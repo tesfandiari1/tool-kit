@@ -1,0 +1,8 @@
+.git
+.env
+target
+secrets
+tests
+evals
+README.md
+compose.yaml

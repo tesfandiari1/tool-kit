@@ -1,0 +1,39 @@
+name: tool-kit-converter
+
+services:
+  converter:
+    build:
+      context: .
+    image: tool-kit-converter:dev
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=384m,mode=1777,noexec,nosuid,nodev
+    pids_limit: 128
+    mem_limit: 2g
+    cpus: 2.0
+    environment:
+      TOOLKIT_CONVERTER_BIND_ADDR: 0.0.0.0:8080
+      TOOLKIT_CONVERTER_TOKEN_FILE: /run/secrets/bootstrap_token
+      TOOLKIT_CONVERTER_MAX_JOBS: 4
+      TOOLKIT_CONVERTER_MAX_CONCURRENT_UPLOADS: 2
+      RUST_LOG: ${RUST_LOG:-tool_kit_converter=info}
+    secrets:
+      - bootstrap_token
+    ports:
+      - "127.0.0.1:${TOOLKIT_CONVERTER_PORT:-8080}:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+secrets:
+  bootstrap_token:
+    file: ${TOOLKIT_CONVERTER_TOKEN_FILE:-./secrets/bootstrap-token.txt}
