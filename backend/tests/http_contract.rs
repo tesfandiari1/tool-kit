@@ -1,26 +1,26 @@
-use std::{io::Write as _, net::SocketAddr, path::PathBuf, time::Duration};
+mod support;
+
+use std::time::Duration;
 
 use axum::{
     body::Body,
     http::{header::AUTHORIZATION, Method, Request, StatusCode},
-    Router,
 };
 use http_body_util::BodyExt;
 use serde_json::Value;
 use serde_yaml_ng::Value as YamlValue;
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
-use tokio_util::io::ReaderStream;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use tool_kit_converter::{
-    config::{Limits, Settings},
-    router, AppState,
+use support::{
+    assert_server_request_id, clean_pdf, count_named_files, json_body, multipart_body,
+    multipart_body_with_duplicate_profile, multipart_body_with_media_type,
+    multipart_body_without_source, pdf_with_content, slow_multipart_prefix, streaming_body,
+    test_app, test_app_with_max_jobs, test_app_with_output_limit, test_app_with_upload_limits,
+    test_app_with_worker_script, TestHarness, TOKEN,
 };
-
-const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 #[tokio::test]
 async fn public_health_and_capabilities_are_truthful() {
@@ -45,6 +45,65 @@ async fn public_health_and_capabilities_are_truthful() {
     );
     assert_eq!(conversion["engine"]["version"], "1.15.0");
     assert_eq!(payload["data"]["remoteFallback"]["available"], false);
+}
+
+#[tokio::test]
+async fn harness_reinitializes_app_state_against_one_data_root_without_a_listener() {
+    let harness = TestHarness::new();
+    let data_dir = harness.data_dir().to_owned();
+
+    let first = harness.app();
+    assert_eq!(first.data_dir(), data_dir);
+    assert_eq!(
+        first
+            .request(Method::GET, "/health/ready", None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    drop(first);
+
+    let second = harness.app();
+    assert_eq!(second.data_dir(), data_dir);
+    assert_eq!(
+        second
+            .request(Method::GET, "/health/ready", None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[test]
+fn conversion_profile_and_job_status_json_values_are_stable() {
+    let document: YamlValue = serde_yaml_ng::from_str(include_str!("../openapi/openapi.yaml"))
+        .expect("OpenAPI must be valid YAML");
+    let profile_values = document["components"]["schemas"]["ConversionProfile"]["enum"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    let status_values = document["components"]["schemas"]["ConversionJob"]["properties"]["status"]
+        ["enum"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(profile_values, ["standard", "local_only", "best_quality"]);
+    assert_eq!(
+        status_values,
+        [
+            "queued",
+            "converting_local",
+            "finalizing",
+            "succeeded",
+            "failed",
+            "needs_remote",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -85,7 +144,7 @@ async fn conversion_routes_require_one_valid_bearer_token() {
         app.request_with_headers(
             Method::POST,
             "/api/v1/conversions",
-            Body::from_stream(ReaderStream::new(reader)),
+            streaming_body(reader),
             &[
                 ("idempotency-key", "unauthenticated-stream"),
                 (
@@ -98,7 +157,7 @@ async fn conversion_routes_require_one_valid_bearer_token() {
     .await
     .expect("authentication must reject before reading a streaming body");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(count_named_files(app._directory.path(), "source.pdf"), 0);
+    assert_eq!(count_named_files(app.data_dir(), "source.pdf"), 0);
 }
 
 #[tokio::test]
@@ -114,6 +173,8 @@ async fn clean_pdf_completes_and_idempotency_replays_the_job() {
     let location = response.headers()["location"].to_str().unwrap().to_owned();
     let submitted = json_body(response).await;
     let job_id = submitted["data"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(submitted["data"]["profile"], "standard");
+    assert_eq!(submitted["data"]["status"], "queued");
     assert_eq!(location, format!("/api/v1/conversions/{job_id}"));
 
     let completed = app.wait_for_terminal(&job_id).await;
@@ -250,10 +311,7 @@ async fn multipart_boundaries_enforce_fields_media_type_extension_and_size() {
         json_body(response).await["error"]["code"],
         "upload_too_large"
     );
-    assert_eq!(
-        count_named_files(bounded._directory.path(), "source.pdf"),
-        0
-    );
+    assert_eq!(count_named_files(bounded.data_dir(), "source.pdf"), 0);
 }
 
 #[tokio::test]
@@ -273,9 +331,9 @@ async fn concurrent_slow_uploads_receive_immediate_backpressure_and_cleanup() {
             "content-type",
             "multipart/form-data; boundary=tool-kit-boundary",
         )
-        .body(Body::from_stream(ReaderStream::new(reader)))
+        .body(streaming_body(reader))
         .unwrap();
-    let router = app.router.clone();
+    let router = app.router();
     let first = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -296,7 +354,7 @@ async fn concurrent_slow_uploads_receive_immediate_backpressure_and_cleanup() {
     let first = first.await.unwrap();
     assert_eq!(first.status(), StatusCode::BAD_REQUEST);
     tokio::time::sleep(Duration::from_millis(25)).await;
-    assert_eq!(count_named_files(app._directory.path(), "source.pdf"), 0);
+    assert_eq!(count_named_files(app.data_dir(), "source.pdf"), 0);
 }
 
 #[tokio::test]
@@ -308,6 +366,8 @@ async fn non_text_pdf_never_publishes_partial_markdown() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let submitted = json_body(response).await;
     let job_id = submitted["data"]["id"].as_str().unwrap();
+    assert_eq!(submitted["data"]["profile"], "local_only");
+    assert_eq!(submitted["data"]["status"], "queued");
 
     let completed = app.wait_for_terminal(job_id).await;
     assert_eq!(completed["data"]["status"], "needs_remote", "{completed:#}");
@@ -659,321 +719,4 @@ fn openapi_parses_and_documents_only_the_live_routes() {
             .is_null(),
         "acceptingJobs is dynamic"
     );
-}
-
-struct TestApp {
-    router: Router,
-    _directory: TempDir,
-}
-
-impl TestApp {
-    async fn request(
-        &self,
-        method: Method,
-        uri: &str,
-        body: Option<Body>,
-    ) -> axum::response::Response {
-        self.request_with_headers(method, uri, body.unwrap_or_else(Body::empty), &[])
-            .await
-    }
-
-    async fn request_with_headers(
-        &self,
-        method: Method,
-        uri: &str,
-        body: Body,
-        headers: &[(&str, &str)],
-    ) -> axum::response::Response {
-        let mut builder = Request::builder().method(method).uri(uri);
-        for (name, value) in headers {
-            builder = builder.header(*name, *value);
-        }
-        self.router
-            .clone()
-            .oneshot(builder.body(body).unwrap())
-            .await
-            .unwrap()
-    }
-
-    async fn submit(
-        &self,
-        body: Vec<u8>,
-        idempotency_key: &str,
-        token: &str,
-    ) -> axum::response::Response {
-        self.request_with_headers(
-            Method::POST,
-            "/api/v1/conversions",
-            Body::from(body),
-            &[
-                (AUTHORIZATION.as_str(), &format!("Bearer {token}")),
-                ("idempotency-key", idempotency_key),
-                (
-                    "content-type",
-                    "multipart/form-data; boundary=tool-kit-boundary",
-                ),
-            ],
-        )
-        .await
-    }
-
-    async fn authorized_get(&self, uri: &str) -> axum::response::Response {
-        self.request_with_headers(
-            Method::GET,
-            uri,
-            Body::empty(),
-            &[(AUTHORIZATION.as_str(), &format!("Bearer {TOKEN}"))],
-        )
-        .await
-    }
-
-    async fn wait_for_terminal(&self, job_id: &str) -> Value {
-        for _ in 0..100 {
-            let response = self
-                .authorized_get(&format!("/api/v1/conversions/{job_id}"))
-                .await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let payload = json_body(response).await;
-            if matches!(
-                payload["data"]["status"].as_str(),
-                Some("succeeded" | "failed" | "needs_remote")
-            ) {
-                return payload;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("conversion did not reach a terminal state");
-    }
-}
-
-fn test_app() -> TestApp {
-    let directory = tempfile::tempdir().unwrap();
-    let worker_path = PathBuf::from(env!("CARGO_BIN_EXE_tool-kit-pdf-worker"));
-    build_test_app(
-        directory,
-        worker_path,
-        Duration::from_secs(10),
-        1024 * 1024,
-        2 * 1024 * 1024,
-        8,
-        2,
-    )
-}
-
-fn test_app_with_output_limit(max_output_bytes: u64) -> TestApp {
-    let directory = tempfile::tempdir().unwrap();
-    let worker_path = PathBuf::from(env!("CARGO_BIN_EXE_tool-kit-pdf-worker"));
-    build_test_app(
-        directory,
-        worker_path,
-        Duration::from_secs(10),
-        1024 * 1024,
-        max_output_bytes,
-        8,
-        2,
-    )
-}
-
-fn test_app_with_max_jobs(max_jobs: usize) -> TestApp {
-    let directory = tempfile::tempdir().unwrap();
-    let worker_path = PathBuf::from(env!("CARGO_BIN_EXE_tool-kit-pdf-worker"));
-    build_test_app(
-        directory,
-        worker_path,
-        Duration::from_secs(10),
-        1024 * 1024,
-        2 * 1024 * 1024,
-        max_jobs,
-        2,
-    )
-}
-
-fn test_app_with_upload_limits(max_upload_bytes: u64, max_concurrent_uploads: usize) -> TestApp {
-    let directory = tempfile::tempdir().unwrap();
-    let worker_path = PathBuf::from(env!("CARGO_BIN_EXE_tool-kit-pdf-worker"));
-    build_test_app(
-        directory,
-        worker_path,
-        Duration::from_secs(10),
-        max_upload_bytes,
-        2 * 1024 * 1024,
-        8,
-        max_concurrent_uploads,
-    )
-}
-
-#[cfg(unix)]
-fn test_app_with_worker_script(script: &str, worker_timeout: Duration) -> TestApp {
-    use std::os::unix::fs::PermissionsExt;
-
-    let directory = tempfile::tempdir().unwrap();
-    let worker_path = directory.path().join("fake-worker");
-    let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'tool-kit-pdf-worker protocol=1 pdf-inspector=1.15.0'\n  exit 0\nfi\n{}",
-        script.strip_prefix("#!/bin/sh\n").unwrap_or(script)
-    );
-    std::fs::write(&worker_path, script).unwrap();
-    std::fs::set_permissions(&worker_path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    build_test_app(
-        directory,
-        worker_path,
-        worker_timeout,
-        1024 * 1024,
-        2 * 1024 * 1024,
-        8,
-        2,
-    )
-}
-
-fn build_test_app(
-    directory: TempDir,
-    worker_path: PathBuf,
-    worker_timeout: Duration,
-    max_upload_bytes: u64,
-    max_output_bytes: u64,
-    max_jobs: usize,
-    max_concurrent_uploads: usize,
-) -> TestApp {
-    let token_file = directory.path().join("bootstrap-token");
-    std::fs::write(&token_file, format!("{TOKEN}\n")).unwrap();
-    let settings = Settings {
-        bind_address: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
-        log_filter: "tool_kit_converter=info".to_owned(),
-        token_file,
-        scratch_parent: directory.path().to_owned(),
-        pdf_worker_path: worker_path,
-        pdf_bcmaps_dir: None,
-        limits: Limits {
-            max_upload_bytes,
-            max_output_bytes,
-            max_jobs,
-            max_concurrent_uploads,
-            upload_timeout: Duration::from_secs(5),
-            pdf_timeout: worker_timeout,
-        },
-        pdf_threads: 2,
-    };
-    let state = AppState::initialize(&settings).unwrap();
-    TestApp {
-        router: router(state),
-        _directory: directory,
-    }
-}
-
-async fn json_body(response: axum::response::Response) -> Value {
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&bytes).unwrap()
-}
-
-fn assert_server_request_id(response: &axum::response::Response) {
-    let request_id = response.headers()["x-request-id"].to_str().unwrap();
-    assert!(Uuid::parse_str(request_id).is_ok());
-}
-
-fn multipart_body(client_run_id: Uuid, profile: &str, source: &[u8], filename: &str) -> Vec<u8> {
-    multipart_body_with_media_type(client_run_id, profile, source, filename, "application/pdf")
-}
-
-fn multipart_body_with_media_type(
-    client_run_id: Uuid,
-    profile: &str,
-    source: &[u8],
-    filename: &str,
-    media_type: &str,
-) -> Vec<u8> {
-    let boundary = "tool-kit-boundary";
-    let mut body = Vec::new();
-    write!(
-        body,
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"clientRunId\"\r\n\r\n{client_run_id}\r\n"
-    )
-    .unwrap();
-    write!(
-        body,
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\n{profile}\r\n"
-    )
-    .unwrap();
-    write!(
-        body,
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"source\"; filename=\"{filename}\"\r\nContent-Type: {media_type}\r\n\r\n"
-    )
-    .unwrap();
-    body.extend_from_slice(source);
-    write!(body, "\r\n--{boundary}--\r\n").unwrap();
-    body
-}
-
-fn multipart_body_with_duplicate_profile(client_run_id: Uuid, source: &[u8]) -> Vec<u8> {
-    let mut body = multipart_body(client_run_id, "standard", source, "fixture.pdf");
-    let closing = b"--tool-kit-boundary--\r\n";
-    body.truncate(body.len() - closing.len());
-    body.extend_from_slice(
-        b"--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\nlocal_only\r\n--tool-kit-boundary--\r\n",
-    );
-    body
-}
-
-fn multipart_body_without_source(client_run_id: Uuid, profile: &str) -> Vec<u8> {
-    format!(
-        "--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"clientRunId\"\r\n\r\n{client_run_id}\r\n--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\n{profile}\r\n--tool-kit-boundary--\r\n"
-    )
-    .into_bytes()
-}
-
-fn slow_multipart_prefix(client_run_id: Uuid) -> Vec<u8> {
-    format!(
-        "--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"clientRunId\"\r\n\r\n{client_run_id}\r\n--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\nstandard\r\n--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"source\"; filename=\"slow.pdf\"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4\n"
-    )
-    .into_bytes()
-}
-
-fn count_named_files(root: &std::path::Path, expected: &str) -> usize {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .map(|entry| {
-            if entry.path().is_dir() {
-                count_named_files(&entry.path(), expected)
-            } else {
-                usize::from(entry.file_name() == std::ffi::OsStr::new(expected))
-            }
-        })
-        .sum()
-}
-
-fn clean_pdf() -> Vec<u8> {
-    let content = b"BT\n/F1 18 Tf\n72 720 Td\n(Clean PDF Fixture) Tj\n0 -24 Td\n(Second native text line) Tj\n0 -24 Td\n(Third native text line) Tj\nET\n";
-    pdf_with_content(content)
-}
-
-fn pdf_with_content(content: &[u8]) -> Vec<u8> {
-    let objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_vec(),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
-        format!("<< /Length {} >>\nstream\n{}endstream", content.len(), String::from_utf8_lossy(content)).into_bytes(),
-    ];
-    let mut pdf = b"%PDF-1.4\n".to_vec();
-    let mut offsets = Vec::new();
-    for (index, object) in objects.iter().enumerate() {
-        offsets.push(pdf.len());
-        writeln!(pdf, "{} 0 obj", index + 1).unwrap();
-        pdf.extend_from_slice(object);
-        pdf.extend_from_slice(b"\nendobj\n");
-    }
-    let xref = pdf.len();
-    write!(pdf, "xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).unwrap();
-    for offset in offsets {
-        writeln!(pdf, "{offset:010} 00000 n ").unwrap();
-    }
-    write!(
-        pdf,
-        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-        objects.len() + 1
-    )
-    .unwrap();
-    pdf
 }

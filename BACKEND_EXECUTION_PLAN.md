@@ -1,10 +1,10 @@
 # M2 execution plan: durable SQLite jobs and artifacts
 
-**Status:** Proposed — awaiting explicit approval before implementation  
-**Epic tickets:** CVR-020 through CVR-029  
-**Complexity:** Medium-high  
+**Status:** Approved — implementation in progress
+**Epic tickets:** CVR-020 through CVR-029
+**Complexity:** Medium-high
 **Estimated implementation shape:** One baseline increment plus six bounded
-implementation increments, each independently testable  
+implementation increments, each independently testable
 **Last updated:** 2026-08-17
 
 ## Objective
@@ -53,7 +53,9 @@ Excluded from this unit:
 1. Preserve the current API paths, authentication, PDF engine behavior, and
    status values. Authorize one explicit capabilities-contract correction:
    report persistent durability and active capacity instead of
-   `durability: ephemeral` and `maxEphemeralJobs`.
+   `durability: ephemeral` and `maxEphemeralJobs`. Update the backend OpenAPI in
+   M2, but generate and diff the TypeScript schema only in a temporary location;
+   do not write `src/app/api/schema.ts` until M6.
 2. Return `202 Accepted` only after the source and database job record are
    durable enough to recover on restart.
 3. Use SQLite as the job ledger; an in-memory notification may wake the worker
@@ -75,14 +77,18 @@ Excluded from this unit:
 
 ### SQLite access
 
-Use `sqlx` with only its Tokio, SQLite, migration, time, and UUID-related
-features. It fits the existing asynchronous Axum/Tokio process and avoids a
-blocking database thread or ORM. Use runtime queries for ordinary repository
-operations so builds do not depend on a development database URL.
+Use SQLx 0.9 with default features disabled and only `runtime-tokio`, `sqlite`,
+`migrate`, and `macros`. It fits the existing asynchronous Axum/Tokio process
+and avoids a blocking database thread or ORM. Use runtime queries for ordinary
+repository operations so builds do not depend on a development database URL;
+bind UUIDs and timestamps as validated strings rather than enabling additional
+SQLx features. Add `backend/build.rs` with migration-directory change tracking
+so embedded migrations are rebuilt when their SQL changes.
 
 Connection behavior:
 
-- database path: `/data/converter.sqlite` in the container;
+- configurable data directory, with the database filename fixed as
+  `converter.sqlite` (`/data/converter.sqlite` in the container);
 - WAL journal mode;
 - full synchronous durability for the low-volume accepted-job write path;
 - foreign keys enabled on every connection;
@@ -101,7 +107,8 @@ or event-sourcing layer.
 `conversions`
 
 - server job ID and `client_run_id`;
-- authentication scope;
+- authentication scope, fixed to the literal `bootstrap` in M2 so token
+  rotation does not change the idempotency namespace;
 - hashed idempotency key and request fingerprint with a unique constraint;
 - profile and current public status;
 - immutable source relative path, media type, byte count, and SHA-256;
@@ -142,6 +149,9 @@ creation.
           publication.staging/
           artifacts/result.md
           artifacts/manifest.json
+  quarantine/
+    pre-acceptance/
+      {job-id}/...
 ```
 
 The source is immutable and shared by attempts. Results are attempt-scoped.
@@ -165,7 +175,7 @@ Recovery runs after migrations and before readiness/worker startup:
 | `converting_local` | Close the interrupted attempt and create/requeue a new attempt within the recovery limit |
 | `finalizing` + valid published files | Verify paths, sizes, hashes, and manifest; commit success |
 | `finalizing` + only staging/invalid files | Remove only that attempt's staging and requeue within policy, otherwise fail stably |
-| `succeeded` | Verify artifacts before serving; invalidate to a stable artifact failure if missing or corrupt |
+| `succeeded` | Verify artifacts before serving; if missing or corrupt, expose `failed` with `artifact_integrity_failed`, retain audit metadata, and serve no artifacts |
 | `failed` / `needs_remote` | Leave terminal |
 
 The worker transactionally changes one eligible row from `queued` to
@@ -179,16 +189,14 @@ No API request spawns a conversion task.
 
 Related: CVR-028; CVR-019 remains the completed M1 coverage ticket.
 
-- [ ] Record the current OpenAPI checksum or generated-client diff baseline.
-- [ ] Run format, check, tests, Clippy, and Compose validation before changing
+- [x] Record the current backend OpenAPI checksum and a temporary generated
+  TypeScript-schema diff baseline without writing desktop source files.
+- [x] Run format, check, tests, Clippy, and Compose validation before changing
   persistence.
-- [ ] Add characterization tests for current submission replay/conflict,
+- [x] Add characterization tests for current submission replay/conflict,
   state/status serialization, artifact lookup, and `needs_remote` behavior.
-- [ ] Add test helpers that can restart an `AppState` against the same temporary
+- [x] Add test helpers that can restart an `AppState` against the same temporary
   data directory without starting a real network listener.
-- [ ] Add test-only, deterministic fault barriers around job claim,
-  publication rename, and success commit so crash-window tests do not depend on
-  timing.
 
 Exit: current behavior is protected by tests, and any intentional contract
 change will be visible.
@@ -197,10 +205,14 @@ change will be visible.
 
 Related: CVR-020, CVR-021, CVR-022.
 
-- [ ] Add narrowly featured `sqlx` dependencies and regenerate only
+- [ ] Add SQLx 0.9 with default features disabled and exactly the
+  `runtime-tokio`, `sqlite`, `migrate`, and `macros` features; regenerate only
   `backend/Cargo.lock`.
-- [ ] Add `TOOLKIT_CONVERTER_DATA_DIR`, SQLite filename, polling interval, and
-  local recovery-limit settings with bounded validation.
+- [ ] Add `TOOLKIT_CONVERTER_DATA_DIR`, polling interval, and local
+  recovery-limit settings with bounded validation. Always resolve the database
+  as `converter.sqlite` beneath the configured data directory.
+- [ ] Add `backend/build.rs` to track changes under `backend/migrations/` for
+  embedded migration rebuilds.
 - [ ] Add `backend/migrations/0001_conversion_jobs.sql` and migration tests.
 - [ ] Add `persistence/` with a small repository interface and SQLite
   implementation.
@@ -215,6 +227,7 @@ Likely files:
 ```text
 backend/Cargo.toml
 backend/Cargo.lock
+backend/build.rs
 backend/migrations/0001_conversion_jobs.sql
 backend/src/config.rs
 backend/src/app.rs
@@ -242,8 +255,10 @@ Related: CVR-021, CVR-023, CVR-025.
   replay, fingerprint conflict, active-capacity rejection, or database
   transaction failure. A replay must still succeed when active capacity is
   full.
-- [ ] Age-clean an orphan source when a crash occurs before acceptance, using
-  only backend-generated paths and a conservative threshold.
+- [ ] Add an artifact-store operation that moves a pre-acceptance job tree under
+  `/data/quarantine/pre-acceptance/{job-id}/` without following symlinks. The
+  startup reconciler invokes it in Increment 4; M2 never auto-deletes the
+  quarantined document data.
 - [ ] Make staging and publication attempt-scoped and preserve the current
   symlink, size, hash, and non-empty-output checks.
 - [ ] Sync validated artifacts before publication rename so a committed
@@ -274,6 +289,8 @@ Related: CVR-024, CVR-025.
 - [ ] Replace `ConversionService::submit`'s per-job `tokio::spawn` with a
   repository commit followed by `Notify`.
 - [ ] Claim one queued job transactionally and preserve parser concurrency one.
+- [ ] Add a test-only deterministic fault barrier after transactional claim and
+  before engine execution so claim-recovery tests do not depend on timing.
 - [ ] Before every initial or recovered execution, require the immutable source
   to be contained under the job root, a regular non-symlink file, and an exact
   match for its stored byte count and SHA-256.
@@ -307,13 +324,19 @@ Related: CVR-026.
   new jobs.
 - [ ] Validate published artifact containment, file type, byte count, hash, and
   manifest identity during reconciliation and download.
+- [ ] If a previously successful job has a missing or invalid required artifact,
+  expose `failed` with the stable code `artifact_integrity_failed`, retain its
+  attempt and artifact audit metadata, and return no downloadable artifacts.
 - [ ] Fail safely when the immutable source is missing, truncated,
   hash-mismatched, non-regular, or replaced by a symlink; never run a recovered
   attempt on unverified bytes.
 - [ ] Give each retry a new attempt; never reuse or overwrite an interrupted
   attempt directory.
-- [ ] Add a conservative orphan scan that only touches generated job paths and
-  never follows symlinks.
+- [ ] Add a conservative orphan scan that only touches generated job paths,
+  never follows symlinks, and moves pre-acceptance orphan trees into quarantine
+  without deleting them.
+- [ ] Add test-only deterministic fault barriers after entering `finalizing`,
+  immediately after publication rename, and before the success commit.
 - [ ] Emit structured recovery counts and reason codes without document
   content.
 
@@ -337,8 +360,10 @@ Related: CVR-027.
   usable without mutating user artifacts.
 - [ ] Change capabilities truthfully from `durability: ephemeral` to
   persistent durability and replace `maxEphemeralJobs` with `maxActiveJobs`.
-  Update OpenAPI, implementation, generated TypeScript schema, and contract
-  assertions together; this is the only planned M2 response-shape change.
+  Update the backend OpenAPI, implementation, and contract assertions together;
+  generate and diff the TypeScript schema in a temporary location, but leave
+  `src/app/api/schema.ts` untouched until M6. This is the only planned M2
+  response-shape change.
 - [ ] Add a named development volume or explicit bind-mount example for
   `/data`; preserve loopback-only publication and current hardening.
 - [ ] Keep only `/data` writable in the eventual production shape; retain a
@@ -357,7 +382,7 @@ backend/src/config.rs
 backend/compose.yaml
 backend/Dockerfile
 backend/README.md
-backend/openapi/openapi.yaml   # only if readiness semantics are documented
+backend/openapi/openapi.yaml
 ```
 
 Exit: Compose restart preserves accepted jobs and artifacts, and readiness
@@ -373,10 +398,15 @@ Related: CVR-028, CVR-029.
 - [ ] Test replay and conflict after a fresh process starts.
 - [ ] Test replay while active capacity is full and verify that replay,
   conflict, and capacity rejection leave no staged source.
+- [ ] Test that a simulated pre-acceptance crash orphan is moved into quarantine
+  and is not automatically deleted.
 - [ ] Test missing, truncated, hash-mismatched, non-regular, and symlinked
   source files before initial claim and recovered retry.
 - [ ] Test missing, truncated, hash-mismatched, non-regular, and symlinked
   artifacts.
+- [ ] Verify each corrupt-artifact case exposes
+  `failed`/`artifact_integrity_failed`, retains internal audit metadata, and
+  serves no artifacts.
 - [ ] Test migration failure, locked database timeout, unwritable data root,
   output-write failure, and active-capacity rejection.
 - [ ] Test graceful shutdown with idle and active workers.
@@ -399,7 +429,7 @@ Exit: every M2 gate passes with evidence; AnyDoc work may begin only afterward.
 | Repository | Create, replay, conflict, capacity, ordered claim, legal/illegal transitions, concurrent submission |
 | Artifact store | Containment, immutable source, attempt isolation, atomic publish, hash/size mismatch, symlink rejection |
 | Worker | One claim at a time, wake and poll, engine success, `needs_remote`, timeout/crash, shutdown |
-| Recovery | Every nonterminal state and both sides of the publication rename boundary |
+| Recovery | Every nonterminal state, both sides of the publication rename boundary, corrupted-success failure semantics, and pre-acceptance quarantine |
 | HTTP contract | Existing 202/200/404/409/413/415/429 behavior, the reviewed capabilities change, and restart-visible GET/artifacts |
 | Container | Persistent volume, live readiness, loopback bind, non-root/read-only/cap-drop constraints |
 | End to end | Accepted job and idempotency replay survive graceful and forced-kill container restarts |
@@ -427,9 +457,10 @@ through the API.
 
 ### Disk exhaustion
 
-Keep upload/output ceilings, bound active jobs, check free space before
-acceptance, and make every cleanup job-scoped. Retention automation is M7, so
-operators must have an explicit manual cleanup/runbook before LAN use.
+Keep upload/output ceilings, bound active jobs, and make every cleanup or
+quarantine action job-scoped. Free-space admission/readiness, retention, and
+reviewed quarantine deletion are M7 work; M2 must fail individual writes safely
+but does not predict available space before acceptance.
 
 ### Shutdown and parser lifetime
 
@@ -481,17 +512,20 @@ M2 is complete only when all of the following are true:
 - existing M1 API and PDF conversion tests still pass;
 - no accepted job or idempotency record is lost on a full container restart;
 - replay, conflict, and capacity rejection leave no unowned source data;
+- pre-acceptance crash leftovers are quarantined and never auto-deleted by M2;
 - queued and interrupted local work recover within a bounded attempt policy;
 - no worker executes a missing, substituted, symlinked, or hash-mismatched
   source;
 - no success response can reference a missing, invalid, or unverified artifact;
+- a corrupted prior success becomes `failed`/`artifact_integrity_failed`, retains
+  its audit metadata, and serves no artifacts;
 - Compose has one converter service plus persistent `/data`, with no database
   or broker service;
 - the graceful and forced-kill image restart smoke tests pass; and
 - the backend remains loopback-only pending M7.
 
-## Approval boundary
+## Execution boundary
 
-No M2 implementation has begun under this plan. Once the user approves it,
-start with Increment 0 and Increment 1 only, report their evidence, and then
-continue through the remaining increments without adding AnyDoc or other scope.
+M2 is approved and implementation is in progress. Start with Increment 0 and
+Increment 1 only, report their evidence, and then continue through the remaining
+increments without adding AnyDoc or other scope.

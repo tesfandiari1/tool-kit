@@ -1,8 +1,8 @@
 # Tool-Kit conversion backend architecture
 
-**Status:** Approved direction; implementation in progress  
-**Target:** CPU-only Rust/Axum service in Docker Compose  
-**Current milestone:** M2 — durable SQLite jobs and artifacts  
+**Status:** Approved direction; implementation in progress
+**Target:** CPU-only Rust/Axum service in Docker Compose
+**Current milestone:** M2 — durable SQLite jobs and artifacts
 **Last updated:** 2026-08-17
 
 ## Goal
@@ -84,10 +84,15 @@ continues to publish the converter on loopback and can omit Caddy.
 - Run one converter container and exactly one job worker initially.
 - Store job metadata, attempts, idempotency, routing, and artifact metadata in
   SQLite.
+- Use SQLx 0.9 with default features disabled and only the `runtime-tokio`,
+  `sqlite`, `migrate`, and `macros` features. Track embedded migration changes
+  through `backend/build.rs`.
 - Store immutable source files and output artifacts on the filesystem, not as
   SQLite blobs.
 - Put SQLite and artifacts under one host-local `/data` dataset. Never place
   the live SQLite database on SMB, NFS, or another network filesystem.
+- Configure the data directory, but keep the database filename fixed as
+  `converter.sqlite` beneath it.
 - Start worker and parser concurrency at one. Raise either only after measured
   demand and corpus testing justify it.
 - Send PDFs directly to `pdf-inspector`; do not parse them twice merely to
@@ -147,7 +152,9 @@ desktop run without replacing server-generated job and attempt IDs. Polling is
 the initial progress mechanism; server-sent events and WebSockets are not
 needed for the expected volume. M2 updates capabilities from ephemeral
 durability/ephemeral-job capacity to persistent durability/active-job capacity;
-the OpenAPI contract and generated desktop schema change together.
+the backend OpenAPI contract changes with the implementation. M2 generates and
+diffs the TypeScript schema only in a temporary location to prove compatibility;
+the committed desktop schema remains untouched until M6.
 
 ## Durable job model
 
@@ -208,6 +215,9 @@ repeat a submission whose acceptance is uncertain.
           artifacts/
             result.md
             manifest.json
+  quarantine/
+    pre-acceptance/
+      {job-id}/...
 ```
 
 One immutable source belongs to the job. Every execution gets its own attempt
@@ -226,10 +236,12 @@ The minimal SQLite model contains:
 
 An authentication scope plus hashed idempotency key is unique on
 `conversions`; the stored request fingerprint distinguishes safe replay from a
-conflict. Foreign keys, WAL mode, `synchronous=FULL`, a busy timeout, embedded
-migrations, and bounded active-job capacity are required. Historical terminal
-rows do not consume worker queue capacity; retention removes them and their
-artifacts together later.
+conflict. M2 uses the literal authentication scope `bootstrap`, which remains
+stable when the bootstrap token changes; M7 introduces per-device scopes through
+an explicit migration. Foreign keys, WAL mode, `synchronous=FULL`, a busy
+timeout, embedded migrations, and bounded active-job capacity are required.
+Historical terminal rows do not consume worker queue capacity; retention
+removes them and their artifacts together later.
 
 ## Recovery rules
 
@@ -239,12 +251,15 @@ artifacts together later.
   immutable source.
 - `finalizing`: validate any published directory and hashes; complete success
   if publication finished, otherwise clean staging and retry within policy.
-- `succeeded`: never serve a missing, symlinked, or hash-mismatched artifact;
-  surface a stable failure and retain the audit record.
+- `succeeded`: if a required artifact is missing, symlinked, or hash-mismatched,
+  transition the public job to `failed` with `artifact_integrity_failed`, retain
+  the attempt and artifact audit metadata, and serve no artifacts.
 - `failed` and `needs_remote`: leave terminal until a future explicit retry or
   fallback operation is implemented.
-- orphan filesystem directories with no database owner: quarantine or remove
-  only after a conservative age threshold.
+- a pre-acceptance job tree with no database owner: move it under
+  `/data/quarantine/pre-acceptance/` without following symlinks. M2 never
+  auto-deletes quarantined document data; retention and reviewed deletion belong
+  to M7.
 
 Startup reconciliation finishes before readiness becomes healthy and before
 the worker begins claiming new jobs. The first release supports one converter

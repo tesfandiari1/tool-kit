@@ -1,10 +1,10 @@
 # Epic: Rust conversion backend
 
-**Status:** In progress  
-**Current milestone:** M2 — durable SQLite jobs and artifacts  
-**Target:** CPU-only Rust/Axum modular monolith  
-**Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)  
-**Immediate plan:** [`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)  
+**Status:** In progress
+**Current milestone:** M2 — durable SQLite jobs and artifacts
+**Target:** CPU-only Rust/Axum modular monolith
+**Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)
+**Immediate plan:** [`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)
 **Last updated:** 2026-08-17
 
 ## Outcome
@@ -43,7 +43,7 @@ integration boundary at a time.
 |---|---|---|---|
 | M0 | Architecture, ownership boundaries, and scaffold | Complete | — |
 | M1 | Authenticated loopback PDF conversion vertical slice | Complete | M0 |
-| M2 | Durable SQLite jobs, sources, and artifacts | Next | M1 |
+| M2 | Durable SQLite jobs, sources, and artifacts | In progress | M1 |
 | M3 | AnyDoc and proven non-PDF local conversion | Planned | M2 |
 | M4 | Corpus-calibrated routing and quality policy | Planned | M3 |
 | M5 | Restart-safe Datalab fallback and privacy policy | Planned | M4 |
@@ -109,13 +109,16 @@ wiring are not implemented. M1 is not approved for LAN deployment.
 
 ## M2 — Durable SQLite jobs and artifacts
 
-- [ ] **CVR-020:** Add the selected SQLite dependency, embedded migrations,
-  foreign keys, WAL mode, full synchronous durability, busy timeout, and
-  migration/startup tests.
+- [ ] **CVR-020:** Add SQLx 0.9 with default features disabled and only
+  `runtime-tokio`, `sqlite`, `migrate`, and `macros`; add embedded migrations,
+  `build.rs` migration tracking, foreign keys, WAL mode, full synchronous
+  durability, busy timeout, and migration/startup tests.
 - [ ] **CVR-021:** Add fail-fast `/data` configuration and a persistent layout
-  for the database, immutable job sources, attempt staging, and artifacts.
+  for the fixed `converter.sqlite` database filename, immutable job sources,
+  attempt staging, artifacts, and pre-acceptance quarantine.
 - [ ] **CVR-022:** Replace the in-memory `JobRegistry` with a repository for
-  conversions, attempts, artifacts, and durable idempotency.
+  conversions, attempts, artifacts, and durable idempotency using the literal
+  M2 authentication scope `bootstrap`.
 - [ ] **CVR-023:** Make submission durable: publish the validated source and
   commit the conversion, first attempt, and idempotency decision before
   returning `202 Accepted`; remove the newly staged source on replay, conflict,
@@ -128,21 +131,28 @@ wiring are not implemented. M1 is not approved for LAN deployment.
   hash.
 - [ ] **CVR-026:** Reconcile `queued`, `converting_local`, `finalizing`, and
   successful jobs at startup; verify immutable source integrity, preserve
-  attempt history, and safely handle orphan staging directories.
+  attempt history, transition corrupted successes to
+  `failed`/`artifact_integrity_failed` without serving artifacts, and quarantine
+  pre-acceptance orphan trees without deleting them.
 - [ ] **CVR-027:** Add live SQLite and writable-volume readiness, bounded
   graceful shutdown, truthful persistent-durability/active-capacity
-  capabilities, and a Compose `/data` mount without adding a service.
+  capabilities, the matching backend OpenAPI update, and a Compose `/data` mount
+  without adding a service. Generate/diff the TypeScript schema only in a
+  temporary location; defer the committed desktop schema update to M6.
 - [ ] **CVR-028:** Test durable idempotency, process restart, queued-job
   recovery, interrupted conversion/publication, corrupt or missing artifacts,
   corrupt or substituted sources, database failure, disk-write failure,
-  rejection cleanup, and deterministic crash windows.
+  rejection cleanup, pre-acceptance quarantine, deterministic crash windows,
+  and the `artifact_integrity_failed` public contract.
 - [ ] **CVR-029:** Run the full Rust checks, Compose validation, image build,
   a graceful stop/start smoke, and a forced-kill recovery smoke before closing
   M2.
 
 **M2 gate:** An accepted job, source, and idempotency record survive a full
 converter restart. A recovered job cannot execute concurrently or report
-success without validated, downloadable artifacts.
+success without validated, downloadable artifacts. A corrupted prior success is
+reported as `failed`/`artifact_integrity_failed`, retains its audit metadata, and
+serves no artifacts.
 
 ## M3 — AnyDoc and local format routing
 
@@ -215,8 +225,9 @@ leave the network, and a known or uncertain remote request is never duplicated.
 
 - [ ] **CVR-060:** Add backend URL and device-token settings outside React
   state, keeping the token in the macOS Keychain.
-- [ ] **CVR-061:** Generate or validate the Tauri HTTP client against the
-  backend OpenAPI contract.
+- [ ] **CVR-061:** Generate or validate and commit the Tauri HTTP client/schema
+  against the backend OpenAPI contract, including the capability correction
+  temporarily diffed during M2.
 - [ ] **CVR-062:** Stream selected files from Tauri to the backend with an
   idempotency key and stable client run ID.
 - [ ] **CVR-063:** Poll durable job state and recover an in-progress desktop run
@@ -321,8 +332,8 @@ Execute M2 only. Do not combine persistence with AnyDoc.
    marking M2 complete.
 
 The detailed file and test plan is in
-[`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md). Implementation waits
-for explicit approval of that plan.
+[`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md). The plan is approved;
+execution starts with its bounded Increment 0 and Increment 1 scope.
 
 ## Verification log
 
@@ -347,3 +358,17 @@ for explicit approval of that plan.
   one-host, low-volume workload.
 - GPU, local OCR, Redis, PostgreSQL, a queue product, and speculative
   microservices remain out of scope.
+
+### 2026-08-17 — M2 Increment 0 contract freeze
+
+- Created backend-only checkpoint `433b6c3` on `codex/backend-m2`; no desktop
+  or root README path was staged.
+- Recorded backend OpenAPI SHA-256
+  `99e140518cc97f5be69b307918b7dd76afee28d7cede230781a678e15de82af3`.
+- `openapi-typescript 7.13.0` generated the M1 client schema under `/private/tmp`;
+  its SHA-256 matched the untouched desktop schema at
+  `333c0250c2041df7279c6a8f5d0e1d3bf334b30dbd81423eb0b2cff10bb66612`.
+- Extracted reusable HTTP test support and added restart-harness plus public
+  status/profile characterization. The full backend suite now contains 30
+  passing tests.
+- Format, check, Clippy with warnings denied, and Compose validation passed.
