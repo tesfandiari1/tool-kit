@@ -6,6 +6,7 @@
 //! remote fallback remain later epic milestones.
 
 pub mod config;
+pub mod persistence;
 pub mod worker_protocol;
 
 mod api;

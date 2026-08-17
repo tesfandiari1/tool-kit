@@ -131,6 +131,7 @@ impl TestHarness {
             bind_address: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
             log_filter: "tool_kit_converter=info".to_owned(),
             token_file: self.workspace.path().join("bootstrap-token"),
+            data_dir: self.data_dir.clone(),
             scratch_parent: self.data_dir.clone(),
             pdf_worker_path: self.worker_path.clone(),
             pdf_bcmaps_dir: None,
@@ -143,6 +144,10 @@ impl TestHarness {
                 pdf_timeout: self.options.worker_timeout,
             },
             pdf_threads: 2,
+            database_busy_timeout: Duration::from_secs(5),
+            worker_poll_interval: Duration::from_secs(1),
+            recovery_limit: 3,
+            shutdown_grace: Duration::from_secs(30),
         }
     }
 }

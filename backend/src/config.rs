@@ -6,6 +6,7 @@ use tracing_subscriber::EnvFilter;
 const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8080";
 const DEFAULT_LOG_FILTER: &str = "tool_kit_converter=info";
 const DEFAULT_TOKEN_FILE: &str = "/run/secrets/bootstrap_token";
+const DEFAULT_DATA_DIR: &str = "/data";
 const DEFAULT_SCRATCH_PARENT: &str = "/tmp";
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: u64 = 50 * 1024 * 1024;
@@ -14,17 +15,26 @@ const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 2;
 const DEFAULT_UPLOAD_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_PDF_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_PDF_THREADS: usize = 2;
+const DEFAULT_DATABASE_BUSY_TIMEOUT_SECS: u64 = 5;
+const DEFAULT_WORKER_POLL_INTERVAL_SECS: u64 = 1;
+const DEFAULT_RECOVERY_LIMIT: usize = 3;
+const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 30;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Settings {
     pub bind_address: SocketAddr,
     pub log_filter: String,
     pub token_file: PathBuf,
+    pub data_dir: PathBuf,
     pub scratch_parent: PathBuf,
     pub pdf_worker_path: PathBuf,
     pub pdf_bcmaps_dir: Option<PathBuf>,
     pub limits: Limits,
     pub pdf_threads: usize,
+    pub database_busy_timeout: Duration,
+    pub worker_poll_interval: Duration,
+    pub recovery_limit: usize,
+    pub shutdown_grace: Duration,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,6 +68,10 @@ impl Settings {
             "TOOLKIT_CONVERTER_TOKEN_FILE",
             read_env_or_default("TOOLKIT_CONVERTER_TOKEN_FILE", DEFAULT_TOKEN_FILE)?,
         )?;
+        let data_dir = absolute_path(
+            "TOOLKIT_CONVERTER_DATA_DIR",
+            read_env_or_default("TOOLKIT_CONVERTER_DATA_DIR", DEFAULT_DATA_DIR)?,
+        )?;
         let scratch_parent = absolute_path(
             "TOOLKIT_CONVERTER_SCRATCH_PARENT",
             read_env_or_default("TOOLKIT_CONVERTER_SCRATCH_PARENT", DEFAULT_SCRATCH_PARENT)?,
@@ -74,6 +88,7 @@ impl Settings {
             bind_address,
             log_filter,
             token_file,
+            data_dir,
             scratch_parent,
             pdf_worker_path,
             pdf_bcmaps_dir,
@@ -121,6 +136,30 @@ impl Settings {
                 1,
                 64,
             )?,
+            database_busy_timeout: Duration::from_secs(read_bounded_u64(
+                "TOOLKIT_CONVERTER_DATABASE_BUSY_TIMEOUT_SECS",
+                DEFAULT_DATABASE_BUSY_TIMEOUT_SECS,
+                1,
+                60,
+            )?),
+            worker_poll_interval: Duration::from_secs(read_bounded_u64(
+                "TOOLKIT_CONVERTER_WORKER_POLL_INTERVAL_SECS",
+                DEFAULT_WORKER_POLL_INTERVAL_SECS,
+                1,
+                60,
+            )?),
+            recovery_limit: read_bounded_usize(
+                "TOOLKIT_CONVERTER_RECOVERY_LIMIT",
+                DEFAULT_RECOVERY_LIMIT,
+                0,
+                16,
+            )?,
+            shutdown_grace: Duration::from_secs(read_bounded_u64(
+                "TOOLKIT_CONVERTER_SHUTDOWN_GRACE_SECS",
+                DEFAULT_SHUTDOWN_GRACE_SECS,
+                1,
+                600,
+            )?),
         })
     }
 }
@@ -236,8 +275,9 @@ mod tests {
     use tracing_subscriber::EnvFilter;
 
     use super::{
-        DEFAULT_BIND_ADDRESS, DEFAULT_LOG_FILTER, DEFAULT_MAX_OUTPUT_BYTES,
-        DEFAULT_MAX_UPLOAD_BYTES,
+        DEFAULT_BIND_ADDRESS, DEFAULT_DATABASE_BUSY_TIMEOUT_SECS, DEFAULT_LOG_FILTER,
+        DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_RECOVERY_LIMIT,
+        DEFAULT_SHUTDOWN_GRACE_SECS, DEFAULT_WORKER_POLL_INTERVAL_SECS,
     };
 
     #[test]
@@ -262,6 +302,15 @@ mod tests {
     #[test]
     fn default_paths_are_absolute() {
         assert!(std::path::Path::new(super::DEFAULT_TOKEN_FILE).is_absolute());
+        assert!(std::path::Path::new(super::DEFAULT_DATA_DIR).is_absolute());
         assert!(std::path::Path::new(super::DEFAULT_SCRATCH_PARENT).is_absolute());
+    }
+
+    #[test]
+    fn durability_defaults_are_deliberately_bounded() {
+        assert_eq!(DEFAULT_DATABASE_BUSY_TIMEOUT_SECS, 5);
+        assert_eq!(DEFAULT_WORKER_POLL_INTERVAL_SECS, 1);
+        assert_eq!(DEFAULT_RECOVERY_LIMIT, 3);
+        assert_eq!(DEFAULT_SHUTDOWN_GRACE_SECS, 30);
     }
 }
