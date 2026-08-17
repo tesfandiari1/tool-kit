@@ -1,10 +1,9 @@
 mod model;
-mod registry;
 mod service;
 
+pub(crate) use model::ConversionManifest;
 pub use model::{
     ArtifactKind, ArtifactRecord, ArtifactView, ConversionProfile, JobStatus, JobView,
-    PublishedArtifacts, SourceMetadata,
+    SourceMetadata,
 };
-pub use registry::{IdempotencyDecision, JobRegistry};
-pub use service::{ArtifactLookup, ConversionService, Submission};
+pub use service::{ArtifactLookup, ConversionService, Submission, SubmissionDecision};

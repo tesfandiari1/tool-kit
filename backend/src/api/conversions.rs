@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 use crate::{
     conversion::{
-        ArtifactKind, ArtifactLookup, ArtifactView, ConversionProfile, IdempotencyDecision,
-        JobView, SourceMetadata, Submission,
+        ArtifactKind, ArtifactLookup, ArtifactView, ConversionProfile, JobView, SourceMetadata,
+        Submission, SubmissionDecision,
     },
     error::{ApiError, RequestId},
     AppState,
@@ -67,9 +67,9 @@ pub async fn create(
 
     let job_id = Uuid::new_v4();
     let attempt_id = Uuid::new_v4();
-    let paths = state
+    let prepared = state
         .service()
-        .begin_attempt(job_id, attempt_id)
+        .prepare_submission(job_id)
         .await
         .map_err(|_| {
             error(
@@ -83,7 +83,7 @@ pub async fn create(
         state.limits().upload_timeout,
         stage_multipart(
             multipart,
-            &paths.source,
+            &prepared.paths.source_staging,
             state.limits().max_upload_bytes,
             &request_id,
         ),
@@ -92,11 +92,11 @@ pub async fn create(
     {
         Ok(Ok(staged)) => staged,
         Ok(Err(api_error)) => {
-            state.service().discard_attempt(&paths).await;
+            state.service().discard_unaccepted_job(job_id).await;
             return Err(api_error);
         }
         Err(_) => {
-            state.service().discard_attempt(&paths).await;
+            state.service().discard_unaccepted_job(job_id).await;
             return Err(error(
                 StatusCode::REQUEST_TIMEOUT,
                 "upload_timeout",
@@ -106,7 +106,7 @@ pub async fn create(
         }
     };
     if staged.profile == ConversionProfile::BestQuality {
-        state.service().discard_attempt(&paths).await;
+        state.service().discard_unaccepted_job(job_id).await;
         return Err(error(
             StatusCode::CONFLICT,
             "profile_unavailable",
@@ -115,35 +115,32 @@ pub async fn create(
         ));
     }
 
-    let fingerprint =
-        submission_fingerprint(staged.client_run_id, staged.profile, &staged.source.sha256);
     let decision = state
         .service()
         .submit(Submission {
-            job_id,
+            prepared,
             attempt_id,
             client_run_id: staged.client_run_id,
             profile: staged.profile,
             source: staged.source,
-            paths,
             idempotency_key,
-            fingerprint,
             origin_request_id: request_id.as_str().to_owned(),
         })
-        .await;
+        .await
+        .map_err(|_| service_unavailable(&request_id))?;
     match decision {
-        IdempotencyDecision::New(job) => Ok(accepted(job, false)),
-        IdempotencyDecision::Replay(job) => Ok(accepted(job, true)),
-        IdempotencyDecision::Conflict => Err(error(
+        SubmissionDecision::Created(job) => Ok(accepted(job, false)),
+        SubmissionDecision::Replay(job) => Ok(accepted(job, true)),
+        SubmissionDecision::Conflict => Err(error(
             StatusCode::CONFLICT,
             "idempotency_conflict",
             "The idempotency key was already used for a different submission.",
             &request_id,
         )),
-        IdempotencyDecision::Capacity => Err(error(
+        SubmissionDecision::Capacity => Err(error(
             StatusCode::TOO_MANY_REQUESTS,
             "job_capacity_reached",
-            "The ephemeral M1 job registry is full; restart the development service before retrying.",
+            "The service is at its active job capacity; retry later.",
             &request_id,
         )),
     }
@@ -155,14 +152,19 @@ pub async fn get(
     Path(raw_job_id): Path<String>,
 ) -> Result<Json<JobEnvelope>, ApiError> {
     let job_id = parse_job_id(&raw_job_id, &request_id)?;
-    let job = state.service().get(job_id).await.ok_or_else(|| {
-        error(
-            StatusCode::NOT_FOUND,
-            "conversion_not_found",
-            "The conversion does not exist.",
-            &request_id,
-        )
-    })?;
+    let job = state
+        .service()
+        .get(job_id)
+        .await
+        .map_err(|_| service_unavailable(&request_id))?
+        .ok_or_else(|| {
+            error(
+                StatusCode::NOT_FOUND,
+                "conversion_not_found",
+                "The conversion does not exist.",
+                &request_id,
+            )
+        })?;
     Ok(Json(JobEnvelope { data: job }))
 }
 
@@ -176,6 +178,7 @@ pub async fn list_artifacts(
         .service()
         .artifact_views(job_id)
         .await
+        .map_err(|_| service_unavailable(&request_id))?
         .ok_or_else(|| {
             error(
                 StatusCode::NOT_FOUND,
@@ -214,6 +217,7 @@ async fn download(
         .service()
         .artifact(job_id, kind)
         .await
+        .map_err(|_| service_unavailable(&request_id))?
         .ok_or_else(|| {
             error(
                 StatusCode::NOT_FOUND,
@@ -241,14 +245,6 @@ async fn download(
             ));
         }
     };
-    let file = tokio::fs::File::open(&artifact.path).await.map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "artifact_unavailable",
-            "The published artifact is unavailable.",
-            &request_id,
-        )
-    })?;
     let extension = match kind {
         ArtifactKind::Markdown => "md",
         ArtifactKind::Manifest => "json",
@@ -263,7 +259,7 @@ async fn download(
         .header(CACHE_CONTROL, "private, no-store")
         .header(X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(ETAG, etag)
-        .body(Body::from_stream(ReaderStream::new(file)))
+        .body(Body::from_stream(ReaderStream::new(artifact.file)))
         .map_err(|_| {
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -555,21 +551,6 @@ fn parse_job_id(raw: &str, request_id: &RequestId) -> Result<Uuid, ApiError> {
     })
 }
 
-fn submission_fingerprint(
-    client_run_id: Uuid,
-    profile: ConversionProfile,
-    source_sha256: &str,
-) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"tool-kit-conversion-m1\0");
-    digest.update(client_run_id.as_bytes());
-    digest.update(b"\0");
-    digest.update(profile.as_str().as_bytes());
-    digest.update(b"\0");
-    digest.update(source_sha256.as_bytes());
-    hex::encode(digest.finalize())
-}
-
 fn accepted(job: JobView, replayed: bool) -> Response {
     let location = format!("/api/v1/conversions/{}", job.id);
     let mut response = (StatusCode::ACCEPTED, Json(JobEnvelope { data: job })).into_response();
@@ -603,6 +584,15 @@ fn error(
     request_id: &RequestId,
 ) -> ApiError {
     ApiError::new(status, code, message, request_id.clone())
+}
+
+fn service_unavailable(request_id: &RequestId) -> ApiError {
+    error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "conversion_unavailable",
+        "The conversion service is temporarily unavailable.",
+        request_id,
+    )
 }
 
 struct StagedSubmission {

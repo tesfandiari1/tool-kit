@@ -117,8 +117,8 @@ impl TestHarness {
         &self.data_dir
     }
 
-    pub(crate) fn app(&self) -> TestApp {
-        let state = AppState::initialize(&self.settings()).unwrap();
+    pub(crate) async fn app(&self) -> TestApp {
+        let state = AppState::initialize(&self.settings()).await.unwrap();
         TestApp {
             router: router(state),
             _workspace: Arc::clone(&self.workspace),
@@ -246,28 +246,32 @@ impl TestApp {
     }
 }
 
-pub(crate) fn test_app() -> TestApp {
-    TestHarness::new().app()
+pub(crate) async fn test_app() -> TestApp {
+    TestHarness::new().app().await
 }
 
-pub(crate) fn test_app_with_output_limit(max_output_bytes: u64) -> TestApp {
-    TestHarness::with_output_limit(max_output_bytes).app()
+pub(crate) async fn test_app_with_output_limit(max_output_bytes: u64) -> TestApp {
+    TestHarness::with_output_limit(max_output_bytes).app().await
 }
 
-pub(crate) fn test_app_with_max_jobs(max_jobs: usize) -> TestApp {
-    TestHarness::with_max_jobs(max_jobs).app()
+pub(crate) async fn test_app_with_max_jobs(max_jobs: usize) -> TestApp {
+    TestHarness::with_max_jobs(max_jobs).app().await
 }
 
-pub(crate) fn test_app_with_upload_limits(
+pub(crate) async fn test_app_with_upload_limits(
     max_upload_bytes: u64,
     max_concurrent_uploads: usize,
 ) -> TestApp {
-    TestHarness::with_upload_limits(max_upload_bytes, max_concurrent_uploads).app()
+    TestHarness::with_upload_limits(max_upload_bytes, max_concurrent_uploads)
+        .app()
+        .await
 }
 
 #[cfg(unix)]
-pub(crate) fn test_app_with_worker_script(script: &str, worker_timeout: Duration) -> TestApp {
-    TestHarness::with_worker_script(script, worker_timeout).app()
+pub(crate) async fn test_app_with_worker_script(script: &str, worker_timeout: Duration) -> TestApp {
+    TestHarness::with_worker_script(script, worker_timeout)
+        .app()
+        .await
 }
 
 pub(crate) async fn json_body(response: axum::response::Response) -> Value {
@@ -356,6 +360,22 @@ pub(crate) fn count_named_files(root: &Path, expected: &str) -> usize {
             }
         })
         .sum()
+}
+
+pub(crate) fn count_job_directories(data_dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(data_dir.join("jobs")) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.path().is_dir()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| Uuid::parse_str(name).is_ok())
+        })
+        .count()
 }
 
 pub(crate) fn clean_pdf() -> Vec<u8> {

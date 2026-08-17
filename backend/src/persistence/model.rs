@@ -38,6 +38,17 @@ pub enum ConversionState {
 }
 
 impl ConversionState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::ConvertingLocal => "converting_local",
+            Self::Finalizing => "finalizing",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::NeedsRemote => "needs_remote",
+        }
+    }
+
     pub(crate) fn from_database(value: &str) -> Option<Self> {
         match value {
             "queued" => Some(Self::Queued),
@@ -63,6 +74,18 @@ pub enum AttemptState {
 }
 
 impl AttemptState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::ConvertingLocal => "converting_local",
+            Self::Finalizing => "finalizing",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::NeedsRemote => "needs_remote",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
     pub(crate) fn from_database(value: &str) -> Option<Self> {
         match value {
             "queued" => Some(Self::Queued),
@@ -91,6 +114,102 @@ impl ArtifactKind {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentClassification {
+    TextBased,
+    Scanned,
+    ImageBased,
+    Mixed,
+}
+
+impl DocumentClassification {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::TextBased => "text_based",
+            Self::Scanned => "scanned",
+            Self::ImageBased => "image_based",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalStart {
+    pub engine: EngineRecord,
+    pub route: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LocalAnalysis {
+    pub classification: DocumentClassification,
+    pub inspection: Value,
+    pub reason_codes: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NeedsRemoteResult {
+    pub analysis: LocalAnalysis,
+    pub fallback_reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailureStage {
+    Queued,
+    ConvertingLocal,
+    Finalizing,
+}
+
+impl FailureStage {
+    pub(crate) fn conversion_state(self) -> ConversionState {
+        match self {
+            Self::Queued => ConversionState::Queued,
+            Self::ConvertingLocal => ConversionState::ConvertingLocal,
+            Self::Finalizing => ConversionState::Finalizing,
+        }
+    }
+
+    pub(crate) fn attempt_state(self) -> AttemptState {
+        match self {
+            Self::Queued => AttemptState::Queued,
+            Self::ConvertingLocal => AttemptState::ConvertingLocal,
+            Self::Finalizing => AttemptState::Finalizing,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FailedResult {
+    pub stage: FailureStage,
+    pub failure: StoredFailure,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewArtifact {
+    pub relative_path: String,
+    pub media_type: String,
+    pub byte_length: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuccessfulArtifacts {
+    pub markdown: NewArtifact,
+    pub manifest: NewArtifact,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitOperation {
+    CreateConversion,
+    StartLocal,
+    ClaimNextQueued,
+    MarkFinalizing,
+    FinishNeedsRemote,
+    FinishFailed,
+    FinishSucceeded,
+    MarkArtifactIntegrityFailed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1,12 +1,19 @@
-use std::{path::PathBuf, str::FromStr};
+use std::str::FromStr;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use tokio::fs::File;
 use uuid::Uuid;
 
-use crate::{artifacts::AttemptPaths, worker_protocol::Inspection};
+use crate::{
+    persistence::{
+        ArtifactKind as StoredArtifactKind, ConversionState, Profile, StoredArtifact,
+        StoredConversion,
+    },
+    worker_protocol::Inspection,
+};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversionProfile {
     Standard,
@@ -37,6 +44,26 @@ impl FromStr for ConversionProfile {
     }
 }
 
+impl From<ConversionProfile> for Profile {
+    fn from(value: ConversionProfile) -> Self {
+        match value {
+            ConversionProfile::Standard => Self::Standard,
+            ConversionProfile::LocalOnly => Self::LocalOnly,
+            ConversionProfile::BestQuality => Self::BestQuality,
+        }
+    }
+}
+
+impl From<Profile> for ConversionProfile {
+    fn from(value: Profile) -> Self {
+        match value {
+            Profile::Standard => Self::Standard,
+            Profile::LocalOnly => Self::LocalOnly,
+            Profile::BestQuality => Self::BestQuality,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
@@ -54,76 +81,15 @@ impl JobStatus {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct JobRecord {
-    pub id: Uuid,
-    pub active_attempt_id: Uuid,
-    pub client_run_id: Uuid,
-    pub profile: ConversionProfile,
-    pub status: JobStatus,
-    pub route: Option<&'static str>,
-    pub reason_codes: Vec<&'static str>,
-    pub warnings: Vec<String>,
-    pub failure: Option<JobFailure>,
-    pub source: SourceMetadata,
-    pub paths: AttemptPaths,
-    pub artifacts: Option<PublishedArtifacts>,
-    pub inspection: Option<Inspection>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub origin_request_id: String,
-}
-
-impl JobRecord {
-    pub fn new(
-        id: Uuid,
-        active_attempt_id: Uuid,
-        client_run_id: Uuid,
-        profile: ConversionProfile,
-        source: SourceMetadata,
-        paths: AttemptPaths,
-        origin_request_id: String,
-    ) -> Self {
-        let now = now();
-        Self {
-            id,
-            active_attempt_id,
-            client_run_id,
-            profile,
-            status: JobStatus::Queued,
-            route: None,
-            reason_codes: Vec::new(),
-            warnings: Vec::new(),
-            failure: None,
-            source,
-            paths,
-            artifacts: None,
-            inspection: None,
-            created_at: now.clone(),
-            updated_at: now,
-            origin_request_id,
-        }
-    }
-
-    pub fn touch(&mut self) {
-        self.updated_at = now();
-    }
-
-    pub fn view(&self) -> JobView {
-        JobView {
-            id: self.id,
-            active_attempt_id: self.active_attempt_id,
-            client_run_id: self.client_run_id,
-            profile: self.profile,
-            status: self.status,
-            route: self.route.map(|kind| RouteView {
-                kind,
-                reason_codes: self.reason_codes.clone(),
-            }),
-            warnings: self.warnings.clone(),
-            failure: self.failure.clone(),
-            created_at: self.created_at.clone(),
-            updated_at: self.updated_at.clone(),
+impl From<ConversionState> for JobStatus {
+    fn from(value: ConversionState) -> Self {
+        match value {
+            ConversionState::Queued => Self::Queued,
+            ConversionState::ConvertingLocal => Self::ConvertingLocal,
+            ConversionState::Finalizing => Self::Finalizing,
+            ConversionState::Succeeded => Self::Succeeded,
+            ConversionState::Failed => Self::Failed,
+            ConversionState::NeedsRemote => Self::NeedsRemote,
         }
     }
 }
@@ -145,36 +111,55 @@ pub struct JobView {
     pub updated_at: String,
 }
 
+impl JobView {
+    pub fn from_stored(job: &StoredConversion) -> Self {
+        Self {
+            id: job.id,
+            active_attempt_id: job.active_attempt.id,
+            client_run_id: job.client_run_id,
+            profile: job.profile.into(),
+            status: job.state.into(),
+            route: job.route.as_ref().map(|kind| RouteView {
+                kind: kind.clone(),
+                reason_codes: job.reason_codes.clone(),
+            }),
+            warnings: job.warnings.clone(),
+            failure: job.failure.as_ref().map(|failure| JobFailure {
+                code: failure.code.clone(),
+                message: failure.message.clone(),
+            }),
+            created_at: job.created_at.clone(),
+            updated_at: job.updated_at.clone(),
+        }
+    }
+
+    pub fn artifact_integrity_failed(job: &StoredConversion) -> Self {
+        let mut view = Self::from_stored(job);
+        view.status = JobStatus::Failed;
+        view.failure = Some(JobFailure {
+            code: "artifact_integrity_failed".to_owned(),
+            message: "A published artifact failed integrity validation.".to_owned(),
+        });
+        view.updated_at = now();
+        view
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteView {
-    pub kind: &'static str,
-    pub reason_codes: Vec<&'static str>,
+    pub kind: String,
+    pub reason_codes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct JobFailure {
-    pub code: &'static str,
-    pub message: &'static str,
+    pub code: String,
+    pub message: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceMetadata {
-    pub byte_length: u64,
-    pub sha256: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct PublishedArtifacts {
-    pub markdown: ArtifactRecord,
-    pub manifest: ArtifactRecord,
-}
-
-#[derive(Clone, Debug)]
-pub struct ArtifactRecord {
-    pub kind: ArtifactKind,
-    pub path: PathBuf,
-    pub media_type: &'static str,
     pub byte_length: u64,
     pub sha256: String,
 }
@@ -195,20 +180,21 @@ impl ArtifactKind {
     }
 }
 
-impl ArtifactRecord {
-    pub fn view(&self, job_id: Uuid, attempt_id: Uuid) -> ArtifactView {
-        ArtifactView {
-            kind: self.kind,
-            attempt_id,
-            media_type: self.media_type,
-            byte_length: self.byte_length,
-            sha256: self.sha256.clone(),
-            href: format!(
-                "/api/v1/conversions/{job_id}/artifacts/{}",
-                self.kind.as_str()
-            ),
+impl From<StoredArtifactKind> for ArtifactKind {
+    fn from(value: StoredArtifactKind) -> Self {
+        match value {
+            StoredArtifactKind::Markdown => Self::Markdown,
+            StoredArtifactKind::Manifest => Self::Manifest,
         }
     }
+}
+
+#[derive(Debug)]
+pub struct ArtifactRecord {
+    pub file: File,
+    pub media_type: String,
+    pub byte_length: u64,
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -216,10 +202,72 @@ impl ArtifactRecord {
 pub struct ArtifactView {
     pub kind: ArtifactKind,
     pub attempt_id: Uuid,
-    pub media_type: &'static str,
+    pub media_type: String,
     pub byte_length: u64,
     pub sha256: String,
     pub href: String,
+}
+
+impl ArtifactView {
+    pub fn from_stored(job_id: Uuid, artifact: &StoredArtifact) -> Self {
+        let kind = ArtifactKind::from(artifact.kind);
+        Self {
+            kind,
+            attempt_id: artifact.attempt_id,
+            media_type: artifact.media_type.clone(),
+            byte_length: artifact.byte_length,
+            sha256: artifact.sha256.clone(),
+            href: format!("/api/v1/conversions/{job_id}/artifacts/{}", kind.as_str()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConversionManifest {
+    pub(crate) schema_version: u32,
+    pub(crate) job_id: Uuid,
+    pub(crate) attempt_id: Uuid,
+    pub(crate) client_run_id: Uuid,
+    pub(crate) profile: ConversionProfile,
+    pub(crate) source: ManifestSource,
+    pub(crate) engine: ManifestEngine,
+    pub(crate) route: ManifestRoute,
+    pub(crate) document: Inspection,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) output: ManifestOutput,
+    pub(crate) started_at: String,
+    pub(crate) completed_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManifestSource {
+    pub(crate) media_type: String,
+    pub(crate) byte_length: u64,
+    pub(crate) sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ManifestEngine {
+    pub(crate) name: String,
+    pub(crate) version: String,
+    pub(crate) features: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManifestRoute {
+    pub(crate) kind: String,
+    pub(crate) reason_codes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManifestOutput {
+    pub(crate) media_type: String,
+    pub(crate) byte_length: u64,
+    pub(crate) sha256: String,
 }
 
 pub fn now() -> String {

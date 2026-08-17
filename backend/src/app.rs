@@ -7,8 +7,9 @@ use crate::{
     artifacts::{ArtifactError, ArtifactStore},
     auth::{AuthLoadError, BootstrapAuth},
     config::{Limits, Settings},
-    conversion::{ConversionService, JobRegistry},
+    conversion::ConversionService,
     engines::{EngineStartupError, PdfInspectorEngine},
+    persistence::{RepositoryError, SqliteRepository},
 };
 
 #[derive(Clone, Debug)]
@@ -20,9 +21,17 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn initialize(settings: &Settings) -> Result<Self, StartupError> {
+    pub async fn initialize(settings: &Settings) -> Result<Self, StartupError> {
         let auth = BootstrapAuth::load(&settings.token_file)?;
-        let artifacts = ArtifactStore::initialize(&settings.scratch_parent)?;
+        let artifacts = ArtifactStore::initialize(&settings.data_dir)?;
+        let max_active_jobs = u32::try_from(settings.limits.max_jobs)
+            .map_err(|_| StartupError::JobLimitOutOfRange)?;
+        let repository = SqliteRepository::open(
+            &settings.data_dir,
+            max_active_jobs,
+            settings.database_busy_timeout,
+        )
+        .await?;
         let engine = PdfInspectorEngine::initialize(
             settings.pdf_worker_path.clone(),
             settings.pdf_bcmaps_dir.clone(),
@@ -30,11 +39,10 @@ impl AppState {
             settings.limits.max_output_bytes,
             settings.pdf_threads,
         )?;
-        let registry = JobRegistry::new(settings.limits.max_jobs);
 
         Ok(Self {
             auth,
-            service: ConversionService::new(registry, artifacts, engine),
+            service: ConversionService::new(repository, artifacts, engine),
             limits: settings.limits.clone(),
             upload_permits: Arc::new(Semaphore::new(settings.limits.max_concurrent_uploads)),
         })
@@ -64,5 +72,9 @@ pub enum StartupError {
     #[error(transparent)]
     Artifacts(#[from] ArtifactError),
     #[error(transparent)]
+    Persistence(#[from] RepositoryError),
+    #[error(transparent)]
     PdfEngine(#[from] EngineStartupError),
+    #[error("configured active job limit does not fit the persistence layer")]
+    JobLimitOutOfRange,
 }

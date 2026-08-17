@@ -15,8 +15,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::{
-    assert_server_request_id, clean_pdf, count_named_files, json_body, multipart_body,
-    multipart_body_with_duplicate_profile, multipart_body_with_media_type,
+    assert_server_request_id, clean_pdf, count_job_directories, count_named_files, json_body,
+    multipart_body, multipart_body_with_duplicate_profile, multipart_body_with_media_type,
     multipart_body_without_source, pdf_with_content, slow_multipart_prefix, streaming_body,
     test_app, test_app_with_max_jobs, test_app_with_output_limit, test_app_with_upload_limits,
     test_app_with_worker_script, TestHarness, TOKEN,
@@ -24,7 +24,7 @@ use support::{
 
 #[tokio::test]
 async fn public_health_and_capabilities_are_truthful() {
-    let app = test_app();
+    let app = test_app().await;
     let response = app.request(Method::GET, "/health/live", None).await;
 
     assert_eq!(response.status(), StatusCode::OK);
@@ -52,7 +52,7 @@ async fn harness_reinitializes_app_state_against_one_data_root_without_a_listene
     let harness = TestHarness::new();
     let data_dir = harness.data_dir().to_owned();
 
-    let first = harness.app();
+    let first = harness.app().await;
     assert_eq!(first.data_dir(), data_dir);
     assert_eq!(
         first
@@ -63,7 +63,7 @@ async fn harness_reinitializes_app_state_against_one_data_root_without_a_listene
     );
     drop(first);
 
-    let second = harness.app();
+    let second = harness.app().await;
     assert_eq!(second.data_dir(), data_dir);
     assert_eq!(
         second
@@ -108,7 +108,7 @@ fn conversion_profile_and_job_status_json_values_are_stable() {
 
 #[tokio::test]
 async fn conversion_routes_require_one_valid_bearer_token() {
-    let app = test_app();
+    let app = test_app().await;
     let response = app
         .request(Method::GET, "/api/v1/conversions/not-a-uuid", None)
         .await;
@@ -157,12 +157,12 @@ async fn conversion_routes_require_one_valid_bearer_token() {
     .await
     .expect("authentication must reject before reading a streaming body");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(count_named_files(app.data_dir(), "source.pdf"), 0);
+    assert_eq!(count_job_directories(app.data_dir()), 0);
 }
 
 #[tokio::test]
 async fn clean_pdf_completes_and_idempotency_replays_the_job() {
-    let app = test_app();
+    let app = test_app().await;
     let pdf = clean_pdf();
     let client_run_id = Uuid::new_v4();
     let body = multipart_body(client_run_id, "standard", &pdf, "fixture.pdf");
@@ -231,8 +231,162 @@ async fn clean_pdf_completes_and_idempotency_replays_the_job() {
 }
 
 #[tokio::test]
+async fn completed_job_idempotency_and_downloads_survive_app_restart() {
+    let harness = TestHarness::new();
+    let pdf = clean_pdf();
+    let client_run_id = Uuid::new_v4();
+    let body = multipart_body(client_run_id, "standard", &pdf, "fixture.pdf");
+    let first = harness.app().await;
+
+    let response = first.submit(body.clone(), "durable-restart-1", TOKEN).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let submitted = json_body(response).await;
+    let job_id = submitted["data"]["id"].as_str().unwrap().to_owned();
+    let completed = first.wait_for_terminal(&job_id).await;
+    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+
+    let markdown_before = first
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
+        .await
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let manifest_before = first
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
+        .await
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    drop(first);
+
+    let restarted = harness.app().await;
+    let status = restarted
+        .authorized_get(&format!("/api/v1/conversions/{job_id}"))
+        .await;
+    assert_eq!(status.status(), StatusCode::OK);
+    assert_eq!(json_body(status).await["data"]["status"], "succeeded");
+
+    let markdown_after = restarted
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
+        .await;
+    assert_eq!(markdown_after.status(), StatusCode::OK);
+    assert_eq!(
+        markdown_after
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+        markdown_before
+    );
+    let manifest_after = restarted
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
+        .await;
+    assert_eq!(manifest_after.status(), StatusCode::OK);
+    assert_eq!(
+        manifest_after
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+        manifest_before
+    );
+
+    let replay = restarted.submit(body, "durable-restart-1", TOKEN).await;
+    assert_eq!(replay.status(), StatusCode::ACCEPTED);
+    assert_eq!(replay.headers()["idempotency-replayed"], "true");
+    assert_eq!(json_body(replay).await["data"]["id"], job_id);
+
+    let conflict = restarted
+        .submit(
+            multipart_body(Uuid::new_v4(), "standard", &pdf, "fixture.pdf"),
+            "durable-restart-1",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(conflict).await["error"]["code"],
+        "idempotency_conflict"
+    );
+    assert_eq!(count_job_directories(restarted.data_dir()), 1);
+    assert_eq!(count_named_files(restarted.data_dir(), "input"), 1);
+    assert_eq!(count_named_files(restarted.data_dir(), "input.staging"), 0);
+}
+
+#[tokio::test]
+async fn corrupted_published_artifact_fails_closed_and_preserves_audit_files() {
+    let harness = TestHarness::new();
+    let app = harness.app().await;
+    let response = app
+        .submit(
+            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "fixture.pdf"),
+            "artifact-integrity-1",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let submitted = json_body(response).await;
+    let job_id = submitted["data"]["id"].as_str().unwrap().to_owned();
+    let attempt_id = submitted["data"]["activeAttemptId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        app.wait_for_terminal(&job_id).await["data"]["status"],
+        "succeeded"
+    );
+
+    let markdown_path = app
+        .data_dir()
+        .join("jobs")
+        .join(&job_id)
+        .join("attempts")
+        .join(&attempt_id)
+        .join("artifacts")
+        .join("result.md");
+    std::fs::write(&markdown_path, b"corrupted").unwrap();
+
+    let status = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}"))
+        .await;
+    assert_eq!(status.status(), StatusCode::OK);
+    let status = json_body(status).await;
+    assert_eq!(status["data"]["status"], "failed", "{status:#}");
+    assert_eq!(
+        status["data"]["failure"]["code"],
+        "artifact_integrity_failed"
+    );
+    let artifacts = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
+        .await;
+    assert!(json_body(artifacts).await["data"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let download = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
+        .await;
+    assert_eq!(download.status(), StatusCode::NOT_FOUND);
+    assert_eq!(std::fs::read(&markdown_path).unwrap(), b"corrupted");
+
+    drop(app);
+    let restarted = harness.app().await;
+    let status = restarted
+        .authorized_get(&format!("/api/v1/conversions/{job_id}"))
+        .await;
+    assert_eq!(json_body(status).await["data"]["status"], "failed");
+    assert!(markdown_path.exists());
+}
+
+#[tokio::test]
 async fn invalid_submission_fields_are_rejected_without_creating_jobs() {
-    let app = test_app();
+    let app = test_app().await;
     let pdf = clean_pdf();
 
     let wrong_profile = multipart_body(Uuid::new_v4(), "best_quality", &pdf, "fixture.pdf");
@@ -255,11 +409,14 @@ async fn invalid_submission_fields_are_rejected_without_creating_jobs() {
         json_body(response).await["error"]["code"],
         "invalid_pdf_signature"
     );
+    assert_eq!(count_job_directories(app.data_dir()), 0);
+    assert_eq!(count_named_files(app.data_dir(), "input"), 0);
+    assert_eq!(count_named_files(app.data_dir(), "input.staging"), 0);
 }
 
 #[tokio::test]
 async fn multipart_boundaries_enforce_fields_media_type_extension_and_size() {
-    let app = test_app();
+    let app = test_app().await;
     let pdf = clean_pdf();
     for (body, key, status, code) in [
         (
@@ -298,7 +455,7 @@ async fn multipart_boundaries_enforce_fields_media_type_extension_and_size() {
         assert_eq!(json_body(response).await["error"]["code"], code, "{key}");
     }
 
-    let bounded = test_app_with_upload_limits(64, 1);
+    let bounded = test_app_with_upload_limits(64, 1).await;
     let response = bounded
         .submit(
             multipart_body(Uuid::new_v4(), "standard", &pdf, "too-large.pdf"),
@@ -311,12 +468,12 @@ async fn multipart_boundaries_enforce_fields_media_type_extension_and_size() {
         json_body(response).await["error"]["code"],
         "upload_too_large"
     );
-    assert_eq!(count_named_files(bounded.data_dir(), "source.pdf"), 0);
+    assert_eq!(count_job_directories(bounded.data_dir()), 0);
 }
 
 #[tokio::test]
 async fn concurrent_slow_uploads_receive_immediate_backpressure_and_cleanup() {
-    let app = test_app_with_upload_limits(1024 * 1024, 1);
+    let app = test_app_with_upload_limits(1024 * 1024, 1).await;
     let (mut writer, reader) = tokio::io::duplex(4096);
     writer
         .write_all(&slow_multipart_prefix(Uuid::new_v4()))
@@ -354,12 +511,12 @@ async fn concurrent_slow_uploads_receive_immediate_backpressure_and_cleanup() {
     let first = first.await.unwrap();
     assert_eq!(first.status(), StatusCode::BAD_REQUEST);
     tokio::time::sleep(Duration::from_millis(25)).await;
-    assert_eq!(count_named_files(app.data_dir(), "source.pdf"), 0);
+    assert_eq!(count_job_directories(app.data_dir()), 0);
 }
 
 #[tokio::test]
 async fn non_text_pdf_never_publishes_partial_markdown() {
-    let app = test_app();
+    let app = test_app().await;
     let pdf = pdf_with_content(b"q\nQ\n");
     let body = multipart_body(Uuid::new_v4(), "local_only", &pdf, "blank.pdf");
     let response = app.submit(body, "blank-pdf-1", TOKEN).await;
@@ -386,11 +543,14 @@ async fn non_text_pdf_never_publishes_partial_markdown() {
         .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
     assert_eq!(markdown.status(), StatusCode::NOT_FOUND);
+    assert_eq!(count_job_directories(app.data_dir()), 1);
+    assert_eq!(count_named_files(app.data_dir(), "input"), 1);
+    assert_eq!(count_named_files(app.data_dir(), "result.md"), 0);
 }
 
 #[tokio::test]
 async fn worker_output_limit_routes_without_writing_an_artifact() {
-    let app = test_app_with_output_limit(16);
+    let app = test_app_with_output_limit(16).await;
     let body = multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "bounded.pdf");
     let response = app.submit(body, "bounded-output-1", TOKEN).await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -414,7 +574,7 @@ async fn worker_output_limit_routes_without_writing_an_artifact() {
 
 #[tokio::test]
 async fn concurrent_idempotent_submissions_create_one_job() {
-    let app = test_app();
+    let app = test_app().await;
     let body = multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "same.pdf");
     let (first, second) = tokio::join!(
         app.submit(body.clone(), "concurrent-same-1", TOKEN),
@@ -441,7 +601,7 @@ async fn concurrent_idempotent_submissions_create_one_job() {
 
 #[tokio::test]
 async fn capabilities_stop_accepting_new_jobs_at_ephemeral_capacity() {
-    let app = test_app_with_max_jobs(1);
+    let app = test_app_with_max_jobs(1).await;
     let pdf = clean_pdf();
     let client_run_id = Uuid::new_v4();
     let body = multipart_body(client_run_id, "standard", &pdf, "first.pdf");
@@ -475,6 +635,70 @@ async fn capabilities_stop_accepting_new_jobs_at_ephemeral_capacity() {
     assert_eq!(replay.status(), StatusCode::ACCEPTED);
     assert_eq!(replay.headers()["idempotency-replayed"], "true");
     assert_eq!(json_body(replay).await["data"]["id"], first_id);
+    assert_eq!(count_job_directories(app.data_dir()), 1);
+    assert_eq!(count_named_files(app.data_dir(), "input"), 1);
+    assert_eq!(count_named_files(app.data_dir(), "input.staging"), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn jobs_waiting_for_the_engine_permit_remain_queued() {
+    let app =
+        test_app_with_worker_script("#!/bin/sh\n/bin/sleep 1\nexit 42\n", Duration::from_secs(3))
+            .await;
+    let first = app
+        .submit(
+            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "first.pdf"),
+            "engine-queue-first",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let first_id = json_body(first).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let mut first_started = false;
+    for _ in 0..100 {
+        let status = app
+            .authorized_get(&format!("/api/v1/conversions/{first_id}"))
+            .await;
+        let status = json_body(status).await;
+        if status["data"]["status"] == "converting_local" {
+            first_started = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(first_started, "first conversion never acquired the engine");
+
+    let second = app
+        .submit(
+            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "second.pdf"),
+            "engine-queue-second",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(second.status(), StatusCode::ACCEPTED);
+    let second_id = json_body(second).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let waiting = app
+        .authorized_get(&format!("/api/v1/conversions/{second_id}"))
+        .await;
+    assert_eq!(json_body(waiting).await["data"]["status"], "queued");
+    assert_eq!(
+        app.wait_for_terminal(&first_id).await["data"]["status"],
+        "failed"
+    );
+    assert_eq!(
+        app.wait_for_terminal(&second_id).await["data"]["status"],
+        "failed"
+    );
 }
 
 #[cfg(unix)]
@@ -492,7 +716,7 @@ async fn worker_timeout_and_crash_fail_only_the_job() {
             "worker_crash",
         ),
     ] {
-        let app = test_app_with_worker_script(script, worker_timeout);
+        let app = test_app_with_worker_script(script, worker_timeout).await;
         let body = multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "fixture.pdf");
         let response = app
             .submit(body, &format!("failure-{expected_code}"), TOKEN)
@@ -503,6 +727,9 @@ async fn worker_timeout_and_crash_fail_only_the_job() {
         let completed = app.wait_for_terminal(job_id).await;
         assert_eq!(completed["data"]["status"], "failed");
         assert_eq!(completed["data"]["failure"]["code"], expected_code);
+        assert_eq!(count_job_directories(app.data_dir()), 1);
+        assert_eq!(count_named_files(app.data_dir(), "input"), 1);
+        assert_eq!(count_named_files(app.data_dir(), "result.md"), 0);
 
         let health = app.request(Method::GET, "/health/live", None).await;
         assert_eq!(health.status(), StatusCode::OK);
@@ -547,7 +774,7 @@ async fn malformed_or_untrusted_worker_outputs_never_publish() {
     ];
 
     for (name, script, expected_code) in cases {
-        let app = test_app_with_worker_script(&script, Duration::from_secs(2));
+        let app = test_app_with_worker_script(&script, Duration::from_secs(2)).await;
         let response = app
             .submit(
                 multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "fixture.pdf"),
@@ -585,7 +812,7 @@ async fn malformed_or_untrusted_worker_outputs_never_publish() {
 
 #[tokio::test]
 async fn server_replaces_spoofed_request_ids_on_errors_and_success() {
-    let app = test_app();
+    let app = test_app().await;
     for uri in ["/health/live", "/missing"] {
         let response = app
             .request_with_headers(
@@ -603,7 +830,7 @@ async fn server_replaces_spoofed_request_ids_on_errors_and_success() {
 
 #[tokio::test]
 async fn persistence_dependent_routes_remain_absent() {
-    let app = test_app();
+    let app = test_app().await;
     for (method, path, expected) in [
         (
             Method::GET,

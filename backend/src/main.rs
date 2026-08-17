@@ -8,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> Result<(), Box<dyn Error>> {
     let settings = Settings::from_env()?;
     init_tracing(&settings.log_filter)?;
-    let app_state = AppState::initialize(&settings)?;
+    let app_state = AppState::initialize(&settings).await?;
     let listener = TcpListener::bind(settings.bind_address).await?;
 
     tracing::info!(
