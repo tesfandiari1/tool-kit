@@ -1,27 +1,24 @@
 # Session handoff
 
-**Last updated:** 2026-08-17  
-**Branch:** `main`. `codex/backend-m2` (PR #1, PR #3) and
+**Last updated:** 2026-08-18
+**Branch:** `main` at `01f1bf1`. `codex/backend-m2` (PR #1, PR #3) and
 `backend/m2-increment-5` (PR #4) are merged and deleted. Branch fresh off
-`main` for the next increment.
-**Backend checkpoint:** `2f3158d` — M2 Increments 0-5 verified, merged to `main`
-in PR #4 as `b70ce44` with all four CI checks green.
-**Recorded code state:** M2 Increment 6 is implemented, green, and **staged in
-the index but not committed**. `git status --short` should show 18 staged paths
-and nothing else. New files: `backend/src/faults.rs`,
+`main` for the next milestone.
+**Backend checkpoint:** `01f1bf1` — M2 Increments 0-6 verified and committed on
+`main`; M2 is closed.
+**Recorded code state:** Increment 6 is committed as `01f1bf1` and the working
+tree is clean. It added `backend/src/faults.rs`,
 `backend/tests/{crash_recovery,integrity_matrix,failure_modes}.rs`,
-`backend/scripts/container-smoke.sh`, `docs/DESKTOP_EXECUTION_PLAN.md`.
-Modified: `backend/src/{app,lib}.rs`, `backend/src/conversion/service.rs`,
-`backend/tests/support/mod.rs`, `backend/compose.yaml`,
-`backend/.dockerignore`, `package.json`, `CLAUDE.md`, and three `docs/` files.
-**Commit that set, do not rebuild it.** If the index looks empty, someone ran
-`git reset`, and the work is still in the working tree.
+`backend/scripts/container-smoke.sh`, and `docs/DESKTOP_EXECUTION_PLAN.md`, and
+touched `backend/src/{app,lib}.rs`, `backend/src/conversion/service.rs`,
+`backend/tests/support/mod.rs`, `backend/compose.yaml`, `backend/.dockerignore`,
+`package.json`, `CLAUDE.md`, and three `docs/` files.
 **Read this first** in any parallel session, then re-read the live worktree.
 This file goes stale the moment someone lands a commit.
 
 ## Do this next
 
-1. **Commit Increment 6, then start M6 desktop integration.** M2 is closed:
+1. **Start M6 desktop integration.** M2 is closed and committed as `01f1bf1`:
    119 backend tests pass and both container smokes pass. The plan for what
    comes next is `docs/DESKTOP_EXECUTION_PLAN.md`, which re-sequences M6 ahead
    of M3, M4, and M5. **None of the eight M6 tickets is blocked by M3 or M4**,

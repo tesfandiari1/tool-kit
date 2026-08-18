@@ -1,13 +1,13 @@
 # Epic: Rust conversion backend
 
-**Status:** In progress — M2 Increments 0-5 verified, Increment 6 next
-**Current milestone:** M2 — durable SQLite jobs and artifacts
-**Latest verified checkpoint:** `2f3158d` — M2 Increment 5 runtime and Compose
+**Status:** In progress — M2 closed, M6 desktop integration next
+**Current milestone:** M6 — desktop integration
+**Latest verified checkpoint:** `01f1bf1` — M2 Increments 0-6, M2 closed
 **Target:** CPU-only Rust/Axum modular monolith
 **Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)
 **Immediate plan:** [`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)
 **Session handoff:** [`HANDOFF.md`](HANDOFF.md)
-**Last updated:** 2026-08-17
+**Last updated:** 2026-08-18
 
 ## Outcome
 
@@ -586,3 +586,5 @@ Deferred on purpose, not silently dropped:
 The container smoke proves the graceful and forced-kill windows only. The
 `finalizing` and post-rename barriers are held in the Rust suite, because
 holding them from outside the process needs a code seam.
+
+Committed on `main` as `01f1bf1`, closing M2.

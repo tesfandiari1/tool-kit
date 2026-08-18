@@ -1,13 +1,13 @@
 # M2 execution plan: durable SQLite jobs and artifacts
 
-**Status:** Approved — implementation in progress
+**Status:** Complete
 **Epic tickets:** CVR-020 through CVR-029
-**Latest verified checkpoint:** `2f3158d` — Increments 0-5 complete, merged to
-`main` in PR #4 as `b70ce44`.
+**Latest verified checkpoint:** `01f1bf1` — Increments 0-6 complete and
+committed on `main`; M2 is closed.
 **Complexity:** Medium-high
 **Estimated implementation shape:** One baseline increment plus six bounded
 implementation increments, each independently testable
-**Last updated:** 2026-08-17
+**Last updated:** 2026-08-18
 **Session handoff:** [`HANDOFF.md`](HANDOFF.md)
 
 ## Objective
@@ -592,6 +592,6 @@ M2 is complete only when all of the following are true:
 
 ## Execution boundary
 
-M2 is approved. Increments 0-5 are complete, verified, and merged to `main`.
-Execute Increment 6 failure and release verification next. Do not add AnyDoc or
-other scope. Parallel sessions start at [`HANDOFF.md`](HANDOFF.md).
+M2 is complete. Increments 0-6 are verified and committed on `main`; the
+closing checkpoint is `01f1bf1`. Do not add AnyDoc or other scope here.
+Parallel sessions start at [`HANDOFF.md`](HANDOFF.md).
