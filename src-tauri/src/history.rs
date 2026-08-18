@@ -1,10 +1,12 @@
 //! Persistent run history, in a SQLite file beside `settings.json`.
 //!
-//! Two jobs, and the second is why this is a database rather than a log file:
+//! Three jobs, and the second is why this is a database rather than a log file:
 //!
 //! 1. Remember where every result went, so finished work can be found again.
 //! 2. Answer "has this file already been done?" on **every** input scan — every
 //!    drop, every job switch. That is an indexed lookup by source path.
+//! 3. Remember accepted backend work across an app restart, without storing
+//!    credentials or document content.
 //!
 //! **History is a convenience and must never break a job.** Every entry point
 //! that a job touches swallows storage errors: a conversion that succeeded is
@@ -26,7 +28,7 @@ const MAX_ENTRIES: i64 = 5_000;
 
 /// Bump when the schema changes, and add a matching `if version < N` block in
 /// `migrate` — so a new column is a migration rather than a crash on startup.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// The open database, or `None` if it could not be opened. `None` makes every
 /// operation a silent no-op, which is the whole failure policy in one word.
@@ -60,6 +62,38 @@ pub struct Entry {
     pub error: Option<String>,
     /// Unix seconds.
     pub finished_at: i64,
+}
+
+/// One backend conversion to remember before its submit request is sent.
+///
+/// The source identity and mtime are derived here rather than accepted from a
+/// caller, so recovery never trusts stale metadata supplied over another API.
+pub struct NewInFlight<'a> {
+    pub source_path: &'a str,
+    pub file_name: &'a str,
+    pub output_dir: &'a str,
+    pub client_run_id: &'a str,
+    pub idempotency_key: &'a str,
+    pub conversion_profile: &'a str,
+}
+
+/// A backend conversion that can be recovered after an app restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InFlightEntry {
+    /// Canonical source path captured immediately before submit.
+    pub source_path: String,
+    pub file_name: String,
+    pub output_dir: String,
+    pub client_run_id: String,
+    /// The stable per-file key and primary identity of this record.
+    pub idempotency_key: String,
+    /// `None` until the backend accepts or replays the submission.
+    pub backend_job_id: Option<String>,
+    pub conversion_profile: String,
+    /// Source modification time in Unix milliseconds at submit time.
+    pub source_mtime: i64,
+    /// Unix seconds.
+    pub created_at: i64,
 }
 
 // --- Setup -----------------------------------------------------------------
@@ -122,7 +156,24 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              CREATE INDEX IF NOT EXISTS history_finished ON history(finished_at DESC);",
         )?;
     }
-    // Add `if version < 2 { … }` above when a column is added, then bump
+    if version < 2 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS inflight_conversions (
+                 idempotency_key    TEXT    PRIMARY KEY NOT NULL,
+                 source_path       TEXT    NOT NULL,
+                 file_name         TEXT    NOT NULL,
+                 output_dir        TEXT    NOT NULL,
+                 client_run_id     TEXT    NOT NULL,
+                 backend_job_id    TEXT,
+                 conversion_profile TEXT   NOT NULL,
+                 source_mtime      INTEGER NOT NULL,
+                 created_at        INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS inflight_created
+                 ON inflight_conversions(created_at, idempotency_key);",
+        )?;
+    }
+    // Add `if version < 3 { … }` above when the schema changes again, then bump
     // SCHEMA_VERSION. A file written by a *newer* build is left untouched:
     // extra columns are harmless to read, and rewriting it would lose history.
     if version < SCHEMA_VERSION {
@@ -157,6 +208,168 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Resolve the exact source identity and mtime that a restart must verify.
+/// If either lookup fails, the caller skips persistence rather than recording
+/// a recovery row that could not be validated safely later.
+fn source_identity(path: &str) -> Option<(String, i64)> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    let source_path = canonical.to_string_lossy().into_owned();
+    let source_mtime = mtime_ms(&source_path)?;
+    Some((source_path, source_mtime))
+}
+
+// --- In-flight backend conversions -----------------------------------------
+
+/// Best-effort insert before submit. Reusing a stable idempotency key preserves
+/// the original recovery identity, attached backend job, and creation time.
+/// Returns `false` when persistence is unavailable or the source cannot be
+/// identified safely; that must never stop the conversion itself.
+#[allow(dead_code, reason = "the M6 jobs integration lands in a later patch")]
+pub fn upsert_in_flight(app: &AppHandle, pending: &NewInFlight<'_>) -> bool {
+    if pending.idempotency_key.trim().is_empty()
+        || pending.client_run_id.trim().is_empty()
+        || pending.conversion_profile.trim().is_empty()
+    {
+        return false;
+    }
+    with_db(app, |conn| upsert_in_flight_row(conn, pending)).unwrap_or(false)
+}
+
+fn upsert_in_flight_row(conn: &Connection, pending: &NewInFlight<'_>) -> rusqlite::Result<bool> {
+    let Some((source_path, source_mtime)) = source_identity(pending.source_path) else {
+        return Ok(false);
+    };
+    let changed = conn.execute(
+        "INSERT INTO inflight_conversions
+           (idempotency_key, source_path, file_name, output_dir, client_run_id,
+            backend_job_id, conversion_profile, source_mtime, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8)
+         ON CONFLICT(idempotency_key) DO NOTHING",
+        rusqlite::params![
+            pending.idempotency_key,
+            source_path,
+            pending.file_name,
+            pending.output_dir,
+            pending.client_run_id,
+            pending.conversion_profile,
+            source_mtime,
+            now_secs(),
+        ],
+    )?;
+    Ok(changed == 1 || in_flight_matches(conn, pending, &source_path, source_mtime)?)
+}
+
+fn in_flight_matches(
+    conn: &Connection,
+    pending: &NewInFlight<'_>,
+    source_path: &str,
+    source_mtime: i64,
+) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM inflight_conversions
+              WHERE idempotency_key = ?1
+                AND source_path = ?2
+                AND file_name = ?3
+                AND output_dir = ?4
+                AND client_run_id = ?5
+                AND conversion_profile = ?6
+                AND source_mtime = ?7
+         )",
+        rusqlite::params![
+            pending.idempotency_key,
+            source_path,
+            pending.file_name,
+            pending.output_dir,
+            pending.client_run_id,
+            pending.conversion_profile,
+            source_mtime,
+        ],
+        |row| row.get(0),
+    )
+}
+
+/// Attach the backend UUID returned by either an accepted or replayed submit.
+/// The same UUID may be attached repeatedly; a conflicting UUID is rejected so
+/// a replay cannot silently replace the job that the durable key identifies.
+#[allow(dead_code, reason = "the M6 jobs integration lands in a later patch")]
+pub fn attach_backend_job(app: &AppHandle, idempotency_key: &str, backend_job_id: &str) -> bool {
+    if idempotency_key.trim().is_empty() || backend_job_id.trim().is_empty() {
+        return false;
+    }
+    with_db(app, |conn| {
+        attach_backend_job_row(conn, idempotency_key, backend_job_id)
+    })
+    .unwrap_or(false)
+}
+
+fn attach_backend_job_row(
+    conn: &Connection,
+    idempotency_key: &str,
+    backend_job_id: &str,
+) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE inflight_conversions
+            SET backend_job_id = ?2
+          WHERE idempotency_key = ?1
+            AND (backend_job_id IS NULL OR backend_job_id = ?2)",
+        rusqlite::params![idempotency_key, backend_job_id],
+    )?;
+    Ok(changed == 1)
+}
+
+/// List restart-recoverable records in stable creation order.
+///
+/// `None` means storage was unavailable or unreadable; `Some([])` honestly
+/// means the store was read and contains no active backend conversions.
+#[allow(dead_code, reason = "the M6 jobs integration lands in a later patch")]
+pub fn list_in_flight(app: &AppHandle) -> Option<Vec<InFlightEntry>> {
+    with_db(app, select_in_flight)
+}
+
+fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT source_path, file_name, output_dir, client_run_id,
+                idempotency_key, backend_job_id, conversion_profile,
+                source_mtime, created_at
+           FROM inflight_conversions
+          ORDER BY created_at ASC, idempotency_key ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(InFlightEntry {
+            source_path: row.get(0)?,
+            file_name: row.get(1)?,
+            output_dir: row.get(2)?,
+            client_run_id: row.get(3)?,
+            idempotency_key: row.get(4)?,
+            backend_job_id: row.get(5)?,
+            conversion_profile: row.get(6)?,
+            source_mtime: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Delete one terminal or explicitly stopped conversion by its stable key.
+/// Unknown keys and unavailable storage both return `false`; no other row is
+/// cleaned up as a side effect.
+#[allow(dead_code, reason = "the M6 jobs integration lands in a later patch")]
+pub fn delete_in_flight(app: &AppHandle, idempotency_key: &str) -> bool {
+    if idempotency_key.trim().is_empty() {
+        return false;
+    }
+    with_db(app, |conn| delete_in_flight_row(conn, idempotency_key)).unwrap_or(false)
+}
+
+fn delete_in_flight_row(conn: &Connection, idempotency_key: &str) -> rusqlite::Result<bool> {
+    conn.execute(
+        "DELETE FROM inflight_conversions WHERE idempotency_key = ?1",
+        [idempotency_key],
+    )
+    .map(|changed| changed == 1)
 }
 
 // --- Writing ----------------------------------------------------------------
@@ -416,6 +629,197 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    fn create_v1_schema(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE history (
+                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                 file_name     TEXT    NOT NULL,
+                 source_path   TEXT    NOT NULL,
+                 output_path   TEXT,
+                 job_type      TEXT    NOT NULL,
+                 output_format TEXT    NOT NULL,
+                 status        TEXT    NOT NULL,
+                 error         TEXT,
+                 finished_at   INTEGER NOT NULL,
+                 source_mtime  INTEGER
+             );
+             CREATE INDEX history_source ON history(source_path);
+             CREATE INDEX history_finished ON history(finished_at DESC);
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn v1_migrates_without_losing_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_v1_schema(&conn);
+        conn.execute(
+            "INSERT INTO history
+               (file_name, source_path, job_type, output_format, status, finished_at)
+             VALUES ('kept.pdf', '/kept.pdf', 'convert', 'markdown', 'done', 42)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let rows = select(&conn, "", 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].file_name, "kept.pdf");
+        let active_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'table' AND name = 'inflight_conversions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_table, 1);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn in_flight_record_attach_list_and_delete_round_trip() {
+        let conn = db();
+        let (src, out) = pair("inflight-roundtrip");
+        let source_path = src.to_string_lossy().into_owned();
+        let output_dir = out.parent().unwrap().to_string_lossy().into_owned();
+        let pending = NewInFlight {
+            source_path: &source_path,
+            file_name: "report.pdf",
+            output_dir: &output_dir,
+            client_run_id: "11111111-1111-4111-8111-111111111111",
+            idempotency_key: "22222222-2222-4222-8222-222222222222",
+            conversion_profile: "standard",
+        };
+
+        assert!(upsert_in_flight_row(&conn, &pending).unwrap());
+        // Retrying the pre-submit write keeps the one durable identity.
+        assert!(upsert_in_flight_row(&conn, &pending).unwrap());
+        let before_attach = select_in_flight(&conn).unwrap();
+        assert_eq!(before_attach.len(), 1);
+        assert_eq!(before_attach[0].backend_job_id, None);
+        assert_eq!(before_attach[0].client_run_id, pending.client_run_id);
+        assert_eq!(before_attach[0].idempotency_key, pending.idempotency_key);
+        assert_eq!(before_attach[0].conversion_profile, "standard");
+        assert!(before_attach[0].created_at > 0);
+
+        let backend_job_id = "33333333-3333-4333-8333-333333333333";
+        assert!(attach_backend_job_row(&conn, pending.idempotency_key, backend_job_id).unwrap());
+        assert!(attach_backend_job_row(&conn, pending.idempotency_key, backend_job_id).unwrap());
+        assert!(!attach_backend_job_row(
+            &conn,
+            pending.idempotency_key,
+            "44444444-4444-4444-8444-444444444444"
+        )
+        .unwrap());
+        assert_eq!(
+            select_in_flight(&conn).unwrap()[0]
+                .backend_job_id
+                .as_deref(),
+            Some(backend_job_id)
+        );
+
+        assert!(delete_in_flight_row(&conn, pending.idempotency_key).unwrap());
+        assert!(select_in_flight(&conn).unwrap().is_empty());
+        assert!(!delete_in_flight_row(&conn, pending.idempotency_key).unwrap());
+    }
+
+    #[test]
+    fn in_flight_identity_is_canonical_and_captures_source_mtime() {
+        let conn = db();
+        let root = std::env::temp_dir().join("toolkit-hist-inflight-identity");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("nested")).unwrap();
+        let src = root.join("report.pdf");
+        fs::write(&src, b"pdf").unwrap();
+        let alias = root.join("nested").join("..").join("report.pdf");
+        let alias_path = alias.to_string_lossy().into_owned();
+        let output_dir = root.to_string_lossy().into_owned();
+        let pending = NewInFlight {
+            source_path: &alias_path,
+            file_name: "report.pdf",
+            output_dir: &output_dir,
+            client_run_id: "55555555-5555-4555-8555-555555555555",
+            idempotency_key: "66666666-6666-4666-8666-666666666666",
+            conversion_profile: "local_only",
+        };
+
+        assert!(upsert_in_flight_row(&conn, &pending).unwrap());
+        let row = select_in_flight(&conn).unwrap().remove(0);
+        assert_eq!(
+            row.source_path,
+            fs::canonicalize(&src).unwrap().to_string_lossy()
+        );
+        assert_eq!(row.source_mtime, mtime_ms(&row.source_path).unwrap());
+    }
+
+    #[test]
+    fn in_flight_records_survive_reopen() {
+        let dir = std::env::temp_dir().join("toolkit-hist-inflight-reopen");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        let src = dir.join("report.pdf");
+        fs::write(&src, b"pdf").unwrap();
+        let source_path = src.to_string_lossy().into_owned();
+        let output_dir = dir.to_string_lossy().into_owned();
+        let pending = NewInFlight {
+            source_path: &source_path,
+            file_name: "report.pdf",
+            output_dir: &output_dir,
+            client_run_id: "77777777-7777-4777-8777-777777777777",
+            idempotency_key: "88888888-8888-4888-8888-888888888888",
+            conversion_profile: "standard",
+        };
+
+        {
+            let conn = open(&path).unwrap();
+            assert!(upsert_in_flight_row(&conn, &pending).unwrap());
+            assert!(attach_backend_job_row(
+                &conn,
+                pending.idempotency_key,
+                "99999999-9999-4999-8999-999999999999"
+            )
+            .unwrap());
+        }
+
+        let conn = open(&path).unwrap();
+        let rows = select_in_flight(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].idempotency_key, pending.idempotency_key);
+        assert_eq!(
+            rows[0].backend_job_id.as_deref(),
+            Some("99999999-9999-4999-8999-999999999999")
+        );
+    }
+
+    #[test]
+    fn newer_schema_version_is_not_rewritten() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE future_data (value TEXT NOT NULL);
+             INSERT INTO future_data (value) VALUES ('keep me');
+             PRAGMA user_version = 99;",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let value: String = conn
+            .query_row("SELECT value FROM future_data", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 99);
+        assert_eq!(value, "keep me");
     }
 
     #[test]
