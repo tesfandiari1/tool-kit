@@ -12,23 +12,24 @@ use thiserror::Error;
 use tokio::{
     fs,
     io::AsyncReadExt,
-    process::Command,
-    sync::{OwnedSemaphorePermit, Semaphore},
-    time::timeout,
+    process::{Child, Command},
+    sync::{watch, OwnedSemaphorePermit, Semaphore},
+    time::sleep,
 };
 
 use crate::{
-    artifacts::AttemptPaths,
+    artifacts::{AttemptPaths, ValidatedOpenFile},
     worker_protocol::{
         FallbackReason, Inspection, PdfTypeLabel, RejectionCode, WorkerOutcome, WorkerReport,
-        MARKDOWN_FILE, PDF_INSPECTOR_VERSION, WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION,
+        MARKDOWN_FILE, PDF_INSPECTOR_VERSION, WORKER_EXPECTED_SOURCE_BYTES_ENV,
+        WORKER_EXPECTED_SOURCE_SHA256_ENV, WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION,
         WORKER_REPORT_FILE,
     },
 };
 
 const MAX_REPORT_BYTES: u64 = 1024 * 1024;
 const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(2);
-const EXPECTED_WORKER_IDENTITY: &str = "tool-kit-pdf-worker protocol=1 pdf-inspector=1.15.0\n";
+const EXPECTED_WORKER_IDENTITY: &str = "tool-kit-pdf-worker protocol=2 pdf-inspector=1.15.0\n";
 const REQUIRED_CMAPS: [&str; 4] = [
     "Adobe-CNS1-UCS2.bcmap",
     "Adobe-GB1-UCS2.bcmap",
@@ -89,11 +90,25 @@ impl PdfInspectorEngine {
     pub async fn convert(
         &self,
         paths: &AttemptPaths,
+        source: ValidatedOpenFile,
         _permit: OwnedSemaphorePermit,
+        mut cancellation: watch::Receiver<bool>,
     ) -> Result<EngineOutcome, EngineFailure> {
+        if *cancellation.borrow() {
+            return Err(EngineFailure::Interrupted);
+        }
+        let ValidatedOpenFile {
+            file,
+            byte_length,
+            sha256,
+        } = source;
+        if byte_length == 0 || !is_lowercase_sha256(&sha256) {
+            return Err(EngineFailure::Protocol);
+        }
+        let source = file.into_std().await;
+
         let mut command = Command::new(self.worker_path.as_path());
         command
-            .arg(&paths.source)
             .arg(&paths.publication_staging)
             .current_dir(&paths.attempt)
             .env_clear()
@@ -102,7 +117,9 @@ impl PdfInspectorEngine {
                 WORKER_MAX_OUTPUT_BYTES_ENV,
                 self.max_output_bytes.to_string(),
             )
-            .stdin(Stdio::null())
+            .env(WORKER_EXPECTED_SOURCE_BYTES_ENV, byte_length.to_string())
+            .env(WORKER_EXPECTED_SOURCE_SHA256_ENV, sha256)
+            .stdin(Stdio::from(source))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
@@ -111,17 +128,37 @@ impl PdfInspectorEngine {
         }
 
         let mut child = command.spawn().map_err(|_| EngineFailure::Unavailable)?;
-        let status = match timeout(self.timeout, child.wait()).await {
-            Ok(Ok(status)) => status,
-            Ok(Err(_)) => return Err(EngineFailure::Crashed),
-            Err(_) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(EngineFailure::Timeout);
+        let mut deadline = Box::pin(sleep(self.timeout));
+        let status = loop {
+            tokio::select! {
+                biased;
+                changed = cancellation.changed() => {
+                    let interrupted = changed.is_err() || *cancellation.borrow_and_update();
+                    if interrupted {
+                        kill_and_reap(&mut child).await;
+                        return Err(EngineFailure::Interrupted);
+                    }
+                }
+                _ = &mut deadline => {
+                    kill_and_reap(&mut child).await;
+                    return Err(EngineFailure::Timeout);
+                }
+                result = child.wait() => {
+                    match result {
+                        Ok(status) => break status,
+                        Err(_) => {
+                            kill_and_reap(&mut child).await;
+                            return Err(EngineFailure::Crashed);
+                        }
+                    }
+                }
             }
         };
         if !status.success() {
             return Err(EngineFailure::Crashed);
+        }
+        if *cancellation.borrow() {
+            return Err(EngineFailure::Interrupted);
         }
 
         self.read_and_validate_report(paths).await
@@ -235,6 +272,7 @@ pub enum EngineOutcome {
 pub enum EngineFailure {
     Unavailable,
     Timeout,
+    Interrupted,
     Crashed,
     Protocol,
 }
@@ -244,6 +282,7 @@ impl EngineFailure {
         match self {
             Self::Unavailable => "worker_unavailable",
             Self::Timeout => "worker_timeout",
+            Self::Interrupted => "worker_interrupted",
             Self::Crashed => "worker_crash",
             Self::Protocol => "worker_protocol_error",
         }
@@ -253,10 +292,16 @@ impl EngineFailure {
         match self {
             Self::Unavailable => "The local PDF worker is unavailable.",
             Self::Timeout => "The local PDF worker exceeded its time limit.",
+            Self::Interrupted => "The local PDF worker was interrupted.",
             Self::Crashed => "The local PDF worker stopped unexpectedly.",
             Self::Protocol => "The local PDF worker returned an invalid result.",
         }
     }
+}
+
+async fn kill_and_reap(child: &mut Child) {
+    let _ = child.start_kill();
+    let _ = child.wait().await;
 }
 
 fn validate_worker(path: &Path) -> Result<(), EngineStartupError> {
@@ -428,6 +473,13 @@ fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 async fn hash_and_check_content(path: &Path) -> Result<(String, bool), EngineFailure> {
     let mut file = fs::File::open(path)
         .await
@@ -491,7 +543,52 @@ pub enum EngineStartupError {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_cmaps, verify_worker_identity, EngineStartupError};
+    use std::{path::Path, time::Duration};
+
+    use sha2::{Digest, Sha256};
+    use tokio::sync::watch;
+
+    use super::{
+        validate_cmaps, verify_worker_identity, EngineFailure, EngineStartupError,
+        PdfInspectorEngine,
+    };
+    use crate::artifacts::{AttemptPaths, ValidatedOpenFile};
+
+    #[cfg(unix)]
+    fn write_worker(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn worker_script(body: &str) -> String {
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'tool-kit-pdf-worker protocol=2 pdf-inspector=1.15.0\\n'\n  exit 0\nfi\n{body}\n"
+        )
+    }
+
+    async fn source(path: &Path, bytes: &[u8]) -> ValidatedOpenFile {
+        tokio::fs::write(path, bytes).await.unwrap();
+        ValidatedOpenFile {
+            file: tokio::fs::File::open(path).await.unwrap(),
+            byte_length: u64::try_from(bytes.len()).unwrap(),
+            sha256: hex::encode(Sha256::digest(bytes)),
+        }
+    }
+
+    fn paths(root: &Path) -> AttemptPaths {
+        let attempt = root.join("attempt");
+        let publication_staging = attempt.join("publication.staging");
+        std::fs::create_dir_all(&publication_staging).unwrap();
+        AttemptPaths {
+            source: root.join("input"),
+            published: attempt.join("artifacts"),
+            publication_staging,
+            attempt,
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -517,5 +614,145 @@ mod tests {
             validate_cmaps(directory.path()),
             Err(EngineStartupError::InvalidCmapSentinel { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn conversion_passes_the_validated_handle_not_a_reopened_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker");
+        write_worker(
+            &worker,
+            &worker_script(
+                "printf '%s' \"$TOOLKIT_PDF_WORKER_EXPECTED_SOURCE_SHA256\" > observed-source-sha256\n/bin/cat > observed-source\nexit 1",
+            ),
+        );
+        let paths = paths(directory.path());
+        let source = source(&paths.source, b"original").await;
+        let expected_sha256 = source.sha256.clone();
+        tokio::fs::rename(&paths.source, directory.path().join("opened-source"))
+            .await
+            .unwrap();
+        tokio::fs::write(&paths.source, b"replacement")
+            .await
+            .unwrap();
+
+        let engine =
+            PdfInspectorEngine::initialize(worker, None, Duration::from_secs(2), 1024, 1).unwrap();
+        let permit = engine.acquire().await.unwrap();
+        let (_cancel, cancellation) = watch::channel(false);
+        let result = engine.convert(&paths, source, permit, cancellation).await;
+
+        assert_eq!(result.unwrap_err(), EngineFailure::Crashed);
+        assert_eq!(
+            tokio::fs::read(paths.attempt.join("observed-source"))
+                .await
+                .unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(paths.attempt.join("observed-source-sha256"))
+                .await
+                .unwrap(),
+            expected_sha256
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn conversion_binds_in_place_mutation_to_the_stored_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker");
+        write_worker(
+            &worker,
+            &worker_script(
+                "printf '%s' \"$TOOLKIT_PDF_WORKER_EXPECTED_SOURCE_SHA256\" > observed-source-sha256\n/bin/cat > observed-source\nexit 1",
+            ),
+        );
+        let paths = paths(directory.path());
+        let source = source(&paths.source, b"original").await;
+        let stored_sha256 = source.sha256.clone();
+        tokio::fs::write(&paths.source, b"mutation").await.unwrap();
+
+        let engine =
+            PdfInspectorEngine::initialize(worker, None, Duration::from_secs(2), 1024, 1).unwrap();
+        let permit = engine.acquire().await.unwrap();
+        let (_cancel, cancellation) = watch::channel(false);
+        let result = engine.convert(&paths, source, permit, cancellation).await;
+
+        assert_eq!(result.unwrap_err(), EngineFailure::Crashed);
+        assert_eq!(
+            tokio::fs::read(paths.attempt.join("observed-source"))
+                .await
+                .unwrap(),
+            b"mutation"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(paths.attempt.join("observed-source-sha256"))
+                .await
+                .unwrap(),
+            stored_sha256
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn conversion_rejects_noncanonical_source_digest_before_spawn() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker");
+        write_worker(
+            &worker,
+            &worker_script("printf started > worker-started\nexit 1"),
+        );
+        let paths = paths(directory.path());
+        let mut source = source(&paths.source, b"source").await;
+        source.sha256 = "A".repeat(64);
+
+        let engine =
+            PdfInspectorEngine::initialize(worker, None, Duration::from_secs(2), 1024, 1).unwrap();
+        let permit = engine.acquire().await.unwrap();
+        let (_cancel, cancellation) = watch::channel(false);
+        let result = engine.convert(&paths, source, permit, cancellation).await;
+
+        assert_eq!(result.unwrap_err(), EngineFailure::Protocol);
+        assert!(!paths.attempt.join("worker-started").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_kills_and_reaps_the_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker");
+        write_worker(
+            &worker,
+            &worker_script("printf started > worker-started\nexec /bin/sleep 30"),
+        );
+        let paths = paths(directory.path());
+        let source = source(&paths.source, b"source").await;
+        let engine =
+            PdfInspectorEngine::initialize(worker, None, Duration::from_secs(30), 1024, 1).unwrap();
+        let permit = engine.acquire().await.unwrap();
+        let (cancel, cancellation) = watch::channel(false);
+        let marker = paths.attempt.join("worker-started");
+        let task_paths = paths.clone();
+        let task = tokio::spawn(async move {
+            engine
+                .convert(&task_paths, source, permit, cancellation)
+                .await
+        });
+        for _ in 0..200 {
+            if marker.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(marker.exists());
+        cancel.send(true).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancelled worker should be reaped promptly")
+            .unwrap();
+        assert_eq!(result.unwrap_err(), EngineFailure::Interrupted);
     }
 }

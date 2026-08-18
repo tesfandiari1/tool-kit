@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{collections::HashSet, path::Path, time::Duration};
 
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -16,8 +16,8 @@ use uuid::Uuid;
 use super::model::{
     ArtifactKind, AttemptState, CommitOperation, ConversionState, CreateOutcome, EngineRecord,
     FailedResult, LocalAnalysis, LocalStart, NeedsRemoteResult, NewArtifact, NewConversion,
-    Profile, StoredArtifact, StoredAttempt, StoredConversion, StoredFailure, StoredSource,
-    SuccessfulArtifacts,
+    Profile, RequeueOutcome, StoredArtifact, StoredAttempt, StoredConversion, StoredFailure,
+    StoredSource, SuccessfulArtifacts,
 };
 
 pub const DATABASE_FILENAME: &str = "converter.sqlite";
@@ -588,6 +588,156 @@ impl SqliteRepository {
         Ok(conversion)
     }
 
+    pub async fn interrupt_and_requeue(
+        &self,
+        conversion_id: Uuid,
+        expected_attempt_id: Uuid,
+        new_attempt_id: Uuid,
+        recovery_limit: usize,
+    ) -> Result<RequeueOutcome, RepositoryError> {
+        if new_attempt_id == expected_attempt_id {
+            return Err(RepositoryError::InvalidInput(
+                "recovery attempt id must be new",
+            ));
+        }
+        let recovery_limit = u32::try_from(recovery_limit)
+            .map_err(|_| RepositoryError::InvalidInput("recovery limit is too large"))?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let active =
+            load_active_attempt_header(&mut transaction, conversion_id, expected_attempt_id)
+                .await?;
+        let recoverable_state = match (active.conversion_state, active.attempt_state) {
+            (ConversionState::ConvertingLocal, AttemptState::ConvertingLocal) => {
+                ConversionState::ConvertingLocal
+            }
+            (ConversionState::Finalizing, AttemptState::Finalizing) => ConversionState::Finalizing,
+            _ => {
+                return Err(RepositoryError::IllegalRecoveryState {
+                    conversion_id,
+                    attempt_id: expected_attempt_id,
+                    actual_conversion: active.conversion_state,
+                    actual_attempt: active.attempt_state,
+                });
+            }
+        };
+
+        if active.highest_recovery_count >= recovery_limit {
+            let conversion = load_required_conversion(&mut transaction, conversion_id).await?;
+            transaction.rollback().await?;
+            return Ok(RequeueOutcome::LimitReached(conversion));
+        }
+
+        let next_attempt_number = active
+            .highest_attempt_number
+            .checked_add(1)
+            .ok_or(RepositoryError::CorruptData("attempts.attempt_number"))?;
+        let next_recovery_count = active
+            .highest_recovery_count
+            .checked_add(1)
+            .ok_or(RepositoryError::CorruptData("attempts.recovery_count"))?;
+        let updated_at = now_rfc3339()?;
+        let conversion_id_text = conversion_id.hyphenated().to_string();
+        let expected_attempt_id_text = expected_attempt_id.hyphenated().to_string();
+        let new_attempt_id_text = new_attempt_id.hyphenated().to_string();
+
+        let interrupted = sqlx::query(
+            "UPDATE attempts
+             SET state = 'interrupted', updated_at = ?1, finished_at = ?1
+             WHERE conversion_id = ?2 AND id = ?3 AND state = ?4
+               AND attempt_number = ?5 AND recovery_count = ?6",
+        )
+        .bind(&updated_at)
+        .bind(&conversion_id_text)
+        .bind(&expected_attempt_id_text)
+        .bind(active.attempt_state.as_str())
+        .bind(i64::from(active.attempt_number))
+        .bind(i64::from(active.recovery_count))
+        .execute(&mut *transaction)
+        .await?;
+        require_one_transition_row(interrupted.rows_affected(), "attempts.state")?;
+
+        sqlx::query(
+            "INSERT INTO attempts (
+                id, conversion_id, attempt_number, state, recovery_count,
+                reason_codes_json, warnings_json, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, 'queued', ?4, '[]', '[]', ?5, ?5)",
+        )
+        .bind(&new_attempt_id_text)
+        .bind(&conversion_id_text)
+        .bind(i64::from(next_attempt_number))
+        .bind(i64::from(next_recovery_count))
+        .bind(&updated_at)
+        .execute(&mut *transaction)
+        .await?;
+
+        let requeued = sqlx::query(
+            "UPDATE conversions
+             SET active_attempt_id = ?1, status = 'queued', route = NULL,
+                 reason_codes_json = '[]', warnings_json = '[]',
+                 failure_code = NULL, failure_message = NULL, updated_at = ?2
+             WHERE id = ?3 AND auth_scope = ?4 AND active_attempt_id = ?5
+               AND status = ?6",
+        )
+        .bind(&new_attempt_id_text)
+        .bind(&updated_at)
+        .bind(&conversion_id_text)
+        .bind(AUTH_SCOPE)
+        .bind(&expected_attempt_id_text)
+        .bind(recoverable_state.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        require_one_transition_row(requeued.rows_affected(), "conversions.status")?;
+
+        let conversion = load_required_conversion(&mut transaction, conversion_id).await?;
+        commit_transition(
+            transaction,
+            CommitOperation::InterruptAndRequeue,
+            conversion_id,
+            new_attempt_id,
+        )
+        .await?;
+        Ok(RequeueOutcome::Requeued(conversion))
+    }
+
+    pub async fn list_recovery_candidates(&self) -> Result<Vec<StoredConversion>, RepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let rows = sqlx::query(
+            "SELECT c.id
+             FROM conversions AS c
+             JOIN attempts AS a
+               ON a.conversion_id = c.id AND a.id = c.active_attempt_id
+             WHERE c.auth_scope = ?1
+               AND c.status IN (
+                   'queued', 'converting_local', 'finalizing', 'succeeded'
+               )
+             ORDER BY a.queue_seq ASC",
+        )
+        .bind(AUTH_SCOPE)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut conversions = Vec::with_capacity(rows.len());
+        for row in rows {
+            let conversion_id = parse_uuid(row.try_get("id")?, "conversions.id")?;
+            conversions.push(load_required_conversion(&mut transaction, conversion_id).await?);
+        }
+        transaction.commit().await?;
+        Ok(conversions)
+    }
+
+    pub async fn list_conversion_ids(&self) -> Result<HashSet<Uuid>, RepositoryError> {
+        let rows = sqlx::query("SELECT id FROM conversions WHERE auth_scope = ?1")
+            .bind(AUTH_SCOPE)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| parse_uuid(row.try_get("id")?, "conversions.id"))
+            .collect()
+    }
+
+    pub async fn health_check(&self) -> Result<(), RepositoryError> {
+        probe_database(&self.pool).await
+    }
+
     pub async fn get(
         &self,
         conversion_id: Uuid,
@@ -623,6 +773,16 @@ struct EncodedLocalAnalysis {
 struct ActiveIds {
     conversion_id: Uuid,
     attempt_id: Uuid,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActiveAttemptHeader {
+    conversion_state: ConversionState,
+    attempt_state: AttemptState,
+    attempt_number: u32,
+    recovery_count: u32,
+    highest_attempt_number: u32,
+    highest_recovery_count: u32,
 }
 
 async fn apply_start_local(
@@ -682,13 +842,37 @@ async fn require_active_state(
     expected_conversion: ConversionState,
     expected_attempt: AttemptState,
 ) -> Result<(), RepositoryError> {
+    let active = load_active_attempt_header(transaction, conversion_id, attempt_id).await?;
+    if active.conversion_state != expected_conversion || active.attempt_state != expected_attempt {
+        return Err(RepositoryError::IllegalTransition {
+            conversion_id,
+            attempt_id,
+            expected_conversion,
+            expected_attempt,
+            actual_conversion: active.conversion_state,
+            actual_attempt: active.attempt_state,
+        });
+    }
+    Ok(())
+}
+
+async fn load_active_attempt_header(
+    transaction: &mut Transaction<'_, Sqlite>,
+    conversion_id: Uuid,
+    attempt_id: Uuid,
+) -> Result<ActiveAttemptHeader, RepositoryError> {
     let row = sqlx::query(
-        "SELECT c.active_attempt_id, c.status,
-                (SELECT a.state
-                 FROM attempts AS a
-                 WHERE a.conversion_id = c.id AND a.id = c.active_attempt_id)
-                    AS attempt_state
+        "SELECT c.active_attempt_id, c.status, a.state AS attempt_state,
+                a.attempt_number, a.recovery_count,
+                (SELECT MAX(history.attempt_number)
+                 FROM attempts AS history WHERE history.conversion_id = c.id)
+                    AS highest_attempt_number,
+                (SELECT MAX(history.recovery_count)
+                 FROM attempts AS history WHERE history.conversion_id = c.id)
+                    AS highest_recovery_count
          FROM conversions AS c
+         LEFT JOIN attempts AS a
+           ON a.conversion_id = c.id AND a.id = c.active_attempt_id
          WHERE c.auth_scope = ?1 AND c.id = ?2",
     )
     .bind(AUTH_SCOPE)
@@ -714,24 +898,41 @@ async fn require_active_state(
         });
     }
 
-    let actual_conversion = ConversionState::from_database(&row.try_get::<String, _>("status")?)
+    let conversion_state = ConversionState::from_database(&row.try_get::<String, _>("status")?)
         .ok_or(RepositoryError::CorruptData("conversions.status"))?;
-    let actual_attempt = AttemptState::from_database(
+    let attempt_state = AttemptState::from_database(
         &row.try_get::<Option<String>, _>("attempt_state")?
             .ok_or(RepositoryError::CorruptData("attempts.state"))?,
     )
     .ok_or(RepositoryError::CorruptData("attempts.state"))?;
-    if actual_conversion != expected_conversion || actual_attempt != expected_attempt {
-        return Err(RepositoryError::IllegalTransition {
-            conversion_id,
-            attempt_id,
-            expected_conversion,
-            expected_attempt,
-            actual_conversion,
-            actual_attempt,
-        });
-    }
-    Ok(())
+    let attempt_number = nonnegative_u32(
+        row.try_get::<Option<i64>, _>("attempt_number")?
+            .ok_or(RepositoryError::CorruptData("attempts.attempt_number"))?,
+        "attempts.attempt_number",
+    )?;
+    let recovery_count = nonnegative_u32(
+        row.try_get::<Option<i64>, _>("recovery_count")?
+            .ok_or(RepositoryError::CorruptData("attempts.recovery_count"))?,
+        "attempts.recovery_count",
+    )?;
+    let highest_attempt_number = nonnegative_u32(
+        row.try_get::<Option<i64>, _>("highest_attempt_number")?
+            .ok_or(RepositoryError::CorruptData("attempts.attempt_number"))?,
+        "attempts.attempt_number",
+    )?;
+    let highest_recovery_count = nonnegative_u32(
+        row.try_get::<Option<i64>, _>("highest_recovery_count")?
+            .ok_or(RepositoryError::CorruptData("attempts.recovery_count"))?,
+        "attempts.recovery_count",
+    )?;
+    Ok(ActiveAttemptHeader {
+        conversion_state,
+        attempt_state,
+        attempt_number,
+        recovery_count,
+        highest_attempt_number,
+        highest_recovery_count,
+    })
 }
 
 async fn update_attempt_analysis(
@@ -1306,6 +1507,15 @@ pub enum RepositoryError {
         actual_attempt: AttemptState,
     },
     #[error(
+        "conversion {conversion_id} attempt {attempt_id} cannot be recovered from {actual_conversion:?}/{actual_attempt:?}"
+    )]
+    IllegalRecoveryState {
+        conversion_id: Uuid,
+        attempt_id: Uuid,
+        actual_conversion: ConversionState,
+        actual_attempt: AttemptState,
+    },
+    #[error(
         "artifact metadata already exists for conversion {conversion_id} attempt {attempt_id}"
     )]
     ArtifactSetAlreadyExists {
@@ -1339,7 +1549,7 @@ pub enum RepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{collections::HashSet, sync::Arc, time::Duration};
 
     use sqlx::Row;
     use tempfile::TempDir;
@@ -1353,7 +1563,8 @@ mod tests {
     use crate::persistence::{
         ArtifactKind, AttemptState, ConversionState, CreateOutcome, DocumentClassification,
         EngineRecord, FailedResult, FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult,
-        NewArtifact, NewConversion, NewSource, Profile, StoredFailure, SuccessfulArtifacts,
+        NewArtifact, NewConversion, NewSource, Profile, RequeueOutcome, StoredFailure,
+        SuccessfulArtifacts,
     };
 
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -2186,6 +2397,417 @@ mod tests {
         assert!(after.failure.is_none());
         assert!(after.active_attempt.failure.is_none());
         assert!(after.active_attempt.finished_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn requeue_preserves_history_reenters_fifo_and_stops_at_the_limit() {
+        let directory = TempDir::new().unwrap();
+        let repository = SqliteRepository::open(directory.path(), 4, BUSY_TIMEOUT)
+            .await
+            .unwrap();
+        let first = created(
+            repository
+                .create_or_replay(new_conversion("requeue-first", "a"))
+                .await
+                .unwrap(),
+        );
+        repository
+            .start_local(first.id, first.active_attempt.id, local_start())
+            .await
+            .unwrap();
+        let second = created(
+            repository
+                .create_or_replay(new_conversion("requeue-second", "b"))
+                .await
+                .unwrap(),
+        );
+        let recovered_attempt_id = Uuid::new_v4();
+
+        let outcome = repository
+            .interrupt_and_requeue(first.id, first.active_attempt.id, recovered_attempt_id, 1)
+            .await
+            .unwrap();
+        let RequeueOutcome::Requeued(requeued) = outcome else {
+            panic!("first recovery must requeue");
+        };
+        assert_eq!(requeued.state, ConversionState::Queued);
+        assert_eq!(requeued.active_attempt.id, recovered_attempt_id);
+        assert_eq!(requeued.active_attempt.number, 2);
+        assert_eq!(requeued.active_attempt.recovery_count, 1);
+        assert!(
+            requeued.active_attempt.queue_sequence > second.active_attempt.queue_sequence,
+            "recovered work must reenter at the end of FIFO"
+        );
+        assert!(requeued.route.is_none());
+        assert!(requeued.reason_codes.is_empty());
+
+        let old_attempt = sqlx::query(
+            "SELECT state, finished_at FROM attempts WHERE conversion_id = ?1 AND id = ?2",
+        )
+        .bind(first.id.hyphenated().to_string())
+        .bind(first.active_attempt.id.hyphenated().to_string())
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            old_attempt.try_get::<String, _>("state").unwrap(),
+            "interrupted"
+        );
+        assert!(old_attempt
+            .try_get::<Option<String>, _>("finished_at")
+            .unwrap()
+            .is_some());
+
+        let claimed_second = repository
+            .claim_next_queued(local_start())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed_second.id, second.id);
+        let claimed_recovery = repository
+            .claim_next_queued(local_start())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed_recovery.id, first.id);
+
+        let limit = repository
+            .interrupt_and_requeue(first.id, recovered_attempt_id, Uuid::new_v4(), 1)
+            .await
+            .unwrap();
+        let RequeueOutcome::LimitReached(unchanged) = limit else {
+            panic!("configured recovery limit must stop another attempt");
+        };
+        assert_eq!(unchanged.state, ConversionState::ConvertingLocal);
+        assert_eq!(unchanged.active_attempt.id, recovered_attempt_id);
+        assert_eq!(unchanged.active_attempt.recovery_count, 1);
+        let attempt_count: i64 =
+            sqlx::query("SELECT COUNT(*) AS attempt_count FROM attempts WHERE conversion_id = ?1")
+                .bind(first.id.hyphenated().to_string())
+                .fetch_one(&repository.pool)
+                .await
+                .unwrap()
+                .try_get("attempt_count")
+                .unwrap();
+        assert_eq!(attempt_count, 2);
+    }
+
+    #[tokio::test]
+    async fn requeue_accepts_finalizing_and_rejects_illegal_or_stale_attempts() {
+        let directory = TempDir::new().unwrap();
+        let repository = SqliteRepository::open(directory.path(), 3, BUSY_TIMEOUT)
+            .await
+            .unwrap();
+        let queued = created(
+            repository
+                .create_or_replay(new_conversion("requeue-guards", "a"))
+                .await
+                .unwrap(),
+        );
+        assert!(matches!(
+            repository
+                .interrupt_and_requeue(queued.id, queued.active_attempt.id, Uuid::new_v4(), 3,)
+                .await,
+            Err(RepositoryError::IllegalRecoveryState { .. })
+        ));
+
+        repository
+            .start_local(queued.id, queued.active_attempt.id, local_start())
+            .await
+            .unwrap();
+        repository
+            .mark_finalizing(queued.id, queued.active_attempt.id, local_analysis())
+            .await
+            .unwrap();
+        assert!(matches!(
+            repository
+                .interrupt_and_requeue(queued.id, Uuid::new_v4(), Uuid::new_v4(), 3)
+                .await,
+            Err(RepositoryError::StaleActiveAttempt { .. })
+        ));
+
+        let new_attempt_id = Uuid::new_v4();
+        let outcome = repository
+            .interrupt_and_requeue(queued.id, queued.active_attempt.id, new_attempt_id, 3)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RequeueOutcome::Requeued(conversion)
+                if conversion.active_attempt.id == new_attempt_id
+                    && conversion.state == ConversionState::Queued
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_requeue_allows_one_new_active_attempt() {
+        let directory = TempDir::new().unwrap();
+        let repository = SqliteRepository::open(directory.path(), 2, BUSY_TIMEOUT)
+            .await
+            .unwrap();
+        let conversion = created(
+            repository
+                .create_or_replay(new_conversion("concurrent-requeue", "a"))
+                .await
+                .unwrap(),
+        );
+        repository
+            .start_local(conversion.id, conversion.active_attempt.id, local_start())
+            .await
+            .unwrap();
+        let new_ids = [Uuid::new_v4(), Uuid::new_v4()];
+        let barrier = Arc::new(Barrier::new(2));
+        let mut tasks = Vec::new();
+        for new_attempt_id in new_ids {
+            let repository = repository.clone();
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                repository
+                    .interrupt_and_requeue(
+                        conversion.id,
+                        conversion.active_attempt.id,
+                        new_attempt_id,
+                        3,
+                    )
+                    .await
+            }));
+        }
+
+        let mut winner = None;
+        let mut stale = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(RequeueOutcome::Requeued(requeued)) => {
+                    assert!(winner.replace(requeued.active_attempt.id).is_none());
+                }
+                Err(RepositoryError::StaleActiveAttempt { .. }) => stale += 1,
+                result => panic!("unexpected concurrent recovery result: {result:?}"),
+            }
+        }
+        assert_eq!(stale, 1);
+        assert!(new_ids.contains(&winner.unwrap()));
+        let attempt_count: i64 =
+            sqlx::query("SELECT COUNT(*) AS attempt_count FROM attempts WHERE conversion_id = ?1")
+                .bind(conversion.id.hyphenated().to_string())
+                .fetch_one(&repository.pool)
+                .await
+                .unwrap()
+                .try_get("attempt_count")
+                .unwrap();
+        assert_eq!(attempt_count, 2);
+    }
+
+    #[tokio::test]
+    async fn recovery_listing_is_filtered_complete_and_includes_artifacts_in_one_view() {
+        let directory = TempDir::new().unwrap();
+        let repository = SqliteRepository::open(directory.path(), 8, BUSY_TIMEOUT)
+            .await
+            .unwrap();
+        let queued = created(
+            repository
+                .create_or_replay(new_conversion("list-queued", "a"))
+                .await
+                .unwrap(),
+        );
+        let converting = created(
+            repository
+                .create_or_replay(new_conversion("list-converting", "b"))
+                .await
+                .unwrap(),
+        );
+        repository
+            .start_local(converting.id, converting.active_attempt.id, local_start())
+            .await
+            .unwrap();
+        let finalizing = created(
+            repository
+                .create_or_replay(new_conversion("list-finalizing", "c"))
+                .await
+                .unwrap(),
+        );
+        repository
+            .start_local(finalizing.id, finalizing.active_attempt.id, local_start())
+            .await
+            .unwrap();
+        repository
+            .mark_finalizing(
+                finalizing.id,
+                finalizing.active_attempt.id,
+                local_analysis(),
+            )
+            .await
+            .unwrap();
+        let succeeded = created(
+            repository
+                .create_or_replay(new_conversion("list-succeeded", "d"))
+                .await
+                .unwrap(),
+        );
+        repository
+            .start_local(succeeded.id, succeeded.active_attempt.id, local_start())
+            .await
+            .unwrap();
+        repository
+            .mark_finalizing(succeeded.id, succeeded.active_attempt.id, local_analysis())
+            .await
+            .unwrap();
+        repository
+            .finish_succeeded(
+                succeeded.id,
+                succeeded.active_attempt.id,
+                successful_artifacts(succeeded.id, succeeded.active_attempt.id),
+            )
+            .await
+            .unwrap();
+        let failed = created(
+            repository
+                .create_or_replay(new_conversion("list-failed", "e"))
+                .await
+                .unwrap(),
+        );
+        repository
+            .finish_failed(
+                failed.id,
+                failed.active_attempt.id,
+                failed_result(FailureStage::Queued, "source_integrity_failed"),
+            )
+            .await
+            .unwrap();
+        let needs_remote = created(
+            repository
+                .create_or_replay(new_conversion("list-needs-remote", "f"))
+                .await
+                .unwrap(),
+        );
+        repository
+            .start_local(
+                needs_remote.id,
+                needs_remote.active_attempt.id,
+                local_start(),
+            )
+            .await
+            .unwrap();
+        repository
+            .finish_needs_remote(
+                needs_remote.id,
+                needs_remote.active_attempt.id,
+                NeedsRemoteResult {
+                    analysis: LocalAnalysis {
+                        classification: DocumentClassification::Scanned,
+                        inspection: serde_json::json!({"pageCount": 1}),
+                        reason_codes: vec!["scanned_pdf".to_owned()],
+                        warnings: vec![],
+                    },
+                    fallback_reason: "scanned_pdf".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let candidates = repository.list_recovery_candidates().await.unwrap();
+        let candidate_ids = candidates
+            .iter()
+            .map(|conversion| conversion.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            candidate_ids,
+            HashSet::from([queued.id, converting.id, finalizing.id, succeeded.id])
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .find(|conversion| conversion.id == succeeded.id)
+                .unwrap()
+                .artifacts
+                .len(),
+            2
+        );
+
+        let all_ids = repository.list_conversion_ids().await.unwrap();
+        assert_eq!(
+            all_ids,
+            HashSet::from([
+                queued.id,
+                converting.id,
+                finalizing.id,
+                succeeded.id,
+                failed.id,
+                needs_remote.id,
+            ])
+        );
+        repository.health_check().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_requeue_insert_rolls_back_interruption_and_preserves_foreign_keys() {
+        let directory = TempDir::new().unwrap();
+        let repository = SqliteRepository::open(directory.path(), 3, BUSY_TIMEOUT)
+            .await
+            .unwrap();
+        let recovering = created(
+            repository
+                .create_or_replay(new_conversion("rollback-requeue", "a"))
+                .await
+                .unwrap(),
+        );
+        repository
+            .start_local(recovering.id, recovering.active_attempt.id, local_start())
+            .await
+            .unwrap();
+        let other = created(
+            repository
+                .create_or_replay(new_conversion("rollback-other", "b"))
+                .await
+                .unwrap(),
+        );
+
+        assert!(matches!(
+            repository
+                .interrupt_and_requeue(
+                    recovering.id,
+                    recovering.active_attempt.id,
+                    other.active_attempt.id,
+                    3,
+                )
+                .await,
+            Err(RepositoryError::Database(_))
+        ));
+        let unchanged = repository.get(recovering.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.state, ConversionState::ConvertingLocal);
+        assert_eq!(unchanged.active_attempt.id, recovering.active_attempt.id);
+        assert_eq!(
+            unchanged.active_attempt.state,
+            AttemptState::ConvertingLocal
+        );
+        let attempt_count: i64 =
+            sqlx::query("SELECT COUNT(*) AS attempt_count FROM attempts WHERE conversion_id = ?1")
+                .bind(recovering.id.hyphenated().to_string())
+                .fetch_one(&repository.pool)
+                .await
+                .unwrap()
+                .try_get("attempt_count")
+                .unwrap();
+        assert_eq!(attempt_count, 1);
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&repository.pool)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn health_check_requires_a_live_read_write_pool() {
+        let directory = TempDir::new().unwrap();
+        let repository = SqliteRepository::open(directory.path(), 2, BUSY_TIMEOUT)
+            .await
+            .unwrap();
+        repository.health_check().await.unwrap();
+        repository.pool.close().await;
+        assert!(matches!(
+            repository.health_check().await,
+            Err(RepositoryError::Database(sqlx::Error::PoolClosed))
+        ));
     }
 
     fn new_conversion(key: &str, fingerprint_character: &str) -> NewConversion {

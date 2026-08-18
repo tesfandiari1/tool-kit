@@ -210,6 +210,13 @@ pub enum CommitOperation {
     FinishFailed,
     FinishSucceeded,
     MarkArtifactIntegrityFailed,
+    InterruptAndRequeue,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RequeueOutcome {
+    Requeued(StoredConversion),
+    LimitReached(StoredConversion),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

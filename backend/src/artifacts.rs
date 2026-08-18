@@ -54,6 +54,14 @@ pub enum PublishedArtifact {
     Manifest,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationState {
+    Missing,
+    StagingOnly,
+    Published,
+    Conflicting,
+}
+
 impl PublishedArtifact {
     fn file_name(self) -> &'static str {
         match self {
@@ -247,8 +255,9 @@ impl ArtifactStore {
         job_id: Uuid,
         attempt_id: Uuid,
     ) -> Result<AttemptPaths, ArtifactError> {
-        let paths = self.attempt_paths(job_id, attempt_id);
-        self.require_owned_attempt(job_id, attempt_id).await?;
+        let paths = self
+            .ensure_attempt_for_publication(job_id, attempt_id)
+            .await?;
         require_absent(&paths.published).await?;
         create_private_directory(&paths.publication_staging)
             .await
@@ -263,6 +272,109 @@ impl ArtifactStore {
                 source,
             })?;
         Ok(paths)
+    }
+
+    /// Inspects only deterministic, backend-owned publication directories.
+    /// Every existing component is checked with `symlink_metadata`; a symlink
+    /// or non-directory is corruption, not a publication state.
+    pub async fn inspect_publication(
+        &self,
+        job_id: Uuid,
+        attempt_id: Uuid,
+    ) -> Result<PublicationState, ArtifactError> {
+        if !self.owned_attempt_exists(job_id, attempt_id).await? {
+            return Ok(PublicationState::Missing);
+        }
+
+        let staging = self
+            .optional_owned_directory_relative(&publication_staging_relative_path(
+                job_id, attempt_id,
+            ))
+            .await?;
+        let published = self
+            .optional_owned_directory_relative(&artifacts_relative_path(job_id, attempt_id))
+            .await?;
+        Ok(match (staging, published) {
+            (false, false) => PublicationState::Missing,
+            (true, false) => PublicationState::StagingOnly,
+            (false, true) => PublicationState::Published,
+            (true, true) => PublicationState::Conflicting,
+        })
+    }
+
+    /// Removes only the ID-derived staging publication for one known attempt.
+    /// Published artifacts and the shared immutable source are never touched.
+    pub async fn discard_publication_staging(
+        &self,
+        job_id: Uuid,
+        attempt_id: Uuid,
+    ) -> Result<(), ArtifactError> {
+        if !self.owned_attempt_exists(job_id, attempt_id).await? {
+            return Ok(());
+        }
+        let relative = publication_staging_relative_path(job_id, attempt_id);
+        if !self.optional_owned_directory_relative(&relative).await? {
+            return Ok(());
+        }
+        let path = self.resolve_existing_relative(&relative).await?;
+        fs::remove_dir_all(&path)
+            .await
+            .map_err(|source| ArtifactError::Discard {
+                path: path.clone(),
+                source,
+            })?;
+        sync_directory(self.attempt_paths(job_id, attempt_id).attempt)
+            .await
+            .map_err(|source| ArtifactError::Discard { path, source })
+    }
+
+    /// Lists direct canonical UUID job directories without following symlinks
+    /// or interpreting any entry name as an arbitrary path.
+    pub async fn list_owned_job_ids(&self) -> Result<Vec<Uuid>, ArtifactError> {
+        let jobs = self
+            .require_owned_directory_relative(Path::new(JOBS_DIRECTORY))
+            .await
+            .map(|_| self.root.join(JOBS_DIRECTORY))?;
+        let mut entries =
+            fs::read_dir(&jobs)
+                .await
+                .map_err(|source| ArtifactError::InspectPath {
+                    path: jobs.clone(),
+                    source,
+                })?;
+        let mut job_ids = Vec::new();
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|source| ArtifactError::InspectPath {
+                    path: jobs.clone(),
+                    source,
+                })?
+        {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Ok(job_id) = Uuid::parse_str(&name) else {
+                continue;
+            };
+            if job_id.to_string() != name {
+                continue;
+            }
+            let file_type =
+                entry
+                    .file_type()
+                    .await
+                    .map_err(|source| ArtifactError::InspectPath {
+                        path: entry.path(),
+                        source,
+                    })?;
+            if file_type.is_dir() && !file_type.is_symlink() {
+                job_ids.push(job_id);
+            }
+        }
+        job_ids.sort_unstable();
+        Ok(job_ids)
     }
 
     pub async fn publish_artifacts(
@@ -618,6 +730,59 @@ impl ArtifactStore {
         }
     }
 
+    async fn ensure_attempt_for_publication(
+        &self,
+        job_id: Uuid,
+        attempt_id: Uuid,
+    ) -> Result<AttemptPaths, ArtifactError> {
+        let _source = self
+            .open_owned_regular_relative(&source_relative_path(job_id))
+            .await?;
+        self.require_owned_directory_relative(&attempts_relative_path(job_id))
+            .await?;
+
+        let relative = attempt_relative_path(job_id, attempt_id);
+        if self.optional_owned_directory_relative(&relative).await? {
+            Ok(self.attempt_paths(job_id, attempt_id))
+        } else {
+            self.create_attempt_directory(job_id, attempt_id).await
+        }
+    }
+
+    async fn owned_attempt_exists(
+        &self,
+        job_id: Uuid,
+        attempt_id: Uuid,
+    ) -> Result<bool, ArtifactError> {
+        self.require_owned_directory_relative(Path::new(JOBS_DIRECTORY))
+            .await?;
+        for relative in [
+            job_relative_path(job_id),
+            attempts_relative_path(job_id),
+            attempt_relative_path(job_id, attempt_id),
+        ] {
+            if !self.optional_owned_directory_relative(&relative).await? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn optional_owned_directory_relative(
+        &self,
+        relative: &Path,
+    ) -> Result<bool, ArtifactError> {
+        let path = self.resolve_relative(relative)?;
+        let Some(metadata) = optional_metadata(&path).await? else {
+            return Ok(false);
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ArtifactError::UnsafeOwnedPath(path));
+        }
+        self.resolve_existing_relative(relative).await?;
+        Ok(true)
+    }
+
     async fn require_owned_attempt(
         &self,
         job_id: Uuid,
@@ -750,9 +915,11 @@ pub fn source_relative_path(job_id: Uuid) -> PathBuf {
 }
 
 pub fn attempt_relative_path(job_id: Uuid, attempt_id: Uuid) -> PathBuf {
-    job_relative_path(job_id)
-        .join(ATTEMPTS_DIRECTORY)
-        .join(attempt_id.to_string())
+    attempts_relative_path(job_id).join(attempt_id.to_string())
+}
+
+pub fn attempts_relative_path(job_id: Uuid) -> PathBuf {
+    job_relative_path(job_id).join(ATTEMPTS_DIRECTORY)
 }
 
 pub fn publication_staging_relative_path(job_id: Uuid, attempt_id: Uuid) -> PathBuf {
@@ -1090,7 +1257,8 @@ mod tests {
         artifact_relative_path, artifacts_relative_path, attempt_relative_path, job_relative_path,
         preacceptance_quarantine_relative_path, preacceptance_quarantine_reservation_relative_path,
         publication_staging_relative_path, source_relative_path, source_staging_relative_path,
-        ArtifactError, ArtifactStore, AttemptPaths, PublishedArtifact, MANIFEST_FILE,
+        ArtifactError, ArtifactStore, AttemptPaths, PublicationState, PublishedArtifact,
+        MANIFEST_FILE,
     };
     use crate::worker_protocol::MARKDOWN_FILE;
 
@@ -1355,6 +1523,127 @@ mod tests {
         assert_eq!(MARKDOWN_FILE, "result.md");
     }
 
+    #[tokio::test]
+    async fn preparation_creates_missing_retry_attempt_and_preserves_existing_attempt() {
+        let directory = tempdir().unwrap();
+        let store = ArtifactStore::initialize(directory.path()).unwrap();
+        let job_id = Uuid::new_v4();
+        let initial_attempt_id = Uuid::new_v4();
+        let retry_attempt_id = Uuid::new_v4();
+        let prepared = store.prepare_submission(job_id).await.unwrap();
+        tokio::fs::write(&prepared.paths.source_staging, b"source")
+            .await
+            .unwrap();
+        store.publish_source(&prepared).await.unwrap();
+
+        let initial = store
+            .create_retry_attempt(job_id, initial_attempt_id)
+            .await
+            .unwrap();
+        let marker = initial.attempt.join("preserve-me");
+        tokio::fs::write(&marker, b"marker").await.unwrap();
+        let prepared_initial = store
+            .prepare_artifacts(job_id, initial_attempt_id)
+            .await
+            .unwrap();
+        assert_eq!(prepared_initial, initial);
+        assert!(marker.exists());
+
+        let retry = store
+            .prepare_artifacts(job_id, retry_attempt_id)
+            .await
+            .unwrap();
+        assert!(retry.attempt.is_dir());
+        assert!(retry.publication_staging.is_dir());
+        assert!(prepared.paths.source.is_file());
+    }
+
+    #[tokio::test]
+    async fn publication_inspection_and_staging_cleanup_preserve_published_data() {
+        let directory = tempdir().unwrap();
+        let store = ArtifactStore::initialize(directory.path()).unwrap();
+        let job_id = Uuid::new_v4();
+        let attempt_id = Uuid::new_v4();
+        let prepared = store.prepare_submission(job_id).await.unwrap();
+        tokio::fs::write(&prepared.paths.source_staging, b"source")
+            .await
+            .unwrap();
+        store.publish_source(&prepared).await.unwrap();
+        store
+            .create_retry_attempt(job_id, attempt_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.inspect_publication(job_id, attempt_id).await.unwrap(),
+            PublicationState::Missing
+        );
+        let attempt = store.prepare_artifacts(job_id, attempt_id).await.unwrap();
+        assert_eq!(
+            store.inspect_publication(job_id, attempt_id).await.unwrap(),
+            PublicationState::StagingOnly
+        );
+        tokio::fs::write(attempt.staged_markdown(), b"markdown")
+            .await
+            .unwrap();
+        tokio::fs::write(attempt.staged_manifest(), b"{}")
+            .await
+            .unwrap();
+        store.publish_artifacts(job_id, attempt_id).await.unwrap();
+        assert_eq!(
+            store.inspect_publication(job_id, attempt_id).await.unwrap(),
+            PublicationState::Published
+        );
+
+        tokio::fs::create_dir(&attempt.publication_staging)
+            .await
+            .unwrap();
+        tokio::fs::write(attempt.staged_markdown(), b"stale")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.inspect_publication(job_id, attempt_id).await.unwrap(),
+            PublicationState::Conflicting
+        );
+        store
+            .discard_publication_staging(job_id, attempt_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.inspect_publication(job_id, attempt_id).await.unwrap(),
+            PublicationState::Published
+        );
+        assert_eq!(
+            tokio::fs::read(attempt.markdown()).await.unwrap(),
+            b"markdown"
+        );
+        assert!(prepared.paths.source.is_file());
+    }
+
+    #[tokio::test]
+    async fn owned_job_listing_includes_only_canonical_uuid_directories() {
+        let directory = tempdir().unwrap();
+        let store = ArtifactStore::initialize(directory.path()).unwrap();
+        let first = Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").unwrap();
+        let second = Uuid::parse_str("11234567-89ab-cdef-0123-456789abcdef").unwrap();
+        store.prepare_submission(second).await.unwrap();
+        store.prepare_submission(first).await.unwrap();
+
+        let jobs = directory.path().join("jobs");
+        tokio::fs::create_dir(jobs.join(format!("{{{first}}}")))
+            .await
+            .unwrap();
+        tokio::fs::create_dir(jobs.join("not-a-job")).await.unwrap();
+        tokio::fs::write(jobs.join(Uuid::new_v4().to_string()), b"not a directory")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.list_owned_job_ids().await.unwrap(),
+            vec![first, second]
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn validation_rejects_symlink_substitution_and_directories_are_private() {
@@ -1406,5 +1695,28 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(attempt_mode, 0o700);
+
+        let symlink_job_id = Uuid::new_v4();
+        symlink(
+            &outside_directory,
+            directory.path().join(job_relative_path(symlink_job_id)),
+        )
+        .unwrap();
+        assert!(!store
+            .list_owned_job_ids()
+            .await
+            .unwrap()
+            .contains(&symlink_job_id));
+
+        tokio::fs::remove_dir(&attempt.publication_staging)
+            .await
+            .ok();
+        let outside_publication = directory.path().join("outside-publication");
+        tokio::fs::create_dir(&outside_publication).await.unwrap();
+        symlink(&outside_publication, &attempt.publication_staging).unwrap();
+        assert!(matches!(
+            store.inspect_publication(job_id, attempt_id).await,
+            Err(ArtifactError::UnsafeOwnedPath(_))
+        ));
     }
 }

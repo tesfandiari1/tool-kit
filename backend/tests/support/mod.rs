@@ -13,6 +13,8 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
 use tempfile::TempDir;
 use tokio_util::io::ReaderStream;
 use tower::ServiceExt;
@@ -20,6 +22,10 @@ use uuid::Uuid;
 
 use tool_kit_converter::{
     config::{Limits, Settings},
+    persistence::{
+        hash_idempotency_key, CreateOutcome, NewConversion, NewSource, Profile, SqliteRepository,
+        DATABASE_FILENAME,
+    },
     router, AppState,
 };
 
@@ -32,6 +38,7 @@ struct TestOptions {
     max_output_bytes: u64,
     max_jobs: usize,
     max_concurrent_uploads: usize,
+    worker_poll_interval: Duration,
 }
 
 impl Default for TestOptions {
@@ -42,6 +49,7 @@ impl Default for TestOptions {
             max_output_bytes: 2 * 1024 * 1024,
             max_jobs: 8,
             max_concurrent_uploads: 2,
+            worker_poll_interval: Duration::from_secs(1),
         }
     }
 }
@@ -96,6 +104,12 @@ impl TestHarness {
         harness
     }
 
+    pub(crate) fn with_poll_interval(worker_poll_interval: Duration) -> Self {
+        let mut harness = Self::new();
+        harness.options.worker_poll_interval = worker_poll_interval;
+        harness
+    }
+
     #[cfg(unix)]
     pub(crate) fn with_worker_script(script: &str, worker_timeout: Duration) -> Self {
         use std::os::unix::fs::PermissionsExt;
@@ -103,7 +117,7 @@ impl TestHarness {
         let mut harness = Self::new();
         let worker_path = harness.workspace.path().join("fake-worker");
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'tool-kit-pdf-worker protocol=1 pdf-inspector=1.15.0'\n  exit 0\nfi\n{}",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'tool-kit-pdf-worker protocol=2 pdf-inspector=1.15.0'\n  exit 0\nfi\ncat >/dev/null\n{}",
             script.strip_prefix("#!/bin/sh\n").unwrap_or(script)
         );
         std::fs::write(&worker_path, script).unwrap();
@@ -117,10 +131,77 @@ impl TestHarness {
         &self.data_dir
     }
 
+    pub(crate) async fn insert_queued_without_notification(&self, source: &[u8]) -> Uuid {
+        let job_id = Uuid::new_v4();
+        let attempt_id = Uuid::new_v4();
+        let source_directory = self
+            .data_dir
+            .join("jobs")
+            .join(job_id.to_string())
+            .join("source");
+        let attempt_directory = self
+            .data_dir
+            .join("jobs")
+            .join(job_id.to_string())
+            .join("attempts")
+            .join(attempt_id.to_string());
+        std::fs::create_dir_all(&source_directory).unwrap();
+        std::fs::create_dir_all(&attempt_directory).unwrap();
+        std::fs::write(source_directory.join("input"), source).unwrap();
+
+        let repository = SqliteRepository::open(
+            &self.data_dir,
+            self.options.max_jobs as u32,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let outcome = repository
+            .create_or_replay(NewConversion {
+                id: job_id,
+                initial_attempt_id: attempt_id,
+                client_run_id: Uuid::new_v4(),
+                idempotency_key_sha256: hash_idempotency_key(&format!("missed-notify-{job_id}")),
+                request_fingerprint: hex::encode(Sha256::digest(job_id.as_bytes())),
+                profile: Profile::Standard,
+                source: NewSource {
+                    relative_path: format!("jobs/{job_id}/source/input"),
+                    media_type: "application/pdf".to_owned(),
+                    byte_length: source.len() as u64,
+                    sha256: hex::encode(Sha256::digest(source)),
+                },
+                origin_request_id: Uuid::new_v4().to_string(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(outcome, CreateOutcome::Created(_)));
+        job_id
+    }
+
+    pub(crate) async fn inject_active_attempt_state(&self, job_id: Uuid, state: &str) {
+        let options = SqliteConnectOptions::new()
+            .filename(self.data_dir.join(DATABASE_FILENAME))
+            .foreign_keys(true);
+        let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+        let updated = sqlx::query(
+            "UPDATE attempts
+             SET state = ?1
+             WHERE conversion_id = ?2
+               AND id = (SELECT active_attempt_id FROM conversions WHERE id = ?2)",
+        )
+        .bind(state)
+        .bind(job_id.hyphenated().to_string())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
+    }
+
     pub(crate) async fn app(&self) -> TestApp {
         let state = AppState::initialize(&self.settings()).await.unwrap();
         TestApp {
-            router: router(state),
+            router: router(state.clone()),
+            state,
             _workspace: Arc::clone(&self.workspace),
             data_dir: self.data_dir.clone(),
         }
@@ -145,7 +226,7 @@ impl TestHarness {
             },
             pdf_threads: 2,
             database_busy_timeout: Duration::from_secs(5),
-            worker_poll_interval: Duration::from_secs(1),
+            worker_poll_interval: self.options.worker_poll_interval,
             recovery_limit: 3,
             shutdown_grace: Duration::from_secs(30),
         }
@@ -154,6 +235,7 @@ impl TestHarness {
 
 pub(crate) struct TestApp {
     router: Router,
+    state: AppState,
     _workspace: Arc<TempDir>,
     data_dir: PathBuf,
 }
@@ -165,6 +247,34 @@ impl TestApp {
 
     pub(crate) fn router(&self) -> Router {
         self.router.clone()
+    }
+
+    pub(crate) fn stop_job_claiming(&self) {
+        self.state.stop_job_claiming();
+    }
+
+    pub(crate) fn force_cancel_jobs(&self) {
+        self.state.force_cancel_jobs();
+    }
+
+    pub(crate) async fn shutdown(&self, grace: Duration) {
+        self.state.shutdown_jobs(grace).await;
+    }
+
+    pub(crate) fn job_runner_failed(&self) -> bool {
+        self.state.job_runner_failed()
+    }
+
+    pub(crate) fn job_runner_stopped(&self) -> bool {
+        self.state.job_runner_stopped()
+    }
+
+    pub(crate) async fn wait_for_job_runner_idle(&self) {
+        self.state.wait_for_job_runner_idle().await;
+    }
+
+    pub(crate) async fn wait_for_job_runner_exit(&self) -> bool {
+        self.state.wait_for_job_runner_exit().await
     }
 
     pub(crate) async fn request(
@@ -263,6 +373,12 @@ pub(crate) async fn test_app_with_upload_limits(
     max_concurrent_uploads: usize,
 ) -> TestApp {
     TestHarness::with_upload_limits(max_upload_bytes, max_concurrent_uploads)
+        .app()
+        .await
+}
+
+pub(crate) async fn test_app_with_poll_interval(worker_poll_interval: Duration) -> TestApp {
+    TestHarness::with_poll_interval(worker_poll_interval)
         .app()
         .await
 }

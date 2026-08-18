@@ -9,6 +9,7 @@ use crate::{
     config::{Limits, Settings},
     conversion::ConversionService,
     engines::{EngineStartupError, PdfInspectorEngine},
+    jobs::{JobRuntime, NoopStartupRecovery, StartupRecoveryHook},
     persistence::{RepositoryError, SqliteRepository},
 };
 
@@ -18,6 +19,7 @@ pub struct AppState {
     service: ConversionService,
     limits: Limits,
     upload_permits: Arc<Semaphore>,
+    jobs: JobRuntime,
 }
 
 impl AppState {
@@ -40,11 +42,16 @@ impl AppState {
             settings.pdf_threads,
         )?;
 
+        let service = ConversionService::new(repository, artifacts, engine);
+        NoopStartupRecovery.run(&service).await;
+        let jobs = JobRuntime::spawn(service.clone(), settings.worker_poll_interval);
+
         Ok(Self {
             auth,
-            service: ConversionService::new(repository, artifacts, engine),
+            service,
             limits: settings.limits.clone(),
             upload_permits: Arc::new(Semaphore::new(settings.limits.max_concurrent_uploads)),
+            jobs,
         })
     }
 
@@ -62,6 +69,38 @@ impl AppState {
 
     pub(crate) fn try_acquire_upload(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {
         self.upload_permits.clone().try_acquire_owned()
+    }
+
+    pub fn stop_job_claiming(&self) {
+        self.jobs.stop_claiming();
+    }
+
+    pub fn force_cancel_jobs(&self) {
+        self.jobs.force_cancel();
+    }
+
+    pub async fn shutdown_jobs(&self, grace: std::time::Duration) {
+        self.jobs.shutdown(grace).await;
+    }
+
+    pub async fn shutdown_jobs_until(&self, deadline: tokio::time::Instant) {
+        self.jobs.shutdown_until(deadline).await;
+    }
+
+    pub fn job_runner_failed(&self) -> bool {
+        self.jobs.failed()
+    }
+
+    pub fn job_runner_stopped(&self) -> bool {
+        self.jobs.stopped()
+    }
+
+    pub async fn wait_for_job_runner_exit(&self) -> bool {
+        self.jobs.wait_until_stopped().await
+    }
+
+    pub async fn wait_for_job_runner_idle(&self) {
+        self.jobs.wait_until_idle().await;
     }
 }
 

@@ -1,18 +1,19 @@
 use std::{
     env,
-    fs::OpenOptions,
-    io::Write,
+    fs::{File, OpenOptions},
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
-use pdf_inspector::{
-    process_pdf_with_options, DetectionConfig, PdfError, PdfOptions, PdfType, ScanStrategy,
-};
+#[cfg(target_os = "linux")]
+use pdf_inspector::process_pdf_with_options;
+use pdf_inspector::{DetectionConfig, PdfError, PdfOptions, PdfType, ScanStrategy};
 use sha2::{Digest, Sha256};
 use tool_kit_converter::worker_protocol::{
     EngineIdentity, FallbackReason, Inspection, PageReasons, PdfTypeLabel, RejectionCode,
     WorkerArtifact, WorkerOutcome, WorkerReport, MARKDOWN_FILE, PDF_INSPECTOR_VERSION,
+    WORKER_EXPECTED_SOURCE_BYTES_ENV, WORKER_EXPECTED_SOURCE_SHA256_ENV,
     WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION, WORKER_REPORT_FILE,
 };
 
@@ -32,9 +33,11 @@ fn run() -> Result<(), ()> {
         );
         return Ok(());
     }
-    let [input, output_directory] = args.as_slice() else {
+    let [output_directory] = args.as_slice() else {
         return Err(());
     };
+    let expected_source_bytes = required_positive_u64_env(WORKER_EXPECTED_SOURCE_BYTES_ENV)?;
+    let expected_source_sha256 = required_lowercase_sha256_env(WORKER_EXPECTED_SOURCE_SHA256_ENV)?;
     let max_output_bytes = env::var(WORKER_MAX_OUTPUT_BYTES_ENV)
         .map_err(|_| ())?
         .parse::<u64>()
@@ -43,21 +46,144 @@ fn run() -> Result<(), ()> {
         return Err(());
     }
     let output_directory = PathBuf::from(output_directory);
-    if !output_directory.is_dir() {
+    let output_metadata = std::fs::symlink_metadata(&output_directory).map_err(|_| ())?;
+    if output_metadata.file_type().is_symlink() || !output_metadata.is_dir() {
         return Err(());
     }
+
+    // The parent gives this process the already-open, validated source as
+    // stdin. Bind both its length and digest while copying into a
+    // worker-private anonymous file so pdf-inspector never reopens the mutable
+    // jobs path or parses bytes that changed after parent-side validation.
+    let mut private_source = tempfile::tempfile().map_err(|_| ())?;
+    copy_exact_source(
+        std::io::stdin().lock(),
+        &mut private_source,
+        expected_source_bytes,
+        &expected_source_sha256,
+    )?;
 
     let detection = DetectionConfig {
         strategy: ScanStrategy::Full,
         ..DetectionConfig::default()
     };
-    let outcome = match process_pdf_with_options(input, PdfOptions::new().detection(detection)) {
+    let result = process_private_source(
+        &mut private_source,
+        expected_source_bytes,
+        PdfOptions::new().detection(detection),
+    )?;
+    let outcome = match result {
         Ok(result) => convert_result(result, &output_directory, max_output_bytes)?,
         Err(error) => WorkerOutcome::Rejected {
             code: rejection_code(&error),
         },
     };
     write_report(&output_directory, outcome)
+}
+
+fn required_positive_u64_env(name: &str) -> Result<u64, ()> {
+    let value = env::var(name)
+        .map_err(|_| ())?
+        .parse::<u64>()
+        .map_err(|_| ())?;
+    if value == 0 {
+        Err(())
+    } else {
+        Ok(value)
+    }
+}
+
+fn required_lowercase_sha256_env(name: &str) -> Result<String, ()> {
+    let value = env::var(name).map_err(|_| ())?;
+    if is_lowercase_sha256(&value) {
+        Ok(value)
+    } else {
+        Err(())
+    }
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn copy_exact_source(
+    mut input: impl Read,
+    output: &mut File,
+    expected_bytes: u64,
+    expected_sha256: &str,
+) -> Result<(), ()> {
+    if expected_bytes == 0 || !is_lowercase_sha256(expected_sha256) {
+        return Err(());
+    }
+
+    let mut remaining = expected_bytes;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut digest = Sha256::new();
+    while remaining > 0 {
+        let requested = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| ())?;
+        let count = read_retry(&mut input, &mut buffer[..requested])?;
+        if count == 0 {
+            return Err(());
+        }
+        output.write_all(&buffer[..count]).map_err(|_| ())?;
+        digest.update(&buffer[..count]);
+        remaining -= u64::try_from(count).map_err(|_| ())?;
+    }
+
+    let mut extra = [0_u8; 1];
+    if read_retry(&mut input, &mut extra)? != 0 {
+        return Err(());
+    }
+    if hex::encode(digest.finalize()) != expected_sha256 {
+        return Err(());
+    }
+    output.flush().map_err(|_| ())?;
+    output.seek(std::io::SeekFrom::Start(0)).map_err(|_| ())?;
+    Ok(())
+}
+
+fn read_retry(input: &mut impl Read, buffer: &mut [u8]) -> Result<usize, ()> {
+    loop {
+        match input.read(buffer) {
+            Ok(count) => return Ok(count),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(()),
+        }
+    }
+}
+
+fn process_private_source(
+    source: &mut File,
+    _expected_source_bytes: u64,
+    options: PdfOptions,
+) -> Result<Result<pdf_inspector::PdfProcessResult, PdfError>, ()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+
+        let source_path = PathBuf::from(format!("/proc/self/fd/{}", source.as_raw_fd()));
+        return Ok(process_pdf_with_options(source_path, options));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        // macOS `/dev/fd/N` opens share a cursor across pdf-inspector's
+        // validation and parse opens. Feeding the anonymous file through the
+        // crate's memory API preserves the same immutable-handle guarantee on
+        // macOS (and is the conservative fallback on other build targets).
+        use pdf_inspector::process_pdf_mem_with_options;
+
+        let capacity = usize::try_from(_expected_source_bytes).map_err(|_| ())?;
+        let mut bytes = Vec::with_capacity(capacity);
+        source.read_to_end(&mut bytes).map_err(|_| ())?;
+        if bytes.len() != capacity {
+            return Err(());
+        }
+        Ok(process_pdf_mem_with_options(&bytes, options))
+    }
 }
 
 fn convert_result(
@@ -186,9 +312,18 @@ fn rejection_code(error: &PdfError) -> RejectionCode {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Read};
+
+    use sha2::{Digest, Sha256};
     use tool_kit_converter::worker_protocol::{
         EngineIdentity, PDF_INSPECTOR_VERSION, WORKER_PROTOCOL_VERSION,
     };
+
+    use super::copy_exact_source;
+
+    fn digest(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
 
     #[test]
     fn protocol_identity_matches_the_exact_engine_pin() {
@@ -198,8 +333,45 @@ mod tests {
             features: Vec::new(),
         };
 
-        assert_eq!(WORKER_PROTOCOL_VERSION, 1);
+        assert_eq!(WORKER_PROTOCOL_VERSION, 2);
         assert_eq!(identity.version, "1.15.0");
         assert!(identity.features.is_empty());
+    }
+
+    #[test]
+    fn source_copy_accepts_only_the_declared_length_and_rewinds() {
+        let expected = digest(b"source");
+        let mut exact = tempfile::tempfile().unwrap();
+        copy_exact_source(Cursor::new(b"source"), &mut exact, 6, &expected).unwrap();
+        let mut bytes = Vec::new();
+        exact.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"source");
+
+        let mut short_output = tempfile::tempfile().unwrap();
+        assert!(copy_exact_source(Cursor::new(b"short"), &mut short_output, 6, &expected).is_err());
+
+        let mut long_output = tempfile::tempfile().unwrap();
+        assert!(
+            copy_exact_source(Cursor::new(b"too-long"), &mut long_output, 7, &expected).is_err()
+        );
+    }
+
+    #[test]
+    fn source_copy_rejects_same_length_content_mutation_and_noncanonical_hashes() {
+        let expected = digest(b"original");
+        let mut mutated_output = tempfile::tempfile().unwrap();
+        assert!(
+            copy_exact_source(Cursor::new(b"mutation"), &mut mutated_output, 8, &expected,)
+                .is_err()
+        );
+
+        let mut uppercase_output = tempfile::tempfile().unwrap();
+        assert!(copy_exact_source(
+            Cursor::new(b"original"),
+            &mut uppercase_output,
+            8,
+            &expected.to_uppercase(),
+        )
+        .is_err());
     }
 }

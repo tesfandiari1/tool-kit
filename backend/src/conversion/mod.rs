@@ -6,4 +6,5 @@ pub use model::{
     ArtifactKind, ArtifactRecord, ArtifactView, ConversionProfile, JobStatus, JobView,
     SourceMetadata,
 };
+pub(crate) use service::ConversionExecutionError;
 pub use service::{ArtifactLookup, ConversionService, Submission, SubmissionDecision};

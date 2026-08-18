@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-pub const WORKER_PROTOCOL_VERSION: u32 = 1;
+pub const WORKER_PROTOCOL_VERSION: u32 = 2;
 pub const PDF_INSPECTOR_VERSION: &str = "1.15.0";
 pub const WORKER_REPORT_FILE: &str = "worker-report.json";
 pub const MARKDOWN_FILE: &str = "result.md";
 pub const WORKER_MAX_OUTPUT_BYTES_ENV: &str = "TOOLKIT_PDF_WORKER_MAX_OUTPUT_BYTES";
+pub const WORKER_EXPECTED_SOURCE_BYTES_ENV: &str = "TOOLKIT_PDF_WORKER_EXPECTED_SOURCE_BYTES";
+pub const WORKER_EXPECTED_SOURCE_SHA256_ENV: &str = "TOOLKIT_PDF_WORKER_EXPECTED_SOURCE_SHA256";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,8 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::{fs::OpenOptions, io::AsyncWriteExt};
+use tokio::{
+    fs::OpenOptions,
+    io::AsyncWriteExt,
+    sync::{watch, Notify},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -37,6 +44,7 @@ pub struct ConversionService {
     repository: SqliteRepository,
     artifacts: ArtifactStore,
     engine: PdfInspectorEngine,
+    work_notification: Arc<Notify>,
 }
 
 impl ConversionService {
@@ -49,6 +57,7 @@ impl ConversionService {
             repository,
             artifacts,
             engine,
+            work_notification: Arc::new(Notify::new()),
         }
     }
 
@@ -140,10 +149,7 @@ impl ConversionService {
         match decision {
             CreateOutcome::Created(job) => {
                 let accepted = JobView::from_stored(&job);
-                let service = self.clone();
-                tokio::spawn(async move {
-                    service.process(job.id, job.active_attempt.id).await;
-                });
+                self.work_notification.notify_one();
                 Ok(SubmissionDecision::Created(accepted))
             }
             CreateOutcome::Replay(job) => {
@@ -176,6 +182,16 @@ impl ConversionService {
                 false
             }
         }
+    }
+
+    pub(crate) fn work_notification(&self) -> Arc<Notify> {
+        Arc::clone(&self.work_notification)
+    }
+
+    pub(crate) async fn claim_next_queued(
+        &self,
+    ) -> Result<Option<StoredConversion>, RepositoryError> {
+        self.repository.claim_next_queued(local_start()).await
     }
 
     pub async fn artifact_views(
@@ -242,40 +258,70 @@ impl ConversionService {
         }
     }
 
-    async fn process(&self, job_id: Uuid, attempt_id: Uuid) {
-        let job = match self.repository.get(job_id).await {
-            Ok(Some(job)) if job.active_attempt.id == attempt_id => job,
-            Ok(_) => return,
-            Err(error) => {
-                tracing::error!(%job_id, %attempt_id, %error, "failed to load accepted conversion");
-                return;
-            }
-        };
+    pub(crate) async fn execute_claimed(
+        &self,
+        job: StoredConversion,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<(), ConversionExecutionError> {
+        let job_id = job.id;
+        let attempt_id = job.active_attempt.id;
         let request_id = job.origin_request_id.clone();
+        if job.state != ConversionState::ConvertingLocal {
+            return Err(ConversionExecutionError::InvalidClaim {
+                job_id,
+                attempt_id,
+                state: job.state,
+            });
+        }
+        if *shutdown.borrow() {
+            tracing::info!(%job_id, %attempt_id, "preserving claimed conversion during forced shutdown");
+            return Ok(());
+        }
 
         if job.source.relative_path != portable_relative(source_relative_path(job_id))
             || job.source.media_type != SOURCE_MEDIA_TYPE
-            || self
-                .artifacts
-                .validate_source(
-                    job_id,
-                    Some(job.source.byte_length),
-                    Some(&job.source.sha256),
-                )
-                .await
-                .is_err()
         {
             self.finish_failure(
                 job_id,
                 attempt_id,
-                FailureStage::Queued,
+                FailureStage::ConvertingLocal,
                 "source_integrity_failed",
                 "The immutable source failed integrity validation.",
                 true,
             )
-            .await;
-            return;
+            .await?;
+            return Ok(());
         }
+        let source = match self
+            .artifacts
+            .open_validated_source(
+                job_id,
+                Some(job.source.byte_length),
+                Some(&job.source.sha256),
+            )
+            .await
+        {
+            Ok(source) => source,
+            Err(error) => match classify_artifact_error(error) {
+                ArtifactReadFailure::Integrity => {
+                    tracing::warn!(%job_id, %attempt_id, "claimed source failed integrity validation");
+                    self.finish_failure(
+                        job_id,
+                        attempt_id,
+                        FailureStage::ConvertingLocal,
+                        "source_integrity_failed",
+                        "The immutable source failed integrity validation.",
+                        true,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                ArtifactReadFailure::Transient(error) => {
+                    tracing::error!(%job_id, %attempt_id, %error, "claimed source could not be validated; recovery is required");
+                    return Err(error.into());
+                }
+            },
+        };
 
         let permit = match self.engine.acquire().await {
             Ok(permit) => permit,
@@ -283,25 +329,13 @@ impl ConversionService {
                 self.finish_failure(
                     job_id,
                     attempt_id,
-                    FailureStage::Queued,
+                    FailureStage::ConvertingLocal,
                     failure.code(),
                     failure.message(),
                     true,
                 )
-                .await;
-                return;
-            }
-        };
-
-        let job = match self
-            .repository
-            .start_local(job_id, attempt_id, local_start())
-            .await
-        {
-            Ok(job) => job,
-            Err(error) => {
-                tracing::error!(%job_id, %attempt_id, %error, "failed to start local conversion");
-                return;
+                .await?;
+                return Ok(());
             }
         };
 
@@ -317,59 +351,27 @@ impl ConversionService {
                     "The service could not prepare conversion artifacts.",
                     true,
                 )
-                .await;
-                return;
+                .await?;
+                return Ok(());
             }
         };
 
-        match self.engine.convert(&paths, permit).await {
+        match self.engine.convert(&paths, source, permit, shutdown).await {
             Ok(EngineOutcome::Converted {
                 inspection,
                 byte_length,
                 sha256,
             }) => {
                 self.finalize_success(job, paths, inspection, byte_length, sha256)
-                    .await;
+                    .await?;
             }
             Ok(EngineOutcome::NeedsRemote {
                 inspection,
                 reason_code,
             }) => {
                 let reason = reason_code.as_str().to_owned();
-                let analysis = local_analysis(&inspection, vec![reason.clone()]);
-                match analysis {
-                    Ok(analysis) => {
-                        match self
-                            .repository
-                            .finish_needs_remote(
-                                job_id,
-                                attempt_id,
-                                NeedsRemoteResult {
-                                    analysis,
-                                    fallback_reason: reason.clone(),
-                                },
-                            )
-                            .await
-                        {
-                            Ok(_) => {
-                                self.discard_attempt(job_id, attempt_id).await;
-                                tracing::info!(
-                                    %job_id,
-                                    %attempt_id,
-                                    %request_id,
-                                    status = "needs_remote",
-                                    reason_code = %reason,
-                                    "conversion attempt completed"
-                                );
-                            }
-                            Err(error) => tracing::error!(
-                                %job_id,
-                                %attempt_id,
-                                %error,
-                                "failed to persist remote-routing result"
-                            ),
-                        }
-                    }
+                let analysis = match local_analysis(&inspection, vec![reason.clone()]) {
+                    Ok(analysis) => analysis,
                     Err(_) => {
                         self.finish_failure(
                             job_id,
@@ -379,9 +381,29 @@ impl ConversionService {
                             "The service could not persist document inspection metadata.",
                             true,
                         )
-                        .await;
+                        .await?;
+                        return Ok(());
                     }
-                }
+                };
+                self.repository
+                    .finish_needs_remote(
+                        job_id,
+                        attempt_id,
+                        NeedsRemoteResult {
+                            analysis,
+                            fallback_reason: reason.clone(),
+                        },
+                    )
+                    .await?;
+                self.discard_attempt(job_id, attempt_id).await;
+                tracing::info!(
+                    %job_id,
+                    %attempt_id,
+                    %request_id,
+                    status = "needs_remote",
+                    reason_code = %reason,
+                    "conversion attempt completed"
+                );
             }
             Ok(EngineOutcome::Rejected { code }) => {
                 let message = match code {
@@ -403,7 +425,15 @@ impl ConversionService {
                     message,
                     true,
                 )
-                .await;
+                .await?;
+            }
+            Err(EngineFailure::Interrupted) => {
+                tracing::info!(
+                    %job_id,
+                    %attempt_id,
+                    %request_id,
+                    "conversion interrupted for shutdown; preserving recoverable state"
+                );
             }
             Err(failure) => {
                 self.finish_failure(
@@ -414,9 +444,10 @@ impl ConversionService {
                     failure.message(),
                     true,
                 )
-                .await;
+                .await?;
             }
         }
+        Ok(())
     }
 
     async fn finalize_success(
@@ -426,7 +457,7 @@ impl ConversionService {
         inspection: Inspection,
         markdown_bytes: u64,
         markdown_sha256: String,
-    ) {
+    ) -> Result<(), ConversionExecutionError> {
         let job_id = job.id;
         let attempt_id = job.active_attempt.id;
         let request_id = job.origin_request_id.clone();
@@ -441,21 +472,14 @@ impl ConversionService {
                     "The service could not persist document inspection metadata.",
                     true,
                 )
-                .await;
-                return;
+                .await?;
+                return Ok(());
             }
         };
-        let finalizing = match self
+        let finalizing = self
             .repository
             .mark_finalizing(job_id, attempt_id, analysis)
-            .await
-        {
-            Ok(job) => job,
-            Err(error) => {
-                tracing::error!(%job_id, %attempt_id, %error, "failed to persist finalizing transition");
-                return;
-            }
-        };
+            .await?;
 
         let completed_at = now();
         let manifest = ConversionManifest {
@@ -503,8 +527,8 @@ impl ConversionService {
                     "The service could not publish conversion artifacts.",
                     true,
                 )
-                .await;
-                return;
+                .await?;
+                return Ok(());
             }
         };
         let manifest_sha256 = hex::encode(Sha256::digest(&encoded));
@@ -523,8 +547,8 @@ impl ConversionService {
                 "The service could not publish conversion artifacts.",
                 true,
             )
-            .await;
-            return;
+            .await?;
+            return Ok(());
         }
 
         match self.artifacts.publish_artifacts(job_id, attempt_id).await {
@@ -536,7 +560,7 @@ impl ConversionService {
                     %error,
                     "artifact publication commit is not known to be durable; preserving finalizing state"
                 );
-                return;
+                return Err(error.into());
             }
             Err(error) => {
                 tracing::warn!(%job_id, %attempt_id, %error, "failed to publish conversion artifacts");
@@ -548,8 +572,8 @@ impl ConversionService {
                     "The service could not publish conversion artifacts.",
                     true,
                 )
-                .await;
-                return;
+                .await?;
+                return Ok(());
             }
         }
 
@@ -573,17 +597,24 @@ impl ConversionService {
                 Some(&manifest_sha256),
             )
             .await;
-        if markdown_validation.is_err() || manifest_validation.is_err() {
-            self.finish_failure(
-                job_id,
-                attempt_id,
-                FailureStage::Finalizing,
-                "artifact_integrity_failed",
-                "A published artifact failed integrity validation.",
-                false,
-            )
-            .await;
-            return;
+        for validation in [markdown_validation, manifest_validation] {
+            if let Err(error) = validation {
+                match classify_artifact_error(error) {
+                    ArtifactReadFailure::Integrity => {
+                        self.finish_failure(
+                            job_id,
+                            attempt_id,
+                            FailureStage::Finalizing,
+                            "artifact_integrity_failed",
+                            "A published artifact failed integrity validation.",
+                            false,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    ArtifactReadFailure::Transient(error) => return Err(error.into()),
+                }
+            }
         }
 
         let artifacts = SuccessfulArtifacts {
@@ -608,25 +639,17 @@ impl ConversionService {
                 sha256: manifest_sha256,
             },
         };
-        match self
-            .repository
+        self.repository
             .finish_succeeded(job_id, attempt_id, artifacts)
-            .await
-        {
-            Ok(_) => tracing::info!(
-                %job_id,
-                %attempt_id,
-                %request_id,
-                status = "succeeded",
-                "conversion attempt completed"
-            ),
-            Err(error) => tracing::error!(
-                %job_id,
-                %attempt_id,
-                %error,
-                "failed to commit published conversion artifacts; preserving finalizing state"
-            ),
-        }
+            .await?;
+        tracing::info!(
+            %job_id,
+            %attempt_id,
+            %request_id,
+            status = "succeeded",
+            "conversion attempt completed"
+        );
+        Ok(())
     }
 
     async fn finish_failure(
@@ -637,7 +660,7 @@ impl ConversionService {
         code: &str,
         message: &str,
         discard_attempt: bool,
-    ) {
+    ) -> Result<(), ConversionExecutionError> {
         let result = FailedResult {
             stage,
             failure: StoredFailure {
@@ -645,25 +668,14 @@ impl ConversionService {
                 message: message.to_owned(),
             },
         };
-        match self
-            .repository
+        self.repository
             .finish_failed(job_id, attempt_id, result)
-            .await
-        {
-            Ok(_) => {
-                if discard_attempt {
-                    self.discard_attempt(job_id, attempt_id).await;
-                }
-                tracing::warn!(%job_id, %attempt_id, failure_code = %code, "conversion attempt failed");
-            }
-            Err(error) => tracing::error!(
-                %job_id,
-                %attempt_id,
-                %error,
-                failure_code = %code,
-                "failed to persist conversion failure; preserving attempt storage"
-            ),
+            .await?;
+        if discard_attempt {
+            self.discard_attempt(job_id, attempt_id).await;
         }
+        tracing::warn!(%job_id, %attempt_id, failure_code = %code, "conversion attempt failed");
+        Ok(())
     }
 
     async fn discard_attempt(&self, job_id: Uuid, attempt_id: Uuid) {
@@ -851,6 +863,22 @@ pub enum ConversionServiceError {
     SourceChangedDuringAcceptance,
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum ConversionExecutionError {
+    #[error(
+        "conversion {job_id} attempt {attempt_id} was claimed in invalid state {state:?}; recovery is required"
+    )]
+    InvalidClaim {
+        job_id: Uuid,
+        attempt_id: Uuid,
+        state: ConversionState,
+    },
+    #[error(transparent)]
+    Artifacts(#[from] ArtifactError),
+    #[error(transparent)]
+    Persistence(#[from] RepositoryError),
+}
+
 pub(crate) fn submission_fingerprint(
     client_run_id: Uuid,
     profile: ConversionProfile,
@@ -1034,6 +1062,19 @@ mod tests {
             assert!(matches!(
                 classify_artifact_error(replaced_path),
                 ArtifactReadFailure::Integrity
+            ));
+        }
+
+        #[cfg(unix)]
+        for raw_error in [libc::EIO, libc::EMFILE] {
+            let transient_io = ArtifactError::InspectPath {
+                path: PathBuf::from("transient-io"),
+                source: std::io::Error::from_raw_os_error(raw_error),
+            };
+            assert!(matches!(
+                classify_artifact_error(transient_io),
+                ArtifactReadFailure::Transient(ArtifactError::InspectPath { source, .. })
+                    if source.raw_os_error() == Some(raw_error)
             ));
         }
 

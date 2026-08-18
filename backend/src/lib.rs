@@ -16,6 +16,7 @@ mod auth;
 mod conversion;
 mod engines;
 mod error;
+mod jobs;
 
 pub use api::router;
 pub use app::AppState;

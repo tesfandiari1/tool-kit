@@ -18,8 +18,8 @@ use support::{
     assert_server_request_id, clean_pdf, count_job_directories, count_named_files, json_body,
     multipart_body, multipart_body_with_duplicate_profile, multipart_body_with_media_type,
     multipart_body_without_source, pdf_with_content, slow_multipart_prefix, streaming_body,
-    test_app, test_app_with_max_jobs, test_app_with_output_limit, test_app_with_upload_limits,
-    test_app_with_worker_script, TestHarness, TOKEN,
+    test_app, test_app_with_max_jobs, test_app_with_output_limit, test_app_with_poll_interval,
+    test_app_with_upload_limits, test_app_with_worker_script, TestHarness, TOKEN,
 };
 
 #[tokio::test]
@@ -61,6 +61,7 @@ async fn harness_reinitializes_app_state_against_one_data_root_without_a_listene
             .status(),
         StatusCode::OK
     );
+    first.shutdown(Duration::from_secs(1)).await;
     drop(first);
 
     let second = harness.app().await;
@@ -261,6 +262,7 @@ async fn completed_job_idempotency_and_downloads_survive_app_restart() {
         .await
         .unwrap()
         .to_bytes();
+    first.shutdown(Duration::from_secs(1)).await;
     drop(first);
 
     let restarted = harness.app().await;
@@ -375,6 +377,7 @@ async fn corrupted_published_artifact_fails_closed_and_preserves_audit_files() {
     assert_eq!(download.status(), StatusCode::NOT_FOUND);
     assert_eq!(std::fs::read(&markdown_path).unwrap(), b"corrupted");
 
+    app.shutdown(Duration::from_secs(1)).await;
     drop(app);
     let restarted = harness.app().await;
     let status = restarted
@@ -642,7 +645,7 @@ async fn capabilities_stop_accepting_new_jobs_at_ephemeral_capacity() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn jobs_waiting_for_the_engine_permit_remain_queued() {
+async fn single_runner_keeps_waiting_jobs_queued_and_execution_serial() {
     let app =
         test_app_with_worker_script("#!/bin/sh\n/bin/sleep 1\nexit 42\n", Duration::from_secs(3))
             .await;
@@ -701,12 +704,168 @@ async fn jobs_waiting_for_the_engine_permit_remain_queued() {
     );
 }
 
+#[tokio::test]
+async fn submission_notification_wakes_runner_before_a_long_poll() {
+    let app = test_app_with_poll_interval(Duration::from_secs(30)).await;
+    app.wait_for_job_runner_idle().await;
+    let response = app
+        .submit(
+            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "notify.pdf"),
+            "runner-notify-wake",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job_id = json_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let completed = tokio::time::timeout(Duration::from_secs(3), app.wait_for_terminal(&job_id))
+        .await
+        .expect("Notify should wake the runner before its 30-second poll");
+    assert_eq!(completed["data"]["status"], "succeeded");
+    assert!(!app.job_runner_failed());
+}
+
+#[tokio::test]
+async fn polling_claims_a_job_when_its_notification_was_missed() {
+    let harness = TestHarness::with_poll_interval(Duration::from_millis(100));
+    let app = harness.app().await;
+    app.wait_for_job_runner_idle().await;
+    let job_id = harness
+        .insert_queued_without_notification(&clean_pdf())
+        .await
+        .to_string();
+
+    let completed = tokio::time::timeout(Duration::from_secs(3), app.wait_for_terminal(&job_id))
+        .await
+        .expect("periodic polling should recover a missed notification");
+    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+    assert!(!app.job_runner_failed());
+}
+
+#[tokio::test]
+async fn idle_runner_shutdown_is_clean_and_bounded() {
+    let app = test_app().await;
+    app.wait_for_job_runner_idle().await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        app.shutdown(Duration::from_millis(250)),
+    )
+    .await
+    .expect("idle shutdown should not consume the outer bound");
+    assert!(app.job_runner_stopped());
+    assert!(!app.job_runner_failed());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn active_forced_cancellation_leaves_the_claim_recoverable() {
+    let app =
+        test_app_with_worker_script("#!/bin/sh\nexec /bin/sleep 5\n", Duration::from_secs(10))
+            .await;
+    let response = app
+        .submit(
+            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "active.pdf"),
+            "runner-active-cancel",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let submitted = json_body(response).await;
+    let job_id = submitted["data"]["id"].as_str().unwrap().to_owned();
+    let attempt_id = submitted["data"]["activeAttemptId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let mut claimed = false;
+    for _ in 0..100 {
+        let status = app
+            .authorized_get(&format!("/api/v1/conversions/{job_id}"))
+            .await;
+        if json_body(status).await["data"]["status"] == "converting_local" {
+            claimed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        claimed,
+        "runner never claimed the active cancellation fixture"
+    );
+
+    app.stop_job_claiming();
+    app.force_cancel_jobs();
+    app.shutdown(Duration::from_secs(1)).await;
+    assert!(app.job_runner_stopped());
+    assert!(!app.job_runner_failed());
+
+    let status = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}"))
+        .await;
+    assert_eq!(
+        json_body(status).await["data"]["status"],
+        "converting_local"
+    );
+    assert!(app
+        .data_dir()
+        .join("jobs")
+        .join(job_id)
+        .join("attempts")
+        .join(attempt_id)
+        .exists());
+    assert_eq!(count_named_files(app.data_dir(), "input"), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn persistence_invariant_failure_stops_the_single_runner() {
+    let harness = TestHarness::with_worker_script(
+        "#!/bin/sh\n/bin/sleep 1\nexit 42\n",
+        Duration::from_secs(3),
+    );
+    let app = harness.app().await;
+    let response = app
+        .submit(
+            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "invariant.pdf"),
+            "runner-persistence-invariant",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job_id =
+        Uuid::parse_str(json_body(response).await["data"]["id"].as_str().unwrap()).unwrap();
+
+    let mut claimed = false;
+    for _ in 0..100 {
+        let status = app
+            .authorized_get(&format!("/api/v1/conversions/{job_id}"))
+            .await;
+        if json_body(status).await["data"]["status"] == "converting_local" {
+            claimed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(claimed, "runner never claimed the invariant fixture");
+    harness.inject_active_attempt_state(job_id, "failed").await;
+
+    let runner_failed =
+        tokio::time::timeout(Duration::from_secs(3), app.wait_for_job_runner_exit())
+            .await
+            .expect("runner did not expose the fatal persistence invariant");
+    assert!(runner_failed);
+    assert!(app.job_runner_failed());
+    app.shutdown(Duration::from_secs(1)).await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn worker_timeout_and_crash_fail_only_the_job() {
     for (script, worker_timeout, expected_code) in [
         (
-            "#!/bin/sh\n/bin/sleep 5\n",
+            "#!/bin/sh\nexec /bin/sleep 5\n",
             Duration::from_millis(50),
             "worker_timeout",
         ),
@@ -730,6 +889,7 @@ async fn worker_timeout_and_crash_fail_only_the_job() {
         assert_eq!(count_job_directories(app.data_dir()), 1);
         assert_eq!(count_named_files(app.data_dir(), "input"), 1);
         assert_eq!(count_named_files(app.data_dir(), "result.md"), 0);
+        assert!(!app.job_runner_failed());
 
         let health = app.request(Method::GET, "/health/live", None).await;
         assert_eq!(health.status(), StatusCode::OK);
@@ -740,23 +900,23 @@ async fn worker_timeout_and_crash_fail_only_the_job() {
 #[tokio::test]
 async fn malformed_or_untrusted_worker_outputs_never_publish() {
     const INSPECTION: &str = r#""inspection":{"pdfType":"text_based","confidence":1.0,"pageCount":1,"pagesNeedingOcr":[],"ocrReasonsByPage":[],"hasEncodingIssues":false,"isComplex":false,"pagesWithTables":[],"pagesWithColumns":[],"processingTimeMs":1}"#;
-    let wrong_identity = r#"printf '%s' '{"protocolVersion":1,"engine":{"name":"pdf-inspector","version":"0.0.0","features":[]},"outcome":{"kind":"rejected","code":"invalid_pdf"}}' > "$2/worker-report.json"
+    let wrong_identity = r#"printf '%s' '{"protocolVersion":2,"engine":{"name":"pdf-inspector","version":"0.0.0","features":[]},"outcome":{"kind":"rejected","code":"invalid_pdf"}}' > "$1/worker-report.json"
 "#;
     let bad_hash = format!(
-        "printf X > \"$2/result.md\"\nprintf '%s' '{{\"protocolVersion\":1,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.15.0\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$2/worker-report.json\"\n",
+        "printf X > \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.15.0\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$1/worker-report.json\"\n",
         "0".repeat(64)
     );
     let symlink = format!(
-        "ln -s /etc/passwd \"$2/result.md\"\nprintf '%s' '{{\"protocolVersion\":1,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.15.0\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$2/worker-report.json\"\n",
+        "ln -s /etc/passwd \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.15.0\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$1/worker-report.json\"\n",
         "0".repeat(64)
     );
     let extra_file = format!(
-        "printf X > \"$2/result.md\"\nprintf extra > \"$2/unexpected.bin\"\nprintf '%s' '{{\"protocolVersion\":1,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.15.0\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015\"}}}}}}' > \"$2/worker-report.json\"\n"
+        "printf X > \"$1/result.md\"\nprintf extra > \"$1/unexpected.bin\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.15.0\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015\"}}}}}}' > \"$1/worker-report.json\"\n"
     );
     let cases = [
         (
             "malformed-report",
-            "printf not-json > \"$2/worker-report.json\"\n".to_owned(),
+            "printf not-json > \"$1/worker-report.json\"\n".to_owned(),
             "worker_protocol_error",
         ),
         (
