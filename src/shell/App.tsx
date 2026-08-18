@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ClockCounterClockwiseIcon, GearSixIcon, SparkleIcon } from "@phosphor-icons/react";
 import { Button, Display, SplitPane } from "@ui";
+import { conversionClient } from "@/app/api";
 import { commands } from "@/app/commands";
 import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
 import type { Job, JobId, Scan, SecretStatus, Settings, View } from "@/app/types";
 import { RunView } from "@/domains/run/RunView";
 import { JOBS } from "@/domains/run/jobs";
 import { canStartRun, planRun, runButtonLabel } from "@/domains/run/plan";
+import {
+  missingConversionCredentials,
+  planConversionRoutes,
+  type ConversionCapabilities,
+} from "@/domains/run/routes";
 import { HistoryPanel } from "@/domains/history/HistoryPanel";
 import { SettingsPanel } from "@/domains/settings/SettingsPanel";
 import { DocumentPane } from "@/domains/thread/DocumentPane";
@@ -41,7 +47,11 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [secrets, setSecrets] = useState<SecretStatus>({ datalab: false, revai: false, backend: false });
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [scan, setScan] = useState<Scan>(EMPTY_SCAN);
+  const [scanResult, setScanResult] = useState<{ key: string; value: Scan }>({
+    key: "",
+    value: EMPTY_SCAN,
+  });
+  const [capabilities, setCapabilities] = useState<ConversionCapabilities>({ state: "idle" });
   const [now, setNow] = useState(() => Date.now());
   const [view, setView] = useState<View>("run");
   /// Bumped once when a run finishes. Refreshes the already-done counts and an
@@ -51,12 +61,23 @@ export default function App() {
   const [starting, setStarting] = useState(false);
   const wasRunning = useRef(false);
   const autoClear = useRef(false);
+  const settingsRef = useRef<Settings>(DEFAULT_SETTINGS);
+  const settingsSave = useRef<Promise<void>>(Promise.resolve());
 
   const { toast, showToast } = useToast();
   const { docs, activeId, mode, openJob, openHistory, select, closeDoc, edit, setMode, setDocMeta } =
     useDocuments({ showToast });
   const { saveDoc, requestClose } = useDocumentSave({ docs, activeId, closeDoc, setDocMeta });
 
+  const scanKey = JSON.stringify([
+    settings.inputs,
+    settings.datalabFormat,
+    settings.datalabPipelineId,
+    settings.outputDir,
+    runsFinished,
+  ]);
+  const scanCurrent = scanResult.key === scanKey;
+  const scan = scanCurrent ? scanResult.value : EMPTY_SCAN;
   const job = useMemo(() => JOBS.find((j) => j.id === settings.jobType) ?? JOBS[0], [settings.jobType]);
   const inputCount = settings.jobType === "transcribe" ? scan.transcribe : scan.convert;
 
@@ -83,6 +104,23 @@ export default function App() {
     });
   }, []);
 
+  const queueSettingsSave = useCallback((next: Settings) => {
+    const pending = settingsSave.current
+      .catch(() => undefined)
+      .then(() => commands.saveSettings(next));
+    settingsSave.current = pending;
+    void pending.catch(() => undefined);
+  }, []);
+
+  const applySettings = useCallback(
+    (next: Settings) => {
+      settingsRef.current = next;
+      setSettings(next);
+      queueSettingsSave(next);
+    },
+    [queueSettingsSave],
+  );
+
   useEffect(() => {
     void (async () => {
       const [s, k, j] = await Promise.all([
@@ -90,6 +128,7 @@ export default function App() {
         commands.secretStatus(),
         commands.listJobs(),
       ]);
+      settingsRef.current = s;
       setSettings(s);
       setSecrets(k);
       setJobs(j);
@@ -111,26 +150,56 @@ export default function App() {
       // The scan is an async host call. Emptying the selection has to zero the
       // counts here or the run label and autodetect keep citing the last drop.
       // eslint-disable-next-line react-hooks/set-state-in-effect -- reset derived scan; there is no store to subscribe to
-      setScan(EMPTY_SCAN);
+      setScanResult({ key: scanKey, value: EMPTY_SCAN });
       return;
     }
     let live = true;
-    void commands
-      .scanInputs(settings.inputs)
-      .then((s) => live && setScan(s))
-      .catch(() => live && setScan(EMPTY_SCAN));
+    const pendingSave = settingsSave.current;
+    void pendingSave
+      .then(() => commands.scanInputs(settings.inputs))
+      .then((value) => live && setScanResult({ key: scanKey, value }))
+      .catch(() => live && setScanResult({ key: scanKey, value: EMPTY_SCAN }));
     return () => {
       live = false;
     };
-  }, [settings.inputs, settings.datalabFormat, settings.datalabPipelineId, settings.outputDir, runsFinished]);
+  }, [scanKey, settings.inputs]);
+
+  // A backend URL is persisted before the host probes it. The host resolves
+  // the URL from its own Settings on every request, so issuing the GET first
+  // would race the save and occasionally inspect the previous server.
+  useEffect(() => {
+    if (settings.conversionRoute !== "backend") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset external probe state when its route is disabled
+      setCapabilities({ state: "idle" });
+      return;
+    }
+
+    const probe = { cancelled: false };
+    const pendingSave = settingsSave.current;
+    setCapabilities({ state: "loading" });
+    void (async () => {
+      try {
+        await pendingSave;
+        const { data } = await conversionClient.GET("/api/v1/capabilities");
+        if (!data) throw new Error("Conversion service capabilities were unavailable");
+        if (probe.cancelled) return;
+        setCapabilities({
+          state: "ready",
+          acceptingJobs: data.data.conversion.acceptingJobs,
+          inputFormats: data.data.conversion.inputFormats,
+        });
+      } catch {
+        if (!probe.cancelled) setCapabilities({ state: "unavailable" });
+      }
+    })();
+    return () => {
+      probe.cancelled = true;
+    };
+  }, [settings.backendUrl, settings.conversionRoute]);
 
   const persist = useCallback((patch: Partial<Settings>) => {
-    setSettings((prev) => {
-      const next = { ...prev, ...patch };
-      void commands.saveSettings(next).catch(() => undefined);
-      return next;
-    });
-  }, []);
+    applySettings({ ...settingsRef.current, ...patch });
+  }, [applySettings]);
 
   // Match the job to what was dropped, and put results beside the input.
   //
@@ -146,23 +215,17 @@ export default function App() {
     const jobType: JobId = scan.transcribe > scan.convert ? "transcribe" : "convert";
     // Autodetect must run in an effect: it persists, and it must not depend on
     // jobType or a manual click is undone on the next render. See CLAUDE.md.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- selection autodetect; deps are the scan counts only
-    setSettings((prev) => {
-      // Read outputDir from prev rather than a dependency, so defaulting it
-      // can't retrigger this effect.
-      const next = { ...prev, jobType, outputDir: prev.outputDir ?? scan.suggestedOutput };
-      void commands.saveSettings(next).catch(() => undefined);
-      return next;
-    });
-  }, [scan.convert, scan.transcribe, scan.suggestedOutput]);
+    const current = settingsRef.current;
+    // Read outputDir from the ref rather than a dependency, so defaulting it
+    // can't retrigger this effect.
+    const next = { ...current, jobType, outputDir: current.outputDir ?? scan.suggestedOutput };
+    applySettings(next);
+  }, [applySettings, scan.convert, scan.transcribe, scan.suggestedOutput]);
 
   const mutateInputs = useCallback((fn: (cur: string[]) => string[]) => {
-    setSettings((prev) => {
-      const next = { ...prev, inputs: fn(prev.inputs) };
-      void commands.saveSettings(next).catch(() => undefined);
-      return next;
-    });
-  }, []);
+    const current = settingsRef.current;
+    applySettings({ ...current, inputs: fn(current.inputs) });
+  }, [applySettings]);
 
   const addPaths = useCallback(
     (paths: string[]) => {
@@ -303,11 +366,32 @@ export default function App() {
     settings.skipAlreadyDone,
   );
 
-  const hasKey = secrets[job.secret];
+  const conversionPlan = planConversionRoutes({
+    files: scan.convertFiles,
+    route: settings.conversionRoute,
+    profile: settings.conversionProfile,
+    capabilities,
+    skipAlreadyDone: settings.skipAlreadyDone,
+  });
+  const missingCredentials =
+    settings.jobType === "convert"
+      ? missingConversionCredentials(conversionPlan, secrets)
+      : toRun > 0 && !secrets.revai
+        ? ["revai" as const]
+        : [];
+  const routeBlocked = settings.jobType === "convert" && conversionPlan.blocked.length > 0;
+  // The planner already has the final per-file routing contract. Native
+  // backend submit/poll is deliberately a separate readiness gate so the next
+  // increment can enable execution without changing that routing math. Until
+  // then, never let the existing all-Datalab pipeline consume backend files.
+  const backendExecutionBlocked =
+    settings.jobType === "convert" && conversionPlan.backend.length > 0;
+  const preflightReady =
+    scanCurrent && !routeBlocked && !backendExecutionBlocked && missingCredentials.length === 0;
   const canRun = canStartRun({
     hasInputs: settings.inputs.length > 0,
     hasOutput: Boolean(settings.outputDir),
-    hasKey,
+    hasKey: preflightReady,
     toRun,
     copying,
     running,
@@ -318,7 +402,7 @@ export default function App() {
     // `running` is derived from the job list, which stays empty until the first
     // job-updated event lands — so without this guard a double-click fires two
     // runs before the button ever disables.
-    if (starting) return;
+    if (starting || !canRun) return;
     // A large batch is irreversible spend the moment it starts — Stop only
     // helps once you have noticed. Confirm the size and the cost driver first.
     if (toRun >= BIG_RUN) {
@@ -411,8 +495,10 @@ export default function App() {
   // so name the formats rather than just reporting a count of zero.
   const other = settings.jobType === "transcribe" ? scan.convert : scan.transcribe;
   let hint: string | null = null;
-  if (!hasKey) hint = `Add your ${job.service} key in Settings`;
-  else if (settings.inputs.length > 0 && inputCount === 0) {
+  let hintOpensSettings = false;
+  if (settings.inputs.length > 0 && !scanCurrent) {
+    hint = "Checking the selected files…";
+  } else if (settings.inputs.length > 0 && inputCount === 0) {
     if (other > 0) {
       hint = `Those look like ${settings.jobType === "transcribe" ? "documents" : "media files"} — switch to ${settings.jobType === "transcribe" ? "Convert" : "Transcribe"}`;
     } else if (scan.alreadyText > 0) {
@@ -420,6 +506,33 @@ export default function App() {
     } else {
       hint = "Nothing to do here. Convert takes PDF, Office and image files; Transcribe takes audio and video.";
     }
+  } else if (routeBlocked) {
+    const reason = conversionPlan.blocked[0]?.reason;
+    const count = conversionPlan.blocked.length;
+    if (reason === "capabilities_pending") {
+      hint = "Checking conversion service capabilities…";
+    } else if (reason === "backend_unavailable") {
+      hint = `Conversion service unavailable for ${count} file${count > 1 ? "s" : ""} — check the backend URL in Settings`;
+      hintOpensSettings = true;
+    } else if (reason === "backend_not_accepting") {
+      hint = `Conversion service is not accepting jobs for ${count} file${count > 1 ? "s" : ""} right now`;
+      hintOpensSettings = true;
+    } else {
+      hint = `${count} file${count > 1 ? "s need" : " needs"} Datalab, but Local only forbids remote fallback — choose Standard or remove ${count > 1 ? "them" : "it"}`;
+      hintOpensSettings = true;
+    }
+  } else if (backendExecutionBlocked) {
+    const count = conversionPlan.backend.length;
+    hint = `${count} file${count > 1 ? "s are" : " is"} routed to the local backend, but native submit/poll is not available in this increment yet`;
+    hintOpensSettings = true;
+  } else if (missingCredentials.length > 0) {
+    const labels = missingCredentials.map((secret) => {
+      if (secret === "datalab") return "Datalab key";
+      if (secret === "backend") return "backend token";
+      return "Rev.ai key";
+    });
+    hint = `Add your ${labels.join(" and ")} in Settings`;
+    hintOpensSettings = true;
   } else if (toRun === 0 && copying === 0 && skipping > 0) {
     hint = `All ${skipping} already in this folder — turn off “Skip files already done” in Settings to run them again`;
   } else if (settings.inputs.length > 0 && !settings.outputDir) {
@@ -441,6 +554,15 @@ export default function App() {
     );
   }
   if (copying > 0 && toRun > 0) noteParts.push(`${copying} copied from an earlier run`);
+  if (
+    settings.jobType === "convert" &&
+    settings.conversionRoute === "backend" &&
+    conversionPlan.direct.length > 0
+  ) {
+    noteParts.push(
+      `${conversionPlan.direct.length} routed direct to Datalab`,
+    );
+  }
   const note = noteParts.length > 0 ? noteParts.join(" · ") : null;
 
   // The left column, and the whole body when nothing is open. Settings and
@@ -512,7 +634,7 @@ export default function App() {
           }}
           onRetryJob={(id) => void call(() => commands.retryJob(id))}
           onHint={() => {
-            if (!hasKey) setView("settings");
+            if (hintOpensSettings) setView("settings");
             else if (!settings.outputDir) void pickOutput();
           }}
         />

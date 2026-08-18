@@ -9,6 +9,7 @@ mod settings;
 mod live_smoke;
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -139,6 +140,29 @@ const ALREADY_TEXT: &[&str] = &[
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ScannedConversionFile {
+    source_path: String,
+    media_type: String,
+    reuse: ReuseDisposition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReuseDisposition {
+    Pending,
+    AlreadyHere,
+    Reusable,
+}
+
+#[derive(Default)]
+struct ReuseSummary {
+    already_here: usize,
+    reusable: usize,
+    by_source: HashMap<String, ReuseDisposition>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Scan {
     /// Matching file count per job, so the UI can pick the job that fits the
     /// selection and show what each one would process.
@@ -153,6 +177,10 @@ struct Scan {
     /// rather than sent to the provider again — real work, but free.
     reusable_convert: usize,
     reusable_transcribe: usize,
+    /// Concrete Convert files and their MIME/reuse disposition. This is
+    /// metadata only: no file bytes cross IPC. The webview uses it to plan
+    /// each pending file against live backend capabilities.
+    convert_files: Vec<ScannedConversionFile>,
     /// Files skipped because they are already text.
     already_text: usize,
     /// The folder to default the output to: the dropped folder itself, or the
@@ -172,13 +200,15 @@ fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String> {
     let cfg = settings::load(&app);
     let convert = collect_input_files(&inputs, JobType::Convert);
     let transcribe = collect_input_files(&inputs, JobType::Transcribe);
-    let (here_c, reuse_c) = split_reusable(&app, &convert, JobType::Convert, &cfg);
-    let (here_t, reuse_t) = split_reusable(&app, &transcribe, JobType::Transcribe, &cfg);
+    let convert_reuse = split_reusable(&app, &convert, JobType::Convert, &cfg);
+    let transcribe_reuse = split_reusable(&app, &transcribe, JobType::Transcribe, &cfg);
+    let convert_files = describe_conversion_files(&convert, &convert_reuse);
     Ok(Scan {
-        already_here_convert: here_c,
-        already_here_transcribe: here_t,
-        reusable_convert: reuse_c,
-        reusable_transcribe: reuse_t,
+        already_here_convert: convert_reuse.already_here,
+        already_here_transcribe: transcribe_reuse.already_here,
+        reusable_convert: convert_reuse.reusable,
+        reusable_transcribe: transcribe_reuse.reusable,
+        convert_files,
         convert: convert.len(),
         transcribe: transcribe.len(),
         already_text: count_matching(&inputs, ALREADY_TEXT),
@@ -195,22 +225,52 @@ fn split_reusable(
     files: &[std::path::PathBuf],
     jt: JobType,
     cfg: &Settings,
-) -> (usize, usize) {
+) -> ReuseSummary {
     if files.is_empty() {
-        return (0, 0);
+        return ReuseSummary::default();
     }
     let found = history::reusable(app, files, jt.id(), &jobs::output_format_for(jt, cfg));
-    // With no output folder chosen yet nothing can be "already here", so every
-    // reusable result counts as a copy — which is what will happen once the
-    // user picks one.
-    let Some(dir) = cfg.output_dir.as_deref() else {
-        return (0, found.len());
-    };
-    let here = found
-        .values()
-        .filter(|out| history::is_in_dir(out, dir))
-        .count();
-    (here, found.len() - here)
+    let mut summary = ReuseSummary::default();
+    for (source, output) in found {
+        let disposition = if cfg
+            .output_dir
+            .as_deref()
+            .is_some_and(|dir| history::is_in_dir(&output, dir))
+        {
+            summary.already_here += 1;
+            ReuseDisposition::AlreadyHere
+        } else {
+            summary.reusable += 1;
+            ReuseDisposition::Reusable
+        };
+        summary.by_source.insert(source, disposition);
+    }
+    summary
+}
+
+fn describe_conversion_files(
+    files: &[std::path::PathBuf],
+    reuse: &ReuseSummary,
+) -> Vec<ScannedConversionFile> {
+    files
+        .iter()
+        .map(|path| {
+            let source_path = path.to_string_lossy().into_owned();
+            let media_type = mime_guess::from_path(path)
+                .first_or_octet_stream()
+                .essence_str()
+                .to_string();
+            ScannedConversionFile {
+                reuse: reuse
+                    .by_source
+                    .get(&source_path)
+                    .copied()
+                    .unwrap_or(ReuseDisposition::Pending),
+                source_path,
+                media_type,
+            }
+        })
+        .collect()
 }
 
 /// Newest first. `query` filters on file name or folder; empty means everything.
@@ -899,6 +959,31 @@ mod scan_tests {
             names(&collect_input_files(&inputs, JobType::Transcribe)),
             vec!["Audio.MP3"]
         );
+    }
+
+    #[test]
+    fn conversion_scan_metadata_reports_mime_and_reuse_per_file() {
+        let root = tree("route-metadata", &["report.pdf", "image.png", "page.html"]);
+        let files = collect_input_files(&[root.to_string_lossy().to_string()], JobType::Convert);
+        let report = root.join("report.pdf").to_string_lossy().into_owned();
+        let reuse = ReuseSummary {
+            already_here: 1,
+            reusable: 0,
+            by_source: HashMap::from([(report.clone(), ReuseDisposition::AlreadyHere)]),
+        };
+
+        let scanned = describe_conversion_files(&files, &reuse);
+        let by_name = |name: &str| {
+            scanned
+                .iter()
+                .find(|file| file.source_path.ends_with(name))
+                .unwrap()
+        };
+        assert_eq!(by_name("report.pdf").media_type, "application/pdf");
+        assert_eq!(by_name("report.pdf").reuse, ReuseDisposition::AlreadyHere);
+        assert_eq!(by_name("image.png").media_type, "image/png");
+        assert_eq!(by_name("image.png").reuse, ReuseDisposition::Pending);
+        assert_eq!(by_name("page.html").media_type, "text/html");
     }
 
     #[test]

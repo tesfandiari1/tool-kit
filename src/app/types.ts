@@ -6,9 +6,16 @@ export type Status = "queued" | "working" | "processing" | "done" | "failed";
 export type SecretId = "datalab" | "revai" | "backend";
 export type ConversionRoute = "direct" | "backend";
 export type ConversionProfile = "standard" | "local_only";
+export type ReuseDisposition = "pending" | "already_here" | "reusable";
 /// The compact launcher, or a panel that replaces the left column. Documents
 /// open beside it and are not a view.
 export type View = "run" | "settings" | "history";
+
+export interface ScannedConversionFile {
+  sourcePath: string;
+  mediaType: string;
+  reuse: ReuseDisposition;
+}
 
 /// What `scan_inputs` reports for the current selection.
 export interface Scan {
@@ -24,6 +31,9 @@ export interface Scan {
   /// than sent to the provider again: real work, but free and instant.
   reusableConvert: number;
   reusableTranscribe: number;
+  /// Concrete Convert files and their MIME/reuse disposition. File contents
+  /// stay in the host; this metadata is enough for capability-driven routing.
+  convertFiles: ScannedConversionFile[];
   alreadyText: number;
   suggestedOutput: string | null;
 }
@@ -108,6 +118,7 @@ export const EMPTY_SCAN: Scan = {
   alreadyHereTranscribe: 0,
   reusableConvert: 0,
   reusableTranscribe: 0,
+  convertFiles: [],
   alreadyText: 0,
   suggestedOutput: null,
 };
