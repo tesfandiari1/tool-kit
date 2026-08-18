@@ -9,10 +9,13 @@ M1 is a **loopback-only development vertical slice**. Jobs, idempotency records,
 uploads, and artifacts are intentionally ephemeral and disappear on restart.
 Do not expose this Compose service to the LAN yet; durable storage, stronger
 parser isolation, per-device credentials, TLS, backups, and the TrueNAS overlay
-remain release-gated milestones in [`../BACKEND_EPIC.md`](../BACKEND_EPIC.md).
+remain release-gated milestones in [`../docs/BACKEND_EPIC.md`](../docs/BACKEND_EPIC.md).
 The next bounded unit is the SQLite and persistent-artifact work in
-[`../BACKEND_EXECUTION_PLAN.md`](../BACKEND_EXECUTION_PLAN.md). AnyDoc and
-Datalab follow only after durability is proven.
+[`../docs/BACKEND_EXECUTION_PLAN.md`](../docs/BACKEND_EXECUTION_PLAN.md).
+Parallel sessions start at [`../docs/HANDOFF.md`](../docs/HANDOFF.md):
+Increment 1 is mid-wire in the worktree (SQLite repository exists; the live
+job store is still `JobRegistry`). AnyDoc and Datalab follow only after
+durability is proven.
 
 The service is permanently CPU-only. It contains no local OCR, model-serving,
 PDFium, ONNX, or accelerator runtime. PDFs that are scanned, image-based, mixed,
@@ -83,7 +86,7 @@ that service process; reusing it for different input returns `409`.
 
 ## Run natively
 
-Rust 1.95 or newer is required. Build both sibling binaries before starting the
+Rust 1.97 or newer is required. Build both sibling binaries before starting the
 API so startup can verify the worker identity:
 
 ```bash

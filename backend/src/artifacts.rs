@@ -27,6 +27,7 @@ const PUBLICATION_STAGING_DIRECTORY: &str = "publication.staging";
 const ARTIFACTS_DIRECTORY: &str = "artifacts";
 const QUARANTINE_DIRECTORY: &str = "quarantine";
 const PREACCEPTANCE_DIRECTORY: &str = "pre-acceptance";
+const ORPHANED_DIRECTORY: &str = "orphaned";
 
 #[derive(Clone, Debug)]
 pub struct ArtifactStore {
@@ -109,6 +110,7 @@ impl ArtifactStore {
         let quarantine = store.root.join(QUARANTINE_DIRECTORY);
         ensure_private_directory(&quarantine)?;
         ensure_private_directory(&quarantine.join(PREACCEPTANCE_DIRECTORY))?;
+        ensure_private_directory(&quarantine.join(ORPHANED_DIRECTORY))?;
 
         Ok(store)
     }
@@ -377,6 +379,20 @@ impl ArtifactStore {
         Ok(job_ids)
     }
 
+    /// Validates that one published artifact directory contains exactly the
+    /// two backend-owned regular files and no symlinks or extra entries.
+    pub async fn validate_published_contents(
+        &self,
+        job_id: Uuid,
+        attempt_id: Uuid,
+    ) -> Result<(), ArtifactError> {
+        self.require_owned_attempt(job_id, attempt_id).await?;
+        let relative = artifacts_relative_path(job_id, attempt_id);
+        let published = self.resolve_existing_relative(&relative).await?;
+        require_directory(&published).await?;
+        validate_publication_contents(&published).await
+    }
+
     pub async fn publish_artifacts(
         &self,
         job_id: Uuid,
@@ -581,6 +597,75 @@ impl ArtifactStore {
             }
         }
         Err(ArtifactError::QuarantineReservationExhausted(job_id))
+    }
+
+    /// Moves a canonical UUID job directory with no database owner into a
+    /// backend-owned quarantine. The ID-derived source is resolved without
+    /// following symlinks before any mutation occurs.
+    pub async fn quarantine_orphan(&self, job_id: Uuid) -> Result<PathBuf, ArtifactError> {
+        for _ in 0..8 {
+            let quarantine_id = Uuid::new_v4();
+            match self.quarantine_orphan_as(job_id, quarantine_id).await {
+                Err(ArtifactError::PathAlreadyExists(_)) => continue,
+                result => return result,
+            }
+        }
+        Err(ArtifactError::QuarantineReservationExhausted(job_id))
+    }
+
+    async fn quarantine_orphan_as(
+        &self,
+        job_id: Uuid,
+        quarantine_id: Uuid,
+    ) -> Result<PathBuf, ArtifactError> {
+        let orphaned_relative = PathBuf::from(QUARANTINE_DIRECTORY).join(ORPHANED_DIRECTORY);
+        self.require_owned_directory_relative(&orphaned_relative)
+            .await?;
+        let job_relative = job_relative_path(job_id);
+        let job = self.resolve_existing_relative(&job_relative).await?;
+        require_directory(&job).await?;
+
+        let reservation_relative = orphaned_quarantine_reservation_relative_path(
+            job_id,
+            quarantine_id,
+        );
+        let reservation = self.resolve_relative(&reservation_relative)?;
+        match create_private_directory(&reservation).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(ArtifactError::PathAlreadyExists(reservation));
+            }
+            Err(source) => {
+                return Err(ArtifactError::Quarantine {
+                    path: reservation,
+                    source,
+                });
+            }
+        }
+
+        let quarantine_relative = orphaned_quarantine_relative_path(job_id, quarantine_id);
+        let quarantine = self.resolve_relative(&quarantine_relative)?;
+        require_absent(&quarantine).await?;
+        if let Err(source) = fs::rename(&job, &quarantine).await {
+            let _ = fs::remove_dir(&reservation).await;
+            return Err(ArtifactError::Quarantine { path: job, source });
+        }
+        sync_directory(self.root.join(JOBS_DIRECTORY))
+            .await
+            .map_err(|source| ArtifactError::Quarantine { path: job, source })?;
+        sync_directory(reservation)
+            .await
+            .map_err(|source| ArtifactError::Quarantine {
+                path: quarantine.clone(),
+                source,
+            })?;
+        sync_directory(self.root.join(QUARANTINE_DIRECTORY).join(ORPHANED_DIRECTORY))
+            .await
+            .map_err(|source| ArtifactError::Quarantine {
+                path: quarantine,
+                source,
+            })?;
+        Ok(quarantine_relative)
     }
 
     async fn quarantine_preacceptance_as(
@@ -949,6 +1034,19 @@ pub fn preacceptance_quarantine_reservation_relative_path(
 
 pub fn preacceptance_quarantine_relative_path(job_id: Uuid, quarantine_id: Uuid) -> PathBuf {
     preacceptance_quarantine_reservation_relative_path(job_id, quarantine_id).join("job")
+}
+
+pub fn orphaned_quarantine_reservation_relative_path(
+    job_id: Uuid,
+    quarantine_id: Uuid,
+) -> PathBuf {
+    PathBuf::from(QUARANTINE_DIRECTORY)
+        .join(ORPHANED_DIRECTORY)
+        .join(format!("{job_id}-{quarantine_id}"))
+}
+
+pub fn orphaned_quarantine_relative_path(job_id: Uuid, quarantine_id: Uuid) -> PathBuf {
+    orphaned_quarantine_reservation_relative_path(job_id, quarantine_id).join("job")
 }
 
 async fn validate_publication_contents(path: &Path) -> Result<(), ArtifactError> {
