@@ -1,0 +1,80 @@
+.gal {
+  height: 100%;
+  overflow: auto;
+  /* Opaque, unlike the app window. The gallery runs in a plain browser tab
+     with no NSVisualEffectView behind it, so the app's semi-transparent scrim
+     would composite against white and wash every specimen out. */
+  background: var(--surface-solid);
+  padding: var(--s6) var(--s6) var(--s8);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.gal__inner {
+  max-width: 940px;
+  margin: 0 auto;
+}
+
+.gal__bar {
+  position: sticky;
+  top: calc(var(--s6) * -1);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin: calc(var(--s6) * -1) calc(var(--s6) * -1) var(--s6);
+  padding: var(--s3) var(--s6);
+  background: var(--surface-raised);
+  border-bottom: 1px solid var(--rule);
+  backdrop-filter: blur(12px);
+}
+
+.gal__section {
+  margin-bottom: var(--s8);
+}
+
+.gal__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  padding-bottom: var(--s3);
+  margin-bottom: var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+
+/* Specimens sit on a subtly different ground so component edges are visible
+   against the page. */
+.gal__specimen {
+  padding: var(--s4);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-panel);
+  background: var(--surface);
+}
+
+.gal__swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: var(--s3);
+}
+
+.gal__swatch {
+  border: 1px solid var(--rule);
+  border-radius: var(--r-control);
+  overflow: hidden;
+}
+
+.gal__chip {
+  height: 48px;
+}
+
+.gal__swatch figcaption {
+  padding: var(--s2);
+  border-top: 1px solid var(--rule);
+  background: var(--surface-well);
+}
+
+.gal__grid2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--s4);
+}

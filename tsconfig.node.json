@@ -4,7 +4,15 @@
     "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+
+    /* A referenced composite project may not disable emit (TS6310), so the
+       output is redirected instead of suppressed. Without these two lines
+       `tsc` writes vite.config.js, vite.config.d.ts, and the build-info file
+       into the repo root, where they are untracked, regenerate on every
+       build, and get swept into the next `git add`. */
+    "outDir": "./node_modules/.tmp/tsconfig.node",
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node/tsconfig.node.tsbuildinfo"
   },
   "include": ["vite.config.ts"]
 }

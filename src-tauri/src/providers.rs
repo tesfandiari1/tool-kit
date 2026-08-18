@@ -1,5 +1,5 @@
-//! Provider integrations. Document/audio providers follow submit -> poll ->
-//! fetch; the LLM provider (Claude) is a single synchronous request.
+//! Provider integrations. Both providers follow the same shape:
+//! submit -> poll -> fetch.
 
 use serde_json::Value;
 use std::path::Path;
@@ -9,7 +9,6 @@ use std::time::Duration;
 pub enum ProviderKind {
     Datalab,
     RevAi,
-    Anthropic,
 }
 
 impl ProviderKind {
@@ -17,7 +16,6 @@ impl ProviderKind {
         match self {
             ProviderKind::Datalab => "Datalab",
             ProviderKind::RevAi => "Rev.ai",
-            ProviderKind::Anthropic => "Claude",
         }
     }
     /// Keychain account name for this provider's API key.
@@ -25,7 +23,6 @@ impl ProviderKind {
         match self {
             ProviderKind::Datalab => "datalab",
             ProviderKind::RevAi => "revai",
-            ProviderKind::Anthropic => "anthropic",
         }
     }
 }
@@ -44,7 +41,6 @@ pub enum PollResult {
 const DATALAB_BASE: &str = "https://www.datalab.to";
 const DATALAB_CONVERT: &str = "https://www.datalab.to/api/v1/convert";
 const REVAI_JOBS: &str = "https://api.rev.ai/speechtotext/v1/jobs";
-const ANTHROPIC_MESSAGES: &str = "https://api.anthropic.com/v1/messages";
 
 /// Pull the first present, non-null value from `keys`, as text.
 fn pick_string(body: &Value, keys: &[&str]) -> Option<String> {
@@ -77,22 +73,45 @@ async fn read_file_bytes(path: &str, default_name: &str) -> Result<(Vec<u8>, Str
 }
 
 fn bytes_part(bytes: Vec<u8>, name: &str, mime: &str) -> reqwest::multipart::Part {
-    reqwest::multipart::Part::bytes(bytes)
-        .file_name(name.to_string())
-        .mime_str(mime)
-        .expect("mime_guess produces a valid MIME type")
+    let part = reqwest::multipart::Part::bytes(bytes).file_name(name.to_string());
+    // A panic here would abort the spawned job task, leaving the row stuck on
+    // "Uploading…" forever, so fall back instead of unwrapping.
+    part.mime_str(mime)
+        .unwrap_or_else(|_| reqwest::multipart::Part::bytes(Vec::new()).file_name(name.to_string()))
 }
 
+/// Seconds to wait per `retry-after`, capped so a large server-supplied delay
+/// can't pin a concurrency permit for hours. The integer form is the only one
+/// these APIs send; an HTTP-date falls back to our own backoff.
 fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
     resp.headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|s| s.min(60))
 }
 
-/// Send a request with up to 3 attempts, retrying transient failures (HTTP 429,
-/// 529, 5xx, and network errors) with backoff. `make` rebuilds the request each
-/// attempt because multipart bodies are single-use. Honors `retry-after`.
+/// Upload timeout. Submits carry the whole file, so they need far longer than a
+/// poll — a 300s cap made large Transcribe files impossible to submit at all.
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Poll timeout. Polls are tiny GETs; if one hangs, the next tick retries.
+pub const POLL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Turn a non-success poll response into a terminal failure where the status
+/// says retrying can't help. 5xx and 429 stay transient (caller keeps polling).
+fn terminal_poll_error(status: reqwest::StatusCode, body: &Value, who: &str) -> Option<PollResult> {
+    if status.is_success() || status.is_server_error() || status.as_u16() == 429 {
+        return None;
+    }
+    let detail = pick_string(body, &["error", "detail", "message", "title"])
+        .unwrap_or_else(|| status.to_string());
+    Some(PollResult::Failed(format!("{who} returned {status}: {detail}")))
+}
+
+/// Send a request with up to 3 attempts, retrying only failures that prove the
+/// server never started work (429/502/503/504/529, and connect errors) so a
+/// retry can't double-bill. `make` rebuilds the request each attempt because
+/// multipart bodies are single-use. Honors `retry-after`.
 async fn send_retrying<F, Fut>(make: F) -> Result<reqwest::Response, String>
 where
     F: Fn() -> Fut,
@@ -105,7 +124,10 @@ where
         match make().await {
             Ok(resp) => {
                 let code = resp.status().as_u16();
-                let transient = code == 429 || code == 529 || resp.status().is_server_error();
+                // Only retry statuses that mean the request was refused before
+                // any work happened. A 500 may mean the job was created and
+                // then errored — retrying it would bill the user twice.
+                let transient = matches!(code, 429 | 502 | 503 | 504 | 529);
                 if transient && attempt < MAX_TRIES {
                     let wait = retry_after_secs(&resp).unwrap_or(2u64.pow(attempt));
                     tokio::time::sleep(Duration::from_secs(wait)).await;
@@ -114,7 +136,10 @@ where
                 return Ok(resp);
             }
             Err(e) => {
-                if attempt < MAX_TRIES {
+                // Same reasoning: a failure while connecting means the body was
+                // never sent. A timeout or a mid-body error might have reached
+                // the server, so don't resend and risk a duplicate charge.
+                if e.is_connect() && attempt < MAX_TRIES {
                     tokio::time::sleep(Duration::from_secs(2u64.pow(attempt))).await;
                     continue;
                 }
@@ -133,27 +158,33 @@ pub async fn datalab_submit(
     api_key: &str,
     path: &str,
     output_format: &str,
+    high_accuracy: bool,
 ) -> Result<Submitted, String> {
     let (bytes, name, mime) = read_file_bytes(path, "file").await?;
     let resp = send_retrying(|| {
-        // High-accuracy profile for SIM/CIM source docs (tax returns, P&Ls,
-        // balance sheets — frequently scanned, table-heavy). These flags trade
-        // credits + latency for fidelity, which is the right call when every
-        // extracted figure ends up cited in a buyer-facing memorandum:
-        //   use_llm     — LLM pass that markedly improves tables/forms/layout
-        //   force_ocr   — re-OCR every page, ignoring unreliable embedded text
-        //   format_lines— reconstruct lines cleanly (keeps financial rows intact)
-        //   paginate    — emit page delimiters so figures can be cited to a page
-        let form = reqwest::multipart::Form::new()
+        // Page delimiters are always on so any figure can be cited to a page.
+        let mut form = reqwest::multipart::Form::new()
             .part("file", bytes_part(bytes.clone(), &name, &mime))
             .text("output_format", output_format.to_string())
-            .text("use_llm", "true")
-            .text("force_ocr", "true")
-            .text("format_lines", "true")
             .text("paginate", "true");
+        // High-accuracy profile, tuned for SIM/CIM source docs (tax returns,
+        // P&Ls, balance sheets — frequently scanned and table-heavy). It trades
+        // credits and latency for fidelity, which is the right default when
+        // every extracted figure ends up cited in a buyer-facing memorandum,
+        // and wasted effort on a clean digital PDF:
+        //   use_llm      — LLM pass that markedly improves tables/forms/layout
+        //   force_ocr    — re-OCR every page, ignoring unreliable embedded text
+        //   format_lines — reconstruct lines cleanly (keeps financial rows intact)
+        if high_accuracy {
+            form = form
+                .text("use_llm", "true")
+                .text("force_ocr", "true")
+                .text("format_lines", "true");
+        }
         client
             .post(DATALAB_CONVERT)
             .header("X-API-Key", api_key)
+            .timeout(UPLOAD_TIMEOUT)
             .multipart(form)
             .send()
     })
@@ -197,13 +228,18 @@ pub async fn datalab_poll(
     let resp = client
         .get(check_url)
         .header("X-API-Key", api_key)
+        .timeout(POLL_TIMEOUT)
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    let http = resp.status();
     let body: Value = resp
         .json()
         .await
         .map_err(|e| format!("Bad poll response from Datalab: {e}"))?;
+    if let Some(failed) = terminal_poll_error(http, &body, "Datalab") {
+        return Ok(failed);
+    }
     let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("");
     if status == "complete" {
         if !body.get("success").and_then(|v| v.as_bool()).unwrap_or(true) {
@@ -217,7 +253,14 @@ pub async fn datalab_poll(
             "chunks" => &["chunks", "json", "output"],
             _ => &["markdown", "output", "content"],
         };
-        return Ok(PollResult::Done(pick_string(&body, keys).unwrap_or_default()));
+        // An absent/empty result field used to be written out as a 0-byte file
+        // and reported as a success. Fail the job instead.
+        return Ok(match pick_string(&body, keys) {
+            Some(text) if !text.trim().is_empty() => PollResult::Done(text),
+            _ => PollResult::Failed(
+                "Datalab reported success but returned no content for this file.".into(),
+            ),
+        });
     }
     if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
         if !err.is_empty() {
@@ -247,6 +290,7 @@ pub async fn datalab_pipeline_submit(
         client
             .post(&url)
             .header("X-API-Key", api_key)
+            .timeout(UPLOAD_TIMEOUT)
             .multipart(form)
             .send()
     })
@@ -279,13 +323,18 @@ pub async fn datalab_pipeline_poll(
     let resp = client
         .get(&url)
         .header("X-API-Key", api_key)
+        .timeout(POLL_TIMEOUT)
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    let http = resp.status();
     let body: Value = resp
         .json()
         .await
         .map_err(|e| format!("Bad poll response from Datalab pipeline: {e}"))?;
+    if let Some(failed) = terminal_poll_error(http, &body, "Datalab pipeline") {
+        return Ok(failed);
+    }
     match body.get("status").and_then(|v| v.as_str()).unwrap_or("") {
         "completed" | "completed_with_errors" => {
             let steps = body
@@ -293,32 +342,54 @@ pub async fn datalab_pipeline_poll(
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let mut step_index: i64 = 0;
-            for s in &steps {
-                let ok = s.get("status").and_then(|v| v.as_str()) == Some("completed");
-                let idx = s.get("step_index").and_then(|v| v.as_i64()).unwrap_or(0);
-                if ok && idx >= step_index {
-                    step_index = idx;
-                }
-            }
+            // Take the last *completed* step. Defaulting to step 0 when nothing
+            // completed fetched a failed step's error payload and wrote it to
+            // disk as if it were the converted document.
+            let step_index = steps
+                .iter()
+                .filter(|s| s.get("status").and_then(|v| v.as_str()) == Some("completed"))
+                .filter_map(|s| s.get("step_index").and_then(|v| v.as_i64()))
+                .max();
+            let Some(step_index) = step_index else {
+                return Ok(PollResult::Failed(
+                    pick_string(&body, &["error", "error_message", "detail"])
+                        .unwrap_or_else(|| "Pipeline finished with no completed step".into()),
+                ));
+            };
             let rurl = format!(
                 "{DATALAB_BASE}/api/v1/pipelines/executions/{execution_id}/steps/{step_index}/result"
             );
-            let rbody: Value = client
+            let rresp = client
                 .get(&rurl)
                 .header("X-API-Key", api_key)
+                .timeout(POLL_TIMEOUT)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            let rhttp = rresp.status();
+            // Same rule as the transcript fetch: the pipeline run is already
+            // paid for, so a 5xx on collecting the result is worth another tick.
+            if rhttp.is_server_error() || rhttp.as_u16() == 429 {
+                return Err(format!("Datalab step result returned {rhttp}"));
+            }
+            let rbody: Value = rresp
                 .json()
                 .await
                 .map_err(|e| format!("Bad step result from Datalab: {e}"))?;
-            let text = pick_string(
+            if !rhttp.is_success() {
+                return Ok(PollResult::Failed(format!(
+                    "Datalab step result returned {rhttp}"
+                )));
+            }
+            match pick_string(
                 &rbody,
                 &["markdown", "html", "json", "output", "content", "text"],
-            )
-            .unwrap_or_else(|| serde_json::to_string_pretty(&rbody).unwrap_or_default());
-            Ok(PollResult::Done(text))
+            ) {
+                Some(text) if !text.trim().is_empty() => Ok(PollResult::Done(text)),
+                _ => Ok(PollResult::Failed(
+                    "Datalab pipeline returned no content for this file.".into(),
+                )),
+            }
         }
         "failed" => Ok(PollResult::Failed(
             pick_string(&body, &["error", "error_message", "detail"])
@@ -340,7 +411,12 @@ pub async fn revai_submit(
     let (bytes, name, mime) = read_file_bytes(path, "media").await?;
     let resp = send_retrying(|| {
         let form = reqwest::multipart::Form::new().part("media", bytes_part(bytes.clone(), &name, &mime));
-        client.post(REVAI_JOBS).bearer_auth(api_key).multipart(form).send()
+        client
+            .post(REVAI_JOBS)
+            .bearer_auth(api_key)
+            .timeout(UPLOAD_TIMEOUT)
+            .multipart(form)
+            .send()
     })
     .await?;
     let status = resp.status();
@@ -370,26 +446,47 @@ pub async fn revai_poll(
     let resp = client
         .get(format!("{REVAI_JOBS}/{job_id}"))
         .bearer_auth(api_key)
+        .timeout(POLL_TIMEOUT)
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    let http = resp.status();
     let body: Value = resp
         .json()
         .await
         .map_err(|e| format!("Bad poll response from Rev.ai: {e}"))?;
+    if let Some(failed) = terminal_poll_error(http, &body, "Rev.ai") {
+        return Ok(failed);
+    }
     match body.get("status").and_then(|v| v.as_str()).unwrap_or("") {
         "transcribed" => {
             let tresp = client
                 .get(format!("{REVAI_JOBS}/{job_id}/transcript"))
                 .bearer_auth(api_key)
                 .header(reqwest::header::ACCEPT, "text/plain")
+                .timeout(POLL_TIMEOUT)
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
-            if !tresp.status().is_success() {
-                return Err(format!("Could not fetch transcript ({})", tresp.status()));
+            // The transcription is finished and already billed by the time we
+            // ask for it, so a transient blip here must not discard it. `Err`
+            // sends the caller's poll loop round again (it tolerates ~1 minute
+            // of unbroken failure); only a client error is worth giving up on.
+            let ts = tresp.status();
+            if ts.is_server_error() || ts.as_u16() == 429 {
+                return Err(format!("Transcript fetch returned {ts}"));
             }
-            Ok(PollResult::Done(tresp.text().await.map_err(|e| e.to_string())?))
+            if !ts.is_success() {
+                return Ok(PollResult::Failed(format!("Could not fetch transcript ({ts})")));
+            }
+            let text = tresp.text().await.map_err(|e| e.to_string())?;
+            // Rev.ai returns 200 with an empty body for silent media.
+            if text.trim().is_empty() {
+                return Ok(PollResult::Failed(
+                    "Rev.ai returned an empty transcript — no speech was detected.".into(),
+                ));
+            }
+            Ok(PollResult::Done(text))
         }
         "failed" => Ok(PollResult::Failed(
             pick_string(&body, &["failure_detail", "failure"])
@@ -397,77 +494,4 @@ pub async fn revai_poll(
         )),
         _ => Ok(PollResult::Pending),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Claude — summarize text into AI-ready markdown notes
-// ---------------------------------------------------------------------------
-
-pub async fn anthropic_summarize(
-    client: &reqwest::Client,
-    api_key: &str,
-    model: &str,
-    text: &str,
-) -> Result<String, String> {
-    let prompt = format!(
-        "Summarize the document below into clear, well-structured Markdown notes. \
-         Capture the key points, decisions, figures, and action items. Use headings and \
-         bullet lists. Output only the Markdown, no preamble.\n\n---\n\n{text}"
-    );
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 8192,
-        "messages": [{ "role": "user", "content": prompt }],
-    });
-    let resp = send_retrying(|| {
-        client
-            .post(ANTHROPIC_MESSAGES)
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-    })
-    .await?;
-    let status = resp.status();
-    let json: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Bad response from Claude: {e}"))?;
-    if !status.is_success() {
-        let msg = json
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("Claude error ({status})"));
-        return Err(msg);
-    }
-    // Check stop_reason before trusting the content: a refusal can carry an
-    // empty body, and a max_tokens stop means the summary is truncated.
-    let stop = json.get("stop_reason").and_then(|v| v.as_str()).unwrap_or("");
-    if stop == "refusal" {
-        return Err("Claude declined to summarize this content.".into());
-    }
-    let mut out = json
-        .get("content")
-        .and_then(|c| c.as_array())
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
-    if out.trim().is_empty() {
-        return Err("Claude returned an empty summary".into());
-    }
-    if stop == "max_tokens" {
-        out.push_str(
-            "\n\n<!-- Summary truncated: hit the model's output limit. \
-             Raise the summarize output cap if you need the full text. -->",
-        );
-    }
-    Ok(out)
 }

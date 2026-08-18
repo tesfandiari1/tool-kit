@@ -1,0 +1,73 @@
+/* Layout helpers. Gaps come from the 4px scale and nowhere else, which is what
+   keeps rhythm consistent across views nobody reviewed together. */
+
+.ui-stack {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ui-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  min-width: 0;
+}
+
+.ui-row--wrap {
+  flex-wrap: wrap;
+}
+
+.ui-gap-1 {
+  gap: var(--s1);
+}
+.ui-gap-2 {
+  gap: var(--s2);
+}
+.ui-gap-3 {
+  gap: var(--s3);
+}
+.ui-gap-4 {
+  gap: var(--s4);
+}
+.ui-gap-5 {
+  gap: var(--s5);
+}
+.ui-gap-6 {
+  gap: var(--s6);
+}
+
+.ui-align-start {
+  align-items: flex-start;
+}
+.ui-align-center {
+  align-items: center;
+}
+.ui-align-end {
+  align-items: flex-end;
+}
+.ui-align-stretch {
+  align-items: stretch;
+}
+.ui-align-baseline {
+  align-items: baseline;
+}
+
+.ui-justify-start {
+  justify-content: flex-start;
+}
+.ui-justify-center {
+  justify-content: center;
+}
+.ui-justify-end {
+  justify-content: flex-end;
+}
+.ui-justify-between {
+  justify-content: space-between;
+}
+
+/* Pushes everything after it to the far edge of a row. */
+.ui-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}

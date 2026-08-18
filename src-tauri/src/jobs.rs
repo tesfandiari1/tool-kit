@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Semaphore;
 
 use crate::providers::{self, PollResult, ProviderKind};
-use crate::{secrets, settings};
+use crate::{history, secrets, settings};
 
 /// The "job to be done" the user picks once for the whole run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -20,7 +20,6 @@ use crate::{secrets, settings};
 pub enum JobType {
     Convert,
     Transcribe,
-    Summarize,
 }
 
 impl JobType {
@@ -28,7 +27,6 @@ impl JobType {
         match s {
             "convert" => Some(JobType::Convert),
             "transcribe" => Some(JobType::Transcribe),
-            "summarize" => Some(JobType::Summarize),
             _ => None,
         }
     }
@@ -37,7 +35,15 @@ impl JobType {
         match self {
             JobType::Convert => "Convert",
             JobType::Transcribe => "Transcribe",
-            JobType::Summarize => "Summarize",
+        }
+    }
+
+    /// The stable string this job is filed under in the history database.
+    /// Matches `from_id`, and must not change once rows exist.
+    pub fn id(&self) -> &'static str {
+        match self {
+            JobType::Convert => "convert",
+            JobType::Transcribe => "transcribe",
         }
     }
 
@@ -45,7 +51,6 @@ impl JobType {
         match self {
             JobType::Convert => ProviderKind::Datalab,
             JobType::Transcribe => ProviderKind::RevAi,
-            JobType::Summarize => ProviderKind::Anthropic,
         }
     }
 
@@ -62,7 +67,6 @@ impl JobType {
                 "mp3" | "mp4" | "wav" | "m4a" | "flac" | "ogg" | "oga" | "aac" | "mov" | "avi"
                     | "mkv" | "webm" | "wmv" | "mpeg" | "mpg" | "opus" | "amr" | "3gp"
             ),
-            JobType::Summarize => matches!(ext, "txt" | "md" | "markdown" | "text" | "rtf"),
         }
     }
 }
@@ -82,6 +86,10 @@ pub struct Job {
     pub output_text: Option<String>,
     pub error: Option<String>,
     pub created_at: u64,
+    /// When this job actually left the queue. The elapsed timer counts from
+    /// here so a file waiting behind the concurrency cap doesn't appear to
+    /// have been processing for the whole wait.
+    pub started_at: Option<u64>,
 }
 
 impl Job {
@@ -104,6 +112,7 @@ impl Job {
             output_text: None,
             error: None,
             created_at: now_secs(),
+            started_at: None,
         }
     }
 }
@@ -120,6 +129,14 @@ pub struct JobManager {
     jobs: Mutex<Vec<Job>>,
     counter: AtomicU64,
     sem: Arc<Semaphore>,
+    /// Bumped by every new run and by Stop. A spawned task captures the value
+    /// at spawn time and aborts as soon as it no longer matches, so starting a
+    /// second run (or hitting Stop) reliably retires the previous run's tasks
+    /// instead of leaving them to spend credits and write files invisibly.
+    generation: AtomicU64,
+    /// Settings snapshot taken when a run starts, so changing Settings mid-run
+    /// can't split one run across two output formats or two models.
+    run_config: Mutex<settings::Settings>,
 }
 
 impl Default for JobManager {
@@ -128,6 +145,8 @@ impl Default for JobManager {
             jobs: Mutex::new(Vec::new()),
             counter: AtomicU64::new(0),
             sem: Arc::new(Semaphore::new(4)), // up to 4 files in flight at once
+            generation: AtomicU64::new(0),
+            run_config: Mutex::new(settings::Settings::default()),
         }
     }
 }
@@ -157,10 +176,68 @@ impl JobManager {
         f(job);
         Some(job.clone())
     }
+
+    /// Retire every in-flight task and return the new generation.
+    pub fn new_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+    pub fn set_run_config(&self, cfg: settings::Settings) {
+        *self.run_config.lock().unwrap() = cfg;
+    }
+    pub fn run_config(&self) -> settings::Settings {
+        self.run_config.lock().unwrap().clone()
+    }
+}
+
+/// What "the same output" means when deciding whether a file is already done.
+///
+/// The pipeline id is folded in on purpose: pinning a `pl_…` pipeline changes
+/// what Convert produces, so a plain-convert result is not a substitute for it
+/// and the file must run again.
+pub fn output_format_for(jt: JobType, cfg: &settings::Settings) -> String {
+    match jt {
+        JobType::Transcribe => "text".to_string(),
+        JobType::Convert => match cfg
+            .datalab_pipeline_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(pid) => format!("{}@{pid}", cfg.datalab_format),
+            None => cfg.datalab_format.clone(),
+        },
+    }
 }
 
 fn emit(app: &AppHandle, job: Job) {
     let _ = app.emit("job-updated", job);
+}
+
+/// File a terminal job in the history. Best-effort by design: `history::record`
+/// swallows storage errors so a finished conversion is still a success.
+///
+/// User-initiated stops are skipped — `stop_run` marks cancelled jobs with the
+/// error "Stopped", and a cancelled 200-file run would otherwise bury the log.
+fn log_history(app: &AppHandle, job: &Job, status: &str, error: Option<&str>) {
+    if error == Some("Stopped") {
+        return;
+    }
+    let cfg = app.state::<JobManager>().run_config();
+    history::record(
+        app,
+        &history::Finished {
+            file_name: &job.file_name,
+            source_path: &job.source_path,
+            output_path: job.output_path.as_deref(),
+            job_type: job.job_type.id(),
+            output_format: &output_format_for(job.job_type, &cfg),
+            status,
+            error,
+        },
+    );
 }
 
 fn set_status(app: &AppHandle, id: u64, status: &str, note: &str) {
@@ -178,6 +255,7 @@ fn fail(app: &AppHandle, id: u64, err: &str) {
         j.progress_note = String::new();
         j.error = Some(err.to_string());
     }) {
+        log_history(app, &job, "failed", Some(err));
         emit(app, job);
     }
 }
@@ -190,42 +268,103 @@ fn finish(app: &AppHandle, id: u64, text: String, output_path: Option<String>) {
         j.output_path = output_path;
         j.error = None;
     }) {
+        log_history(app, &job, "done", None);
         emit(app, job);
     }
 }
 
-/// Write `text` into the job's output folder, avoiding clobbering.
-fn write_output(output_dir: &str, file_name: &str, ext: &str, suffix: &str, text: &str) -> Option<String> {
+/// Write `text` into the job's output folder without clobbering an existing
+/// file. Uses `create_new` so two concurrent jobs whose sources share a
+/// basename can't both win the same candidate name and overwrite each other.
+fn write_output(
+    output_dir: &str,
+    file_name: &str,
+    ext: &str,
+    suffix: &str,
+    text: &str,
+) -> Result<String, String> {
+    use std::io::Write;
+
     let stem = Path::new(file_name)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
     let base = std::path::PathBuf::from(output_dir);
-    let mut candidate = base.join(format!("{stem}{suffix}.{ext}"));
-    let mut n = 1;
-    while candidate.exists() {
-        candidate = base.join(format!("{stem}{suffix} ({n}).{ext}"));
-        n += 1;
+
+    for n in 0..1000 {
+        let candidate = if n == 0 {
+            base.join(format!("{stem}{suffix}.{ext}"))
+        } else {
+            base.join(format!("{stem}{suffix} ({n}).{ext}"))
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut f) => {
+                return f
+                    .write_all(text.as_bytes())
+                    .and_then(|_| f.sync_all())
+                    .map(|_| candidate.to_string_lossy().to_string())
+                    .map_err(|e| format!("Could not write {}: {e}", candidate.display()));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("Could not write to the output folder: {e}")),
+        }
     }
-    std::fs::write(&candidate, text.as_bytes())
-        .ok()
-        .map(|_| candidate.to_string_lossy().to_string())
+    Err(format!(
+        "Could not find a free filename for {stem}{suffix}.{ext} in the output folder."
+    ))
 }
 
-const MAX_SUMMARIZE_CHARS: usize = 500_000;
-
-/// Slice `s` to at most `max_chars` characters, always at a valid UTF-8
-/// boundary — plain byte slicing (`&s[..n]`) panics on multibyte input.
-fn truncate_chars(s: &str, max_chars: usize) -> &str {
-    match s.char_indices().nth(max_chars) {
-        Some((idx, _)) => &s[..idx],
-        None => s,
+/// Satisfy a job from a result an earlier run already produced, instead of
+/// paying the provider for it again.
+///
+/// Reached when the history has a still-valid result for this exact file, job
+/// and format, but it lives in a different folder from the one now selected.
+/// The source is unchanged and the format matches, so the bytes a re-run would
+/// produce are the bytes we already have — copying is the same outcome for
+/// free. Goes through `write_output`, so it inherits the no-clobber rule.
+///
+/// Returns whether the copy succeeded; a failure is reported on the job like
+/// any other, and Retry then runs it for real.
+pub fn reuse_result(app: &AppHandle, id: u64, existing: &str) -> bool {
+    let Some(job) = app.state::<JobManager>().get(id) else {
+        return false;
+    };
+    let text = match std::fs::read_to_string(existing) {
+        Ok(t) => t,
+        Err(e) => {
+            fail(app, id, &format!("Could not read the earlier result: {e}"));
+            return false;
+        }
+    };
+    // Take the extension from the file we are copying, so a result written
+    // under an older format setting keeps its own suffix.
+    let ext = Path::new(existing)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("txt");
+    match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
+        Ok(path) => {
+            finish(app, id, text, Some(path));
+            true
+        }
+        Err(e) => {
+            fail(app, id, &e);
+            false
+        }
     }
 }
 
-/// Spawn the full lifecycle for one job on the async runtime.
-pub fn run_job(app: AppHandle, id: u64) {
+/// Spawn the full lifecycle for one job on the async runtime. `generation` is
+/// the run this job belongs to; if the manager has moved on (a new run started,
+/// or the user hit Stop) the task exits without touching state or spending money.
+pub fn run_job(app: AppHandle, id: u64, generation: u64) {
     tauri::async_runtime::spawn(async move {
+        let stale = |app: &AppHandle| app.state::<JobManager>().generation() != generation;
+
         let job = match app.state::<JobManager>().get(id) {
             Some(j) => j,
             None => return,
@@ -243,37 +382,28 @@ pub fn run_job(app: AppHandle, id: u64) {
         // Respect the concurrency cap for the whole job lifetime.
         let sem = app.state::<JobManager>().semaphore();
         let _permit = sem.acquire_owned().await;
+        // Waiting for a permit can take minutes; the run may be long gone.
+        if stale(&app) {
+            return;
+        }
 
-        let cfg = settings::load(&app);
-        // Bound hung connections so a stuck request can't hold a concurrency
-        // permit forever (reqwest has no default timeout).
+        if let Some(updated) = app.state::<JobManager>().update(id, |j| {
+            j.started_at = Some(now_secs());
+        }) {
+            emit(&app, updated);
+        }
+
+        // Snapshot taken when the run started, so a Settings change mid-run
+        // can't give half the files a different output format.
+        let cfg = app.state::<JobManager>().run_config();
+        // No global timeout: submits carry whole files and need far longer
+        // than polls, so each request sets its own (see providers::*_TIMEOUT).
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
             .connect_timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
-        match job.job_type {
-            JobType::Summarize => {
-                set_status(&app, id, "processing", "Reading…");
-                let raw = match tokio::fs::read_to_string(&job.source_path).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        fail(&app, id, &format!("Could not read file: {e}"));
-                        return;
-                    }
-                };
-                let text = truncate_chars(&raw, MAX_SUMMARIZE_CHARS);
-                set_status(&app, id, "processing", "Summarizing…");
-                match providers::anthropic_summarize(&client, &api_key, &cfg.summarize_model, text).await {
-                    Ok(summary) => {
-                        let path = write_output(&job.output_dir, &job.file_name, "md", ".summary", &summary);
-                        finish(&app, id, summary, path);
-                    }
-                    Err(e) => fail(&app, id, &e),
-                }
-            }
-            JobType::Convert | JobType::Transcribe => {
+        {
                 set_status(&app, id, "working", "Uploading…");
                 let datalab_format = cfg.datalab_format.clone();
                 let pipeline = cfg
@@ -292,13 +422,22 @@ pub fn run_job(app: AppHandle, id: u64) {
                                 .await
                             }
                             None => {
-                                providers::datalab_submit(&client, &api_key, &job.source_path, &datalab_format).await
+                                providers::datalab_submit(
+                                    &client,
+                                    &api_key,
+                                    &job.source_path,
+                                    &datalab_format,
+                                    cfg.datalab_high_accuracy,
+                                )
+                                .await
                             }
                         };
                         match res {
                             Ok(s) => s,
                             Err(e) => {
-                                fail(&app, id, &e);
+                                if !stale(&app) {
+                                    fail(&app, id, &e);
+                                }
                                 return;
                             }
                         }
@@ -306,12 +445,26 @@ pub fn run_job(app: AppHandle, id: u64) {
                     _ => match providers::revai_submit(&client, &api_key, &job.source_path).await {
                         Ok(s) => s,
                         Err(e) => {
-                            fail(&app, id, &e);
+                            if !stale(&app) {
+                                fail(&app, id, &e);
+                            }
                             return;
                         }
                     },
                 };
 
+                // A submit carries the whole file and can run for half an hour,
+                // so Stop is very likely to land during one. Without this check
+                // the finished upload writes "processing" back over a row the
+                // user already stopped, and since the poll loop then bails on
+                // its own stale check, nothing ever moves that row to a
+                // terminal state: Run stays disabled behind a job with no task.
+                // The two arms above are guarded for the same reason — a
+                // stopped job must not be relabelled with a network error, or
+                // it lands in the history as a genuine failure.
+                if stale(&app) {
+                    return;
+                }
                 set_status(&app, id, "processing", "Processing…");
                 let convert_check_url = submitted.check_url.clone().unwrap_or_else(|| {
                     format!("https://www.datalab.to/api/v1/convert/{}", submitted.remote_id)
@@ -319,6 +472,10 @@ pub fn run_job(app: AppHandle, id: u64) {
 
                 let max_attempts: u32 = 720; // ~60 min at 5s
                 let mut attempt: u32 = 0;
+                // Consecutive network/parse errors. Transient blips are fine to
+                // ride out, but an endless stream of them should fail the job
+                // rather than silently burn the full 60-minute budget.
+                let mut consecutive_errors: u32 = 0;
                 let text = loop {
                     attempt += 1;
                     if attempt > max_attempts {
@@ -326,6 +483,9 @@ pub fn run_job(app: AppHandle, id: u64) {
                         return;
                     }
                     tokio::time::sleep(Duration::from_secs(5)).await;
+                    if stale(&app) {
+                        return;
+                    }
                     let poll = match job.job_type {
                         JobType::Convert => match &pipeline {
                             Some(_) => {
@@ -343,8 +503,19 @@ pub fn run_job(app: AppHandle, id: u64) {
                             fail(&app, id, &e);
                             return;
                         }
-                        Ok(PollResult::Pending) => continue,
-                        Err(_) => continue, // transient network error; keep polling
+                        Ok(PollResult::Pending) => {
+                            consecutive_errors = 0;
+                            continue;
+                        }
+                        Err(e) => {
+                            consecutive_errors += 1;
+                            if consecutive_errors >= 12 {
+                                // ~1 minute of unbroken failure.
+                                fail(&app, id, &format!("Lost contact while waiting for the result: {e}"));
+                                return;
+                            }
+                            continue;
+                        }
                     }
                 };
 
@@ -356,9 +527,13 @@ pub fn run_job(app: AppHandle, id: u64) {
                     },
                     _ => "txt",
                 };
-                let path = write_output(&job.output_dir, &job.file_name, ext, "", &text);
-                finish(&app, id, text, path);
-            }
+                if stale(&app) {
+                    return;
+                }
+                match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
+                    Ok(path) => finish(&app, id, text, Some(path)),
+                    Err(e) => fail(&app, id, &e),
+                }
         }
     });
 }

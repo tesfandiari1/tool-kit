@@ -1,0 +1,56 @@
+[package]
+name = "tool-kit-converter"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+axum = { version = "0.8.9", features = ["multipart"] }
+hex = "0.4.3"
+libc = { version = "0.2.189", default-features = false }
+pdf-inspector = { version = "=1.15.0", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+sqlx = { version = "0.9.0", default-features = false, features = [
+  "macros",
+  "migrate",
+  "runtime-tokio",
+  "sqlite",
+] }
+subtle = "2.6.1"
+tempfile = "3.27.0"
+time = { version = "0.3.55", features = ["formatting"] }
+tokio = { version = "1.53.1", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "net",
+  "process",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
+tokio-util = { version = "0.7.19", features = ["io"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = [
+  "env-filter",
+  "fmt",
+  "json",
+] }
+thiserror = "2.0.20"
+uuid = { version = "1.24.1", features = ["serde", "v4"] }
+zeroize = "1.9.0"
+
+[dev-dependencies]
+http-body-util = "0.1.5"
+serde_yaml_ng = "0.10.0"
+tower = { version = "0.5.3", features = ["util"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

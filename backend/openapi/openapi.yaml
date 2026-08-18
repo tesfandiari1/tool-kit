@@ -1,0 +1,705 @@
+openapi: 3.1.0
+info:
+  title: Tool-Kit Conversion Service
+  version: 0.2.0
+  description: >-
+    CPU-only M1 contract for ephemeral, authenticated clean-PDF conversion.
+    Jobs and idempotency records are process-local until the durable M2 model.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Loopback-only development
+paths:
+  /health/live:
+    get:
+      operationId: getLiveness
+      summary: Report whether the HTTP process is alive
+      responses:
+        "200":
+          $ref: "#/components/responses/Health"
+  /health/ready:
+    get:
+      operationId: getReadiness
+      summary: Report whether startup dependencies are ready
+      responses:
+        "200":
+          $ref: "#/components/responses/Health"
+  /api/v1/capabilities:
+    get:
+      operationId: getCapabilities
+      summary: Report only capabilities currently implemented
+      responses:
+        "200":
+          description: Current service capabilities
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilitiesEnvelope"
+  /api/v1/conversions:
+    post:
+      operationId: createConversion
+      summary: Stage a PDF and create an ephemeral asynchronous conversion
+      security:
+        - bootstrapBearer: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ConversionSubmission"
+            encoding:
+              source:
+                contentType: application/pdf
+      responses:
+        "202":
+          description: Upload completed and the conversion was accepted
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+            Location:
+              $ref: "#/components/headers/Location"
+            Retry-After:
+              $ref: "#/components/headers/RetryAfter"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /api/v1/conversions/{id}:
+    get:
+      operationId: getConversion
+      summary: Poll one ephemeral conversion
+      security:
+        - bootstrapBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ConversionId"
+      responses:
+        "200":
+          description: Current conversion state
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversions/{id}/artifacts:
+    get:
+      operationId: listConversionArtifacts
+      summary: List atomically published artifacts
+      security:
+        - bootstrapBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ConversionId"
+      responses:
+        "200":
+          description: Empty until publication; two entries after success
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactListEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversions/{id}/artifacts/markdown:
+    get:
+      operationId: downloadConversionMarkdown
+      summary: Stream the published Markdown artifact
+      security:
+        - bootstrapBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ConversionId"
+      responses:
+        "200":
+          description: Published Markdown
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+            ETag:
+              $ref: "#/components/headers/ArtifactEtag"
+          content:
+            text/markdown:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /api/v1/conversions/{id}/artifacts/manifest:
+    get:
+      operationId: downloadConversionManifest
+      summary: Stream the published provenance manifest
+      security:
+        - bootstrapBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ConversionId"
+      responses:
+        "200":
+          description: Versioned provenance manifest
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+            ETag:
+              $ref: "#/components/headers/ArtifactEtag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversionManifest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+components:
+  securitySchemes:
+    bootstrapBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: M1 bootstrap token loaded from a mounted secret file
+  parameters:
+    ConversionId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Process-local in M1; 1-128 URL-safe characters
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._~-]+$"
+  headers:
+    RequestId:
+      description: Server-generated correlation identifier
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Location:
+      description: Polling URL for the accepted conversion
+      required: true
+      schema:
+        type: string
+    RetryAfter:
+      description: Suggested polling delay in seconds
+      required: true
+      schema:
+        type: integer
+        const: 1
+    IdempotencyReplayed:
+      description: Whether this response reused a process-local idempotency record
+      required: true
+      schema:
+        type: boolean
+    ArtifactEtag:
+      description: Quoted SHA-256-backed artifact entity tag
+      required: true
+      schema:
+        type: string
+  responses:
+    Health:
+      description: Service health
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HealthResponse"
+    BadRequest:
+      $ref: "#/components/responses/Error400"
+    Unauthorized:
+      description: Missing or invalid bearer token
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+        WWW-Authenticate:
+          schema:
+            type: string
+            const: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RequestTimeout:
+      description: Upload deadline exceeded
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Conflict:
+      description: Idempotency, profile, or artifact-state conflict
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    PayloadTooLarge:
+      description: Upload exceeded configured byte limits
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    UnsupportedMediaType:
+      description: Source extension, declared media type, or PDF signature failed
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    UnprocessableEntity:
+      description: Multipart field semantics are invalid
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    TooManyRequests:
+      description: Ephemeral M1 job capacity reached
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: Conversion, artifact, or route not found
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    InternalError:
+      description: Safe internal failure without parser details
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Error400:
+      description: Malformed request
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service, serviceVersion]
+      properties:
+        status:
+          type: string
+        service:
+          type: string
+          const: tool-kit-converter
+        serviceVersion:
+          type: string
+    CapabilitiesEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [apiVersion, serviceVersion, conversion, remoteFallback]
+          properties:
+            apiVersion:
+              type: string
+              const: v1
+            serviceVersion:
+              type: string
+            conversion:
+              $ref: "#/components/schemas/ConversionCapabilities"
+            remoteFallback:
+              type: object
+              required: [provider, available]
+              properties:
+                provider:
+                  type: string
+                  const: datalab
+                available:
+                  type: boolean
+                  const: false
+    ConversionCapabilities:
+      type: object
+      required: [acceptingJobs, durability, inputFormats, outputFormats, profiles, engine, limits]
+      properties:
+        acceptingJobs:
+          type: boolean
+        durability:
+          type: string
+          const: ephemeral
+        inputFormats:
+          type: array
+          prefixItems:
+            - type: string
+              const: application/pdf
+          minItems: 1
+          maxItems: 1
+        outputFormats:
+          type: array
+          items:
+            type: string
+        profiles:
+          type: array
+          items:
+            type: object
+            required: [name, available]
+            properties:
+              name:
+                $ref: "#/components/schemas/ConversionProfile"
+              available:
+                type: boolean
+        engine:
+          type: object
+          required: [name, version]
+          properties:
+            name:
+              type: string
+              const: pdf-inspector
+            version:
+              type: string
+              const: 1.15.0
+        limits:
+          type: object
+          required: [maxUploadBytes, maxOutputBytes, maxEphemeralJobs, maxConcurrentUploads]
+          properties:
+            maxUploadBytes:
+              type: integer
+              minimum: 1
+            maxOutputBytes:
+              type: integer
+              minimum: 1
+            maxEphemeralJobs:
+              type: integer
+              minimum: 1
+            maxConcurrentUploads:
+              type: integer
+              minimum: 1
+    ConversionSubmission:
+      type: object
+      required: [source, clientRunId, profile]
+      additionalProperties: false
+      properties:
+        source:
+          type: string
+          format: binary
+        clientRunId:
+          type: string
+          format: uuid
+        profile:
+          $ref: "#/components/schemas/ConversionProfile"
+    ConversionProfile:
+      type: string
+      enum: [standard, local_only, best_quality]
+    JobEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/ConversionJob"
+    ConversionJob:
+      type: object
+      required:
+        - id
+        - activeAttemptId
+        - clientRunId
+        - profile
+        - status
+        - warnings
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        activeAttemptId:
+          type: string
+          format: uuid
+        clientRunId:
+          type: string
+          format: uuid
+        profile:
+          $ref: "#/components/schemas/ConversionProfile"
+        status:
+          type: string
+          enum: [queued, converting_local, finalizing, succeeded, failed, needs_remote]
+        route:
+          type: object
+          required: [kind, reasonCodes]
+          properties:
+            kind:
+              type: string
+              const: local_pdf
+            reasonCodes:
+              type: array
+              items:
+                type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        failure:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ArtifactListEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Artifact"
+    Artifact:
+      type: object
+      required: [kind, attemptId, mediaType, byteLength, sha256, href]
+      properties:
+        kind:
+          type: string
+          enum: [markdown, manifest]
+        attemptId:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+        byteLength:
+          type: integer
+          minimum: 1
+        sha256:
+          $ref: "#/components/schemas/Sha256"
+        href:
+          type: string
+    ConversionManifest:
+      type: object
+      required:
+        - schemaVersion
+        - jobId
+        - attemptId
+        - clientRunId
+        - profile
+        - source
+        - engine
+        - route
+        - document
+        - warnings
+        - output
+        - startedAt
+        - completedAt
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        jobId:
+          type: string
+          format: uuid
+        attemptId:
+          type: string
+          format: uuid
+        clientRunId:
+          type: string
+          format: uuid
+        profile:
+          $ref: "#/components/schemas/ConversionProfile"
+        source:
+          $ref: "#/components/schemas/ManifestArtifact"
+        engine:
+          type: object
+          required: [name, version, features]
+          properties:
+            name:
+              type: string
+              const: pdf-inspector
+            version:
+              type: string
+              const: 1.15.0
+            features:
+              type: array
+              maxItems: 0
+              items:
+                type: string
+        route:
+          type: object
+          required: [kind, reasonCodes]
+          properties:
+            kind:
+              type: string
+              const: local_pdf
+            reasonCodes:
+              type: array
+              prefixItems:
+                - type: string
+                  const: native_text_pdf
+              minItems: 1
+              maxItems: 1
+        document:
+          $ref: "#/components/schemas/Inspection"
+        warnings:
+          type: array
+          items:
+            type: string
+        output:
+          $ref: "#/components/schemas/ManifestArtifact"
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+    ManifestArtifact:
+      type: object
+      required: [mediaType, byteLength, sha256]
+      properties:
+        mediaType:
+          type: string
+        byteLength:
+          type: integer
+          minimum: 1
+        sha256:
+          $ref: "#/components/schemas/Sha256"
+    Inspection:
+      type: object
+      required:
+        - pdfType
+        - confidence
+        - pageCount
+        - pagesNeedingOcr
+        - ocrReasonsByPage
+        - hasEncodingIssues
+        - isComplex
+        - pagesWithTables
+        - pagesWithColumns
+        - processingTimeMs
+      properties:
+        pdfType:
+          type: string
+          const: text_based
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        pageCount:
+          type: integer
+          minimum: 1
+        pagesNeedingOcr:
+          type: array
+          maxItems: 0
+          items:
+            type: integer
+        ocrReasonsByPage:
+          type: array
+          items:
+            type: object
+        hasEncodingIssues:
+          type: boolean
+          const: false
+        isComplex:
+          type: boolean
+        pagesWithTables:
+          type: array
+          items:
+            type: integer
+        pagesWithColumns:
+          type: array
+          items:
+            type: integer
+        processingTimeMs:
+          type: integer
+          minimum: 0
+    Sha256:
+      type: string
+      pattern: "^[a-f0-9]{64}$"
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId, details]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            requestId:
+              type: string
+              format: uuid
+            details:
+              type: array
+              maxItems: 0
+              items:
+                type: object

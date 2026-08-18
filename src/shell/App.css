@@ -1,0 +1,520 @@
+/* ===========================================================================
+   Tool-Kit — application styles
+
+   The design system now lives in `src/ui`. This file no longer defines a
+   palette, a type ramp, or a reset: it imports them, and styles the app's own
+   composites on top.
+
+   There is deliberately no `@import "./ui/base.css"` here. `@ui/index.ts`
+   already loads it, and importing it from both places made Vite emit the whole
+   16KB token layer into two separate chunks with two competing `:root` blocks.
+
+   That makes this file depend on load order: App.tsx imports `@ui` before
+   `./App.css`, so the library's `:root` lands first and the bridge below can
+   alias it. Keep that order.
+   =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+   Bridge: the app's older token names, re-pointed at the library.
+
+   These are aliases, not values. Nothing here invents a colour. The names
+   survive so that ~800 lines of working component CSS did not have to be
+   rewritten in the same change that swapped the palette, which would have made
+   a visual regression impossible to attribute.
+
+   This layer is transitional. Every component that moves to an `@ui` primitive
+   drops rules from this file, and the day the last one goes, so does this
+   block. Do not add new names to it.
+   --------------------------------------------------------------------------- */
+:root {
+  --panel: var(--surface);
+  --panel-hi: var(--surface-raised);
+  --well: var(--surface-well);
+  --ghost: var(--ink-ghost);
+
+  --sans: var(--font-body);
+  --mono: var(--font-mono);
+
+  --r-sm: var(--r-control);
+  --r-md: var(--r-panel);
+}
+
+/* macOS dims an inactive window's accents. Mirror that: everything cools to
+   graphite. Live indicators and the primary action are deliberately absent
+   here — `--live` and `--accent` are never dimmed, which is what keeps a
+   background run readable from across the desk and stops the Run button from
+   reading as disabled. */
+body.inactive {
+  --ink: var(--warm-300);
+  --ink-2: var(--warm-500);
+  --ink-3: var(--warm-600);
+  --rule: #ecebe514;
+}
+/* The exceptions to inactive dimming (the primary action, and live run
+   indicators) now live with the components that need them, in Button.css,
+   Meter.css, and Badge.css. Nothing to restate here: `--live` and `--accent`
+   are deliberately not dimmed above, so those components stay lit on their
+   own. */
+
+/* Icons are glyphs, never coloured badges. Sized here because the icon set is
+   the app's choice, not the design system's. */
+svg {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+/* Every number can tick; none of them may shift the layout. Only this one is
+   listed: `.input-name`, `.job-name`, and `.job-time` render through `Mono`,
+   which already sets tabular numerals. */
+.folder-path {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The last app-level survivor of the mono label treatment. Every other button
+   and heading now gets it from `Button`, `Label`, or `Segmented`; this one
+   sits inside the folder picker, which is still an app composite. */
+.folder-action {
+  font-family: var(--font-mono);
+  font-size: var(--t-label);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* --- Title bar ------------------------------------------------------------
+   Traffic lights are drawn over this strip by the system, so the row is inset
+   past them. Dragging comes from `data-tauri-drag-region` on the element, not
+   from CSS: WebKit has no -webkit-app-region, so that Chromium property is
+   silently inert here.
+
+   Deliberately full-width (no max-width/auto-margin like .flow): the traffic
+   lights sit at a fixed window offset, so a centred bar would drift out of
+   alignment with them and leave dead, undraggable strips at either side as
+   the window widens. */
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4) var(--s2) 82px;
+  width: 100%;
+  flex-shrink: 0;
+}
+/* Layout only. The name itself is a <Display>, which is the one place in the
+   chrome the serif earns its keep. */
+.bar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+/* The mark is a monochrome glyph, not a coloured badge: amber is reserved
+   for reporting state. */
+.bar-brand .mark {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  color: var(--ink-3);
+}
+.bar-brand .mark svg {
+  font-size: 15px;
+}
+
+.bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* --- Vertical flow -------------------------------------------------------- */
+.flow {
+  flex: 1;
+  overflow-y: auto;
+  width: 100%;
+  max-width: 620px;
+  margin: 0 auto;
+  padding: var(--s1) var(--s4) var(--s5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+/* --- Folder picker -------------------------------------------------------- */
+.folder {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  padding: 9px var(--s3);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  color: var(--ink-3);
+  text-align: left;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.folder:hover {
+  border-color: var(--rule-lit);
+  background: var(--panel-hi);
+}
+.folder.set {
+  color: var(--ink);
+}
+.folder > svg {
+  color: var(--ink-3);
+}
+.folder-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.folder-action {
+  color: var(--ink-3);
+  flex-shrink: 0;
+}
+
+/* --- Blocking hint --------------------------------------------------------
+   Deliberately NOT a <Button>. Every Button wears the mono uppercase label
+   treatment with `white-space: nowrap`, which is right for "SAVE" and wrong
+   for a full sentence: it clipped this text against the 620px column with no
+   way to scroll to the start. This is prose you can click, so it takes body
+   type and wraps. The warning glyph carries the caution; the accent says it
+   is actionable. */
+.hint {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-quiet);
+  font-family: var(--font-body);
+  font-size: var(--t-xs);
+  line-height: var(--lh-snug);
+  text-align: left;
+  white-space: normal;
+}
+.hint:hover {
+  color: var(--accent-hover);
+}
+.hint svg {
+  font-size: 13px;
+  margin-top: 1px;
+}
+
+/* --- Input well ----------------------------------------------------------- */
+.inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 76px;
+  padding: var(--s1);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  background: var(--well);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+/* Drag-over is an affordance, not a running job, so it takes the action
+   colour. */
+.inputs.dragging {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 14%, var(--well));
+}
+.inputs-empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: var(--s4) var(--s2);
+  text-align: center;
+  font-size: 12px;
+  color: var(--ghost);
+  line-height: 1.5;
+}
+.input-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 26px;
+  padding: 0 var(--s2);
+  border-radius: var(--r-sm);
+}
+.input-item:hover {
+  background: var(--panel);
+}
+.input-item > svg {
+  color: var(--ink-3);
+  font-size: 14px;
+}
+.input-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+.input-x {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ghost);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.input-item:hover .input-x,
+.input-x:focus-visible {
+  opacity: 1;
+}
+.input-x:hover {
+  background: var(--panel-hi);
+  color: var(--ink);
+}
+.input-x svg {
+  font-size: 12px;
+}
+
+/* --- Results log ---------------------------------------------------------- */
+.results {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--rule);
+  padding-top: var(--s3);
+}
+.results-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--ink-3);
+  padding: 0 var(--s2) var(--s2);
+}
+
+.job {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 30px;
+  padding: 0 var(--s2);
+  border-radius: var(--r-sm);
+}
+.job:hover {
+  background: var(--panel);
+}
+/* One-shot flash when a row lands, so a finish is visible even if you were
+   looking somewhere else a second ago. */
+.job.done {
+  animation: settle 900ms ease-out;
+}
+/* Green, not amber: the flash announces a row that just *finished*, so tinting
+   it with the live colour would contradict the state the row has moved to. */
+@keyframes settle {
+  from {
+    background: color-mix(in oklch, var(--pass) 18%, transparent);
+  }
+  to {
+    background: transparent;
+  }
+}
+.job-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+}
+.job-name {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
+/* No `color` here. The tone comes from <Text tone=…>, and because this file
+   loads after the library a colour set here would beat it — which silently
+   turned every failed job's error message grey. Layout only. */
+.job-sub {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 100;
+  min-width: 0;
+}
+.job-time {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  flex-shrink: 0;
+}
+/* Actions occupy their slot always, so revealing them never shifts the row. */
+.job-actions {
+  display: flex;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.job:hover .job-actions,
+.job-actions:focus-within {
+  opacity: 1;
+}
+
+.hist-list {
+  display: flex;
+  flex-direction: column;
+}
+.hist-empty {
+  display: grid;
+  place-items: center;
+  padding: var(--s5) var(--s4);
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ghost);
+}
+/* The preview is the one place the app is a reading surface, so it gets prose
+   type and a real measure instead of the log's monospace. */
+.preview-body {
+  margin: 0;
+  padding: var(--s5);
+  overflow: auto;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.62;
+  word-break: break-word;
+  color: var(--ink-2);
+  -webkit-user-select: text;
+  user-select: text;
+}
+.md h1,
+.md h2,
+.md h3 {
+  color: var(--ink);
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 1.15em 0 0.4em;
+}
+.md h1 { font-size: 1.28em; }
+.md h2 { font-size: 1.12em; }
+.md h3 { font-size: 1em; }
+.md p,
+.md ul,
+.md ol,
+.md blockquote {
+  margin: 0 0 0.8em;
+}
+.md ul,
+.md ol {
+  padding-left: 1.2em;
+}
+.md a {
+  color: var(--ink);
+  text-decoration: underline;
+}
+.md code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+}
+.md pre {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow: auto;
+  padding: var(--s3);
+  margin: 0 0 0.8em;
+  background: var(--panel-hi);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-sm);
+}
+.md pre code {
+  font-size: inherit;
+}
+.md table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+  margin: 0 0 0.8em;
+}
+.md th,
+.md td {
+  border-bottom: 1px solid var(--rule);
+  padding: 4px 8px;
+  text-align: left;
+}
+
+/* --- Toast ---------------------------------------------------------------- */
+.toast {
+  position: fixed;
+  bottom: var(--s5);
+  left: 50%;
+  transform: translateX(-50%);
+  background: color-mix(in srgb, var(--warm-800) 95%, transparent);
+  border: 1px solid var(--rule-lit);
+  color: var(--ink);
+  padding: 8px 14px;
+  border-radius: var(--r-md);
+  font-size: 12px;
+  max-width: min(460px, calc(100% - 40px));
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--warm-950) 55%, transparent);
+  z-index: 60;
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Overlay scrollbars, the way macOS draws them. */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border-radius: 99px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-3);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Suppress the app's own motion only. The design system replaces its
+   animations with deliberate reduced-motion substitutes (Meter breathes
+   instead of sweeping, the live dot takes a static ring); a blanket
+   `animation: none !important` here killed those too, leaving a reduced-motion
+   user with a full-width bar indistinguishable from 100% complete. */
+@media (prefers-reduced-motion: reduce) {
+  .spin,
+  .job.done {
+    animation: none;
+  }
+  .folder,
+  .inputs,
+  .input-x,
+  .job-actions {
+    transition: none;
+  }
+}

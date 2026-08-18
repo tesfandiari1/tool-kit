@@ -1,0 +1,131 @@
+/* Typography primitives. Each family has exactly one job here. */
+
+/* --- Label ---------------------------------------------------------------
+   The signature of the design language: mono, uppercase, widely tracked. Used
+   for every section heading, tab, field label, and button. If you remember one
+   rule from this system, it is that labels look like this. */
+.ui-label {
+  font-family: var(--font-mono);
+  font-size: var(--t-label);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  line-height: var(--lh-tight);
+  color: var(--ink-3);
+  margin: 0;
+}
+
+.ui-label--strong {
+  color: var(--ink-2);
+}
+.ui-label--accent {
+  color: var(--accent-quiet);
+}
+.ui-label--live {
+  color: var(--live);
+}
+.ui-label--fault {
+  color: var(--fault);
+}
+
+/* --- Display -------------------------------------------------------------
+   Instrument Serif, set tight. Panel titles and headline numbers only. Never
+   below --t-lg: this face is drawn for size and muddies at UI scale. */
+.ui-display {
+  font-family: var(--font-display);
+  font-weight: var(--weight-normal);
+  letter-spacing: var(--track-display);
+  line-height: var(--lh-tight);
+  color: var(--ink);
+  margin: 0;
+}
+
+.ui-display--lg {
+  font-size: var(--t-xl);
+}
+.ui-display--xl {
+  font-size: var(--t-2xl);
+}
+.ui-display--2xl {
+  font-size: var(--t-3xl);
+}
+.ui-display--3xl {
+  font-size: var(--t-4xl);
+}
+
+/* --- Text ----------------------------------------------------------------
+   SF Pro. All prose. */
+.ui-text {
+  font-family: var(--font-body);
+  line-height: var(--lh-body);
+  color: var(--ink);
+  margin: 0;
+}
+
+.ui-text--xs {
+  font-size: var(--t-xs);
+}
+.ui-text--sm {
+  font-size: var(--t-sm);
+}
+.ui-text--base {
+  font-size: var(--t-base);
+}
+.ui-text--lg {
+  font-size: var(--t-lg);
+  line-height: var(--lh-snug);
+}
+
+.ui-text--muted {
+  color: var(--ink-2);
+}
+.ui-text--faint {
+  color: var(--ink-3);
+}
+/* Values hold their slot as dim glyphs and brighten when they carry meaning,
+   so the window never reflows while jobs finish out of order. */
+.ui-text--ghost {
+  color: var(--ink-ghost);
+}
+.ui-text--pass {
+  color: var(--pass);
+}
+.ui-text--fault {
+  color: var(--fault);
+}
+
+/* --- Mono ----------------------------------------------------------------
+   Paths, counts, timers, identifiers. Anything the eye scans in a column. */
+.ui-mono {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  letter-spacing: var(--track-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+  margin: 0;
+}
+
+.ui-mono--xs {
+  font-size: var(--t-xs);
+}
+.ui-mono--sm {
+  font-size: var(--t-sm);
+}
+.ui-mono--base {
+  font-size: var(--t-base);
+}
+
+.ui-mono--ink {
+  color: var(--ink);
+}
+.ui-mono--ghost {
+  color: var(--ink-ghost);
+}
+
+/* Middle-truncate a path: keep the filename, drop the middle of the folders. */
+.ui-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}

@@ -24,7 +24,7 @@ async fn datalab_convert_live() {
     let path = env_or("TEST_PDF", "/tmp/toolkit-test/sample.pdf");
     let client = reqwest::Client::new();
 
-    let submitted = providers::datalab_submit(&client, &key, &path, "markdown")
+    let submitted = providers::datalab_submit(&client, &key, &path, "markdown", true)
         .await
         .expect("datalab submit");
     let check_url = submitted
