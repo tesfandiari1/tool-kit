@@ -281,6 +281,21 @@ impl JobManager {
         Some(job.clone())
     }
 
+    fn update_if_generation<F: FnOnce(&mut Job)>(
+        &self,
+        id: u64,
+        expected_generation: u64,
+        f: F,
+    ) -> Option<Job> {
+        let mut jobs = self.jobs.lock().unwrap();
+        if self.generation() != expected_generation {
+            return None;
+        }
+        let job = jobs.iter_mut().find(|job| job.id == id)?;
+        f(job);
+        Some(job.clone())
+    }
+
     /// Retire every in-flight task and return the new generation.
     pub fn new_generation(&self) -> u64 {
         self.generation.fetch_add(1, Ordering::SeqCst) + 1
@@ -360,6 +375,20 @@ fn set_status(app: &AppHandle, id: u64, status: &str, note: &str) {
     }
 }
 
+fn set_backend_status(app: &AppHandle, id: u64, generation: u64, status: &str, note: &str) -> bool {
+    let Some(job) = app
+        .state::<JobManager>()
+        .update_if_generation(id, generation, |job| {
+            job.status = status.to_string();
+            job.progress_note = note.to_string();
+        })
+    else {
+        return false;
+    };
+    emit(app, job);
+    true
+}
+
 fn fail(app: &AppHandle, id: u64, err: &str) {
     if let Some(job) = app.state::<JobManager>().update(id, |j| {
         j.status = "failed".to_string();
@@ -384,54 +413,76 @@ fn finish(app: &AppHandle, id: u64, text: String, output_path: Option<String>) {
     }
 }
 
-fn apply_backend_view(app: &AppHandle, id: u64, view: &ConversionJob) {
-    if let Some(updated) = app.state::<JobManager>().update(id, |job| {
-        job.route = view.route.as_ref().map(|route| route.kind.clone());
-        job.reason_codes = view
-            .route
-            .as_ref()
-            .map(|route| route.reason_codes.clone())
-            .unwrap_or_default();
-        job.warnings = view.warnings.clone();
-        job.failure = view.failure.clone();
-    }) {
-        emit(app, updated);
-    }
+fn apply_backend_view(app: &AppHandle, id: u64, generation: u64, view: &ConversionJob) -> bool {
+    let Some(updated) = app
+        .state::<JobManager>()
+        .update_if_generation(id, generation, |job| {
+            job.route = view.route.as_ref().map(|route| route.kind.clone());
+            job.reason_codes = view
+                .route
+                .as_ref()
+                .map(|route| route.reason_codes.clone())
+                .unwrap_or_default();
+            job.warnings = view.warnings.clone();
+            job.failure = view.failure.clone();
+        })
+    else {
+        return false;
+    };
+    emit(app, updated);
+    true
 }
 
-fn fail_backend_retryable(app: &AppHandle, id: u64, err: &str) {
-    if let Some(job) = app.state::<JobManager>().update(id, |job| {
-        job.status = "failed".into();
-        job.progress_note = "Retry to continue this conversion".into();
-        job.error = Some(err.to_string());
-    }) {
+fn fail_backend_retryable(app: &AppHandle, id: u64, generation: u64, err: &str) {
+    if let Some(job) = app
+        .state::<JobManager>()
+        .update_if_generation(id, generation, |job| {
+            job.status = "failed".into();
+            job.progress_note = "Retry to continue this conversion".into();
+            job.error = Some(err.to_string());
+        })
+    {
         emit(app, job);
     }
 }
 
-fn fail_backend_terminal(app: &AppHandle, id: u64, err: &str) {
-    if let Some(job) = app.state::<JobManager>().get(id) {
+fn fail_backend_terminal(app: &AppHandle, id: u64, generation: u64, err: &str) {
+    if let Some(job) = app
+        .state::<JobManager>()
+        .update_if_generation(id, generation, |job| {
+            job.status = "failed".into();
+            job.progress_note.clear();
+            job.error = Some(err.to_string());
+        })
+    {
         if let Some(backend) = &job.backend {
             history::delete_in_flight(app, &backend.idempotency_key);
         }
+        log_history(app, &job, "failed", Some(err));
+        emit(app, job);
     }
-    fail(app, id, err);
 }
 
-fn finish_backend(app: &AppHandle, id: u64, output_path: String) {
-    if let Some(job) = app.state::<JobManager>().update(id, |job| {
-        job.status = "done".into();
-        job.progress_note.clear();
-        job.output_text = None;
-        job.output_path = Some(output_path);
-        job.error = None;
-        job.failure = None;
-    }) {
+fn finish_backend(app: &AppHandle, id: u64, generation: u64, output_path: String) {
+    let cleanup_path = output_path.clone();
+    if let Some(job) = app
+        .state::<JobManager>()
+        .update_if_generation(id, generation, |job| {
+            job.status = "done".into();
+            job.progress_note.clear();
+            job.output_text = None;
+            job.output_path = Some(output_path);
+            job.error = None;
+            job.failure = None;
+        })
+    {
         if let Some(backend) = &job.backend {
             history::delete_in_flight(app, &backend.idempotency_key);
         }
         log_history(app, &job, "done", None);
         emit(app, job);
+    } else {
+        let _ = std::fs::remove_file(cleanup_path);
     }
 }
 
@@ -590,17 +641,21 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         return;
     }
     let Ok(_permit) = permit else {
-        fail_backend_retryable(&app, id, "The conversion queue is unavailable");
+        fail_backend_retryable(&app, id, generation, "The conversion queue is unavailable");
         return;
     };
-    if let Some(updated) = app.state::<JobManager>().update(id, |current| {
-        current.started_at = Some(now_secs());
-    }) {
-        emit(&app, updated);
-    }
+    let Some(updated) = app
+        .state::<JobManager>()
+        .update_if_generation(id, generation, |current| {
+            current.started_at = Some(now_secs());
+        })
+    else {
+        return;
+    };
+    emit(&app, updated);
 
     if let Some(error) = &backend.recovery_blocker {
-        fail_backend_retryable(&app, id, error);
+        fail_backend_retryable(&app, id, generation, error);
         return;
     }
     if backend.backend_job_id.is_none()
@@ -610,6 +665,7 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         fail_backend_retryable(
             &app,
             id,
+            generation,
             "The source changed after this conversion was queued; stop it before starting a new conversion",
         );
         return;
@@ -626,6 +682,7 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
             fail_backend_retryable(
                 &app,
                 id,
+                generation,
                 "Backend token is unavailable. Add it in Settings, then retry.",
             );
             return;
@@ -633,8 +690,7 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
     };
 
     let mut view = if let Some(backend_job_id) = backend.backend_job_id.clone() {
-        set_status(&app, id, "processing", "Resuming conversion…");
-        if stale(&app) {
+        if !set_backend_status(&app, id, generation, "processing", "Resuming conversion…") {
             return;
         }
         let result =
@@ -646,13 +702,18 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         match result {
             Ok(view) => view,
             Err(error) => {
-                fail_backend_retryable(&app, id, &error);
+                fail_backend_retryable(&app, id, generation, &error);
                 return;
             }
         }
     } else {
-        set_status(&app, id, "working", "Uploading to conversion service…");
-        if stale(&app) {
+        if !set_backend_status(
+            &app,
+            id,
+            generation,
+            "working",
+            "Uploading to conversion service…",
+        ) {
             return;
         }
         let result = conversion_service::submit_conversion(
@@ -670,16 +731,21 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         match result {
             Ok(view) => {
                 backend.backend_job_id = Some(view.id.clone());
+                let Some(_updated) =
+                    app.state::<JobManager>()
+                        .update_if_generation(id, generation, |current| {
+                            if let Some(context) = &mut current.backend {
+                                context.backend_job_id = Some(view.id.clone());
+                            }
+                        })
+                else {
+                    return;
+                };
                 history::attach_backend_job(&app, &backend.idempotency_key, &view.id);
-                app.state::<JobManager>().update(id, |current| {
-                    if let Some(context) = &mut current.backend {
-                        context.backend_job_id = Some(view.id.clone());
-                    }
-                });
                 view
             }
             Err(error) => {
-                fail_backend_retryable(&app, id, &error);
+                fail_backend_retryable(&app, id, generation, &error);
                 return;
             }
         }
@@ -691,11 +757,12 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         if stale(&app) {
             return;
         }
-        apply_backend_view(&app, id, &view);
+        if !apply_backend_view(&app, id, generation, &view) {
+            return;
+        }
         match backend_action(&view) {
             BackendAction::Succeeded => {
-                set_status(&app, id, "processing", "Saving Markdown…");
-                if stale(&app) {
+                if !set_backend_status(&app, id, generation, "processing", "Saving Markdown…") {
                     return;
                 }
                 let output = conversion_service::download_markdown(
@@ -714,13 +781,13 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                     return;
                 };
                 match output {
-                    Ok(path) => finish_backend(&app, id, path),
-                    Err(error) => fail_backend_retryable(&app, id, &error),
+                    Ok(path) => finish_backend(&app, id, generation, path),
+                    Err(error) => fail_backend_retryable(&app, id, generation, &error),
                 }
                 return;
             }
             BackendAction::Failed(error) => {
-                fail_backend_terminal(&app, id, &error);
+                fail_backend_terminal(&app, id, generation, &error);
                 return;
             }
             BackendAction::NeedsRemote => {
@@ -728,25 +795,41 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                     fail_backend_terminal(
                         &app,
                         id,
+                        generation,
                         "Local-only conversion could not finish locally. Choose Standard to allow Datalab fallback.",
                     );
                     return;
                 }
-                app.state::<JobManager>().update(id, |current| {
-                    current.service = "Datalab fallback".into();
-                    if let Some(context) = &mut current.backend {
-                        context.phase = BackendPhase::DatalabFallback;
-                    }
-                });
+                if app
+                    .state::<JobManager>()
+                    .update_if_generation(id, generation, |current| {
+                        current.service = "Datalab fallback".into();
+                        if let Some(context) = &mut current.backend {
+                            context.phase = BackendPhase::DatalabFallback;
+                        }
+                    })
+                    .is_none()
+                {
+                    return;
+                }
                 run_datalab_fallback(&app, id, generation, &job).await;
                 return;
             }
-            BackendAction::Pending(note) => set_status(&app, id, "processing", note),
+            BackendAction::Pending(note) => {
+                if !set_backend_status(&app, id, generation, "processing", note) {
+                    return;
+                }
+            }
         }
 
         polls += 1;
         if polls > BACKEND_MAX_POLLS {
-            fail_backend_retryable(&app, id, "Timed out waiting for the conversion service");
+            fail_backend_retryable(
+                &app,
+                id,
+                generation,
+                "Timed out waiting for the conversion service",
+            );
             return;
         }
         tokio::time::sleep(BACKEND_POLL_INTERVAL).await;
@@ -754,7 +837,12 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
             return;
         }
         let Some(backend_job_id) = backend.backend_job_id.as_deref() else {
-            fail_backend_retryable(&app, id, "Conversion service returned no job id");
+            fail_backend_retryable(
+                &app,
+                id,
+                generation,
+                "Conversion service returned no job id",
+            );
             return;
         };
         let result =
@@ -773,6 +861,7 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                     fail_backend_retryable(
                         &app,
                         id,
+                        generation,
                         &format!("Lost contact with the conversion service: {error}"),
                     );
                     return;
@@ -793,6 +882,7 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
             fail_backend_retryable(
                 app,
                 id,
+                generation,
                 "Datalab fallback is required. Add its API key in Settings, then retry.",
             );
             return;
@@ -812,8 +902,13 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
     if stale(app) {
         return;
     }
-    set_status(app, id, "working", "Uploading to Datalab fallback…");
-    if stale(app) {
+    if !set_backend_status(
+        app,
+        id,
+        generation,
+        "working",
+        "Uploading to Datalab fallback…",
+    ) {
         return;
     }
     let submitted = match pipeline {
@@ -844,7 +939,7 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
     let submitted = match submitted {
         Ok(value) => value,
         Err(error) => {
-            fail_backend_retryable(app, id, &error);
+            fail_backend_retryable(app, id, generation, &error);
             return;
         }
     };
@@ -854,14 +949,27 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
             submitted.remote_id
         )
     });
-    set_status(app, id, "processing", "Processing with Datalab fallback…");
+    if !set_backend_status(
+        app,
+        id,
+        generation,
+        "processing",
+        "Processing with Datalab fallback…",
+    ) {
+        return;
+    }
 
     let mut attempts = 0u32;
     let mut consecutive_errors = 0u32;
     let text = loop {
         attempts += 1;
         if attempts > BACKEND_MAX_POLLS {
-            fail_backend_retryable(app, id, "Timed out waiting for Datalab fallback");
+            fail_backend_retryable(
+                app,
+                id,
+                generation,
+                "Timed out waiting for Datalab fallback",
+            );
             return;
         }
         tokio::time::sleep(BACKEND_POLL_INTERVAL).await;
@@ -882,7 +990,7 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
         match result {
             Ok(PollResult::Done(text)) => break text,
             Ok(PollResult::Failed(error)) => {
-                fail_backend_retryable(app, id, &error);
+                fail_backend_retryable(app, id, generation, &error);
                 return;
             }
             Ok(PollResult::Pending) => consecutive_errors = 0,
@@ -892,6 +1000,7 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
                     fail_backend_retryable(
                         app,
                         id,
+                        generation,
                         &format!("Lost contact with Datalab fallback: {error}"),
                     );
                     return;
@@ -921,8 +1030,8 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
         return;
     };
     match output {
-        Ok(path) => finish_backend(app, id, path),
-        Err(error) => fail_backend_retryable(app, id, &error),
+        Ok(path) => finish_backend(app, id, generation, path),
+        Err(error) => fail_backend_retryable(app, id, generation, &error),
     }
 }
 
@@ -1200,7 +1309,7 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
 
         if let Some(error) = recovery_error {
             history::delete_in_flight(&app, &durable_key);
-            fail_backend_retryable(&app, id, &error);
+            fail_backend_retryable(&app, id, generation, &error);
         } else {
             run_job(app.clone(), id, generation);
         }
@@ -1291,6 +1400,40 @@ mod backend_tests {
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_generation_cannot_mutate_a_stopped_job() {
+        let manager = JobManager::default();
+        manager.insert(Job::new(
+            1,
+            "/tmp/report.pdf".into(),
+            "/tmp".into(),
+            JobType::Convert,
+        ));
+        let task_generation = manager.generation();
+
+        assert!(manager
+            .update_if_generation(1, task_generation, |job| {
+                job.status = "working".into();
+            })
+            .is_some());
+
+        manager.new_generation();
+        manager.update(1, |job| {
+            job.status = "failed".into();
+            job.error = Some("Stopped".into());
+        });
+
+        assert!(manager
+            .update_if_generation(1, task_generation, |job| {
+                job.status = "done".into();
+                job.error = None;
+            })
+            .is_none());
+        let stopped = manager.get(1).unwrap();
+        assert_eq!(stopped.status, "failed");
+        assert_eq!(stopped.error.as_deref(), Some("Stopped"));
     }
 
     #[test]
