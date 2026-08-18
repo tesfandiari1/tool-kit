@@ -435,6 +435,23 @@ fn finish_backend(app: &AppHandle, id: u64, output_path: String) {
     }
 }
 
+/// A backend download or fallback write creates its collision-safe file before
+/// control returns to the job task. If Stop retired the task meanwhile, remove
+/// exactly that newly-created path and leave the stopped row untouched.
+fn completed_output_if_current(
+    current_generation: u64,
+    expected_generation: u64,
+    output: Result<String, String>,
+) -> Option<Result<String, String>> {
+    if current_generation == expected_generation {
+        return Some(output);
+    }
+    if let Ok(path) = output {
+        let _ = std::fs::remove_file(path);
+    }
+    None
+}
+
 /// Write `text` into the job's output folder without clobbering an existing
 /// file. Uses `create_new` so two concurrent jobs whose sources share a
 /// basename can't both win the same candidate name and overwrite each other.
@@ -568,13 +585,14 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
     };
 
     let sem = app.state::<JobManager>().semaphore();
-    let Ok(_permit) = sem.acquire_owned().await else {
-        fail_backend_retryable(&app, id, "The conversion queue is unavailable");
-        return;
-    };
+    let permit = sem.acquire_owned().await;
     if stale(&app) {
         return;
     }
+    let Ok(_permit) = permit else {
+        fail_backend_retryable(&app, id, "The conversion queue is unavailable");
+        return;
+    };
     if let Some(updated) = app.state::<JobManager>().update(id, |current| {
         current.started_at = Some(now_secs());
     }) {
@@ -616,9 +634,16 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
 
     let mut view = if let Some(backend_job_id) = backend.backend_job_id.clone() {
         set_status(&app, id, "processing", "Resuming conversion…");
-        match conversion_service::poll_conversion(&backend.backend_url, &token, &backend_job_id)
-            .await
-        {
+        if stale(&app) {
+            return;
+        }
+        let result =
+            conversion_service::poll_conversion(&backend.backend_url, &token, &backend_job_id)
+                .await;
+        if stale(&app) {
+            return;
+        }
+        match result {
             Ok(view) => view,
             Err(error) => {
                 fail_backend_retryable(&app, id, &error);
@@ -627,7 +652,10 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         }
     } else {
         set_status(&app, id, "working", "Uploading to conversion service…");
-        match conversion_service::submit_conversion(
+        if stale(&app) {
+            return;
+        }
+        let result = conversion_service::submit_conversion(
             &backend.backend_url,
             &token,
             &job.source_path,
@@ -635,8 +663,11 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
             backend.profile.id(),
             &backend.idempotency_key,
         )
-        .await
-        {
+        .await;
+        if stale(&app) {
+            return;
+        }
+        match result {
             Ok(view) => {
                 backend.backend_job_id = Some(view.id.clone());
                 history::attach_backend_job(&app, &backend.idempotency_key, &view.id);
@@ -664,15 +695,25 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         match backend_action(&view) {
             BackendAction::Succeeded => {
                 set_status(&app, id, "processing", "Saving Markdown…");
-                match conversion_service::download_markdown(
+                if stale(&app) {
+                    return;
+                }
+                let output = conversion_service::download_markdown(
                     &backend.backend_url,
                     &token,
                     &view.id,
                     &job.output_dir,
                     &job.file_name,
                 )
-                .await
-                {
+                .await;
+                let Some(output) = completed_output_if_current(
+                    app.state::<JobManager>().generation(),
+                    generation,
+                    output,
+                ) else {
+                    return;
+                };
+                match output {
                     Ok(path) => finish_backend(&app, id, path),
                     Err(error) => fail_backend_retryable(&app, id, &error),
                 }
@@ -716,9 +757,12 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
             fail_backend_retryable(&app, id, "Conversion service returned no job id");
             return;
         };
-        match conversion_service::poll_conversion(&backend.backend_url, &token, backend_job_id)
-            .await
-        {
+        let result =
+            conversion_service::poll_conversion(&backend.backend_url, &token, backend_job_id).await;
+        if stale(&app) {
+            return;
+        }
+        match result {
             Ok(polled) => {
                 consecutive_errors = 0;
                 view = polled;
@@ -740,6 +784,9 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
 
 async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, original: &Job) {
     let stale = |app: &AppHandle| app.state::<JobManager>().generation() != generation;
+    if stale(app) {
+        return;
+    }
     let api_key = match secrets::get_key("datalab") {
         Some(key) if !key.trim().is_empty() => key,
         _ => {
@@ -762,7 +809,13 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
+    if stale(app) {
+        return;
+    }
     set_status(app, id, "working", "Uploading to Datalab fallback…");
+    if stale(app) {
+        return;
+    }
     let submitted = match pipeline {
         Some(pipeline_id) => {
             providers::datalab_pipeline_submit(
@@ -785,6 +838,9 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
             .await
         }
     };
+    if stale(app) {
+        return;
+    }
     let submitted = match submitted {
         Ok(value) => value,
         Err(error) => {
@@ -820,6 +876,9 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
                 providers::datalab_poll(&client, &api_key, &check_url, &cfg.datalab_format).await
             }
         };
+        if stale(app) {
+            return;
+        }
         match result {
             Ok(PollResult::Done(text)) => break text,
             Ok(PollResult::Failed(error)) => {
@@ -846,13 +905,22 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
         "json" | "chunks" => "json",
         _ => "md",
     };
-    match write_output(
+    if stale(app) {
+        return;
+    }
+    let output = write_output(
         &original.output_dir,
         &original.file_name,
         extension,
         "",
         &text,
-    ) {
+    );
+    let Some(output) =
+        completed_output_if_current(app.state::<JobManager>().generation(), generation, output)
+    else {
+        return;
+    };
+    match output {
         Ok(path) => finish_backend(app, id, path),
         Err(error) => fail_backend_retryable(app, id, &error),
     }
@@ -1187,6 +1255,42 @@ mod backend_tests {
             needs_remote_decision(settings::ConversionProfile::LocalOnly),
             NeedsRemoteDecision::RejectLocalOnly
         );
+    }
+
+    #[test]
+    fn stale_completed_output_removes_only_the_new_collision_safe_path() {
+        let root = std::env::temp_dir().join(format!(
+            "tool-kit-stale-backend-output-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let existing = root.join("report.md");
+        let created = root.join("report (1).md");
+        std::fs::write(&existing, b"existing").unwrap();
+        std::fs::write(&created, b"new").unwrap();
+
+        assert_eq!(
+            completed_output_if_current(2, 1, Ok(created.to_string_lossy().into_owned())),
+            None
+        );
+        assert!(!created.exists());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"existing");
+
+        let current = root.join("report (2).md");
+        std::fs::write(&current, b"current").unwrap();
+        let current_path = current.to_string_lossy().into_owned();
+        assert_eq!(
+            completed_output_if_current(2, 2, Ok(current_path.clone())),
+            Some(Ok(current_path))
+        );
+        assert!(current.exists());
+        assert_eq!(
+            completed_output_if_current(2, 1, Err("stale network error".into())),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
