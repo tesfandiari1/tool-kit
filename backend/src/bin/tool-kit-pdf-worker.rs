@@ -165,7 +165,7 @@ fn process_private_source(
         use std::os::fd::AsRawFd;
 
         let source_path = PathBuf::from(format!("/proc/self/fd/{}", source.as_raw_fd()));
-        return Ok(process_pdf_with_options(source_path, options));
+        Ok(process_pdf_with_options(source_path, options))
     }
 
     #[cfg(not(target_os = "linux"))]
