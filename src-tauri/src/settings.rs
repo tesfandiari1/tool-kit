@@ -4,22 +4,30 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+/// `#[serde(default)]` on the struct is load-bearing: without it, a settings.json
+/// written before a new field existed fails to parse, and `load()` silently falls
+/// back to defaults — wiping the user's output folder and job choice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     /// Selected inputs: individual files and/or folders to scan.
-    #[serde(default)]
     pub inputs: Vec<String>,
     /// Folder where finished outputs are written.
     pub output_dir: Option<String>,
-    /// Last selected job: "convert" | "transcribe" | "summarize".
+    /// Last selected job: "convert" | "transcribe".
     pub job_type: String,
     /// Datalab output format: "markdown" | "html" | "json".
     pub datalab_format: String,
     /// Optional Datalab pipeline id (pl_...). Blank uses the /convert endpoint.
     pub datalab_pipeline_id: Option<String>,
-    /// Claude model used for the Summarize job.
-    pub summarize_model: String,
+    /// High-accuracy Convert profile: re-OCR every page and run an LLM pass.
+    /// Much better on scanned, table-heavy documents; slower and costs more
+    /// credits, and unnecessary for clean digital PDFs.
+    pub datalab_high_accuracy: bool,
+    /// Leave a file alone when the history says it already has a result on
+    /// disk. On by default: paying twice for the same conversion is the thing
+    /// the history layer exists to prevent.
+    pub skip_already_done: bool,
 }
 
 impl Default for Settings {
@@ -30,7 +38,8 @@ impl Default for Settings {
             job_type: "convert".into(),
             datalab_format: "markdown".into(),
             datalab_pipeline_id: None,
-            summarize_model: "claude-sonnet-4-6".into(),
+            datalab_high_accuracy: true,
+            skip_already_done: true,
         }
     }
 }
@@ -49,8 +58,15 @@ pub fn load(app: &AppHandle) -> Settings {
         .unwrap_or_default()
 }
 
+/// Written to a temp file and renamed into place. `fs::write` truncates first,
+/// so a reader landing mid-write — or a crash — would see a half-file, and
+/// `load()` answers a parse failure with `unwrap_or_default()`: the user's
+/// output folder and job silently reset. Rename is atomic, so a reader sees
+/// either the old file or the new one.
 pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let path = settings_path(app)?;
     let bytes = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
-    std::fs::write(path, bytes).map_err(|e| e.to_string())
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }

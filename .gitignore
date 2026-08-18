@@ -7,10 +7,44 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies and frontend build
 node_modules
 dist
 dist-ssr
 *.local
+*.tsbuildinfo
+
+# tsconfig.node.json is a composite project, so it cannot set noEmit (TS6310).
+# Its output is redirected to node_modules/.tmp; these two are what leaked into
+# the repo root before that fix, and are never source.
+/vite.config.js
+/vite.config.d.ts
+
+# Secrets and local env. Keep committed examples.
+.env
+.env.*
+!.env.example
+backend/secrets/
+
+# Local tool caches and agent state
+.firecrawl/
+.impeccable/
+.cursor/hooks/state/
+.gitnexus/
+
+# Runtime / local data (SQLite, job artifacts)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+backend/data/
+
+# Rust (crate gitignores already cover /target/ in each crate)
+/target/
 
 # Editor directories and files
 .vscode/*
@@ -23,5 +57,8 @@ dist-ssr
 *.sln
 *.sw?
 
-.env
-.env.local
+# Apple signing leftovers (creds themselves live in .env.local)
+*.p12
+*.pfx
+*.cer
+*.mobileprovision

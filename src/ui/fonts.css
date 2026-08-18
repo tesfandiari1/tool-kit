@@ -1,0 +1,30 @@
+/* Self-hosted so the app renders identically with no network. Both families
+   are SIL Open Font License 1.1; see THIRD_PARTY_NOTICES.md.
+
+   `font-display: block` rather than `swap`: a flash of Georgia where a serif
+   title belongs is more jarring in a 900px window than 80ms of nothing. */
+
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("./fonts/InstrumentSerif-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("./fonts/InstrumentSerif-Italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+}
+
+/* One variable file covers the whole weight range we use. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("./fonts/JetBrainsMono-Variable.woff2") format("woff2-variations");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: block;
+}

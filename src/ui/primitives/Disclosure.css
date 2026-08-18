@@ -1,0 +1,40 @@
+/* A label that folds a section away. The triangle is drawn rather than shipped
+   as an icon so it inherits the label's colour and cannot be given a tint of
+   its own. */
+
+.ui-disclosure {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--ink-3);
+
+  font-family: var(--font-mono);
+  font-size: var(--t-label);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.ui-disclosure:hover {
+  color: var(--ink);
+}
+
+.ui-disclosure::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border: 3.5px solid transparent;
+  border-left-color: currentColor;
+  transform: translateX(1px);
+  transition: transform var(--dur) var(--ease);
+}
+
+.ui-disclosure[aria-expanded="true"]::before {
+  transform: rotate(90deg) translateY(1px);
+}

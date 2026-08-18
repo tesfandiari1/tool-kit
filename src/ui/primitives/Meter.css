@@ -1,0 +1,74 @@
+/* Progress. Two modes, and the difference matters: a determinate bar makes a
+   promise about how much is left, so it is only used when that is actually
+   known. Everything else gets the indeterminate sweep. */
+
+.ui-meter {
+  position: relative;
+  width: 100%;
+  height: 3px;
+  border-radius: var(--r-pill);
+  background: var(--rule);
+  overflow: hidden;
+}
+
+/* The determinate fill is full width and scaled down, rather than sized by a
+   width percentage. Animating width lays out the page on every frame, and a
+   queue repaints its meters on every poll, so this is the difference between
+   compositing a transform and relaying out twenty rows several times a second.
+
+   No `transform` is declared here: the determinate mode sets one inline, and
+   both indeterminate modes drive their own via animation. Declaring a default
+   would blank the reduced-motion variant, which animates opacity alone. */
+.ui-meter__fill {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--live);
+  transform-origin: left center;
+  transition: transform var(--dur-slow) var(--ease-out);
+  will-change: transform;
+}
+
+.ui-meter--indeterminate .ui-meter__fill {
+  width: 34%;
+  animation: ui-meter-sweep 1.4s var(--ease) infinite;
+}
+
+@keyframes ui-meter-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(390%);
+  }
+}
+
+/* Reduced motion gets a steady pulse rather than a frozen bar, which would
+   read as a stalled job. */
+@media (prefers-reduced-motion: reduce) {
+  .ui-meter--indeterminate .ui-meter__fill {
+    width: 100%;
+    animation: ui-meter-breathe 2s var(--ease) infinite;
+  }
+  @keyframes ui-meter-breathe {
+    0%,
+    100% {
+      opacity: 0.9;
+    }
+    50% {
+      opacity: 0.3;
+    }
+  }
+}
+
+.ui-meter--pass .ui-meter__fill {
+  background: var(--pass);
+}
+.ui-meter--fault .ui-meter__fill {
+  background: var(--fault);
+}
+
+/* Nothing to restate for the inactive window: `--live` is never dimmed, so a
+   running meter stays lit on its own. An unscoped rule here repainted passed
+   and failed meters amber, which is exactly the confusion the three status
+   colours exist to prevent. */

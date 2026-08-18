@@ -1,0 +1,100 @@
+/* Surfaces: the panel, and the hairline cell grid.
+
+   The cell grid is the reference's structural signature. Cells butt directly
+   against one another and share single-pixel rules, so the layout reads as one
+   machined lattice rather than a row of floating cards. No gaps, no shadows,
+   no radius. */
+
+.ui-panel {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-panel);
+  min-width: 0;
+}
+
+.ui-panel--flush {
+  border-radius: var(--r-cell);
+}
+.ui-panel--raised {
+  background: var(--surface-raised);
+}
+.ui-panel--well {
+  background: var(--surface-well);
+}
+.ui-panel--bare {
+  background: transparent;
+  border-color: transparent;
+}
+
+.ui-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--rule);
+  min-height: 40px;
+}
+
+.ui-panel__body {
+  padding: var(--s4);
+  min-width: 0;
+}
+
+.ui-panel__body--flush {
+  padding: 0;
+}
+
+/* --- Cell grid -----------------------------------------------------------
+   Overlapping 1px borders collapse into a single hairline via a negative
+   margin, which keeps the lattice even at any column count. */
+.ui-cellgrid {
+  display: grid;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-cell);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.ui-cell {
+  padding: var(--s5);
+  border-right: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  min-width: 0;
+  transition: background var(--dur) var(--ease);
+}
+
+/* The outer border already draws the last column and row. */
+.ui-cell:last-child {
+  border-right-color: transparent;
+}
+
+.ui-cell--interactive:hover {
+  background: var(--surface-raised);
+}
+
+.ui-cell--pad-sm {
+  padding: var(--s3) var(--s4);
+}
+
+/* --- Well: a recessed area for output, logs, transcripts --------------- */
+.ui-well {
+  background: var(--surface-well);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-control);
+  padding: var(--s3);
+  min-width: 0;
+}
+
+/* --- Divider ----------------------------------------------------------- */
+.ui-divider {
+  border: 0;
+  border-top: 1px solid var(--rule);
+  margin: 0;
+  align-self: stretch;
+}
+
+.ui-divider--vertical {
+  border-top: 0;
+  border-left: 1px solid var(--rule);
+}

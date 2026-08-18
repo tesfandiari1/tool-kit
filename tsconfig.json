@@ -13,6 +13,11 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@ui": ["./src/ui/index.ts"],
+      "@ui/*": ["./src/ui/*"]
+    },
 
     /* Linting */
     "strict": true,
