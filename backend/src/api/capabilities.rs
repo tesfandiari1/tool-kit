@@ -46,7 +46,7 @@ struct EngineCapability {
 struct LimitCapabilities {
     max_upload_bytes: u64,
     max_output_bytes: u64,
-    max_ephemeral_jobs: usize,
+    max_active_jobs: usize,
     max_concurrent_uploads: usize,
 }
 
@@ -64,7 +64,7 @@ pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
             service_version: env!("CARGO_PKG_VERSION"),
             conversion: ConversionCapabilities {
                 accepting_jobs,
-                durability: "ephemeral",
+                durability: "persistent",
                 input_formats: vec!["application/pdf"],
                 output_formats: vec!["text/markdown", "application/json"],
                 profiles: vec![
@@ -88,7 +88,7 @@ pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
                 limits: LimitCapabilities {
                     max_upload_bytes: state.limits().max_upload_bytes,
                     max_output_bytes: state.limits().max_output_bytes,
-                    max_ephemeral_jobs: state.limits().max_jobs,
+                    max_active_jobs: state.limits().max_jobs,
                     max_concurrent_uploads: state.limits().max_concurrent_uploads,
                 },
             },

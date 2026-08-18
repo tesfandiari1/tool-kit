@@ -120,7 +120,7 @@ Current implementation snapshot:
 | Durable ingest/artifacts | Complete | Persistent source and attempt layout, atomic publication, hashes, cleanup, quarantine primitives, and restart-visible reads |
 | Single worker | Complete | One FIFO runner, Notify plus polling, validated-handle parser input, fail-closed execution, and bounded cancellation/shutdown |
 | Startup reconciliation | Complete | State-specific recovery, bounded manifest/artifact validation, fresh attempts, and conservative orphan quarantine |
-| Runtime/OpenAPI/Compose | Pending | Live readiness, persistent capability response, `/data` mount, and temporary generated-schema diff |
+| Runtime/OpenAPI/Compose | Complete | Live readiness, persistent capability response, `/data` named volume, and temporary generated-schema diff |
 | Release gates | Pending | Container build plus graceful and forced-kill restart smokes |
 
 - [x] **CVR-020:** Add SQLx 0.9 with default features disabled and only
@@ -148,7 +148,7 @@ Current implementation snapshot:
   attempt history, transition corrupted successes to
   `failed`/`artifact_integrity_failed` without serving artifacts, and quarantine
   pre-acceptance orphan trees without deleting them.
-- [ ] **CVR-027:** Add live SQLite and writable-volume readiness, bounded
+- [x] **CVR-027:** Add live SQLite and writable-volume readiness, bounded
   graceful shutdown, truthful persistent-durability/active-capacity
   capabilities, the matching backend OpenAPI update, and a Compose `/data` mount
   without adding a service. Generate/diff the TypeScript schema only in a
@@ -453,3 +453,56 @@ before touching files.
   handoff.
 - Live readiness, the persistent capabilities/OpenAPI delta, Compose `/data`
   wiring, and built-container restart smokes remain for Increments 5-6.
+
+### 2026-08-17 — M2 Increment 5 runtime and Compose checkpoint
+
+- `/health/ready` is a real probe. It runs three checks concurrently, each under
+  a two-second timeout: a SQLite write transaction, a create-and-remove probe
+  file under `<data root>/.health/`, and the job runner's failed/stopped flags.
+  All three pass returns `200` with `status: "ready"`, any failure returns `503`
+  with `status: "not_ready"` and the per-check detail. The route is
+  unauthenticated, so the body carries pass or fail only and the cause goes to
+  the log. `/health/live` stays dependency-free.
+- The probe never touches `jobs/`. Its `.health` directory sits beside the job
+  tree, so startup reconciliation and quarantine never see it, and the probe
+  file is removed by a `Drop` guard so a failed write or a cancelled check
+  cannot leave one behind.
+- Capabilities now report `durability: "persistent"` and `maxActiveJobs`.
+  OpenAPI moved to `0.3.0` with a new `ReadinessResponse` schema and both `200`
+  and `503` documented on `/health/ready`. `backend/Cargo.toml` moved to `0.3.0`
+  so `serviceVersion` stays in lockstep, and the contract test now pins
+  `info.version` to `CARGO_PKG_VERSION`.
+- The TypeScript client delta was generated and diffed under
+  `/private/tmp` only. `src/app/api/schema.ts` is byte-identical, as M6 requires.
+- Two latent breaks were fixed. The Dockerfile never copied `migrations/` or
+  `build.rs`, so `sqlx::migrate!` could not compile in the image. Compose never
+  mounted `/data`, so nothing persisted. The runtime stage now runs
+  `install -d -o 10001 -g 10001 -m 0700 /data`, because a fresh named volume
+  otherwise lands as `root:root` and the service runs as `10001`.
+- Both fixes were checked against a real build. `docker build -t
+  tool-kit-converter:m2 backend` succeeds, and `ls -ldn /data` inside that image
+  reports mode `drwx------` owned by `10001:10001`.
+- Compose mounts the named volume `converter-data` at `/data`, sets
+  `TOOLKIT_CONVERTER_DATA_DIR` explicitly, carries a commented host bind-mount
+  alternative with the SMB/NFS warning, and mirrors the image healthcheck
+  timing (`interval 30s`, `timeout 5s`, `start_period 30s`, `start_interval 2s`,
+  `retries 3`). The `/tmp` tmpfs stays because the PDF worker calls
+  `tempfile::tempfile()`.
+- The artifact-store initialization error now names the directory it could not
+  create, so a native start against the container default `/data` says which
+  path failed instead of a bare `Read-only file system`.
+- Gate run from the repo root:
+  `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`,
+  `cargo check --locked --offline --manifest-path backend/Cargo.toml --all-targets`,
+  `cargo clippy --locked --offline --manifest-path backend/Cargo.toml --all-targets -- -D warnings`,
+  `cargo test --locked --offline --manifest-path backend/Cargo.toml`,
+  `git diff --check`,
+  `docker compose -f backend/compose.yaml config --quiet`, and
+  `docker build -t tool-kit-converter:m2 backend`. All passed with 96 backend
+  tests: 56 library, 1 server, 3 parser worker, and 36 HTTP contract.
+- Clippy on macOS never compiles the `#[cfg(target_os = "linux")]` blocks in
+  `backend/src/bin/tool-kit-pdf-worker.rs`. This local pass is necessary and not
+  sufficient. CI is the only gate that lints them.
+- Increment 5 is implemented and gated but uncommitted. It sits on top of
+  `a50ca54`, so it has no checkpoint SHA of its own yet. The graceful and
+  forced-kill restart smokes remain for Increment 6.

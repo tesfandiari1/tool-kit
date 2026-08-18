@@ -65,7 +65,9 @@ async fn public_health_and_capabilities_are_truthful() {
     let payload = json_body(response).await;
     let conversion = &payload["data"]["conversion"];
     assert_eq!(conversion["acceptingJobs"], true);
-    assert_eq!(conversion["durability"], "ephemeral");
+    assert_eq!(conversion["durability"], "persistent");
+    assert!(conversion["limits"]["maxActiveJobs"].is_u64());
+    assert!(conversion["limits"]["maxEphemeralJobs"].is_null());
     assert_eq!(
         conversion["inputFormats"],
         serde_json::json!(["application/pdf"])
@@ -95,6 +97,133 @@ async fn harness_reinitializes_app_state_against_one_data_root_without_a_listene
     assert_eq!(second.data_dir(), data_dir);
     assert_eq!(
         second
+            .request(Method::GET, "/health/ready", None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn readiness_reports_every_dependency_check_on_a_healthy_app() {
+    let app = test_app().await;
+    let response = app.request(Method::GET, "/health/ready", None).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_server_request_id(&response);
+    // Compared whole, so a leaked path, SQL string, or error detail on this
+    // unauthenticated route fails the test instead of riding along.
+    let payload = json_body(response).await;
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "status": "ready",
+            "service": "tool-kit-converter",
+            "serviceVersion": env!("CARGO_PKG_VERSION"),
+            "checks": {
+                "database": "ok",
+                "dataRoot": "ok",
+                "worker": "ok",
+            },
+        }),
+        "{payload:#}"
+    );
+}
+
+#[tokio::test]
+async fn readiness_fails_only_the_worker_check_after_the_runner_stops() {
+    let app = test_app().await;
+    app.stop_job_claiming();
+    assert!(
+        !app.wait_for_job_runner_exit().await,
+        "the runner must stop cleanly rather than fail"
+    );
+    assert!(app.job_runner_stopped());
+
+    let response = app.request(Method::GET, "/health/ready", None).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_server_request_id(&response);
+    let payload = json_body(response).await;
+    assert_eq!(payload["status"], "not_ready", "{payload:#}");
+    assert_eq!(payload["checks"]["worker"], "failed", "{payload:#}");
+    // SQLite and the data root outlive the runner, so a stopped worker must
+    // not drag their answers down with it.
+    assert_eq!(payload["checks"]["database"], "ok", "{payload:#}");
+    assert_eq!(payload["checks"]["dataRoot"], "ok", "{payload:#}");
+}
+
+#[tokio::test]
+async fn readiness_probes_the_data_root_without_touching_stored_conversions() {
+    let app = test_app().await;
+    let seeded = submit_succeeded_job(&app, "readiness-artifact-safety").await;
+    let jobs = count_job_directories(app.data_dir());
+    let sources = count_named_files(app.data_dir(), "input");
+    let markdown = count_named_files(app.data_dir(), "result.md");
+    let health = app.data_dir().join(".health");
+    assert!(health.is_dir(), "readiness owns a probe directory on disk");
+    // Removing the probe directory under a running service is the operator
+    // case: readiness has to rebuild it, not latch as permanently unready.
+    fs::remove_dir_all(&health).unwrap();
+
+    for round in 0..2 {
+        let response = app.request(Method::GET, "/health/ready", None).await;
+        assert_eq!(response.status(), StatusCode::OK, "round {round}");
+        assert_eq!(json_body(response).await["checks"]["dataRoot"], "ok");
+        assert!(health.is_dir(), "round {round}: no probe directory");
+        assert_eq!(
+            fs::read_dir(&health).unwrap().count(),
+            0,
+            "round {round}: the probe left a file behind"
+        );
+    }
+
+    assert_eq!(count_job_directories(app.data_dir()), jobs);
+    assert_eq!(count_named_files(app.data_dir(), "input"), sources);
+    assert_eq!(count_named_files(app.data_dir(), "result.md"), markdown);
+    let status = app
+        .authorized_get(&format!("/api/v1/conversions/{}", seeded.job_id))
+        .await;
+    assert_eq!(json_body(status).await["data"]["status"], "succeeded");
+}
+
+#[tokio::test]
+async fn startup_reconciliation_ignores_the_readiness_probe_directory() {
+    let harness = TestHarness::new();
+    let first = harness.app().await;
+    let seeded = submit_succeeded_job(&first, "readiness-reconciliation").await;
+    assert_eq!(
+        first
+            .request(Method::GET, "/health/ready", None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let health = harness.data_dir().join(".health");
+    assert!(health.is_dir(), "readiness owns a probe directory on disk");
+    first.shutdown(Duration::from_secs(1)).await;
+    drop(first);
+
+    // A crash between creating and removing a probe leaves a UUID-named file
+    // behind, which is what a storage scan reaching past `jobs/` would read as
+    // a conversion and quarantine.
+    fs::write(health.join(Uuid::new_v4().to_string()), b"ready").unwrap();
+
+    let restarted = harness.app().await;
+    assert!(health.is_dir(), "restart moved the probe directory");
+    assert_eq!(
+        fs::read_dir(harness.data_dir().join("quarantine/pre-acceptance"))
+            .unwrap()
+            .count(),
+        0,
+        "startup reconciliation quarantined the probe directory"
+    );
+    assert_eq!(count_job_directories(harness.data_dir()), 1);
+    let status = restarted
+        .authorized_get(&format!("/api/v1/conversions/{}", seeded.job_id))
+        .await;
+    assert_eq!(json_body(status).await["data"]["status"], "succeeded");
+    assert_eq!(
+        restarted
             .request(Method::GET, "/health/ready", None)
             .await
             .status(),
@@ -891,7 +1020,7 @@ async fn concurrent_idempotent_submissions_create_one_job() {
 }
 
 #[tokio::test]
-async fn capabilities_stop_accepting_new_jobs_at_ephemeral_capacity() {
+async fn capabilities_stop_accepting_new_jobs_at_active_capacity() {
     let app = test_app_with_max_jobs(1).await;
     let pdf = clean_pdf();
     let client_run_id = Uuid::new_v4();
@@ -1322,6 +1451,12 @@ fn openapi_parses_and_documents_only_the_live_routes() {
         .expect("OpenAPI paths must be a mapping");
 
     assert_eq!(document["openapi"].as_str(), Some("3.1.0"));
+    // Every response carries the crate version as `serviceVersion`, so a
+    // Cargo.toml bump without a contract bump ships a lie.
+    assert_eq!(
+        document["info"]["version"].as_str(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
     for (path, method) in [
         ("/health/live", "get"),
         ("/health/ready", "get"),
@@ -1394,4 +1529,57 @@ fn openapi_parses_and_documents_only_the_live_routes() {
             .is_null(),
         "acceptingJobs is dynamic"
     );
+    let capabilities = &document["components"]["schemas"]["ConversionCapabilities"];
+    assert_eq!(
+        capabilities["properties"]["durability"]["const"].as_str(),
+        Some("persistent")
+    );
+    let limits = &capabilities["properties"]["limits"];
+    assert!(string_sequence(&limits["required"]).contains(&"maxActiveJobs"));
+    assert!(!string_sequence(&limits["required"]).contains(&"maxEphemeralJobs"));
+    assert_eq!(
+        limits["properties"]["maxActiveJobs"]["minimum"].as_u64(),
+        Some(1)
+    );
+    assert!(limits["properties"]["maxEphemeralJobs"].is_null());
+
+    for status in ["200", "503"] {
+        let response = &document["paths"]["/health/ready"]["get"]["responses"][status];
+        assert_eq!(
+            response["content"]["application/json"]["schema"]["$ref"].as_str(),
+            Some("#/components/schemas/ReadinessResponse"),
+            "/health/ready {status} must answer with the readiness shape"
+        );
+        assert!(
+            !response["headers"]["X-Request-Id"].is_null(),
+            "/health/ready {status} must carry X-Request-Id"
+        );
+    }
+    let readiness = &document["components"]["schemas"]["ReadinessResponse"];
+    assert_eq!(
+        string_sequence(&readiness["properties"]["status"]["enum"]),
+        vec!["ready", "not_ready"]
+    );
+    let checks = &readiness["properties"]["checks"];
+    assert_eq!(
+        string_sequence(&checks["required"]),
+        vec!["database", "dataRoot", "worker"]
+    );
+    assert_eq!(checks["additionalProperties"].as_bool(), Some(false));
+    for check in ["database", "dataRoot", "worker"] {
+        assert_eq!(
+            string_sequence(&checks["properties"][check]["enum"]),
+            vec!["ok", "failed"],
+            "check {check}"
+        );
+    }
+}
+
+fn string_sequence(value: &YamlValue) -> Vec<&str> {
+    value
+        .as_sequence()
+        .expect("expected a YAML sequence")
+        .iter()
+        .map(|entry| entry.as_str().expect("expected a YAML string"))
+        .collect()
 }

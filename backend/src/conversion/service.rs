@@ -189,6 +189,14 @@ impl ConversionService {
         }
     }
 
+    pub async fn health_check(&self) -> Result<(), RepositoryError> {
+        self.repository.health_check().await
+    }
+
+    pub async fn probe_data_root(&self) -> Result<(), ArtifactError> {
+        self.artifacts.probe_writable().await
+    }
+
     pub(crate) fn work_notification(&self) -> Arc<Notify> {
         Arc::clone(&self.work_notification)
     }

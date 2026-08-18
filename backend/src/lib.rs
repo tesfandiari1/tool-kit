@@ -1,9 +1,10 @@
 //! CPU-only HTTP surface for the Tool-Kit conversion service.
 //!
-//! The current loopback slice exposes authenticated, ephemeral PDF conversion,
+//! The current loopback slice exposes authenticated, durable PDF conversion,
 //! status polling, and validated Markdown/manifest artifacts in addition to
-//! health and capabilities. Durable SQLite state, non-PDF conversion, and
-//! remote fallback remain later epic milestones.
+//! health and capabilities. Accepted jobs, idempotency records, and artifacts
+//! live in SQLite and under the data root, so they survive a restart. Non-PDF
+//! conversion and remote fallback remain later epic milestones.
 
 pub mod config;
 pub mod persistence;
