@@ -1,35 +1,28 @@
 # Session handoff
 
 **Last updated:** 2026-08-18
-**Branch:** `main`, HEAD `b2b4d10`. Branch fresh off `main` for M6.
-**Backend checkpoint:** `b2b4d10` plus an **uncommitted format-set widening**
-in the worktree. M3 is complete: AnyDoc converts 18 extensions in-process
-under a hard timeout, PDF stays on its isolated worker, contract is 0.4.0, and
-the container smoke converts a docx inside the image.
-**Recorded code state: the tree is dirty, in two unrelated piles.**
-1. The format-set widening (this session): `backend/src/{conversion/model.rs,
-   api/conversions.rs, engines/anydoc.rs, persistence/sqlite.rs}`,
-   `backend/migrations/0003_anydoc_full_format_set.sql`, 18 new fixtures,
-   `backend/openapi/openapi.yaml`, `BACKEND_EPIC.md`, and this file. Gate is
-   green; ready to commit.
-2. A **repo-wide prose sweep from a parallel session** (em dash to colon or
-   period) across `CLAUDE.md`, `AGENTS.md`, `README.md`,
-   `backend/README.md`, `backend/evals/README.md`, and four `docs/` files.
-   Mostly punctuation, but it carries a handful of real content edits and it
-   rewrote the generator-owned `<!-- gitnexus:start -->` block, which
-   `gitnexus analyze --index-only` exists to leave alone. **Six of those files
-   are outside backend ownership. Commit it separately, by whoever made it.**
-   Do not fold it into a backend commit and do not revert it blind.
+**Branch:** `main`, HEAD `4590a9a`. M6 is next.
+**Backend checkpoint:** `4590a9a`. M3 is complete: AnyDoc converts 18
+extensions in-process under a hard timeout, PDF stays on its isolated worker,
+contract is 0.4.0, and the container smoke converts a docx inside the image.
+**Recorded code state:** the live worktree has unrelated changes in `AGENTS.md`
+and `CLAUDE.md`. Preserve them and stage M6 paths explicitly.
 **Read this first** in any parallel session, then re-read the live worktree.
 This file goes stale the moment someone lands a commit.
 
+## M6 transport decisions (owner-settled 2026-08-18)
+
+- `POST /api/v1/conversions` is a Rust host special-case that parses the source
+  path from JSON and builds/streams the multipart request. File bytes and the
+  bearer token stay out of the webview.
+- Markdown download gets a separate Tauri command returning an output path and
+  never crosses IPC as a body.
+
 ## Do this next
 
-1. **M3 is closed. Commit the close-out, then start M6.** The M3 gate is met
-   (see the 2026-08-18 close-out entry in `docs/BACKEND_EPIC.md`). M6 begins
-   with `pnpm generate:api`: the committed `src/app/api/schema.ts` trails
-   OpenAPI 0.4.0 by the CVR-027 and M3 deltas. Read the diff, do not
-   hand-reconcile it.
+1. **M3 is closed at `4590a9a`; continue M6 after Increment 0.** The transport
+   decisions above are settled, and `src/app/api/schema.ts` has been regenerated
+   from OpenAPI 0.4.0. Increment 1 is the reversible per-file route switch.
 
    **CVR-036 now advertises the full AnyDoc format set: 19 extensions over 18
    media types.** An earlier pass this same day closed it by narrowing, on the
@@ -102,13 +95,11 @@ This file goes stale the moment someone lands a commit.
    is a standard openapi-typescript/openapi-fetch layer, and
    `commands.serviceRequest` is its typed IPC door. Remaining M6 work: the
    Rust `service_request` handler, backend URL + Keychain token settings, and
-   wiring the client into the run view. **`src/app/api/schema.ts` is now stale
-   on purpose.** Increment 5 landed the CVR-027 OpenAPI delta, so the committed
-   schema no longer matches `backend/openapi/openapi.yaml`. The differences are
-   the new `ReadinessResponse` schema plus both `/health/ready` responses,
-   `durability: "persistent"`, `maxActiveJobs` for `maxEphemeralJobs`, and the
-   reworded summaries. Run `pnpm generate:api` as the first step of M6, not
-   before.
+   wiring the client into the run view. **M6 Increment 0 regenerated
+   `src/app/api/schema.ts` from OpenAPI 0.4.0.** It now includes the expanded
+   18-media-type input set, both engines, the `ReadinessResponse` schema and
+   `/health/ready` responses, `durability: "persistent"`, `maxActiveJobs`, and
+   the reworded summaries.
 
    **The dual-pane workspace is closed.** Compact is a `Panel` launcher;
    opening a result splits the window; Edit writes through `write_document`.
@@ -203,9 +194,8 @@ the root is the required layout, not clutter.
   tears the tree down. Use `pnpm tauri dev`, or `?gallery` for the
   bridge-free design review.
 - Desktop frontend now has an OpenAPI client layer at `src/app/api/`
-  (user-authorized pre-M6 prep). `schema.ts` is generated from
-  `backend/openapi/openapi.yaml` and now trails it by the Increment 5 delta,
-  which M6 regenerates. `client.ts` is a
+  (user-authorized pre-M6 prep). `schema.ts` is generated from and matches
+  `backend/openapi/openapi.yaml` at contract 0.4.0. `client.ts` is a
   standard `openapi-fetch` client typed by that schema: call sites get the
   library's `{ data, error }` results, with `error` carrying the contract's
   ErrorEnvelope. `transport.ts` plugs a Tauri-backed `fetch` into

@@ -28,7 +28,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Report whether startup dependencies are ready */
+        /** Report whether the database, data root, and worker are usable */
         get: operations["getReadiness"];
         put?: never;
         post?: never;
@@ -64,7 +64,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Stage a PDF and create an ephemeral asynchronous conversion */
+        /** Stage a document and create a durable asynchronous conversion */
         post: operations["createConversion"];
         delete?: never;
         options?: never;
@@ -79,7 +79,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Poll one ephemeral conversion */
+        /** Poll one durable conversion */
         get: operations["getConversion"];
         put?: never;
         post?: never;
@@ -150,6 +150,21 @@ export interface components {
             service: "tool-kit-converter";
             serviceVersion: string;
         };
+        ReadinessResponse: {
+            /** @enum {string} */
+            status: "ready" | "not_ready";
+            /** @constant */
+            service: "tool-kit-converter";
+            serviceVersion: string;
+            checks: {
+                /** @enum {string} */
+                database: "ok" | "failed";
+                /** @enum {string} */
+                dataRoot: "ok" | "failed";
+                /** @enum {string} */
+                worker: "ok" | "failed";
+            };
+        };
         CapabilitiesEnvelope: {
             data: {
                 /** @constant */
@@ -167,25 +182,50 @@ export interface components {
         ConversionCapabilities: {
             acceptingJobs: boolean;
             /** @constant */
-            durability: "ephemeral";
+            durability: "persistent";
             inputFormats: [
-                "application/pdf"
+                "application/pdf",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/msword",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "application/vnd.ms-powerpoint",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-excel",
+                "application/epub+zip",
+                "application/vnd.oasis.opendocument.text",
+                "application/vnd.oasis.opendocument.spreadsheet",
+                "application/vnd.oasis.opendocument.presentation",
+                "application/rtf",
+                "text/csv",
+                "application/vnd.ms-word.document.macroEnabled.12",
+                "application/vnd.ms-excel.sheet.macroEnabled.12",
+                "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+                "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+                "application/vnd.ms-powerpoint.slideshow.macroEnabled.12"
             ];
             outputFormats: string[];
             profiles: {
                 name: components["schemas"]["ConversionProfile"];
                 available: boolean;
             }[];
-            engine: {
-                /** @constant */
-                name: "pdf-inspector";
-                /** @constant */
-                version: "1.15.0";
-            };
+            engines: [
+                {
+                    /** @constant */
+                    name: "pdf-inspector";
+                    /** @constant */
+                    version: "1.15.0";
+                },
+                {
+                    /** @constant */
+                    name: "anydoc";
+                    /** @constant */
+                    version: "0.1.9";
+                }
+            ];
             limits: {
                 maxUploadBytes: number;
                 maxOutputBytes: number;
-                maxEphemeralJobs: number;
+                maxActiveJobs: number;
                 maxConcurrentUploads: number;
             };
         };
@@ -360,7 +400,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description Source extension, declared media type, or PDF signature failed */
+        /** @description Source extension, declared media type, or content signature failed */
         UnsupportedMediaType: {
             headers: {
                 "X-Request-Id": components["headers"]["RequestId"];
@@ -380,7 +420,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description Ephemeral M1 job capacity reached */
+        /** @description Active job capacity reached */
         TooManyRequests: {
             headers: {
                 "X-Request-Id": components["headers"]["RequestId"];
@@ -423,7 +463,7 @@ export interface components {
     };
     parameters: {
         ConversionId: string;
-        /** @description Process-local in M1; 1-128 URL-safe characters */
+        /** @description Durable per-token record; 1-128 URL-safe characters */
         IdempotencyKey: string;
     };
     requestBodies: never;
@@ -434,7 +474,7 @@ export interface components {
         Location: string;
         /** @description Suggested polling delay in seconds */
         RetryAfter: 1;
-        /** @description Whether this response reused a process-local idempotency record */
+        /** @description Whether this response reused a stored idempotency record */
         IdempotencyReplayed: boolean;
         /** @description Quoted SHA-256-backed artifact entity tag */
         ArtifactEtag: string;
@@ -464,7 +504,26 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            200: components["responses"]["Health"];
+            /** @description Every dependency check passed */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["RequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadinessResponse"];
+                };
+            };
+            /** @description At least one dependency check failed */
+            503: {
+                headers: {
+                    "X-Request-Id": components["headers"]["RequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadinessResponse"];
+                };
+            };
         };
     };
     getCapabilities: {
@@ -492,7 +551,7 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description Process-local in M1; 1-128 URL-safe characters */
+                /** @description Durable per-token record; 1-128 URL-safe characters */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             path?: never;
