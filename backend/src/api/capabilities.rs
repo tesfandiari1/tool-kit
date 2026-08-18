@@ -1,7 +1,12 @@
 use axum::{extract::State, Json};
 use serde::Serialize;
 
-use crate::{worker_protocol::PDF_INSPECTOR_VERSION, AppState};
+use crate::{
+    conversion::advertised_media_types,
+    engines::{ANYDOC_ENGINE_NAME, ANYDOC_VERSION},
+    worker_protocol::PDF_INSPECTOR_VERSION,
+    AppState,
+};
 
 #[derive(Debug, Serialize)]
 pub struct CapabilitiesEnvelope {
@@ -25,7 +30,7 @@ struct ConversionCapabilities {
     input_formats: Vec<&'static str>,
     output_formats: Vec<&'static str>,
     profiles: Vec<ProfileCapability>,
-    engine: EngineCapability,
+    engines: Vec<EngineCapability>,
     limits: LimitCapabilities,
 }
 
@@ -65,7 +70,7 @@ pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
             conversion: ConversionCapabilities {
                 accepting_jobs,
                 durability: "persistent",
-                input_formats: vec!["application/pdf"],
+                input_formats: advertised_media_types(),
                 output_formats: vec!["text/markdown", "application/json"],
                 profiles: vec![
                     ProfileCapability {
@@ -81,10 +86,16 @@ pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
                         available: false,
                     },
                 ],
-                engine: EngineCapability {
-                    name: "pdf-inspector",
-                    version: PDF_INSPECTOR_VERSION,
-                },
+                engines: vec![
+                    EngineCapability {
+                        name: "pdf-inspector",
+                        version: PDF_INSPECTOR_VERSION,
+                    },
+                    EngineCapability {
+                        name: ANYDOC_ENGINE_NAME,
+                        version: ANYDOC_VERSION,
+                    },
+                ],
                 limits: LimitCapabilities {
                     max_upload_bytes: state.limits().max_upload_bytes,
                     max_output_bytes: state.limits().max_output_bytes,

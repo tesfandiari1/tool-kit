@@ -147,6 +147,10 @@ rather than converting twice.
 
 ### Increment 4 — Poll and download (CVR-063, CVR-064)
 
+Map the durable `status` onto the existing `Job` + `progressNote`. Do not add
+SSE, a percent, or a new OpenAPI field; see
+[`MONITORING_AND_PROGRESS.md`](MONITORING_AND_PROGRESS.md).
+
 - [ ] Poll `GET /api/v1/conversions/{id}` on the existing 5s loop.
 - [ ] Recover an in-progress run after an app restart from the durable key store.
 - [ ] Stream the markdown to disk through `write_output`, unchanged. Its

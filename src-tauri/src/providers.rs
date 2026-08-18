@@ -58,7 +58,10 @@ fn pick_string(body: &Value, keys: &[&str]) -> Option<String> {
 
 /// Read a file once into memory, returning (bytes, filename, mime) so a
 /// multipart body can be rebuilt cheaply on each retry attempt.
-async fn read_file_bytes(path: &str, default_name: &str) -> Result<(Vec<u8>, String, String), String> {
+async fn read_file_bytes(
+    path: &str,
+    default_name: &str,
+) -> Result<(Vec<u8>, String, String), String> {
     let p = Path::new(path);
     let name = p
         .file_name()
@@ -105,7 +108,9 @@ fn terminal_poll_error(status: reqwest::StatusCode, body: &Value, who: &str) -> 
     }
     let detail = pick_string(body, &["error", "detail", "message", "title"])
         .unwrap_or_else(|| status.to_string());
-    Some(PollResult::Failed(format!("{who} returned {status}: {detail}")))
+    Some(PollResult::Failed(format!(
+        "{who} returned {status}: {detail}"
+    )))
 }
 
 /// Send a request with up to 3 attempts, retrying only failures that prove the
@@ -202,7 +207,11 @@ async fn parse_datalab_submit(resp: reqwest::Response) -> Result<Submitted, Stri
         return Err(pick_string(&body, &["error", "detail", "message"])
             .unwrap_or_else(|| format!("Datalab error ({status})")));
     }
-    if !body.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !body
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return Err(pick_string(&body, &["error", "detail"])
             .unwrap_or_else(|| "Datalab rejected the request".into()));
     }
@@ -242,9 +251,14 @@ pub async fn datalab_poll(
     }
     let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("");
     if status == "complete" {
-        if !body.get("success").and_then(|v| v.as_bool()).unwrap_or(true) {
+        if !body
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+        {
             return Ok(PollResult::Failed(
-                pick_string(&body, &["error", "detail"]).unwrap_or_else(|| "Conversion failed".into()),
+                pick_string(&body, &["error", "detail"])
+                    .unwrap_or_else(|| "Conversion failed".into()),
             ));
         }
         let keys: &[&str] = match output_format {
@@ -410,7 +424,8 @@ pub async fn revai_submit(
 ) -> Result<Submitted, String> {
     let (bytes, name, mime) = read_file_bytes(path, "media").await?;
     let resp = send_retrying(|| {
-        let form = reqwest::multipart::Form::new().part("media", bytes_part(bytes.clone(), &name, &mime));
+        let form =
+            reqwest::multipart::Form::new().part("media", bytes_part(bytes.clone(), &name, &mime));
         client
             .post(REVAI_JOBS)
             .bearer_auth(api_key)
@@ -477,7 +492,9 @@ pub async fn revai_poll(
                 return Err(format!("Transcript fetch returned {ts}"));
             }
             if !ts.is_success() {
-                return Ok(PollResult::Failed(format!("Could not fetch transcript ({ts})")));
+                return Ok(PollResult::Failed(format!(
+                    "Could not fetch transcript ({ts})"
+                )));
             }
             let text = tresp.text().await.map_err(|e| e.to_string())?;
             // Rev.ai returns 200 with an empty body for silent media.

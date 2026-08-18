@@ -2,7 +2,7 @@
 
 **Status:** In progress — M2 closed, M3 AnyDoc next; M6 may run in parallel
 **Current milestone:** M3 — AnyDoc and local format routing
-**Latest verified checkpoint:** `01f1bf1` — M2 Increments 0-6, M2 closed
+**Latest verified checkpoint:** `5c626e1` — M3 Increments 0-3, contract 0.4.0
 **Target:** CPU-only Rust/Axum modular monolith
 **Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)
 **Immediate plan:** [`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)
@@ -176,8 +176,8 @@ Execution increments, mirroring the M2 style. Each is independently gated.
 |---|---|---|
 | 0 — AnyDoc spike | Pin `=0.1.9`; build native and image; convert one file per family; hostile-input tests; `cargo tree` feature check; image-size delta | Done 2026-08-18: go; evidence in the verification log |
 | 1 — Engine seam (CVR-031) | Engine-neutral `EngineOutcome`; de-PDF `EngineFailure` strings | Done 2026-08-18: all 119 tests green, no behavior change |
-| 2 — AnyDoc adapter (CVR-032, CVR-034) | `engines/anydoc.rs` with the error mapping; refuses PDF bytes; containment per the spike | A docx round-trips the durable path; a PDF fed to the adapter fails closed |
-| 3 — Validation and capabilities (CVR-033) | Content-sniff plus the CSV extension hint; proven formats only; OpenAPI and capabilities together | Capabilities tells the truth; nothing unproven is accepted |
+| 2 — AnyDoc adapter (CVR-032, CVR-034) | `engines/anydoc.rs` with the error mapping; refuses PDF bytes; in-process per the owner decision | Done 2026-08-18: docx and xlsx round-trip the durable path; a PDF fed to the adapter fails closed |
+| 3 — Validation and capabilities (CVR-033) | Content-sniff plus the CSV extension hint; proven formats only; OpenAPI and capabilities together | Done 2026-08-18: admission table drives upload validation and `inputFormats`; `engines` array; OpenAPI 0.4.0 |
 | 4 — Fixtures and gates (CVR-035, CVR-036, CVR-037) | Per-family success and bounded-failure fixtures; diagnostics without content leakage; full gate plus container smoke | M3 gate |
 
 - [x] **CVR-030:** Verify and pin a compatible AnyDoc revision, Rust API,
@@ -192,20 +192,29 @@ Execution increments, mirroring the M2 style. Each is independently gated.
   carries `EngineAnalysis` (classification plus opaque diagnostics JSON) and
   the shared `EngineOutcome`/`EngineFailure`; the PDF worker's `Inspection`
   stays inside the PDF engine.
-- [ ] **CVR-032:** Implement the AnyDoc adapter through its supported Rust
-  integration. Default to a bounded child worker reusing the PDF worker's
-  supervision pattern, per the isolated-engine mapping in
-  [`YAAK_ARCHITECTURE_REFERENCE.md`](YAAK_ARCHITECTURE_REFERENCE.md); drop to
-  in-process plus `catch_unwind` only with spike evidence. The adapter must
-  refuse PDF input bytes, so AnyDoc's embedded pdf-inspector path can never
-  bypass the isolated PDF worker.
-- [ ] **CVR-033:** Expand upload validation and capabilities to only the file
-  types proven by fixtures. Detect format from content
-  (`Format::from_bytes`); allow an extension hint only for signature-less CSV.
-  The initial advertised set is the desktop-intersection seven: doc, docx,
-  ppt, pptx, xls, xlsx, epub.
-- [ ] **CVR-034:** Route PDFs exactly once through `pdf-inspector` and supported
-  non-PDF documents exactly once through AnyDoc.
+- [x] **CVR-032:** Implement the AnyDoc adapter through its supported Rust
+  integration. **Owner decision, 2026-08-18: in-process**, not a child worker.
+  The spike showed every hostile fixture failing as a typed error through
+  AnyDoc's internal limits, and a second worker binary plus wire protocol was
+  machinery the self-hosted single-user threat model does not justify.
+  `engines/anydoc.rs` runs `to_markdown_bytes` under `spawn_blocking` plus
+  `catch_unwind`; a parser panic becomes `worker_crash`, recoverable like any
+  interrupted attempt. The adapter refuses PDF input outright, so AnyDoc's
+  embedded pdf-inspector can never bypass the isolated PDF worker. The
+  child-worker shape in `pdf_inspector.rs` remains the documented fallback if
+  hostile input ever defeats AnyDoc's limits.
+- [x] **CVR-033:** Expand upload validation and capabilities to only the file
+  types proven by fixtures. One admission table (`SOURCE_FORMATS`) drives the
+  extension/media-type/magic checks at upload, engine selection at execution,
+  and the capabilities `inputFormats` list. Detection is content-based inside
+  the engine; admission checks the container magic. The advertised set is
+  PDF, DOCX, and XLSX — the formats with passing round-trip fixtures.
+  Remaining families join the table with their fixtures in Increment 4.
+- [x] **CVR-034:** Route PDFs exactly once through `pdf-inspector` and supported
+  non-PDF documents exactly once through AnyDoc. Engine selection keys on the
+  stored source media type; the claim transaction stamps the matching engine
+  identity, and a queued row with an engine-less media type fails closed
+  instead of poisoning the queue.
 - [ ] **CVR-035:** Persist engine/version, warnings, fallback reason, output
   hash, and engine-specific diagnostics without leaking document content.
 - [ ] **CVR-036:** Add licensed or synthetic success and safe-failure fixtures
@@ -605,9 +614,10 @@ Committed on `main` as `01f1bf1`, closing M2.
 
 ### 2026-08-18 — M3 Increment 0 AnyDoc spike
 
-**Go.** AnyDoc 0.1.9 is verified as the non-PDF engine, and the containment
-decision is a bounded child worker. Closes CVR-030's verification half; the
-`Cargo.toml` pin lands with the adapter in Increment 2.
+**Go.** AnyDoc 0.1.9 is verified as the non-PDF engine. The initial
+containment call was a bounded child worker; the owner chose in-process (see
+the Increment 2 entry). Closes CVR-030's verification half; the
+`Cargo.toml` pin landed with the adapter.
 
 - Crate facts: `anydoc` 0.1.9 on crates.io, MIT, `rust_version` 1.88 against
   our 1.97.1 toolchain, edition 2024, ~14.2k lines of Rust, no build script.
@@ -677,3 +687,55 @@ Closes CVR-031. No behavior change; all 119 backend tests pass.
   `EngineFailure::Protocol` inside the engine. No test asserted it, and the
   serialization cannot fail for the plain data structs involved.
 - Gate: format, check, Clippy with warnings denied, and 119 tests all pass.
+
+### 2026-08-18 — M3 Increments 2 and 3: AnyDoc adapter, validation, capabilities
+
+Closes CVR-032, CVR-033, and CVR-034. Backend moves to 0.4.0.
+
+- **Design change, owner-approved:** AnyDoc runs in-process behind
+  `spawn_blocking` + `catch_unwind`, not behind a second child worker. The
+  spike evidence (typed errors on every hostile fixture, pre-decompression
+  limits, zero panics) plus the single-user loopback threat model made the
+  extra binary, wire protocol, and supervision layer unjustified machinery.
+  The engine still refuses PDF bytes outright. If AnyDoc's limits ever fail
+  in the field, the fallback is the PDF worker's shape.
+- `engines/anydoc.rs` re-verifies the open source handle (length and SHA-256)
+  before parsing, writes the staged Markdown exactly like the PDF worker, and
+  returns `EngineOutcome`. Rejections are engine-owned: `unsupported_document`
+  (unknown container or PDF), `encrypted_document`, `invalid_document`,
+  `document_exceeds_limits`. No `needs_remote` from AnyDoc in M3; remote
+  policy is M4/M5.
+- One admission table (`conversion::model::SOURCE_FORMATS`) is the single
+  source of truth: upload validation (extension, declared media type,
+  container magic), claim-time engine selection, and capabilities
+  `inputFormats` all read it. The advertised set is PDF, DOCX, and XLSX —
+  the formats with passing round-trip fixtures. Other AnyDoc families join
+  with their fixtures in Increment 4.
+- Migration `0002_non_pdf_source_formats.sql` rebuilds `conversions` and
+  `attempts`: the source media-type CHECK widens to the AnyDoc universe and
+  `classification` gains `structured_document`. SQLite cannot ALTER a CHECK,
+  so both tables are rebuilt under `PRAGMA foreign_keys = OFF` using sqlx's
+  `-- no-transaction` directive. A new test drives the upgrade over a
+  populated M2 database through the real migrator path: rows survive, the new
+  types are accepted, `text/plain` is still rejected, and
+  `foreign_key_check` is clean.
+- Claim stamps the engine identity from the job's stored media type via a
+  closure inside the claim transaction; an engine-less media type fails the
+  job closed with `source_integrity_failed` instead of looping forever.
+- Contract: capabilities `engine` becomes `engines[]` (pdf-inspector 1.15.0,
+  anydoc 0.1.9); `inputFormats` lists the three proven media types; upload
+  error codes unify to `unsupported_source_extension`,
+  `invalid_source_media_type`, and `invalid_source_signature` (the
+  `invalid_pdf_*` codes are gone); the manifest `document` shape check is
+  engine-keyed. OpenAPI and Cargo are 0.4.0. The desktop schema stays stale
+  on purpose; `pnpm generate:api` belongs to M6.
+- Two vendored fixtures (text.docx, sheet.xlsx) from the upstream AnyDoc
+  corpus, MIT, recorded in `backend/tests/fixtures/SOURCES.md`.
+- The harness' engine-selection tests use the real in-process engine; no
+  worker binary or stub needed for AnyDoc.
+- Gate: format, check, Clippy with warnings denied, `git diff --check`,
+  `docker compose config`, and 127 backend tests all pass (64 library, 1
+  server, 3 parser worker, 39 HTTP contract, 5 crash recovery, 10 integrity
+  matrix, 5 failure modes). `docker build` succeeds; the image is
+  42,886,364 bytes, +2.68 MB over the M2 image with AnyDoc linked in. The
+  container smoke stays with Increment 4 (CVR-037).

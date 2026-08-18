@@ -76,10 +76,14 @@ pub fn init(app: &AppHandle) -> History {
             open(&dir.join("history.db")).map_err(|e| e.to_string())
         });
     match db {
-        Ok(conn) => History { db: Mutex::new(Some(conn)) },
+        Ok(conn) => History {
+            db: Mutex::new(Some(conn)),
+        },
         Err(e) => {
             eprintln!("[tool-kit] history unavailable: {e}");
-            History { db: Mutex::new(None) }
+            History {
+                db: Mutex::new(None),
+            }
         }
     }
 }
@@ -255,19 +259,22 @@ fn reuse_map(
         let raw = source.to_string_lossy().into_owned();
         // Read the source's mtime once. If we can't (the file vanished between
         // the scan and now), there is nothing to reuse.
-        let Some(current) = mtime_ms(&raw) else { continue };
+        let Some(current) = mtime_ms(&raw) else {
+            continue;
+        };
 
-        let rows = stmt.query_map(
-            rusqlite::params![key(&raw), job_type, output_format],
-            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)),
-        );
+        let rows = stmt.query_map(rusqlite::params![key(&raw), job_type, output_format], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?))
+        });
         let Ok(rows) = rows else { continue };
 
         // Any past run whose output survives and whose source is untouched
         // counts. Checking every candidate, not just the newest, means a
         // deleted newer output falls back to an older one that is still there.
         for row in rows.flatten() {
-            let (Some(out), Some(then)) = row else { continue };
+            let (Some(out), Some(then)) = row else {
+                continue;
+            };
             if then == current && Path::new(&out).is_file() {
                 found.insert(raw.clone(), out);
                 break;
@@ -335,13 +342,18 @@ fn select(conn: &Connection, query: &str, limit: u32) -> rusqlite::Result<Vec<En
 /// `%` and `_` are wildcards in LIKE, so a search for "report_v2" must not
 /// quietly match "reportXv2".
 fn escape_like(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// Forget everything. The output files themselves are never touched.
 pub fn clear(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<History>();
-    let guard = state.db.lock().map_err(|_| "History is locked".to_string())?;
+    let guard = state
+        .db
+        .lock()
+        .map_err(|_| "History is locked".to_string())?;
     let conn = guard.as_ref().ok_or("History is unavailable")?;
     conn.execute("DELETE FROM history", [])
         .map(|_| ())
@@ -415,13 +427,19 @@ mod tests {
         let rows = select(&conn, "", 50).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].file_name, "report.pdf");
-        assert_eq!(rows[0].output_path.as_deref(), Some(out.to_string_lossy().as_ref()));
+        assert_eq!(
+            rows[0].output_path.as_deref(),
+            Some(out.to_string_lossy().as_ref())
+        );
         assert_eq!(rows[0].status, "done");
         assert!(rows[0].finished_at > 0);
 
         // ...and is findable by name and by folder.
         assert_eq!(select(&conn, "report", 50).unwrap().len(), 1);
-        assert_eq!(select(&conn, "toolkit-hist-roundtrip", 50).unwrap().len(), 1);
+        assert_eq!(
+            select(&conn, "toolkit-hist-roundtrip", 50).unwrap().len(),
+            1
+        );
         assert_eq!(select(&conn, "nothing-like-this", 50).unwrap().len(), 0);
     }
 
@@ -431,7 +449,11 @@ mod tests {
         let (src, out) = pair("hit");
         log_done(&conn, &src, &out);
         let done = reuse_map(&conn, std::slice::from_ref(&src), "convert", "markdown");
-        assert_eq!(done.len(), 1, "an unchanged source with its output still there is done");
+        assert_eq!(
+            done.len(),
+            1,
+            "an unchanged source with its output still there is done"
+        );
     }
 
     #[test]
@@ -454,7 +476,8 @@ mod tests {
         // Pretend the source was touched after it was processed. Doctoring the
         // stored mtime is deterministic; rewriting the file could land in the
         // same millisecond and flake.
-        conn.execute("UPDATE history SET source_mtime = source_mtime - 1000", []).unwrap();
+        conn.execute("UPDATE history SET source_mtime = source_mtime - 1000", [])
+            .unwrap();
         assert!(
             reuse_map(&conn, &[src], "convert", "markdown").is_empty(),
             "an edited source needs redoing"
@@ -466,8 +489,14 @@ mod tests {
         let conn = db();
         let (src, out) = pair("scoped");
         log_done(&conn, &src, &out);
-        assert!(reuse_map(&conn, std::slice::from_ref(&src), "convert", "html").is_empty(), "format switch");
-        assert!(reuse_map(&conn, std::slice::from_ref(&src), "transcribe", "markdown").is_empty(), "job switch");
+        assert!(
+            reuse_map(&conn, std::slice::from_ref(&src), "convert", "html").is_empty(),
+            "format switch"
+        );
+        assert!(
+            reuse_map(&conn, std::slice::from_ref(&src), "transcribe", "markdown").is_empty(),
+            "job switch"
+        );
         assert_eq!(reuse_map(&conn, &[src], "convert", "markdown").len(), 1);
     }
 
@@ -489,7 +518,10 @@ mod tests {
         )
         .unwrap();
         assert!(reuse_map(&conn, &[src], "convert", "markdown").is_empty());
-        assert_eq!(select(&conn, "", 50).unwrap()[0].error.as_deref(), Some("upstream said no"));
+        assert_eq!(
+            select(&conn, "", 50).unwrap()[0].error.as_deref(),
+            Some("upstream said no")
+        );
     }
 
     /// The classic way to lose a user's history is a `migrate` that recreates
@@ -507,11 +539,19 @@ mod tests {
             log_done(&conn, &src, &out);
         }
         let conn = open(&path).unwrap();
-        assert_eq!(select(&conn, "", 50).unwrap().len(), 1, "reopening wiped the history");
+        assert_eq!(
+            select(&conn, "", 50).unwrap().len(),
+            1,
+            "reopening wiped the history"
+        );
 
-        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(mode, "wal");
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
     }
 
@@ -533,9 +573,13 @@ mod tests {
         conn.execute_batch("COMMIT").unwrap();
 
         trim(&conn).unwrap();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, MAX_ENTRIES);
-        let oldest: i64 = conn.query_row("SELECT MIN(finished_at) FROM history", [], |r| r.get(0)).unwrap();
+        let oldest: i64 = conn
+            .query_row("SELECT MIN(finished_at) FROM history", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(oldest, 10, "the ten oldest should be the ones dropped");
     }
 

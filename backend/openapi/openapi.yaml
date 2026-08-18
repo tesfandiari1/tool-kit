@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: Tool-Kit Conversion Service
-  version: 0.3.0
+  version: 0.4.0
   description: >-
-    CPU-only contract for durable, authenticated clean-PDF conversion.
+    CPU-only contract for durable, authenticated document conversion.
     Accepted conversions, idempotency records, and published artifacts are
     stored on disk and survive a service restart. Loopback-only.
 servers:
@@ -57,7 +57,7 @@ paths:
   /api/v1/conversions:
     post:
       operationId: createConversion
-      summary: Stage a PDF and create a durable asynchronous conversion
+      summary: Stage a document and create a durable asynchronous conversion
       security:
         - bootstrapBearer: []
       parameters:
@@ -70,7 +70,7 @@ paths:
               $ref: "#/components/schemas/ConversionSubmission"
             encoding:
               source:
-                contentType: application/pdf
+                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
       responses:
         "202":
           description: Upload completed and the conversion was accepted
@@ -311,7 +311,7 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     UnsupportedMediaType:
-      description: Source extension, declared media type, or PDF signature failed
+      description: Source extension, declared media type, or content signature failed
       headers:
         X-Request-Id:
           $ref: "#/components/headers/RequestId"
@@ -429,7 +429,7 @@ components:
                   const: false
     ConversionCapabilities:
       type: object
-      required: [acceptingJobs, durability, inputFormats, outputFormats, profiles, engine, limits]
+      required: [acceptingJobs, durability, inputFormats, outputFormats, profiles, engines, limits]
       properties:
         acceptingJobs:
           type: boolean
@@ -441,8 +441,12 @@ components:
           prefixItems:
             - type: string
               const: application/pdf
-          minItems: 1
-          maxItems: 1
+            - type: string
+              const: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+            - type: string
+              const: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          minItems: 3
+          maxItems: 3
         outputFormats:
           type: array
           items:
@@ -457,16 +461,29 @@ components:
                 $ref: "#/components/schemas/ConversionProfile"
               available:
                 type: boolean
-        engine:
-          type: object
-          required: [name, version]
-          properties:
-            name:
-              type: string
-              const: pdf-inspector
-            version:
-              type: string
-              const: 1.15.0
+        engines:
+          type: array
+          prefixItems:
+            - type: object
+              required: [name, version]
+              properties:
+                name:
+                  type: string
+                  const: pdf-inspector
+                version:
+                  type: string
+                  const: 1.15.0
+            - type: object
+              required: [name, version]
+              properties:
+                name:
+                  type: string
+                  const: anydoc
+                version:
+                  type: string
+                  const: "0.1.9"
+          minItems: 2
+          maxItems: 2
         limits:
           type: object
           required: [maxUploadBytes, maxOutputBytes, maxActiveJobs, maxConcurrentUploads]

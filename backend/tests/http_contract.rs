@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 mod support;
 
 use std::{fs, time::Duration};
@@ -70,9 +72,22 @@ async fn public_health_and_capabilities_are_truthful() {
     assert!(conversion["limits"]["maxEphemeralJobs"].is_null());
     assert_eq!(
         conversion["inputFormats"],
-        serde_json::json!(["application/pdf"])
+        serde_json::json!([
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ])
     );
-    assert_eq!(conversion["engine"]["version"], "1.15.0");
+    let engines = conversion["engines"].as_array().unwrap();
+    assert_eq!(engines.len(), 2);
+    assert_eq!(engines[0]["name"], "pdf-inspector");
+    assert_eq!(engines[0]["version"], "1.15.0");
+    assert_eq!(engines[1]["name"], "anydoc");
+    assert_eq!(engines[1]["version"], "0.1.9");
+    assert!(
+        conversion["engine"].is_null(),
+        "the singular engine field is gone"
+    );
     assert_eq!(payload["data"]["remoteFallback"]["available"], false);
 }
 
@@ -385,6 +400,154 @@ async fn clean_pdf_completes_and_idempotency_replays_the_job() {
         json_body(conflict).await["error"]["code"],
         "idempotency_conflict"
     );
+}
+
+#[tokio::test]
+async fn docx_completes_through_anydoc_and_replays() {
+    let app = test_app().await;
+    let docx = include_bytes!("fixtures/anydoc/text.docx").as_slice();
+    let body = multipart_body_with_media_type(
+        Uuid::new_v4(),
+        "standard",
+        docx,
+        "notes.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    );
+
+    let response = app.submit(body.clone(), "anydoc-docx-1", TOKEN).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let submitted = json_body(response).await;
+    let job_id = submitted["data"]["id"].as_str().unwrap().to_owned();
+
+    let completed = app.wait_for_terminal(&job_id).await;
+    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+    assert_eq!(completed["data"]["route"]["kind"], "local_anydoc");
+    assert_eq!(
+        completed["data"]["route"]["reasonCodes"],
+        serde_json::json!(["structured_document"])
+    );
+
+    let markdown = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
+        .await;
+    assert_eq!(markdown.status(), StatusCode::OK);
+    let markdown = markdown.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&markdown).contains("Fixture Document"));
+
+    let manifest = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
+        .await;
+    assert_eq!(manifest.status(), StatusCode::OK);
+    let manifest_bytes = manifest.into_body().collect().await.unwrap().to_bytes();
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(manifest["engine"]["name"], "anydoc");
+    assert_eq!(manifest["engine"]["version"], "0.1.9");
+    assert_eq!(manifest["document"]["format"], "docx");
+    assert_eq!(
+        manifest["source"]["mediaType"],
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    assert_eq!(
+        manifest["output"]["sha256"],
+        hex::encode(Sha256::digest(&markdown))
+    );
+    assert!(!String::from_utf8_lossy(&manifest_bytes).contains("notes.docx"));
+
+    let replay = app.submit(body, "anydoc-docx-1", TOKEN).await;
+    assert_eq!(replay.status(), StatusCode::ACCEPTED);
+    assert_eq!(replay.headers()["idempotency-replayed"], "true");
+    let replay = json_body(replay).await;
+    assert_eq!(replay["data"]["id"], job_id);
+}
+
+#[tokio::test]
+async fn xlsx_completes_through_anydoc_with_the_excel_family_label() {
+    let app = test_app().await;
+    let xlsx = include_bytes!("fixtures/anydoc/sheet.xlsx").as_slice();
+    let body = multipart_body_with_media_type(
+        Uuid::new_v4(),
+        "standard",
+        xlsx,
+        "sheet.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+
+    let response = app.submit(body, "anydoc-xlsx-1", TOKEN).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let submitted = json_body(response).await;
+    let job_id = submitted["data"]["id"].as_str().unwrap().to_owned();
+
+    let completed = app.wait_for_terminal(&job_id).await;
+    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+    let manifest = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
+        .await;
+    let manifest_bytes = manifest.into_body().collect().await.unwrap().to_bytes();
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(manifest["document"]["format"], "excel");
+}
+
+#[tokio::test]
+async fn anydoc_upload_boundaries_enforce_extension_media_type_and_magic() {
+    let app = test_app().await;
+    let docx = include_bytes!("fixtures/anydoc/text.docx").as_slice();
+    let docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    for (body, key, status, code) in [
+        (
+            multipart_body_with_media_type(
+                Uuid::new_v4(),
+                "standard",
+                &clean_pdf(),
+                "notes.docx",
+                docx_mime,
+            ),
+            "pdf-content-docx-extension",
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "invalid_source_signature",
+        ),
+        (
+            multipart_body_with_media_type(
+                Uuid::new_v4(),
+                "standard",
+                docx,
+                "notes.docx",
+                "application/msword",
+            ),
+            "mismatched-media-type",
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "invalid_source_media_type",
+        ),
+        (
+            multipart_body_with_media_type(
+                Uuid::new_v4(),
+                "standard",
+                docx,
+                "notes.md",
+                "text/markdown",
+            ),
+            "unsupported-extension",
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_source_extension",
+        ),
+        (
+            multipart_body_with_media_type(
+                Uuid::new_v4(),
+                "standard",
+                docx,
+                "notes.docx",
+                docx_mime,
+            ),
+            "docx-accepted",
+            StatusCode::ACCEPTED,
+            "",
+        ),
+    ] {
+        let response = app.submit(body, key, TOKEN).await;
+        assert_eq!(response.status(), status, "{key}");
+        if status != StatusCode::ACCEPTED {
+            assert_eq!(json_body(response).await["error"]["code"], code, "{key}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -827,7 +990,7 @@ async fn invalid_submission_fields_are_rejected_without_creating_jobs() {
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     assert_eq!(
         json_body(response).await["error"]["code"],
-        "invalid_pdf_signature"
+        "invalid_source_signature"
     );
     assert_eq!(count_job_directories(app.data_dir()), 0);
     assert_eq!(count_named_files(app.data_dir(), "input"), 0);
@@ -843,7 +1006,7 @@ async fn multipart_boundaries_enforce_fields_media_type_extension_and_size() {
             multipart_body(Uuid::new_v4(), "standard", &pdf, "fixture.txt"),
             "wrong-extension",
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "invalid_pdf_filename",
+            "unsupported_source_extension",
         ),
         (
             multipart_body_with_media_type(
@@ -855,7 +1018,7 @@ async fn multipart_boundaries_enforce_fields_media_type_extension_and_size() {
             ),
             "wrong-media-type",
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "invalid_pdf_media_type",
+            "invalid_source_media_type",
         ),
         (
             multipart_body_with_duplicate_profile(Uuid::new_v4(), &pdf),

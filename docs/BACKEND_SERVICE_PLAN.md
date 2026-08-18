@@ -160,7 +160,11 @@ Keep the current resource-oriented API:
 `Idempotency-Key` remains required for submission. `clientRunId` correlates a
 desktop run without replacing server-generated job and attempt IDs. Polling is
 the initial progress mechanism; server-sent events and WebSockets are not
-needed for the expected volume. M2 moved capabilities from ephemeral
+needed for the expected volume. How the Mac maps that poll onto the existing
+`job-updated` UI, and what operator metrics wait until M7, is
+[`MONITORING_AND_PROGRESS.md`](MONITORING_AND_PROGRESS.md).
+
+M2 moved capabilities from ephemeral
 durability and ephemeral-job capacity to persistent durability and active-job
 capacity, and the backend OpenAPI contract changed with it. The TypeScript
 schema was generated and diffed only in a temporary location to prove

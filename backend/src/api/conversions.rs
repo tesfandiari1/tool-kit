@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 use crate::{
     conversion::{
-        ArtifactKind, ArtifactLookup, ArtifactView, ConversionProfile, JobView, SourceMetadata,
-        Submission, SubmissionDecision,
+        source_format_by_extension, ArtifactKind, ArtifactLookup, ArtifactView, ContainerMagic,
+        ConversionProfile, JobView, SourceMetadata, Submission, SubmissionDecision,
     },
     error::{ApiError, RequestId},
     AppState,
@@ -383,32 +383,34 @@ async fn stream_source(
         error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "missing_filename",
-            "The source field must include a PDF filename.",
+            "The source field must include a filename.",
             request_id,
         )
     })?;
-    if filename.len() > MAX_FILENAME_BYTES
-        || filename.chars().any(char::is_control)
-        || FilePath::new(filename)
+    let format = if filename.len() > MAX_FILENAME_BYTES || filename.chars().any(char::is_control) {
+        None
+    } else {
+        FilePath::new(filename)
             .extension()
             .and_then(|extension| extension.to_str())
-            .is_none_or(|extension| !extension.eq_ignore_ascii_case("pdf"))
-    {
+            .and_then(source_format_by_extension)
+    };
+    let Some(format) = format else {
         return Err(error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "invalid_pdf_filename",
-            "The source filename must use the .pdf extension.",
+            "unsupported_source_extension",
+            "The source filename must use a supported extension.",
             request_id,
         ));
-    }
+    };
     if field
         .content_type()
-        .is_none_or(|content_type| !content_type.eq_ignore_ascii_case("application/pdf"))
+        .is_none_or(|content_type| !content_type.eq_ignore_ascii_case(format.media_type))
     {
         return Err(error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "invalid_pdf_media_type",
-            "The source media type must be application/pdf.",
+            "invalid_source_media_type",
+            "The source media type does not match its extension.",
             request_id,
         ));
     }
@@ -466,11 +468,11 @@ async fn stream_source(
             )
         })?;
     }
-    if byte_length == 0 || !has_pdf_signature(&signature) {
+    if byte_length == 0 || !has_container_magic(format.magic, &signature) {
         return Err(error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "invalid_pdf_signature",
-            "The source does not have a valid PDF signature.",
+            "invalid_source_signature",
+            "The source content does not match its extension.",
             request_id,
         ));
     }
@@ -483,9 +485,20 @@ async fn stream_source(
         )
     })?;
     Ok(SourceMetadata {
+        media_type: format.media_type.to_owned(),
         byte_length,
         sha256: hex::encode(digest.finalize()),
     })
+}
+
+/// The cheap admission check: the container signature each format family
+/// carries in its first bytes. Authoritative format detection happens from
+/// the full content inside the engine.
+fn has_container_magic(magic: ContainerMagic, prefix: &[u8]) -> bool {
+    match magic {
+        ContainerMagic::Pdf => has_pdf_signature(prefix),
+        ContainerMagic::Zip => prefix.starts_with(b"PK\x03\x04"),
+    }
 }
 
 fn has_pdf_signature(prefix: &[u8]) -> bool {

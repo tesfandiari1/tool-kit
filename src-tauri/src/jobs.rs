@@ -59,13 +59,45 @@ impl JobType {
         match self {
             JobType::Convert => matches!(
                 ext,
-                "pdf" | "png" | "jpg" | "jpeg" | "webp" | "tiff" | "tif" | "gif" | "bmp" | "docx"
-                    | "doc" | "pptx" | "ppt" | "xlsx" | "xls" | "html" | "htm" | "epub"
+                "pdf"
+                    | "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "webp"
+                    | "tiff"
+                    | "tif"
+                    | "gif"
+                    | "bmp"
+                    | "docx"
+                    | "doc"
+                    | "pptx"
+                    | "ppt"
+                    | "xlsx"
+                    | "xls"
+                    | "html"
+                    | "htm"
+                    | "epub"
             ),
             JobType::Transcribe => matches!(
                 ext,
-                "mp3" | "mp4" | "wav" | "m4a" | "flac" | "ogg" | "oga" | "aac" | "mov" | "avi"
-                    | "mkv" | "webm" | "wmv" | "mpeg" | "mpg" | "opus" | "amr" | "3gp"
+                "mp3"
+                    | "mp4"
+                    | "wav"
+                    | "m4a"
+                    | "flac"
+                    | "ogg"
+                    | "oga"
+                    | "aac"
+                    | "mov"
+                    | "avi"
+                    | "mkv"
+                    | "webm"
+                    | "wmv"
+                    | "mpeg"
+                    | "mpg"
+                    | "opus"
+                    | "amr"
+                    | "3gp"
             ),
         }
     }
@@ -162,7 +194,12 @@ impl JobManager {
         self.jobs.lock().unwrap().clone()
     }
     pub fn get(&self, id: u64) -> Option<Job> {
-        self.jobs.lock().unwrap().iter().find(|j| j.id == id).cloned()
+        self.jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|j| j.id == id)
+            .cloned()
     }
     pub fn clear(&self) {
         self.jobs.lock().unwrap().clear();
@@ -374,7 +411,14 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
         let api_key = match secrets::get_key(provider.key_name()) {
             Some(k) if !k.is_empty() => k,
             _ => {
-                fail(&app, id, &format!("No API key set for {}. Add it in Settings.", provider.label()));
+                fail(
+                    &app,
+                    id,
+                    &format!(
+                        "No API key set for {}. Add it in Settings.",
+                        provider.label()
+                    ),
+                );
                 return;
             }
         };
@@ -404,45 +448,39 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
             .unwrap_or_else(|_| reqwest::Client::new());
 
         {
-                set_status(&app, id, "working", "Uploading…");
-                let datalab_format = cfg.datalab_format.clone();
-                let pipeline = cfg
-                    .datalab_pipeline_id
-                    .clone()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
+            set_status(&app, id, "working", "Uploading…");
+            let datalab_format = cfg.datalab_format.clone();
+            let pipeline = cfg
+                .datalab_pipeline_id
+                .clone()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
 
-                let submitted = match job.job_type {
-                    JobType::Convert => {
-                        let res = match &pipeline {
-                            Some(pid) => {
-                                providers::datalab_pipeline_submit(
-                                    &client, &api_key, pid, &job.source_path, &datalab_format,
-                                )
-                                .await
-                            }
-                            None => {
-                                providers::datalab_submit(
-                                    &client,
-                                    &api_key,
-                                    &job.source_path,
-                                    &datalab_format,
-                                    cfg.datalab_high_accuracy,
-                                )
-                                .await
-                            }
-                        };
-                        match res {
-                            Ok(s) => s,
-                            Err(e) => {
-                                if !stale(&app) {
-                                    fail(&app, id, &e);
-                                }
-                                return;
-                            }
+            let submitted = match job.job_type {
+                JobType::Convert => {
+                    let res = match &pipeline {
+                        Some(pid) => {
+                            providers::datalab_pipeline_submit(
+                                &client,
+                                &api_key,
+                                pid,
+                                &job.source_path,
+                                &datalab_format,
+                            )
+                            .await
                         }
-                    }
-                    _ => match providers::revai_submit(&client, &api_key, &job.source_path).await {
+                        None => {
+                            providers::datalab_submit(
+                                &client,
+                                &api_key,
+                                &job.source_path,
+                                &datalab_format,
+                                cfg.datalab_high_accuracy,
+                            )
+                            .await
+                        }
+                    };
+                    match res {
                         Ok(s) => s,
                         Err(e) => {
                             if !stale(&app) {
@@ -450,90 +488,122 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
                             }
                             return;
                         }
-                    },
-                };
-
-                // A submit carries the whole file and can run for half an hour,
-                // so Stop is very likely to land during one. Without this check
-                // the finished upload writes "processing" back over a row the
-                // user already stopped, and since the poll loop then bails on
-                // its own stale check, nothing ever moves that row to a
-                // terminal state: Run stays disabled behind a job with no task.
-                // The two arms above are guarded for the same reason — a
-                // stopped job must not be relabelled with a network error, or
-                // it lands in the history as a genuine failure.
-                if stale(&app) {
-                    return;
+                    }
                 }
-                set_status(&app, id, "processing", "Processing…");
-                let convert_check_url = submitted.check_url.clone().unwrap_or_else(|| {
-                    format!("https://www.datalab.to/api/v1/convert/{}", submitted.remote_id)
-                });
-
-                let max_attempts: u32 = 720; // ~60 min at 5s
-                let mut attempt: u32 = 0;
-                // Consecutive network/parse errors. Transient blips are fine to
-                // ride out, but an endless stream of them should fail the job
-                // rather than silently burn the full 60-minute budget.
-                let mut consecutive_errors: u32 = 0;
-                let text = loop {
-                    attempt += 1;
-                    if attempt > max_attempts {
-                        fail(&app, id, "Timed out waiting for the result.");
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    if stale(&app) {
-                        return;
-                    }
-                    let poll = match job.job_type {
-                        JobType::Convert => match &pipeline {
-                            Some(_) => {
-                                providers::datalab_pipeline_poll(&client, &api_key, &submitted.remote_id).await
+                JobType::Transcribe => {
+                    match providers::revai_submit(&client, &api_key, &job.source_path).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            if !stale(&app) {
+                                fail(&app, id, &e);
                             }
-                            None => {
-                                providers::datalab_poll(&client, &api_key, &convert_check_url, &datalab_format).await
-                            }
-                        },
-                        _ => providers::revai_poll(&client, &api_key, &submitted.remote_id).await,
-                    };
-                    match poll {
-                        Ok(PollResult::Done(t)) => break t,
-                        Ok(PollResult::Failed(e)) => {
-                            fail(&app, id, &e);
                             return;
                         }
-                        Ok(PollResult::Pending) => {
-                            consecutive_errors = 0;
-                            continue;
-                        }
-                        Err(e) => {
-                            consecutive_errors += 1;
-                            if consecutive_errors >= 12 {
-                                // ~1 minute of unbroken failure.
-                                fail(&app, id, &format!("Lost contact while waiting for the result: {e}"));
-                                return;
-                            }
-                            continue;
-                        }
                     }
-                };
+                }
+            };
 
-                let ext = match job.job_type {
-                    JobType::Convert => match datalab_format.as_str() {
-                        "html" => "html",
-                        "json" | "chunks" => "json",
-                        _ => "md",
-                    },
-                    _ => "txt",
-                };
+            // A submit carries the whole file and can run for half an hour,
+            // so Stop is very likely to land during one. Without this check
+            // the finished upload writes "processing" back over a row the
+            // user already stopped, and since the poll loop then bails on
+            // its own stale check, nothing ever moves that row to a
+            // terminal state: Run stays disabled behind a job with no task.
+            // The two arms above are guarded for the same reason — a
+            // stopped job must not be relabelled with a network error, or
+            // it lands in the history as a genuine failure.
+            if stale(&app) {
+                return;
+            }
+            set_status(&app, id, "processing", "Processing…");
+            let convert_check_url = submitted.check_url.clone().unwrap_or_else(|| {
+                format!(
+                    "https://www.datalab.to/api/v1/convert/{}",
+                    submitted.remote_id
+                )
+            });
+
+            let max_attempts: u32 = 720; // ~60 min at 5s
+            let mut attempt: u32 = 0;
+            // Consecutive network/parse errors. Transient blips are fine to
+            // ride out, but an endless stream of them should fail the job
+            // rather than silently burn the full 60-minute budget.
+            let mut consecutive_errors: u32 = 0;
+            let text = loop {
+                attempt += 1;
+                if attempt > max_attempts {
+                    fail(&app, id, "Timed out waiting for the result.");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 if stale(&app) {
                     return;
                 }
-                match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
-                    Ok(path) => finish(&app, id, text, Some(path)),
-                    Err(e) => fail(&app, id, &e),
+                let poll = match job.job_type {
+                    JobType::Convert => match &pipeline {
+                        Some(_) => {
+                            providers::datalab_pipeline_poll(
+                                &client,
+                                &api_key,
+                                &submitted.remote_id,
+                            )
+                            .await
+                        }
+                        None => {
+                            providers::datalab_poll(
+                                &client,
+                                &api_key,
+                                &convert_check_url,
+                                &datalab_format,
+                            )
+                            .await
+                        }
+                    },
+                    JobType::Transcribe => {
+                        providers::revai_poll(&client, &api_key, &submitted.remote_id).await
+                    }
+                };
+                match poll {
+                    Ok(PollResult::Done(t)) => break t,
+                    Ok(PollResult::Failed(e)) => {
+                        fail(&app, id, &e);
+                        return;
+                    }
+                    Ok(PollResult::Pending) => {
+                        consecutive_errors = 0;
+                        continue;
+                    }
+                    Err(e) => {
+                        consecutive_errors += 1;
+                        if consecutive_errors >= 12 {
+                            // ~1 minute of unbroken failure.
+                            fail(
+                                &app,
+                                id,
+                                &format!("Lost contact while waiting for the result: {e}"),
+                            );
+                            return;
+                        }
+                        continue;
+                    }
                 }
+            };
+
+            let ext = match job.job_type {
+                JobType::Convert => match datalab_format.as_str() {
+                    "html" => "html",
+                    "json" | "chunks" => "json",
+                    _ => "md",
+                },
+                JobType::Transcribe => "txt",
+            };
+            if stale(&app) {
+                return;
+            }
+            match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
+                Ok(path) => finish(&app, id, text, Some(path)),
+                Err(e) => fail(&app, id, &e),
+            }
         }
     });
 }

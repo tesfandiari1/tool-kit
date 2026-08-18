@@ -7,10 +7,8 @@
 
 use serde_json::Value;
 
-use crate::{
-    persistence::DocumentClassification,
-    worker_protocol::{FallbackReason, RejectionCode},
-};
+use crate::persistence::DocumentClassification;
+use crate::worker_protocol::FallbackReason;
 
 /// What one local engine learned about one document, in engine-neutral terms.
 #[derive(Clone, Debug)]
@@ -34,8 +32,16 @@ pub enum EngineOutcome {
         reason_code: FallbackReason,
     },
     Rejected {
-        code: RejectionCode,
+        rejection: EngineRejection,
     },
+}
+
+/// An engine-owned rejection: the stable code and client-safe message travel
+/// together, so a second engine adds codes without touching the service.
+#[derive(Clone, Debug)]
+pub struct EngineRejection {
+    pub code: &'static str,
+    pub message: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

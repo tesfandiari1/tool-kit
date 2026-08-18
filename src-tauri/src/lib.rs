@@ -130,7 +130,9 @@ fn collect_input_files(inputs: &[String], jt: JobType) -> Vec<std::path::PathBuf
 /// Formats that are already plain text. There is nothing to extract from them,
 /// so they are skipped rather than sent to a provider — but they are counted so
 /// the UI can say "already text" instead of reporting an unexplained zero.
-const ALREADY_TEXT: &[&str] = &["txt", "md", "markdown", "text", "rst", "org", "csv", "tsv", "json"];
+const ALREADY_TEXT: &[&str] = &[
+    "txt", "md", "markdown", "text", "rst", "org", "csv", "tsv", "json",
+];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -201,7 +203,10 @@ fn split_reusable(
     let Some(dir) = cfg.output_dir.as_deref() else {
         return (0, found.len());
     };
-    let here = found.values().filter(|out| history::is_in_dir(out, dir)).count();
+    let here = found
+        .values()
+        .filter(|out| history::is_in_dir(out, dir))
+        .count();
     (here, found.len() - here)
 }
 
@@ -228,7 +233,10 @@ fn count_matching(inputs: &[String], exts: &[&str]) -> usize {
         };
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.file_name().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with('.')) {
+            if p.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.starts_with('.'))
+            {
                 continue;
             }
             match entry.file_type() {
@@ -309,7 +317,10 @@ fn run_pipeline(
 
     let mut files = collect_input_files(&inputs, jt);
     if files.is_empty() {
-        return Err(format!("No {} files in your selection", jt.label().to_lowercase()));
+        return Err(format!(
+            "No {} files in your selection",
+            jt.label().to_lowercase()
+        ));
     }
 
     // Loaded once and reused: the same config decides what gets skipped here
@@ -361,7 +372,12 @@ fn run_pipeline(
     let mut copied = 0;
     for (source, existing) in &to_copy {
         let id = state.next_id();
-        let job = Job::new(id, source.to_string_lossy().to_string(), output_dir.clone(), jt);
+        let job = Job::new(
+            id,
+            source.to_string_lossy().to_string(),
+            output_dir.clone(),
+            jt,
+        );
         state.insert(job.clone());
         let _ = app.emit("job-updated", job);
         if jobs::reuse_result(&app, id, existing) {
@@ -371,12 +387,21 @@ fn run_pipeline(
 
     for source in &files {
         let id = state.next_id();
-        let job = Job::new(id, source.to_string_lossy().to_string(), output_dir.clone(), jt);
+        let job = Job::new(
+            id,
+            source.to_string_lossy().to_string(),
+            output_dir.clone(),
+            jt,
+        );
         state.insert(job.clone());
         let _ = app.emit("job-updated", job);
         jobs::run_job(app.clone(), id, generation);
     }
-    Ok(RunResult { count: files.len(), skipped, copied })
+    Ok(RunResult {
+        count: files.len(),
+        skipped,
+        copied,
+    })
 }
 
 /// Stop the current run: retire in-flight tasks and mark anything unfinished
@@ -597,7 +622,8 @@ pub fn run() {
                 // The menu bar wants a monochrome template image, not the full
                 // colour app icon — macOS then tints it for light/dark menu
                 // bars and inverts it while the menu is open.
-                let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray@2x.png"));
+                let tray_icon =
+                    tauri::image::Image::from_bytes(include_bytes!("../icons/tray@2x.png"));
 
                 let mut tray = TrayIconBuilder::new()
                     .menu(&menu)
@@ -629,7 +655,9 @@ pub fn run() {
                 }
                 tray.build(app)?;
 
-                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+                use tauri_plugin_global_shortcut::{
+                    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+                };
                 // Not SUPER|SHIFT+V: that is macOS "Paste and Match Style",
                 // which this would hijack system-wide in every app.
                 let toggle = Shortcut::new(Some(Modifiers::ALT | Modifiers::SUPER), Code::KeyV);
@@ -637,7 +665,9 @@ pub fn run() {
                 app.handle().plugin(
                     tauri_plugin_global_shortcut::Builder::new()
                         .with_handler(move |app, scut, event| {
-                            if scut == &toggle_for_handler && event.state() == ShortcutState::Pressed {
+                            if scut == &toggle_for_handler
+                                && event.state() == ShortcutState::Pressed
+                            {
                                 toggle_main_window(app);
                             }
                         })
@@ -698,19 +728,29 @@ mod scan_tests {
         let root = tree("output-overlap", &["report.pdf"]);
         let input = root.join("report.pdf").to_string_lossy().to_string();
         let found = collect_input_files(&[input], JobType::Convert);
-        assert_eq!(names(&found), vec!["report.pdf"], "input excluded by its own folder");
+        assert_eq!(
+            names(&found),
+            vec!["report.pdf"],
+            "input excluded by its own folder"
+        );
     }
 
     #[test]
     fn folders_are_walked_recursively() {
-        let root = tree("recursive", &["a.pdf", "sub/b.pdf", "sub/deep/c.pdf", "sub/notes.txt"]);
+        let root = tree(
+            "recursive",
+            &["a.pdf", "sub/b.pdf", "sub/deep/c.pdf", "sub/notes.txt"],
+        );
         let found = collect_input_files(&[root.to_string_lossy().to_string()], JobType::Convert);
         assert_eq!(names(&found), vec!["a.pdf", "b.pdf", "c.pdf"]);
     }
 
     #[test]
     fn dot_directories_are_skipped_when_walking() {
-        let root = tree("hidden", &["keep.pdf", ".git/objects/junk.pdf", ".DS_Store"]);
+        let root = tree(
+            "hidden",
+            &["keep.pdf", ".git/objects/junk.pdf", ".DS_Store"],
+        );
         let found = collect_input_files(&[root.to_string_lossy().to_string()], JobType::Convert);
         assert_eq!(names(&found), vec!["keep.pdf"]);
     }
@@ -729,16 +769,28 @@ mod scan_tests {
     fn each_job_sees_only_its_own_extensions() {
         let root = tree("bytype", &["doc.pdf", "talk.mp3", "clip.mov", "sheet.xlsx"]);
         let inputs = vec![root.to_string_lossy().to_string()];
-        assert_eq!(names(&collect_input_files(&inputs, JobType::Convert)), vec!["doc.pdf", "sheet.xlsx"]);
-        assert_eq!(names(&collect_input_files(&inputs, JobType::Transcribe)), vec!["clip.mov", "talk.mp3"]);
+        assert_eq!(
+            names(&collect_input_files(&inputs, JobType::Convert)),
+            vec!["doc.pdf", "sheet.xlsx"]
+        );
+        assert_eq!(
+            names(&collect_input_files(&inputs, JobType::Transcribe)),
+            vec!["clip.mov", "talk.mp3"]
+        );
     }
 
     #[test]
     fn extension_match_is_case_insensitive() {
         let root = tree("case", &["SCAN.PDF", "Audio.MP3"]);
         let inputs = vec![root.to_string_lossy().to_string()];
-        assert_eq!(names(&collect_input_files(&inputs, JobType::Convert)), vec!["SCAN.PDF"]);
-        assert_eq!(names(&collect_input_files(&inputs, JobType::Transcribe)), vec!["Audio.MP3"]);
+        assert_eq!(
+            names(&collect_input_files(&inputs, JobType::Convert)),
+            vec!["SCAN.PDF"]
+        );
+        assert_eq!(
+            names(&collect_input_files(&inputs, JobType::Transcribe)),
+            vec!["Audio.MP3"]
+        );
     }
 
     #[test]
@@ -749,11 +801,17 @@ mod scan_tests {
             one.join("a.pdf").to_string_lossy().to_string(),
             one.join("b.pdf").to_string_lossy().to_string(),
         ];
-        assert_eq!(suggested_output_dir(&same), Some(one.to_string_lossy().to_string()));
+        assert_eq!(
+            suggested_output_dir(&same),
+            Some(one.to_string_lossy().to_string())
+        );
 
         // A dropped folder is its own answer.
         let folder = vec![one.to_string_lossy().to_string()];
-        assert_eq!(suggested_output_dir(&folder), Some(one.to_string_lossy().to_string()));
+        assert_eq!(
+            suggested_output_dir(&folder),
+            Some(one.to_string_lossy().to_string())
+        );
 
         // Two different parents: don't guess.
         let mixed = vec![
