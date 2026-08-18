@@ -262,7 +262,7 @@ async fn startup_reconciliation_ignores_the_readiness_probe_directory() {
 }
 
 #[test]
-fn conversion_profile_and_job_status_json_values_are_stable() {
+fn conversion_profile_job_status_and_route_json_values_are_stable() {
     let document: YamlValue = serde_yaml_ng::from_str(include_str!("../openapi/openapi.yaml"))
         .expect("OpenAPI must be valid YAML");
     let profile_values = document["components"]["schemas"]["ConversionProfile"]["enum"]
@@ -273,6 +273,13 @@ fn conversion_profile_and_job_status_json_values_are_stable() {
         .collect::<Vec<_>>();
     let status_values = document["components"]["schemas"]["ConversionJob"]["properties"]["status"]
         ["enum"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    let route_values = document["components"]["schemas"]["ConversionJob"]["properties"]["route"]
+        ["properties"]["kind"]["enum"]
         .as_sequence()
         .unwrap()
         .iter()
@@ -291,6 +298,7 @@ fn conversion_profile_and_job_status_json_values_are_stable() {
             "needs_remote",
         ]
     );
+    assert_eq!(route_values, ["local_pdf", "local_anydoc"]);
 }
 
 #[tokio::test]

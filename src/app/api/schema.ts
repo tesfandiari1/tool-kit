@@ -252,8 +252,8 @@ export interface components {
             /** @enum {string} */
             status: "queued" | "converting_local" | "finalizing" | "succeeded" | "failed" | "needs_remote";
             route?: {
-                /** @constant */
-                kind: "local_pdf";
+                /** @enum {string} */
+                kind: "local_pdf" | "local_anydoc";
                 reasonCodes: string[];
             };
             warnings: string[];

@@ -584,7 +584,7 @@ components:
           properties:
             kind:
               type: string
-              const: local_pdf
+              enum: [local_pdf, local_anydoc]
             reasonCodes:
               type: array
               items:
