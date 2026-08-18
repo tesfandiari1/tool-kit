@@ -47,9 +47,14 @@ export const commands = {
   /// the base URL, attaches the Keychain bearer token, and streams multipart
   /// sources from disk, so neither the token nor file bytes reach the webview.
   /// Only `@/app/api/transport` calls this — it is the `fetch` openapi-fetch
-  /// runs on, not something a view invokes. No Rust handler until M6.
+  /// runs on, not something a view invokes. The generic door refuses Markdown
+  /// artifacts so a large result can never cross IPC as a response body.
   serviceRequest: (request: ServiceRequestPayload) =>
     invoke<ServiceResponsePayload>("service_request", { request }),
+  /// Streams one published Markdown artifact to a collision-safe file in the
+  /// host and returns only its path. Artifact bytes never enter the webview.
+  downloadConversionMarkdown: (conversionId: string, outputDir: string, fileName: string) =>
+    invoke<string>("download_conversion_markdown", { conversionId, outputDir, fileName }),
   onJobUpdated: (handler: (job: Job) => void) => listen<Job>("job-updated", (e) => {
     handler(e.payload);
   }),

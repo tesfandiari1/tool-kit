@@ -17,8 +17,10 @@ export interface ServiceRequestPayload {
   body?: string;
 }
 
-/// What `service_request` answers with. `body` is the raw response text;
-/// openapi-fetch parses it by content type (JSON envelopes, text/markdown).
+/// What `service_request` answers with. `body` is bounded raw response text;
+/// openapi-fetch parses its JSON envelopes. The host refuses the Markdown
+/// artifact endpoint here; downloads use `downloadConversionMarkdown` and
+/// return only a filesystem path.
 export interface ServiceResponsePayload {
   status: number;
   headers: Record<string, string>;

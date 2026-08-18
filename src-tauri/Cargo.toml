@@ -26,8 +26,8 @@ tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.13", features = ["json", "multipart"] }
-tokio = { version = "1", features = ["time", "fs", "sync"] }
+reqwest = { version = "0.13", features = ["json", "multipart", "stream"] }
+tokio = { version = "1", features = ["time", "fs", "io-util", "sync"] }
 keyring = { version = "3", features = ["apple-native"] }
 mime_guess = "2"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
@@ -59,4 +59,3 @@ manual_async_fn = "deny"
 lossy_float_literal = "deny"
 string_slice = "deny"
 match_wildcard_for_single_variants = "deny"
-

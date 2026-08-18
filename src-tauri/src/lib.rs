@@ -1,3 +1,4 @@
+mod conversion_service;
 mod history;
 mod jobs;
 mod providers;
@@ -708,7 +709,9 @@ pub fn run() {
             quit_app,
             retry_failed,
             list_history,
-            clear_history
+            clear_history,
+            conversion_service::service_request,
+            conversion_service::download_conversion_markdown
         ])
         .setup(|app| {
             // Opened once and held for the process. A database that can't be
