@@ -58,7 +58,8 @@ impl From<ConversionProfile> for Profile {
 /// admission boundary.
 ///
 /// A format appears here only with a passing round-trip fixture, and the
-/// migration 0002 CHECK constraint matches this table exactly.
+/// newest migration's CHECK constraint matches this table exactly. That pairing
+/// is enforced by `advertised_media_types_match_the_migration_check`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SourceFormat {
     pub extension: &'static str,
@@ -75,6 +76,12 @@ pub(crate) enum ContainerMagic {
     Pdf,
     Zip,
     Ole,
+    /// `{\rtf`, the group that must open every RTF file.
+    Rtf,
+    /// CSV carries no signature at all, so admission cannot check one. The
+    /// extension and declared media type are the whole gate, and the engine
+    /// names the format explicitly because detection returns `None`.
+    None,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,6 +147,94 @@ pub(crate) const SOURCE_FORMATS: &[SourceFormat] = &[
         engine: LocalEngineKind::AnyDoc,
         format_label: "epub",
     },
+    SourceFormat {
+        extension: "odt",
+        media_type: "application/vnd.oasis.opendocument.text",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "odt",
+    },
+    SourceFormat {
+        extension: "ods",
+        media_type: "application/vnd.oasis.opendocument.spreadsheet",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "ods",
+    },
+    SourceFormat {
+        extension: "odp",
+        media_type: "application/vnd.oasis.opendocument.presentation",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "odp",
+    },
+    SourceFormat {
+        extension: "rtf",
+        media_type: "application/rtf",
+        magic: ContainerMagic::Rtf,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "rtf",
+    },
+    SourceFormat {
+        extension: "csv",
+        media_type: "text/csv",
+        magic: ContainerMagic::None,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "csv",
+    },
+    // Extension variants of the families above. AnyDoc routes each to the same
+    // parser, so they carry the same `format_label`; only admission differs.
+    SourceFormat {
+        extension: "docm",
+        media_type: "application/vnd.ms-word.document.macroEnabled.12",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "docx",
+    },
+    SourceFormat {
+        extension: "xlsm",
+        media_type: "application/vnd.ms-excel.sheet.macroEnabled.12",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "excel",
+    },
+    SourceFormat {
+        extension: "pptm",
+        media_type: "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "pptx",
+    },
+    SourceFormat {
+        extension: "ppsx",
+        media_type: "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "pptx",
+    },
+    SourceFormat {
+        extension: "ppsm",
+        media_type: "application/vnd.ms-powerpoint.slideshow.macroEnabled.12",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "pptx",
+    },
+    // `pps` and `pot` are the same OLE container as `ppt` and share its media
+    // type; the extension only tells PowerPoint how to open the file.
+    SourceFormat {
+        extension: "pps",
+        media_type: "application/vnd.ms-powerpoint",
+        magic: ContainerMagic::Ole,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "ppt",
+    },
+    SourceFormat {
+        extension: "pot",
+        media_type: "application/vnd.ms-powerpoint",
+        magic: ContainerMagic::Ole,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "ppt",
+    },
 ];
 
 pub(crate) fn source_format_by_extension(extension: &str) -> Option<&'static SourceFormat> {
@@ -155,11 +250,16 @@ pub(crate) fn source_format_by_media_type(media_type: &str) -> Option<&'static S
 }
 
 /// The media types the service advertises and accepts, in table order.
+/// Deduplicated: `ppt`, `pps`, and `pot` are one media type on three
+/// extensions.
 pub(crate) fn advertised_media_types() -> Vec<&'static str> {
-    SOURCE_FORMATS
-        .iter()
-        .map(|format| format.media_type)
-        .collect()
+    let mut seen = Vec::new();
+    for format in SOURCE_FORMATS {
+        if !seen.contains(&format.media_type) {
+            seen.push(format.media_type);
+        }
+    }
+    seen
 }
 
 impl From<Profile> for ConversionProfile {
@@ -383,4 +483,50 @@ pub fn now() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The admission table and the database CHECK are two copies of one list.
+    /// If they drift, an upload the API accepts fails at INSERT with a
+    /// constraint error instead of a clean 415, so pin them together.
+    #[test]
+    fn advertised_media_types_match_the_migration_check() {
+        let sql = include_str!("../../migrations/0003_anydoc_full_format_set.sql");
+        let check = sql
+            .split_once("source_media_type     TEXT NOT NULL")
+            .expect("the conversions CHECK must exist")
+            .1
+            .split_once("))")
+            .expect("the CHECK must close")
+            .0;
+        for media_type in advertised_media_types() {
+            assert!(
+                check.contains(&format!("'{media_type}'")),
+                "{media_type} is advertised but the migration CHECK rejects it"
+            );
+        }
+        let quoted = check.matches('\'').count() / 2;
+        assert_eq!(
+            quoted,
+            advertised_media_types().len(),
+            "the migration CHECK lists media types the admission table does not"
+        );
+    }
+
+    #[test]
+    fn every_extension_is_unique_and_lowercase() {
+        let mut seen = Vec::new();
+        for format in SOURCE_FORMATS {
+            assert_eq!(format.extension, format.extension.to_ascii_lowercase());
+            assert!(
+                !seen.contains(&format.extension),
+                "duplicate extension {}",
+                format.extension
+            );
+            seen.push(format.extension);
+        }
+    }
 }

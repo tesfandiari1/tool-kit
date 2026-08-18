@@ -1,3 +1,4 @@
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm as confirmDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -32,6 +33,25 @@ export function onDragDrop(handler: (event: DragDropEvent) => void) {
 
 export function currentWindow() {
   return getCurrentWindow();
+}
+
+/// Window sizing is logical pixels on both sides of this boundary: the sizes in
+/// `tauri.conf.json` and the persisted expanded size are logical, but
+/// `innerSize()` answers in physical pixels, so on a retina display a window
+/// reads back at twice the size it was just set to unless it is converted here.
+export async function windowSize(): Promise<{ width: number; height: number }> {
+  const win = getCurrentWindow();
+  const [size, scale] = await Promise.all([win.innerSize(), win.scaleFactor()]);
+  const { width, height } = size.toLogical(scale);
+  return { width, height };
+}
+
+export async function resizeWindow(width: number, height: number): Promise<void> {
+  await getCurrentWindow().setSize(new LogicalSize(width, height));
+}
+
+export async function setWindowMinSize(width: number, height: number): Promise<void> {
+  await getCurrentWindow().setMinSize(new LogicalSize(width, height));
 }
 
 function normalizePaths(sel: string | string[] | null): string[] {

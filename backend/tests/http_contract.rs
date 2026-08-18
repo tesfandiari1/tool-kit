@@ -80,7 +80,17 @@ async fn public_health_and_capabilities_are_truthful() {
             "application/vnd.ms-powerpoint",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "application/vnd.ms-excel",
-            "application/epub+zip"
+            "application/epub+zip",
+            "application/vnd.oasis.opendocument.text",
+            "application/vnd.oasis.opendocument.spreadsheet",
+            "application/vnd.oasis.opendocument.presentation",
+            "application/rtf",
+            "text/csv",
+            "application/vnd.ms-word.document.macroEnabled.12",
+            "application/vnd.ms-excel.sheet.macroEnabled.12",
+            "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+            "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+            "application/vnd.ms-powerpoint.slideshow.macroEnabled.12"
         ])
     );
     let engines = conversion["engines"].as_array().unwrap();
@@ -505,6 +515,80 @@ async fn every_advertised_anydoc_family_converts() {
             "application/epub+zip",
             "epub",
         ),
+        (
+            include_bytes!("fixtures/anydoc/text.odt").as_slice(),
+            "notes.odt",
+            "application/vnd.oasis.opendocument.text",
+            "odt",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/sheet.ods").as_slice(),
+            "sheet.ods",
+            "application/vnd.oasis.opendocument.spreadsheet",
+            "ods",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/pres.odp").as_slice(),
+            "deck.odp",
+            "application/vnd.oasis.opendocument.presentation",
+            "odp",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/text.rtf").as_slice(),
+            "notes.rtf",
+            "application/rtf",
+            "rtf",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/sheet.csv").as_slice(),
+            "rows.csv",
+            "text/csv",
+            "csv",
+        ),
+        // Extension variants: same parser, so the reported family is the base
+        // format's label, not the extension.
+        (
+            include_bytes!("fixtures/anydoc/text.docm").as_slice(),
+            "macro.docm",
+            "application/vnd.ms-word.document.macroEnabled.12",
+            "docx",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/sheet.xlsm").as_slice(),
+            "macro.xlsm",
+            "application/vnd.ms-excel.sheet.macroEnabled.12",
+            "excel",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/pres.pptm").as_slice(),
+            "macro.pptm",
+            "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+            "pptx",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/pres.ppsx").as_slice(),
+            "show.ppsx",
+            "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+            "pptx",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/pres.ppsm").as_slice(),
+            "show.ppsm",
+            "application/vnd.ms-powerpoint.slideshow.macroEnabled.12",
+            "pptx",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/deck.pps").as_slice(),
+            "show.pps",
+            "application/vnd.ms-powerpoint",
+            "ppt",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/deck.pot").as_slice(),
+            "template.pot",
+            "application/vnd.ms-powerpoint",
+            "ppt",
+        ),
     ] {
         let body = multipart_body_with_media_type(
             Uuid::new_v4(),
@@ -587,6 +671,36 @@ async fn broken_and_hostile_anydoc_inputs_fail_closed_without_artifacts() {
             "huge.pptx",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             "document_exceeds_limits",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/encrypted.odt").as_slice(),
+            "locked.odt",
+            "application/vnd.oasis.opendocument.text",
+            "encrypted_document",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/hugerepeat.ods").as_slice(),
+            "huge.ods",
+            "application/vnd.oasis.opendocument.spreadsheet",
+            "document_exceeds_limits",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/truncated.odp").as_slice(),
+            "broken.odp",
+            "application/vnd.oasis.opendocument.presentation",
+            "invalid_document",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/empty.rtf").as_slice(),
+            "empty.rtf",
+            "application/rtf",
+            "invalid_document",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/empty.csv").as_slice(),
+            "empty.csv",
+            "text/csv",
+            "invalid_document",
         ),
     ] {
         let body = multipart_body_with_media_type(

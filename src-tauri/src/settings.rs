@@ -1,6 +1,7 @@
 //! Lightweight app settings persisted as JSON in the app config directory.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
@@ -28,6 +29,11 @@ pub struct Settings {
     /// disk. On by default: paying twice for the same conversion is the thing
     /// the history layer exists to prevent.
     pub skip_already_done: bool,
+    /// Last SplitPane layout, percentages keyed by pane id (`start` / `end`).
+    pub split_layout: Option<BTreeMap<String, f64>>,
+    /// Inner window size while the document pane is open.
+    pub expanded_width: Option<u32>,
+    pub expanded_height: Option<u32>,
 }
 
 impl Default for Settings {
@@ -40,6 +46,9 @@ impl Default for Settings {
             datalab_pipeline_id: None,
             datalab_high_accuracy: true,
             skip_already_done: true,
+            split_layout: None,
+            expanded_width: None,
+            expanded_height: None,
         }
     }
 }

@@ -251,27 +251,45 @@ CVR-037–039 and the containment note on CVR-032.
   `warnings` from engine output where applicable; close the ticket if the audit
   passes.
 - [x] **CVR-036:** Add licensed or synthetic success and safe-failure fixtures
-  for each advertised format family. Done 2026-08-18 for all eight advertised
-  formats: pdf plus the AnyDoc seven (doc, docx, ppt, pptx, xls, xlsx, epub),
-  each with a round-trip fixture and a bounded-failure fixture, licences in
-  `backend/tests/fixtures/SOURCES.md`.
+  for each advertised format family. Done 2026-08-18 across the full AnyDoc
+  format set: PDF on its own engine plus 18 AnyDoc extensions, each with a
+  round-trip fixture and each family with a bounded-failure fixture. Licences
+  and derivations in `backend/tests/fixtures/SOURCES.md`.
 
-  **Scope decision, 2026-08-18: rtf, odt, ods, odp, and csv are not advertised
-  and are not planned.** The rule is *advertise only what the desktop sends*.
-  The desktop's convert list (`src-tauri/src/jobs.rs`) is pdf, png, jpg, jpeg,
-  webp, tiff, tif, gif, bmp, docx, doc, pptx, ppt, xlsx, xls, html, htm, epub;
-  `collect_input_files` drops anything else before upload, so an `.rtf` or
-  `.csv` can never become a job. Those five would have cost five admission
-  rows, a migration 0003 rebuilding two tables, five fixtures, and five
-  contract tests, for zero reachable users. Reopen only when a file the user
-  actually owns is rejected.
+  **Scope correction, 2026-08-18 (supersedes the narrowing earlier that day).**
+  The first pass closed this ticket by refusing rtf, odt, ods, odp, and csv on
+  the grounds that the desktop cannot send them. That was the wrong test. The
+  backend is a document-conversion service and AnyDoc is its engine, so the
+  question is what the engine can do, not what today's UI happens to offer.
+  The narrowing also missed extension variants entirely.
 
-  **The real format gap is the other direction.** Ten extensions the desktop
-  does accept have no local engine: png, jpg, jpeg, webp, tiff, tif, gif, bmp,
-  html, and htm. AnyDoc cannot serve any of them. its `Format` enum is exactly
-  doc, docx, odt, pdf, ppt, pptx, rtf, epub, excel, ods, odp, csv. They belong
-  to the remote route (M5) or the desktop's per-file direct-path fallback
-  (M6), never to a local-format increment.
+  **The advertised set is now every AnyDoc format a fixture proves: 19
+  extensions over 18 media types**, plus PDF on its own engine.
+
+  | Family | Extensions | AnyDoc format |
+  |---|---|---|
+  | Word | `doc`, `docx`, `docm` | Doc, Docx |
+  | PowerPoint | `ppt`, `pps`, `pot`, `pptx`, `pptm`, `ppsx`, `ppsm` | Ppt, Pptx |
+  | Excel | `xls`, `xlsx`, `xlsm` | Excel |
+  | OpenDocument | `odt`, `ods`, `odp` | Odt, Ods, Odp |
+  | Other | `epub`, `rtf`, `csv` | Epub, Rtf, Csv |
+
+  `pps` and `pot` share `application/vnd.ms-powerpoint` with `ppt`, so the
+  media-type list is 18 while the extension list is 19. Migration 0003 widens
+  the CHECK once for all of them; the per-format cost after that is one
+  admission row, one fixture, and one test case.
+
+  **`xlsb` is the one deliberate omission.** AnyDoc maps it to the Excel parser
+  and `calamine` has binary-workbook support compiled in, but no upstream
+  fixture exists and a binary workbook cannot be honestly derived from an XML
+  one. Advertising it would break the rule that earns this table its trust: a
+  format appears only with a fixture that proves it.
+
+  **Still absent, and not AnyDoc's to solve:** the ten desktop extensions with
+  no local engine. png, jpg, jpeg, webp, tiff, tif, gif, bmp, html, htm.
+  AnyDoc's `Format` enum has no variant for any of them, so they belong to the
+  remote route (M5) or the desktop's per-file direct-path fallback (M6).
+
 - [x] **CVR-037:** Re-run the container and contract gates with AnyDoc present.
   **Do this first in Increment 4**, before widening formats: graceful and
   SIGKILL restart smokes (`backend/scripts/container-smoke.sh`), full Rust gate,
@@ -293,8 +311,8 @@ CVR-037–039 and the containment note on CVR-032.
   hash were validated at claim/submit and the file has not changed. Optional
   M3.5 after Increment 4 gate; measure on typical docx/xlsx before landing.
 
-**M3 gate: met 2026-08-18.** All eight advertised formats have a passing
-conversion fixture and a bounded failure fixture. Each source is parsed by
+**M3 gate: met 2026-08-18.** All 19 advertised extensions have a passing
+conversion fixture, and every format family has a bounded failure fixture. Each source is parsed by
 exactly one engine, chosen from the stored media type, and the AnyDoc adapter
 refuses PDF bytes outright, so no PDF reaches a second parser. Empty output,
 typed engine errors, the output ceiling, and a cross-family mislabel all fail
@@ -964,3 +982,45 @@ cutting scope found a shipping blocker instead.
   integrity matrix, 5 failure modes). Container smoke run `20260818T195919Z`
   passed graceful and SIGKILL against image `sha256:7b765043…`, with the
   AnyDoc assertions in the evidence file.
+
+### 2026-08-18: full AnyDoc format set
+
+Supersedes the CVR-036 narrowing recorded earlier the same day. That decision
+advertised only the formats the desktop sends and called rtf, odt, ods, odp and
+csv "not planned". Wrong test: this is a document-conversion service, so the
+bound is what the engine can do, not what today's UI offers. The narrowing also
+never looked at extension variants.
+
+- **Advertised set goes from 8 extensions to 19**, over 18 media types. New:
+  `odt`, `ods`, `odp`, `rtf`, `csv`, and the variants `docm`, `xlsm`, `pptm`,
+  `ppsx`, `ppsm`, `pps`, `pot`.
+- **Every one was probed against the real engine before being advertised**, not
+  assumed. All 12 convert. odt 1322 bytes, ods 396, odp 272, rtf 1321, csv 294,
+  and each variant matching its base parser.
+- Bounded failures are upstream where they exist: `encrypted--errors.odt` gives
+  `encrypted_document`, `hugerepeat--errors.ods` gives `document_exceeds_limits`
+  through the `max_expansion` budget. Derived where they do not: a truncated
+  odp fails detection, and a bare `{\rtf1` or a blank csv produces empty output.
+  All fail closed with no artifact.
+- **Detection needed no changes**, but one subtlety is worth recording: `.docm`
+  and `.pptm` main-part content types contain `ms-word` / `ms-powerpoint`, not
+  `wordprocessingml` / `presentationml`, so `opc_format` returns `None` and the
+  mandated root element identifies them (`detect.rs:186`). The derived macro
+  fixtures are real OPC packages so they exercise that path rather than the
+  content-type shortcut.
+- `ContainerMagic` gains `Rtf` (`{\rtf`) and `None`. CSV carries no signature at
+  all, so its admission is the extension plus the declared media type, and the
+  adapter names the format from the admitted label because detection returns
+  `None`.
+- Migration 0003 widens the media-type CHECK once for all ten new media types,
+  reusing the 0002 rebuild. The populated-database upgrade test now drives 0002
+  and 0003 together and asserts an OpenDocument row inserts.
+- **New guard:** `advertised_media_types_match_the_migration_check` pins the
+  admission table to the migration CHECK in both directions. Drift there means
+  an upload the API accepts dies at INSERT on a constraint error instead of
+  returning a clean 415, and nothing caught it before.
+- **`xlsb` is the one deliberate omission**: mapped by AnyDoc and supported by
+  calamine, but no fixture exists and a binary workbook cannot be honestly
+  derived from an XML one.
+- Contract is 0.4.0 still; `inputFormats` grows from 8 to 18 entries, which is
+  additive. `pnpm generate:api` at M6 picks it up.

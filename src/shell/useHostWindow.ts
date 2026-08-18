@@ -43,23 +43,46 @@ export function useWindowFocusClass() {
 /// so the tray and ⌥⌘V keep working. Quit via the tray menu or ⌘Q. Closing
 /// mid-run would abandon files already paid for upstream, so that asks first.
 ///
-/// The handler is registered once and reads `running` / `activeCount` through
-/// refs. Re-registering on every job event would be a subscription churn on a
-/// 200-file run, and the closure would still be one render stale at the moment
-/// it matters.
-export function useCloseConfirm(running: boolean, activeCount: number) {
+/// The handler is registered once and reads `running` / `activeCount` /
+/// `dirtyCount` through refs. Re-registering on every job event would be a
+/// subscription churn on a 200-file run, and the closure would still be one
+/// render stale at the moment it matters.
+export function useCloseConfirm(running: boolean, activeCount: number, dirtyCount: number) {
   const runningRef = useRef(running);
   const activeRef = useRef(activeCount);
+  const dirtyRef = useRef(dirtyCount);
 
   useEffect(() => {
     runningRef.current = running;
     activeRef.current = activeCount;
-  }, [running, activeCount]);
+    dirtyRef.current = dirtyCount;
+  }, [running, activeCount, dirtyCount]);
 
   useEffect(() => {
     const win = currentWindow();
     const un = win.onCloseRequested(async (e) => {
       e.preventDefault();
+      // Hiding keeps the webview alive, so an unsaved edit survives it. Quitting
+      // does not, and the quit below is one click away — so an edit that is
+      // still only in memory has to be said out loud before either.
+      //
+      // Reached when the autosave has not landed yet, or when the host refused
+      // the write because the file changed underneath us. That second case is
+      // the one that matters: it will not fix itself by waiting.
+      const dirty = dirtyRef.current;
+      if (dirty > 0) {
+        const keep = await confirm(
+          `${String(dirty)} document${dirty > 1 ? "s have" : " has"} changes that are not on disk. ` +
+            "Leave the window open to finish saving, or hide it and keep them in memory?",
+          {
+            title: dirty > 1 ? "Unsaved documents" : "Unsaved document",
+            kind: "warning",
+            okLabel: "Keep open",
+            cancelLabel: "Hide anyway",
+          },
+        );
+        if (keep) return;
+      }
       if (!runningRef.current) {
         await win.hide();
         return;

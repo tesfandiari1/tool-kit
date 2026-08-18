@@ -1634,7 +1634,7 @@ mod tests {
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
     #[tokio::test]
-    async fn migration_0002_upgrades_a_populated_m2_database() {
+    async fn migrations_upgrade_a_populated_m2_database() {
         use sqlx::migrate::Migrator;
         use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -1699,7 +1699,7 @@ mod tests {
         .await
         .unwrap();
 
-        // The full migrator applies only 0002.
+        // The full migrator applies 0002 and 0003 over the populated M2 rows.
         super::MIGRATOR.run(&pool).await.unwrap();
 
         let surviving: i64 = sqlx::query("SELECT COUNT(*) AS n FROM conversions")
@@ -1744,6 +1744,29 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+
+        // ...including a media type that only migration 0003 admits.
+        let odt_id = "aaaaaaaa-2222-4111-8222-333333333333";
+        sqlx::query(
+            "INSERT INTO conversions (
+                id, client_run_id, auth_scope, idempotency_key_hash,
+                request_fingerprint, profile, status, source_relative_path,
+                source_media_type, source_byte_length, source_sha256,
+                reason_codes_json, warnings_json, origin_request_id,
+                created_at, updated_at
+             ) VALUES (
+                ?1, ?1, 'bootstrap', ?2, ?2, 'standard', 'queued', ?3,
+                'application/vnd.oasis.opendocument.text',
+                256, ?2, '[]', '[]', 'request-3',
+                '2026-08-18T00:00:02Z', '2026-08-18T00:00:02Z'
+             )",
+        )
+        .bind(odt_id)
+        .bind("c".repeat(64))
+        .bind(format!("jobs/{odt_id}/source/input"))
+        .execute(&pool)
+        .await
+        .expect("migration 0003 must admit the OpenDocument media types");
         let docx_attempt = "bbbbbbbb-2222-4333-8444-555555555555";
         sqlx::query(
             "INSERT INTO attempts (

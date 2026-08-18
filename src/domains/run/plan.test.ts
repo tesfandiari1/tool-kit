@@ -16,6 +16,7 @@ describe("planRun", () => {
       skipping: 0,
       copying: 0,
       toRun: 10,
+      colliding: 3,
     });
   });
 
@@ -24,6 +25,7 @@ describe("planRun", () => {
       skipping: 3,
       copying: 2,
       toRun: 5,
+      colliding: 0,
     });
   });
 
@@ -32,6 +34,7 @@ describe("planRun", () => {
       skipping: 2,
       copying: 0,
       toRun: 0,
+      colliding: 0,
     });
   });
 
@@ -40,6 +43,7 @@ describe("planRun", () => {
       skipping: 1,
       copying: 4,
       toRun: 1,
+      colliding: 0,
     });
   });
 
@@ -49,6 +53,16 @@ describe("planRun", () => {
       skipping: 0,
       copying: 4,
       toRun: 0,
+      colliding: 0,
+    });
+  });
+
+  it("caps numbered copies at the selection when skip is off", () => {
+    expect(planRun("convert", 2, scan, false)).toEqual({
+      skipping: 0,
+      copying: 0,
+      toRun: 2,
+      colliding: 2,
     });
   });
 });

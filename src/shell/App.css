@@ -63,23 +63,8 @@ svg {
   flex-shrink: 0;
 }
 
-/* Every number can tick; none of them may shift the layout. Only this one is
-   listed: `.input-name`, `.job-name`, and `.job-time` render through `Mono`,
-   which already sets tabular numerals. */
-.folder-path {
-  font-variant-numeric: tabular-nums;
-}
-
-/* The last app-level survivor of the mono label treatment. Every other button
-   and heading now gets it from `Button`, `Label`, or `Segmented`; this one
-   sits inside the folder picker, which is still an app composite. */
-.folder-action {
-  font-family: var(--font-mono);
-  font-size: var(--t-label);
-  font-weight: var(--weight-medium);
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
-}
+/* Every number can tick; none of them may shift the layout. `.job-name` and
+   `.job-time` render through `Mono`, which already sets tabular numerals. */
 
 .app {
   display: flex;
@@ -145,38 +130,121 @@ svg {
   gap: var(--s4);
 }
 
-/* --- Folder picker -------------------------------------------------------- */
-.folder {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
+/* --- Workspace split ------------------------------------------------------
+   The body when a document is open. `.app` is a 100vh column with the title
+   bar above, so the split takes the rest — `min-height: 0` is what lets the
+   panes scroll inside it rather than pushing the column past the window. */
+.workspace {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* --- Workspace re-rank ----------------------------------------------------
+   The window is two applications at two widths, so this is not one layout
+   stretched. With a document open the drop well has already done its job and
+   the queue has become the navigation: the controls compress to a strip and
+   the queue takes the rest of the column.
+
+   Compact is untouched. Every rule here is behind `.flow--workspace`, which
+   the run column only wears while something is open. */
+.flow--workspace {
+  overflow: hidden;
+  gap: var(--s3);
+  padding-bottom: var(--s3);
+  /* The 620px measure is the compact window's answer to a wide screen. In a
+     pane it is the wrong one: drag the seam out and the run column starts
+     centring itself in its own half, drifting away from the seam it was just
+     sized against. Inside the split the column is the pane. The split itself
+     is always mounted now, so this hangs off the expanded class rather than
+     off `.workspace`, which would flatten the launcher too. */
   width: 100%;
-  padding: 9px var(--s3);
-  border: 1px solid var(--rule);
-  border-radius: var(--r-md);
-  background: var(--panel);
-  color: var(--ink-3);
-  text-align: left;
-  transition: border-color 120ms ease, background 120ms ease;
+  max-width: none;
+  margin: 0;
+  min-height: 0;
 }
-.folder:hover {
-  border-color: var(--rule-lit);
-  background: var(--panel-hi);
+/* Everything above the queue holds its content height; only the queue grows,
+   and only the queue scrolls. */
+.flow--workspace > * {
+  flex: none;
 }
-.folder.set {
+.flow--workspace > .queue {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.flow--workspace > .queue .ui-panel__body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.flow--workspace .job-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* The well keeps its shape but stops reserving room for a drop that already
+   happened. A long selection scrolls inside it rather than pushing the queue
+   off the bottom. */
+.flow--workspace .drop .ui-well {
+  min-height: 0;
+  max-height: 88px;
+  overflow-y: auto;
+}
+/* Which service a job goes to is orientation for the first drop, not a line
+   to keep reading while you work. */
+.flow--workspace .run-desc {
+  display: none;
+}
+/* The document you are reading is the one row at full strength and the rest
+   step back, so the selection reads without spending a colour on it. */
+.flow--workspace .job-name {
+  color: var(--ink-2);
+}
+.job.is-selected .job-name {
   color: var(--ink);
 }
-.folder > svg {
-  color: var(--ink-3);
+
+/* The pane arrives while the OS is animating the window itself. Opacity and
+   a 1% settle from the seam, transform only, so it reads as the column
+   catching up with the window rather than a card popping in at centre.
+   `--dur-slow` is a token because prefers-reduced-motion zeroes it.
+
+   Closing the last tab is the native window shrink. Matching that in CSS
+   would fight the OS animation; the pane unmounts and the window is the
+   motion. */
+.workspace .doc {
+  animation: pane-in var(--dur-slow) var(--ease-out);
+  transform-origin: left center;
 }
-.folder-path {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
+@keyframes pane-in {
+  from {
+    opacity: 0;
+    transform: scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
-.folder-action {
+
+/* --- Folder picker --------------------------------------------------------
+   A hit target inside a Panel, not a second control chrome. The header already
+   has Choose/Change; this row is the same action with a larger surface. */
+.folder-hit {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.folder-hit svg {
   color: var(--ink-3);
   flex-shrink: 0;
 }
@@ -210,108 +278,56 @@ svg {
   margin-top: 1px;
 }
 
-/* --- Input well ----------------------------------------------------------- */
-.inputs {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-height: 76px;
-  padding: var(--s1);
-  border: 1px solid var(--rule);
-  border-radius: var(--r-md);
-  background: var(--well);
-  transition: border-color 120ms ease, background 120ms ease;
-}
-/* Drag-over is an affordance, not a running job, so it takes the action
-   colour. */
-.inputs.dragging {
+/* --- Input well -----------------------------------------------------------
+   Recessed drop surface is a `Well`. Drag-over is an affordance, not a
+   running job, so it takes the action colour. */
+.ui-well.is-dropping {
   border-color: var(--accent);
-  background: color-mix(in oklch, var(--accent) 14%, var(--well));
+  background: color-mix(in oklch, var(--accent) 14%, var(--surface-well));
 }
-.inputs-empty {
-  flex: 1;
+.drop-empty {
   display: grid;
   place-items: center;
-  padding: var(--s4) var(--s2);
+  min-height: 72px;
+  padding: var(--s3) var(--s2);
   text-align: center;
-  font-size: 12px;
-  color: var(--ghost);
-  line-height: 1.5;
+  gap: var(--s1);
 }
-.input-item {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  height: 26px;
-  padding: 0 var(--s2);
-  border-radius: var(--r-sm);
+.drop-item {
+  min-width: 0;
 }
-.input-item:hover {
-  background: var(--panel);
-}
-.input-item > svg {
+.drop-item > svg {
   color: var(--ink-3);
   font-size: 14px;
 }
-.input-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--ink-2);
-}
-.input-x {
-  display: grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--ghost);
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-.input-item:hover .input-x,
-.input-x:focus-visible {
-  opacity: 1;
-}
-.input-x:hover {
-  background: var(--panel-hi);
-  color: var(--ink);
-}
-.input-x svg {
-  font-size: 12px;
-}
 
-/* --- Results log ---------------------------------------------------------- */
-.results {
+/* --- Results log ----------------------------------------------------------
+   Queue rows are the gallery specimen: StatusDot, Mono name, ghost timer,
+   hairline between rows. No floating chips, no side stripe. */
+.job-list {
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--rule);
-  padding-top: var(--s3);
-}
-.results-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  color: var(--ink-3);
-  padding: 0 var(--s2) var(--s2);
 }
 
 .job {
   display: flex;
   align-items: center;
-  gap: var(--s2);
-  height: 30px;
-  padding: 0 var(--s2);
-  border-radius: var(--r-sm);
+  gap: var(--s3);
+  min-height: 40px;
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+.job:last-child {
+  border-bottom: 0;
 }
 .job:hover {
-  background: var(--panel);
+  background: var(--surface-raised);
+}
+/* The row you are reading. Deliberately not cobalt and deliberately not a
+   side stripe: cobalt is the control you press, and this is a statement of
+   where you are. A step up in surface is the whole signal. */
+.job.is-selected {
+  background: var(--surface-raised);
 }
 /* One-shot flash when a row lands, so a finish is visible even if you were
    looking somewhere else a second ago. */
@@ -335,10 +351,28 @@ svg {
   align-items: baseline;
   gap: var(--s2);
 }
+/* The row's primary control, and bare on purpose: the row is already the
+   affordance, so a second button shell inside it would be a card in a card. */
+.job-open {
+  display: block;
+  min-width: 0;
+  flex-shrink: 1;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  overflow: hidden;
+}
+.job-open:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--r-control);
+}
+/* Blockified because it no longer is a flex item: it sits inside `.job-open`,
+   and an inline span cannot draw an ellipsis. Colour comes from Mono and
+   from the selected-row rule, not from here. */
 .job-name {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--ink);
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -348,7 +382,6 @@ svg {
    loads after the library a colour set here would beat it — which silently
    turned every failed job's error message grey. Layout only. */
 .job-sub {
-  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -356,9 +389,6 @@ svg {
   min-width: 0;
 }
 .job-time {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--ink-3);
   flex-shrink: 0;
 }
 /* Actions occupy their slot always, so revealing them never shifts the row. */
@@ -366,7 +396,7 @@ svg {
   display: flex;
   gap: 1px;
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur-fast) var(--ease);
 }
 .job:hover .job-actions,
 .job-actions:focus-within {
@@ -511,9 +541,8 @@ svg {
   .job.done {
     animation: none;
   }
-  .folder,
-  .inputs,
-  .input-x,
+  .folder-hit,
+  .ui-well.is-dropping,
   .job-actions {
     transition: none;
   }
@@ -532,11 +561,13 @@ svg {
   background: var(--surface-well);
 }
 
+/* Title and subtitle are one group (4px). The tab strip already drew the
+   rule above, so the head is tight to it and airs into the body. */
 .doc-head {
   display: flex;
   flex-direction: column;
   gap: var(--s1);
-  padding: var(--s3) var(--s3) var(--s3) var(--s4);
+  padding: var(--s2) var(--s4) var(--s3);
   border-bottom: 1px solid var(--rule);
   flex: none;
 }
@@ -545,6 +576,12 @@ svg {
    sits on the same baseline as the mono labels in the toggle beside it. */
 .doc-head h2 {
   min-width: 0;
+}
+
+/* Align the subtitle with the title, not the ghost save-dot that holds the
+   slot beside it. The 4px grid nearest the dot-plus-gap is --s4. */
+.doc-head > :last-child {
+  padding-left: var(--s4);
 }
 
 .doc-body {
@@ -562,7 +599,7 @@ svg {
   justify-content: center;
   gap: var(--s2);
   text-align: center;
-  padding: var(--s6) var(--s5);
+  padding: var(--s8) var(--s5);
 }
 
 /* A real measure. Without this the prose ran the full width of the pane at

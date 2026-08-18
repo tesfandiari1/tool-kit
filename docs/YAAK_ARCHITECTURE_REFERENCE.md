@@ -28,13 +28,13 @@ Yaak does **not** use specta for IPC. Current `main` uses:
 
 Workspace members are listed in [`Cargo.toml`](https://github.com/mountain-loop/yaak/blob/main/Cargo.toml):
 
-- `crates/` — engines with **no** Tauri dependency (`yaak-http`, `yaak-models`, `yaak-crypto`, `yaak-plugins`, …)
-- `crates/common/` — `yaak-rpc`, `yaak-rpc-schema`, `yaak-database`
-- `crates-tauri/` — desktop adapters (`yaak-app-client`, `yaak-mac-window`, `yaak-system-appearance`, …)
-- `crates-cli/` — CLI host
-- `crates-proxy/` — hosted send proxy
-- `apps/yaak-client/` — React UI
-- `packages/platform/` — the **only** TypeScript module that may import `@tauri-apps/*`
+- `crates/`: engines with **no** Tauri dependency (`yaak-http`, `yaak-models`, `yaak-crypto`, `yaak-plugins`, …)
+- `crates/common/`: `yaak-rpc`, `yaak-rpc-schema`, `yaak-database`
+- `crates-tauri/`: desktop adapters (`yaak-app-client`, `yaak-mac-window`, `yaak-system-appearance`, …)
+- `crates-cli/`: CLI host
+- `crates-proxy/`: hosted send proxy
+- `apps/yaak-client/`: React UI
+- `packages/platform/`: the **only** TypeScript module that may import `@tauri-apps/*`
 
 That split is the pattern. HTTP, SQLite, encryption, and send orchestration compile without Tauri. The desktop crate only supplies a window, a response directory, and a Keychain.
 
@@ -46,7 +46,7 @@ A command handler is written against a host, not against Tauri:
 
 > A command handler is invoked on behalf of one client (a desktop window today) and needs a handful of things from its surroundings. `Host` is that handful and nothing more. The desktop implements it over a `WebviewWindow`. A server would implement it over a connection. Handlers are generic over it, so the same handler body runs under either without knowing which.
 >
-> What is deliberately *not* here is anything only a desktop can do — open a native window, run the updater, show a native dialog.
+> What is deliberately *not* here is anything only a desktop can do: open a native window, run the updater, show a native dialog.
 
 Source: [`crates/yaak-commands/src/host.rs`](https://github.com/mountain-loop/yaak/blob/main/crates/yaak-commands/src/host.rs) (file header, lines 1–16).
 
@@ -219,8 +219,8 @@ Their web README "slice 2" is the TrueNAS send path in prose: the client posts a
 
 Already in this tree:
 
-- `src/platform/host.ts` — only Tauri imports for dialogs, window, drag-drop
-- `src/app/api/{schema,client,transport}.ts` — OpenAPI types + `hostFetch` → `service_request`
+- `src/platform/host.ts`: only Tauri imports for dialogs, window, drag-drop
+- `src/app/api/{schema,client,transport}.ts`: OpenAPI types + `hostFetch` → `service_request`
 - Keychain in `src-tauri` for Datalab/Rev.ai
 
 Still M6 (`docs/BACKEND_EPIC.md` CVR-060–067):

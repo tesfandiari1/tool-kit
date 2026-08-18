@@ -16,6 +16,9 @@ export interface OpenDoc extends ThreadDoc {
   id: string;
   text: string;
   save: SaveState;
+  /// The file's modification time when this text was read. A save offers it
+  /// back so a file changed outside the app is refused rather than clobbered.
+  mtimeMs: number;
 }
 
 /// Where an edit currently stands with the file on disk.
@@ -29,6 +32,16 @@ export type SaveState = "clean" | "edited" | "saving" | "saved" | "error";
 
 /// Which surface the document is showing.
 export type DocMode = "read" | "edit";
+
+/// Whether the document holds work the file on disk does not.
+///
+/// `error` counts: a refused write means the edit is still only in memory, so
+/// closing it is as destructive as closing an unsaved one. The close confirm
+/// and the tab's dirty mark both ask this, so a document whose save was
+/// refused is marked as unsaved rather than looking settled.
+export function isDirty(s: SaveState) {
+  return s === "edited" || s === "error";
+}
 
 const TONES = {
   clean: "idle",

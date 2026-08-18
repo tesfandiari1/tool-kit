@@ -4,8 +4,9 @@
 export type JobId = "convert" | "transcribe";
 export type Status = "queued" | "working" | "processing" | "done" | "failed";
 export type SecretId = "datalab" | "revai";
-/// The main flow, a panel that replaces it, or a file opened as a thread.
-export type View = "run" | "settings" | "history" | "thread";
+/// The compact launcher, or a panel that replaces the left column. Documents
+/// open beside it and are not a view.
+export type View = "run" | "settings" | "history";
 
 /// What `scan_inputs` reports for the current selection.
 export interface Scan {
@@ -62,6 +63,11 @@ export interface Settings {
   datalabPipelineId: string | null;
   datalabHighAccuracy: boolean;
   skipAlreadyDone: boolean;
+  /// Last SplitPane layout. Null until the user has dragged the seam.
+  splitLayout: Record<string, number> | null;
+  /// Inner size while the document pane is open. Null until the first expand.
+  expandedWidth: number | null;
+  expandedHeight: number | null;
 }
 
 export type SecretStatus = Record<SecretId, boolean>;
@@ -74,6 +80,9 @@ export const DEFAULT_SETTINGS: Settings = {
   datalabPipelineId: null,
   datalabHighAccuracy: true,
   skipAlreadyDone: true,
+  splitLayout: null,
+  expandedWidth: null,
+  expandedHeight: null,
 };
 
 export const ACTIVE: Status[] = ["queued", "working", "processing"];

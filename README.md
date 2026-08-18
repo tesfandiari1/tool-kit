@@ -3,8 +3,8 @@
 A macOS menu-bar utility that turns files into AI-ready text. Drop files or
 folders, hit Run, get markdown or transcripts back next to the originals.
 
-**Current work** is M2 (durable SQLite jobs) on `codex/backend-m2`. Parallel
-sessions start at [`docs/HANDOFF.md`](docs/HANDOFF.md).
+**Current work** is M3 (AnyDoc, Increment 4 close-out). Parallel sessions start
+at [`docs/HANDOFF.md`](docs/HANDOFF.md).
 
 ## Current desktop implementation
 
@@ -72,17 +72,17 @@ jobs, sources, and artifacts now live in embedded SQLite and a persistent
 `/data` volume. Restart verification is the last M2 gate. It remains
 loopback-only and is not ready for LAN deployment yet.
 
-- [`docs/HANDOFF.md`](docs/HANDOFF.md) — current branch, next increment, and
+- [`docs/HANDOFF.md`](docs/HANDOFF.md): current branch, next increment, and
   parallel-session ownership
-- [`docs/BACKEND_SERVICE_PLAN.md`](docs/BACKEND_SERVICE_PLAN.md) — approved architecture
+- [`docs/BACKEND_SERVICE_PLAN.md`](docs/BACKEND_SERVICE_PLAN.md): approved architecture
   and routing contract
-- [`docs/BACKEND_EPIC.md`](docs/BACKEND_EPIC.md) — milestone tracker, work IDs, and
+- [`docs/BACKEND_EPIC.md`](docs/BACKEND_EPIC.md): milestone tracker, work IDs, and
   release gates
-- [`docs/BACKEND_EXECUTION_PLAN.md`](docs/BACKEND_EXECUTION_PLAN.md) — M2
+- [`docs/BACKEND_EXECUTION_PLAN.md`](docs/BACKEND_EXECUTION_PLAN.md): M2
   increment checklist
-- [`docs/DESKTOP_EXECUTION_PLAN.md`](docs/DESKTOP_EXECUTION_PLAN.md) — M6
+- [`docs/DESKTOP_EXECUTION_PLAN.md`](docs/DESKTOP_EXECUTION_PLAN.md): M6
   desktop integration and the order of the remaining milestones
-- [`backend/README.md`](backend/README.md) — backend setup and verification
+- [`backend/README.md`](backend/README.md): backend setup and verification
 
 ## License
 

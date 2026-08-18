@@ -455,8 +455,28 @@ components:
               const: application/vnd.ms-excel
             - type: string
               const: application/epub+zip
-          minItems: 8
-          maxItems: 8
+            - type: string
+              const: application/vnd.oasis.opendocument.text
+            - type: string
+              const: application/vnd.oasis.opendocument.spreadsheet
+            - type: string
+              const: application/vnd.oasis.opendocument.presentation
+            - type: string
+              const: application/rtf
+            - type: string
+              const: text/csv
+            - type: string
+              const: application/vnd.ms-word.document.macroEnabled.12
+            - type: string
+              const: application/vnd.ms-excel.sheet.macroEnabled.12
+            - type: string
+              const: application/vnd.ms-powerpoint.presentation.macroEnabled.12
+            - type: string
+              const: application/vnd.openxmlformats-officedocument.presentationml.slideshow
+            - type: string
+              const: application/vnd.ms-powerpoint.slideshow.macroEnabled.12
+          minItems: 18
+          maxItems: 18
         outputFormats:
           type: array
           items:

@@ -1,12 +1,17 @@
 import type { JobId, Scan } from "@/app/types";
 
-/// The three buckets a selection costs. Extracted so the numbers the Run
-/// button promises can be tested without mounting the app — getting them
-/// wrong either over-bills or silently skips work.
+/// The buckets a selection costs. Extracted so the numbers the Run button
+/// promises can be tested without mounting the app — getting them wrong
+/// either over-bills or silently skips work.
 export interface RunPlan {
   skipping: number;
   copying: number;
   toRun: number;
+  /// Files that already have an output in this folder and will still be sent,
+  /// because skip is off. `write_output` refuses to clobber, so each one lands
+  /// as a numbered copy (`report (1).md`) rather than replacing the edit.
+  /// Zero when skip is on: those files are `skipping` instead.
+  colliding: number;
 }
 
 export function planRun(
@@ -23,7 +28,8 @@ export function planRun(
   const skipping = skipAlreadyDone ? Math.min(alreadyHere, inputCount) : 0;
   const copying = skipAlreadyDone ? Math.min(reusable, inputCount - skipping) : 0;
   const toRun = Math.max(0, inputCount - skipping - copying);
-  return { skipping, copying, toRun };
+  const colliding = skipAlreadyDone ? 0 : Math.min(alreadyHere, inputCount);
+  return { skipping, copying, toRun, colliding };
 }
 
 export function canStartRun({

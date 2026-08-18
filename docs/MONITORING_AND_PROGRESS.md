@@ -1,8 +1,8 @@
 # Job progress and operator monitoring
 
-**Status:** recommendation — not a ticket, not scheduled work  
+**Status:** Recommendation. Not a ticket. Not scheduled work.
 **Last updated:** 2026-08-18  
-**Implements nothing.** M6 still owns the poll loop; M7 still owns metrics.
+**Implements nothing.** M6 still owns the poll loop. M7 still owns metrics.
 
 Two problems that look similar and must stay separate:
 
@@ -20,7 +20,7 @@ SSE, WebSockets, and a workflow dashboard as non-goals
 [`BACKEND_EPIC.md`](BACKEND_EPIC.md) “Explicit non-goals”). This note records
 how to use that choice, and which files already implement the pieces.
 
-## Track A — job UX
+## Track A: job UX
 
 ### What already exists
 
@@ -32,7 +32,7 @@ The instrument face is closer to done than the converter contract is.
 | Event | [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs), [`src/app/commands.ts`](../src/app/commands.ts) | Rust `app.emit("job-updated", job)`. The webview listens with `commands.onJobUpdated`. |
 | Wire type | [`src/app/types.ts`](../src/app/types.ts) | `progressNote: string`. Views do not import Tauri. |
 | Row UI | [`src/domains/run/RunView.tsx`](../src/domains/run/RunView.tsx) | `Status` + `progressNote` while active; elapsed timer from `startedAt`; run-level `<Meter value={finished / total}>`. |
-| Meter contract | [`src/ui/primitives/Meter.tsx`](../src/ui/primitives/Meter.tsx) | `value` is 0–1. **Omit it when the figure is unknown** — an invented percentage is a promise the job cannot keep, and the fill becomes the indeterminate sweep. |
+| Meter contract | [`src/ui/primitives/Meter.tsx`](../src/ui/primitives/Meter.tsx) | `value` is 0–1. **Omit it when the figure is unknown**: an invented percentage is a promise the job cannot keep, and the fill becomes the indeterminate sweep. |
 | Converter job | [`backend/src/conversion/model.rs`](../backend/src/conversion/model.rs), [`backend/openapi/openapi.yaml`](../backend/openapi/openapi.yaml) `ConversionJob` | Durable `status` enum, `route`, `warnings`, `failure`, `createdAt`, `updatedAt`. **No progress field.** |
 | Poll target | [`backend/src/api/conversions.rs`](../backend/src/api/conversions.rs) `get` | `GET /api/v1/conversions/{id}` returns that `JobView`. |
 | Worker | [`backend/src/worker_protocol.rs`](../backend/src/worker_protocol.rs), [`backend/src/engines/pdf_inspector.rs`](../backend/src/engines/pdf_inspector.rs) | Child process, terminal `WorkerReport` (`Converted` / `NeedsRemote` / `Rejected`). No page stream. |
@@ -42,7 +42,7 @@ Yaak’s stream rule, applied here: register the listener before the command
 runs so the first event is not missed
 ([`docs/YAAK_ARCHITECTURE_REFERENCE.md`](YAAK_ARCHITECTURE_REFERENCE.md)
 pattern 2, `rpcStream`). `onJobUpdated` already does that. Do not open
-`EventSource` from React to the converter — that puts the bearer token in the
+`EventSource` from React to the converter. That puts the bearer token in the
 webview, which is the mistake the host split exists to prevent.
 
 ### Do this in M6 Increment 4
@@ -76,10 +76,10 @@ Climb a rung only when an engine can fill a count.
 
 | Rung | Signal | Cost | Do it? |
 |---|---|---|---|
-| 0 — phase | The `status` enum already on `ConversionJob` | Host mapper. Zero OpenAPI change | Yes. M6 Increment 4. |
-| 1 — faster poll | Same GET, 1s while converting/finalizing | Trivial | Only if 5s feels dead. Measure first. |
-| 2 — optional ratio | `progress.completed` / `progress.total`, omitted when unknown | Versioned OpenAPI add | Only after an engine can fill it. |
-| 3 — page loop | `detect_pdf` then `extract_pages_markdown`, persist page N of M | Worker protocol change, restart semantics, partial Markdown | No. Not to feed a bar. |
+| 0: phase | The `status` enum already on `ConversionJob` | Host mapper. Zero OpenAPI change | Yes. M6 Increment 4. |
+| 1: faster poll | Same GET, 1s while converting/finalizing | Trivial | Only if 5s feels dead. Measure first. |
+| 2: optional ratio | `progress.completed` / `progress.total`, omitted when unknown | Versioned OpenAPI add | Only after an engine can fill it. |
+| 3: page loop | `detect_pdf` then `extract_pages_markdown`, persist page N of M | Worker protocol change, restart semantics, partial Markdown | No. Not to feed a bar. |
 
 Datalab’s poll is `processing` / `complete` / `failed` with no percent
 ([API](https://documentation.datalab.to/docs/welcome/api)). Rev.ai is
@@ -97,7 +97,7 @@ Do not:
 - add SSE, WebSockets, or `GET ?wait=` long-poll for M6
 - put Prometheus in the Run view
 
-## Track B — operator monitoring
+## Track B: operator monitoring
 
 ### What already exists
 

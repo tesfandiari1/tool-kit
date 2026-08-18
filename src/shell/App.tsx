@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ClockCounterClockwiseIcon, GearSixIcon, SparkleIcon } from "@phosphor-icons/react";
-import { Button, Display } from "@ui";
+import { Button, Display, SplitPane } from "@ui";
 import { commands } from "@/app/commands";
 import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
 import type { Job, JobId, Scan, SecretStatus, Settings, View } from "@/app/types";
@@ -9,12 +9,33 @@ import { JOBS } from "@/domains/run/jobs";
 import { canStartRun, planRun, runButtonLabel } from "@/domains/run/plan";
 import { HistoryPanel } from "@/domains/history/HistoryPanel";
 import { SettingsPanel } from "@/domains/settings/SettingsPanel";
-import { ThreadView } from "@/domains/thread/ThreadView";
-import { confirm, copyToClipboard, pickDirectory, pickFiles, pickFolders } from "@/platform/host";
+import { DocumentPane } from "@/domains/thread/DocumentPane";
+import { isDirty, type OpenDoc } from "@/domains/thread/model";
+import {
+  confirm,
+  copyToClipboard,
+  pickDirectory,
+  pickFiles,
+  pickFolders,
+  resizeWindow,
+  setWindowMinSize,
+  windowSize,
+} from "@/platform/host";
 import { useToast } from "./useToast";
-import { useThread } from "./useThread";
+import { useDocuments } from "./useDocuments";
+import { useDocumentSave } from "./useDocumentSave";
 import { useCloseConfirm, useDragDrop, useWindowFocusClass } from "./useHostWindow";
 import "./App.css";
+
+/// The window is two applications at two widths. A launcher fits in 420px; a
+/// split with a readable document does not, so the floor moves with the pane
+/// rather than being one compromise that serves neither.
+const COMPACT_MIN = { width: 420, height: 460 };
+const EXPANDED_MIN = { width: 900, height: 460 };
+/// Only reached if the compact size was never measured. Matches the size in
+/// `tauri.conf.json`, so a collapse can never leave the window at a size the
+/// app has no opinion about.
+const COMPACT_FALLBACK = { width: 560, height: 560 };
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -32,11 +53,9 @@ export default function App() {
   const autoClear = useRef(false);
 
   const { toast, showToast } = useToast();
-  const { thread, openJobThread, openHistoryThread, closeThread, copyThread } = useThread({
-    view,
-    setView,
-    showToast,
-  });
+  const { docs, activeId, mode, openJob, openHistory, select, closeDoc, edit, setMode, setDocMeta } =
+    useDocuments({ showToast });
+  const { saveDoc, requestClose } = useDocumentSave({ docs, activeId, closeDoc, setDocMeta });
 
   const job = useMemo(() => JOBS.find((j) => j.id === settings.jobType) ?? JOBS[0], [settings.jobType]);
   const inputCount = settings.jobType === "transcribe" ? scan.transcribe : scan.convert;
@@ -194,7 +213,69 @@ export default function App() {
   }, [running]);
 
   useWindowFocusClass();
-  useCloseConfirm(running, activeCount);
+  // Documents whose edit is still only in memory: the autosave has not landed
+  // yet, or the host refused the write. Closing the window is one click from
+  // quitting, so it has to say so.
+  const dirtyCount = docs.filter((d) => isDirty(d.save)).length;
+  useCloseConfirm(running, activeCount, dirtyCount);
+
+  const expanded = docs.length > 0;
+  const wasExpanded = useRef(false);
+  /// The launcher's size, taken the moment before it grows, so collapsing
+  /// puts the window back where the user had it rather than at a default.
+  const compactSize = useRef<{ width: number; height: number } | null>(null);
+  const sizesRef = useRef(settings);
+
+  useEffect(() => {
+    sizesRef.current = settings;
+  }, [settings]);
+
+  // The window follows the document. Each mode remembers its own size, so
+  // widening the workspace never leaves the launcher stretched, and a compact
+  // window the user shrank by hand is what comes back.
+  //
+  // Native resizing is the OS animating a real window: there is nothing here
+  // to match in CSS, and trying would fight it.
+  useEffect(() => {
+    if (expanded === wasExpanded.current) return;
+    wasExpanded.current = expanded;
+    void (async () => {
+      const current = await windowSize();
+      if (expanded) {
+        compactSize.current = current;
+        await setWindowMinSize(EXPANDED_MIN.width, EXPANDED_MIN.height);
+        const { expandedWidth, expandedHeight } = sizesRef.current;
+        await resizeWindow(
+          expandedWidth ?? Math.max(current.width, EXPANDED_MIN.width),
+          expandedHeight ?? current.height,
+        );
+      } else {
+        // Record the workspace size before shrinking, or the next expand
+        // reads back the launcher's.
+        persist({ expandedWidth: current.width, expandedHeight: current.height });
+        await setWindowMinSize(COMPACT_MIN.width, COMPACT_MIN.height);
+        const back = compactSize.current ?? COMPACT_FALLBACK;
+        await resizeWindow(back.width, back.height);
+      }
+    })();
+  }, [expanded, persist]);
+
+  // Escape closes the document you are reading, not the window and not the
+  // panel beside it. Bound only while something is open, so an app with no
+  // document never swallows the key. `requestClose` saves an edit first, then
+  // asks before discarding if the write was refused.
+  useEffect(() => {
+    if (!activeId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      void requestClose(activeId);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [activeId, requestClose]);
 
   // When a run finishes, clear the input selection so the same files can't be
   // re-run by accident — Run greys out until new inputs are added. Gated on a
@@ -212,11 +293,10 @@ export default function App() {
     wasRunning.current = running;
   }, [running, doneCount, mutateInputs]);
 
-  // What the selection actually costs. Three buckets, and the difference
-  // matters to the user: files already sitting in the output folder do nothing
-  // at all, files whose result exists elsewhere get copied for free, and the
-  // rest go to the provider. The button only ever promises the third number.
-  const { skipping, copying, toRun } = planRun(
+  // What the selection actually costs. Skip, copy, and billable work, plus the
+  // skip-off case: files already in this folder that will still be sent and
+  // land as numbered copies. The button only ever promises the billable number.
+  const { skipping, copying, toRun, colliding } = planRun(
     settings.jobType,
     inputCount,
     scan,
@@ -294,9 +374,33 @@ export default function App() {
     await call(() => commands.stopRun());
   };
 
+  // `Job.outputText` is what the provider returned, which stops being the file
+  // the moment an edit is saved. A row's Copy has to mean the same thing as the
+  // pane's, so prefer the open document, then the file, and fall back to the
+  // provider's bytes only when there is no path to read.
   const copyText = async (j: Job | null) => {
-    if (!j?.outputText) return;
-    showToast((await copyToClipboard(j.outputText)) ? "Copied to clipboard" : "Copy failed");
+    if (!j) return;
+    let text = j.outputText;
+    if (j.outputPath) {
+      const open = docs.find((d) => d.id === j.outputPath);
+      if (open) text = open.text;
+      else {
+        try {
+          text = (await commands.readDocument(j.outputPath)).text;
+        } catch {
+          // Unreadable — too large, gone, not text. The provider's copy is
+          // still worth having, so fall through rather than failing the copy.
+        }
+      }
+    }
+    if (!text) return;
+    showToast((await copyToClipboard(text)) ? "Copied to clipboard" : "Copy failed");
+  };
+
+  // The pane copies what is on screen, which after an edit is not what the
+  // job returned. Same two outcomes and the same two messages as a job row.
+  const copyDoc = async (doc: OpenDoc) => {
+    showToast((await copyToClipboard(doc.text)) ? "Copied to clipboard" : "Copy failed");
   };
 
   // The button names what is about to happen, and never overstates the cost:
@@ -329,13 +433,23 @@ export default function App() {
   // when the button isn't already announcing them.
   const noteParts: string[] = [];
   if (skipping > 0) noteParts.push(`${skipping} already in this folder`);
+  // Skip-off re-runs still refuse to clobber: write_output numbers the file.
+  // Naming that here is the whole increment: the silent duplicate was the bug.
+  if (colliding > 0) {
+    noteParts.push(
+      `${colliding} already in this folder will be saved as numbered copies`,
+    );
+  }
   if (copying > 0 && toRun > 0) noteParts.push(`${copying} copied from an earlier run`);
   const note = noteParts.length > 0 ? noteParts.join(" · ") : null;
 
-  let body: ReactNode;
+  // The left column, and the whole body when nothing is open. Settings and
+  // History replace this column only: a document is a place you are reading,
+  // and changing a setting is not a reason to lose it.
+  let left: ReactNode;
   switch (view) {
     case "settings":
-      body = (
+      left = (
         <SettingsPanel
           settings={settings}
           secrets={secrets}
@@ -347,37 +461,18 @@ export default function App() {
       );
       break;
     case "history":
-      body = (
+      left = (
         <HistoryPanel
           refreshKey={runsFinished}
           onChanged={() => setRunsFinished((n) => n + 1)}
-          onOpen={(e) => void openHistoryThread(e)}
+          onOpen={(e) => void openHistory(e)}
           onToast={showToast}
           onClose={() => setView("run")}
         />
       );
       break;
-    case "thread":
-      body = thread ? (
-        <ThreadView
-          title={thread.title}
-          subtitle={thread.subtitle}
-          text={thread.text}
-          onCopy={() => void copyThread()}
-          onReveal={
-            thread.revealPath
-              ? () => {
-                  const path = thread.revealPath;
-                  if (path) void call(() => commands.revealPath(path));
-                }
-              : null
-          }
-          onClose={closeThread}
-        />
-      ) : null;
-      break;
     case "run":
-      body = (
+      left = (
         <RunView
           settings={settings}
           scan={scan}
@@ -394,6 +489,8 @@ export default function App() {
           doneCount={doneCount}
           failedCount={failedCount}
           job={job}
+          selectedId={activeId}
+          expanded={expanded}
           persist={persist}
           onAddFiles={() => void addFiles()}
           onAddFolders={() => void addFolders()}
@@ -407,7 +504,7 @@ export default function App() {
             const dir = settings.outputDir;
             if (dir) void call(() => commands.revealPath(dir));
           }}
-          onPreview={openJobThread}
+          onPreview={(j) => void openJob(j)}
           onCopy={(j) => void copyText(j)}
           onRevealJob={(j) => {
             const path = j.outputPath;
@@ -423,9 +520,47 @@ export default function App() {
       break;
     default: {
       const _exhaustive: never = view;
-      body = _exhaustive;
+      left = _exhaustive;
     }
   }
+
+  // Always the same element in the same slot, collapsed to one pane when
+  // nothing is open. Swapping between `<SplitPane>` and a bare `left` moves the
+  // column to a different position in the tree, and React answers a move by
+  // remounting: closing the last document threw away a half-typed API key in
+  // Settings and whatever was in the History search box.
+  const body = (
+    <SplitPane
+      className="workspace"
+      collapsed={!expanded}
+      start={left}
+      end={
+        <DocumentPane
+          docs={docs}
+          activeId={activeId}
+          mode={mode}
+          onSelect={(id) => {
+            if (activeId && id !== activeId) void saveDoc(activeId);
+            select(id);
+          }}
+          onClose={(id) => {
+            void requestClose(id);
+          }}
+          onModeChange={setMode}
+          onEdit={edit}
+          onCopy={(doc) => void copyDoc(doc)}
+          onReveal={(doc) => {
+            const path = doc.revealPath;
+            if (path) void call(() => commands.revealPath(path));
+          }}
+        />
+      }
+      layout={settings.splitLayout ?? undefined}
+      onLayoutChanged={(layout) => {
+        persist({ splitLayout: layout });
+      }}
+    />
+  );
 
   return (
     <div className="app">

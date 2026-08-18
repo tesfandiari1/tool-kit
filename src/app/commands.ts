@@ -30,6 +30,12 @@ export const commands = {
     await invoke("reveal_path", { path });
   },
   readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
+  readDocument: (path: string) => invoke<{ text: string; mtimeMs: number }>("read_document", { path }),
+  /// Saves only when the file on disk still has `expectedMtimeMs`; otherwise it
+  /// rejects rather than overwriting an edit made outside the app. Resolves to
+  /// the new mtime, which the caller carries into its next save.
+  writeDocument: (path: string, text: string, expectedMtimeMs: number) =>
+    invoke<number>("write_document", { path, text, expectedMtimeMs }),
   listHistory: (query: string, limit: number) => invoke<HistoryEntry[]>("list_history", { query, limit }),
   clearHistory: async (): Promise<void> => {
     await invoke("clear_history");

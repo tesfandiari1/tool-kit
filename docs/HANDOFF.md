@@ -1,16 +1,17 @@
 # Session handoff
 
 **Last updated:** 2026-08-18
-**Branch:** `main`, HEAD `5f298f6`. Branch fresh off `main` for M6.
-**Backend checkpoint:** `5f298f6` plus an **uncommitted M3 close-out** in the
-worktree. M3 is complete: AnyDoc converts the desktop seven (doc, docx, ppt,
-pptx, xls, xlsx, epub) in-process under a hard timeout, contract is 0.4.0, and
+**Branch:** `main`, HEAD `b2b4d10`. Branch fresh off `main` for M6.
+**Backend checkpoint:** `b2b4d10` plus an **uncommitted format-set widening**
+in the worktree. M3 is complete: AnyDoc converts 18 extensions in-process
+under a hard timeout, PDF stays on its isolated worker, contract is 0.4.0, and
 the container smoke converts a docx inside the image.
 **Recorded code state: the tree is dirty, in two unrelated piles.**
-1. The M3 close-out (this session): `backend/src/{engines/anydoc.rs,
-   jobs/recovery.rs, persistence/model.rs, conversion/service.rs}`,
-   `backend/tests/`, `backend/scripts/container-smoke.sh`, `BACKEND_EPIC.md`,
-   and this file. Gate is green; ready to commit.
+1. The format-set widening (this session): `backend/src/{conversion/model.rs,
+   api/conversions.rs, engines/anydoc.rs, persistence/sqlite.rs}`,
+   `backend/migrations/0003_anydoc_full_format_set.sql`, 18 new fixtures,
+   `backend/openapi/openapi.yaml`, `BACKEND_EPIC.md`, and this file. Gate is
+   green; ready to commit.
 2. A **repo-wide prose sweep from a parallel session** (em dash to colon or
    period) across `CLAUDE.md`, `AGENTS.md`, `README.md`,
    `backend/README.md`, `backend/evals/README.md`, and four `docs/` files.
@@ -30,16 +31,24 @@ This file goes stale the moment someone lands a commit.
    OpenAPI 0.4.0 by the CVR-027 and M3 deltas. Read the diff, do not
    hand-reconcile it.
 
-   **CVR-036 was closed by narrowing, not by building.** rtf, odt, ods, odp,
-   and csv are **not planned**. The desktop cannot send them
-   (`src-tauri/src/jobs.rs`; `collect_input_files` drops them before upload),
-   so five admission rows, a migration 0003, five fixtures, and five contract
-   tests would have bought zero users. The rule is *advertise only what the
-   desktop sends*.
+   **CVR-036 now advertises the full AnyDoc format set: 19 extensions over 18
+   media types.** An earlier pass this same day closed it by narrowing, on the
+   grounds that the desktop cannot send rtf/odt/ods/odp/csv. That was the wrong
+   test for a document-conversion service, and it also missed extension variants
+   (`docm`, `xlsm`, `pptm`, `ppsx`, `ppsm`, `pps`, `pot`) that run through
+   parsers already shipped. All 12 additions were probed against the real engine
+   before being advertised. `xlsb` is the one deliberate omission: no fixture
+   exists and a binary workbook cannot be honestly derived from an XML one.
 
-   **The real format gap runs the other way.** Ten extensions the desktop does
-   accept have no local engine: png, jpg, jpeg, webp, tiff, tif, gif, bmp,
-   html, htm. AnyDoc cannot serve any of them. Those belong to the remote
+   **The rule that keeps the admission table honest:** a format is advertised
+   only with a passing round-trip fixture, and
+   `advertised_media_types_match_the_migration_check` pins the table to the
+   migration CHECK in both directions. Drift there turns a clean 415 into an
+   INSERT constraint error at runtime.
+
+   **The real remaining format gap is not AnyDoc's.** Ten desktop extensions
+   have no local engine: png, jpg, jpeg, webp, tiff, tif, gif, bmp, html, htm.
+   AnyDoc has no `Format` variant for any of them, so they belong to the remote
    route (M5) or the desktop per-file fallback (M6). CVR-065 must gate Run on
    `capabilities.inputFormats` rather than assume the backend takes all 18.
 
@@ -100,6 +109,12 @@ This file goes stale the moment someone lands a commit.
    `durability: "persistent"`, `maxActiveJobs` for `maxEphemeralJobs`, and the
    reworded summaries. Run `pnpm generate:api` as the first step of M6, not
    before.
+
+   **The dual-pane workspace is closed.** Compact is a `Panel` launcher;
+   opening a result splits the window; Edit writes through `write_document`.
+   Do not re-do that work. Record: `docs/WORKSPACE_HANDOFF.md`. M6 still owns
+   `service_request`; do not treat it as available. `src/app/api/schema.ts`
+   stays M6's.
 4. **Do not** create a root Cargo workspace, bump TypeScript 7, migrate
    `keyring` 4, unpin `pdf-inspector`, or take `libc` 1.0 (still alpha).
 
@@ -129,13 +144,18 @@ src/
   app/        types, commands (the IPC door), format, api/ (OpenAPI client)
   platform/   host.ts - dialogs, window, drag-drop, clipboard
   domains/    run/ history/ settings/ thread/
-  shell/      App.tsx, App.css, useToast, useThread, useHostWindow
+  shell/      App.tsx, App.css, useToast, useDocuments, useDocumentSave, useHostWindow
   ui/         design system, imported as @ui, depends on nothing of ours
   main.tsx
 ```
 
 What the next session needs to know:
 
+- **The shell is a dual-pane workspace (closed).** Compact is the `Panel`
+  launcher. A document opens `SplitPane` + `DocumentPane`; Settings and History
+  replace the left pane only. `View` has no `"thread"`. Edit autosaves via
+  `write_document` (mtime guard). See `docs/WORKSPACE_HANDOFF.md`. Do not start
+  another weave.
 - **`App.tsx` moved to `src/shell/`** and shed its non-run concerns into hooks
   beside it. It still owns run state, settings, and the view switch.
 - **`src/domains/viewer/` folded into `src/domains/thread/`.** Thread was its

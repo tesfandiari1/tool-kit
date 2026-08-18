@@ -1,0 +1,48 @@
+import { describe, expect, it } from "vitest";
+import { activateOrInsert, removeDoc } from "./documents";
+import type { OpenDoc } from "@/domains/thread/model";
+
+function doc(id: string, save: OpenDoc["save"] = "clean"): OpenDoc {
+  return { id, title: id, subtitle: id, text: "", revealPath: id, save, mtimeMs: 0 };
+}
+
+const a = doc("/out/a.md");
+const b = doc("/out/b.md");
+const c = doc("/out/c.md");
+
+describe("activateOrInsert", () => {
+  it("opens a document and makes it active", () => {
+    expect(activateOrInsert([a], b)).toEqual({ docs: [a, b], activeId: b.id });
+  });
+
+  it("activates an already open document instead of opening it twice", () => {
+    expect(activateOrInsert([a, b], doc(a.id))).toEqual({ docs: [a, b], activeId: a.id });
+  });
+
+  it("keeps the open copy, edits and all, when the same path is opened again", () => {
+    const edited = doc(a.id, "edited");
+    expect(activateOrInsert([edited], doc(a.id)).docs[0].save).toBe("edited");
+  });
+});
+
+describe("removeDoc", () => {
+  it("empties the pane when the last document closes", () => {
+    expect(removeDoc([a], a.id, a.id)).toEqual({ docs: [], activeId: null });
+  });
+
+  it("activates the document that took the closed one's place", () => {
+    expect(removeDoc([a, b, c], b.id, b.id)).toEqual({ docs: [a, c], activeId: c.id });
+  });
+
+  it("falls back to the previous document when the last tab closes", () => {
+    expect(removeDoc([a, b], b.id, b.id)).toEqual({ docs: [a], activeId: a.id });
+  });
+
+  it("leaves the active document showing when another one closes", () => {
+    expect(removeDoc([a, b, c], c.id, a.id)).toEqual({ docs: [b, c], activeId: c.id });
+  });
+
+  it("changes nothing when the document is not open", () => {
+    expect(removeDoc([a], a.id, b.id)).toEqual({ docs: [a], activeId: a.id });
+  });
+});

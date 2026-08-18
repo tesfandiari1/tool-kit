@@ -511,6 +511,107 @@ fn read_text_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(p).map_err(|e| e.to_string())
 }
 
+/// Reading and writing an editable document. Kept free of Tauri types so the
+/// filesystem rules — the size cap, UTF-8 only, and the mtime check that stops
+/// a save from overwriting an edit made outside the app — are unit-testable.
+mod document_io {
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::time::UNIX_EPOCH;
+
+    #[derive(Debug)]
+    pub struct Document {
+        pub text: String,
+        pub mtime_ms: u64,
+    }
+
+    fn mtime_ms(meta: &std::fs::Metadata) -> Result<u64, String> {
+        let modified = meta.modified().map_err(|e| e.to_string())?;
+        let since_epoch = modified
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?;
+        u64::try_from(since_epoch.as_millis()).map_err(|e| e.to_string())
+    }
+
+    fn file_meta(path: &Path) -> Result<std::fs::Metadata, String> {
+        let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+        if meta.is_file() {
+            Ok(meta)
+        } else {
+            Err("Not a file".into())
+        }
+    }
+
+    /// A hidden sibling so the rename stays on the same filesystem (a temp-dir
+    /// staging file would fall back to a copy, which is not atomic) and a
+    /// failed write doesn't leave visible cruft in the user's folder.
+    fn temp_sibling(path: &Path) -> Result<PathBuf, String> {
+        let name = path.file_name().ok_or_else(|| "Not a file".to_string())?;
+        let mut tmp = OsString::from(".");
+        tmp.push(name);
+        tmp.push(".tmp");
+        Ok(path.with_file_name(tmp))
+    }
+
+    pub fn read(path: &Path, max_bytes: u64) -> Result<Document, String> {
+        let meta = file_meta(path)?;
+        if meta.len() > max_bytes {
+            return Err("File is too large to open".into());
+        }
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::InvalidData {
+                "File is not UTF-8 text".to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
+        Ok(Document {
+            text,
+            mtime_ms: mtime_ms(&meta)?,
+        })
+    }
+
+    /// Save, refusing when the file has changed since it was read. Written to a
+    /// temp file and renamed in: `fs::write` truncates the destination first, so
+    /// a crash or a full disk mid-write would leave the user's document
+    /// half-length with no copy of the original anywhere.
+    pub fn write(path: &Path, text: &str, expected_mtime_ms: u64) -> Result<u64, String> {
+        let meta = file_meta(path)?;
+        if mtime_ms(&meta)? != expected_mtime_ms {
+            return Err("The file changed on disk. Reopen it to get the newer version.".into());
+        }
+
+        let tmp = temp_sibling(path)?;
+        std::fs::write(&tmp, text.as_bytes()).map_err(|e| e.to_string())?;
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+        mtime_ms(&file_meta(path)?)
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentPayload {
+    text: String,
+    mtime_ms: u64,
+}
+
+#[tauri::command]
+fn read_document(path: String) -> Result<DocumentPayload, String> {
+    let doc = document_io::read(Path::new(&path), MAX_PREVIEW_BYTES)?;
+    Ok(DocumentPayload {
+        text: doc.text,
+        mtime_ms: doc.mtime_ms,
+    })
+}
+
+#[tauri::command]
+fn write_document(path: String, text: String, expected_mtime_ms: u64) -> Result<u64, String> {
+    document_io::write(Path::new(&path), &text, expected_mtime_ms)
+}
+
 #[cfg(desktop)]
 fn show_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -600,6 +701,8 @@ pub fn run() {
             retry_job,
             reveal_path,
             read_text_file,
+            read_document,
+            write_document,
             quit_app,
             retry_failed,
             list_history,
@@ -841,5 +944,76 @@ mod already_text_tests {
         assert_eq!(collect_input_files(&inputs, JobType::Transcribe).len(), 0);
         // ...but are counted so the UI can explain the skip.
         assert_eq!(count_matching(&inputs, ALREADY_TEXT), 3);
+    }
+}
+
+#[cfg(test)]
+mod document_io_tests {
+    use super::*;
+    use std::fs;
+
+    /// Seed a document and return its path.
+    fn doc(name: &str, body: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("toolkit-doc-{name}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("note.md");
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn write_then_read_returns_the_saved_text() {
+        let path = doc("roundtrip", "first\n");
+        let opened = document_io::read(&path, MAX_PREVIEW_BYTES).unwrap();
+        assert_eq!(opened.text, "first\n");
+
+        let saved_mtime = document_io::write(&path, "second\n", opened.mtime_ms).unwrap();
+        let reopened = document_io::read(&path, MAX_PREVIEW_BYTES).unwrap();
+        assert_eq!(reopened.text, "second\n");
+        assert_eq!(reopened.mtime_ms, saved_mtime);
+    }
+
+    /// The whole point of the mtime handshake: an edit made outside the app
+    /// must not be silently replaced by the pane's stale copy.
+    #[test]
+    fn write_refuses_when_the_file_changed_on_disk() {
+        let path = doc("stale", "original\n");
+        let opened = document_io::read(&path, MAX_PREVIEW_BYTES).unwrap();
+
+        let err = document_io::write(&path, "from the pane\n", opened.mtime_ms + 1).unwrap_err();
+        assert!(err.contains("changed on disk"), "unexpected error: {err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original\n");
+    }
+
+    /// Overwriting a long document with a short one must leave the short one,
+    /// not the short one followed by the tail of the old bytes — the failure a
+    /// truncate-in-place write produces when it stops halfway.
+    #[test]
+    fn overwriting_leaves_no_tail_of_the_previous_contents() {
+        let long = "x".repeat(4096);
+        let path = doc("overwrite", &long);
+        let opened = document_io::read(&path, MAX_PREVIEW_BYTES).unwrap();
+
+        document_io::write(&path, "short\n", opened.mtime_ms).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "short\n");
+
+        let leftovers: Vec<String> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().to_string()))
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn read_rejects_a_directory_and_an_oversized_file() {
+        let path = doc("limits", "body\n");
+        let dir = path.parent().unwrap();
+        assert_eq!(
+            document_io::read(dir, MAX_PREVIEW_BYTES).unwrap_err(),
+            "Not a file"
+        );
+        assert!(document_io::read(&path, 2).is_err(), "size cap not applied");
     }
 }

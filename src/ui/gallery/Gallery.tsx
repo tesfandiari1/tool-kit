@@ -463,31 +463,65 @@ export function Gallery() {
 
             <Stack gap={2}>
               <Label>Split pane</Label>
-              <Panel>
-                <div style={{ height: 160 }}>
-                  <SplitPane
-                    start={
-                      <div className="gal__splitpane">
-                        <Text size="xs" tone="faint">Run column</Text>
-                      </div>
-                    }
-                    end={
-                      <div className="gal__splitpane">
-                        <Text size="xs" tone="faint">Document</Text>
-                      </div>
-                    }
-                  />
-                </div>
-              </Panel>
+              <SplitPaneSpecimen />
               <Text size="xs" tone="faint">
                 Drag the seam, or focus it and use the arrow keys. The hairline stays
-                a hairline at rest and only brightens under the pointer.
+                a hairline at rest and only brightens under the pointer. Collapsed
+                drops the seam and the end pane; the start pane keeps its instance
+                across the toggle, so the counter below it does not reset.
               </Text>
             </Stack>
           </Stack>
         </Section>
       </div>
     </div>
+  );
+}
+
+/// Both states of the seam, plus the reason `collapsed` is a prop rather than
+/// the caller rendering `start` on its own: the counter is local state inside
+/// the start pane, and it has to survive the toggle. Rendering `start` outside
+/// the split when collapsed moves it in the tree, React remounts it, and the
+/// count goes back to zero — which in the app was a half-typed API key.
+function SplitPaneSpecimen() {
+  const [collapsed, setCollapsed] = useState(false);
+  return (
+    <Stack gap={2}>
+      <Panel>
+        <div style={{ height: 160 }}>
+          <SplitPane
+            collapsed={collapsed}
+            start={
+              <div className="gal__splitpane">
+                <StatefulPaneBody label="Run column" />
+              </div>
+            }
+            end={
+              <div className="gal__splitpane">
+                <Text size="xs" tone="faint">Document</Text>
+              </div>
+            }
+          />
+        </div>
+      </Panel>
+      <Row gap={2}>
+        <Button size="sm" onClick={() => { setCollapsed((c) => !c); }}>
+          {collapsed ? "Open the seam" : "Collapse"}
+        </Button>
+      </Row>
+    </Stack>
+  );
+}
+
+function StatefulPaneBody({ label }: { label: string }) {
+  const [n, setN] = useState(0);
+  return (
+    <Stack gap={2}>
+      <Text size="xs" tone="faint">{label}</Text>
+      <Button size="sm" variant="ghost" onClick={() => { setN((v) => v + 1); }}>
+        Clicked {n}
+      </Button>
+    </Stack>
   );
 }
 

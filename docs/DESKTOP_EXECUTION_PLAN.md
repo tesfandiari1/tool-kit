@@ -92,7 +92,7 @@ natural home. Keep the rule that a storage error never fails a job.
 
 ## Increments
 
-### Increment 0 — Settle the transport shape
+### Increment 0: Settle the transport shape
 
 - [ ] Decide the multipart branch and the download command, per the two problems
   above. Write the decision into `docs/HANDOFF.md` before writing code.
@@ -103,7 +103,7 @@ natural home. Keep the rule that a storage error never fails a job.
 
 Exit: the IPC surface is decided and the schema matches the contract.
 
-### Increment 1 — The reversible switch (CVR-066)
+### Increment 1: The reversible switch (CVR-066)
 
 Build the switch before the thing it switches to. With the flag in from day one
 every later step is shippable and reversible, and the direct path is there to
@@ -115,7 +115,7 @@ catch `needs_remote`.
 
 Exit: the setting exists, defaults to today's behavior, and changes nothing yet.
 
-### Increment 2 — Settings and credentials (CVR-060)
+### Increment 2: Settings and credentials (CVR-060)
 
 - [ ] Add `backend_url` and `conversion_profile` to `Settings`, its frontend
   mirror, and `DEFAULT_SETTINGS`. `#[serde(default)]` on the struct already
@@ -131,7 +131,7 @@ token with per-device credentials, so nothing built here gets thrown away.
 Exit: a backend URL and token round-trip through settings and the Keychain, and
 no key reaches the webview.
 
-### Increment 3 — Submit (CVR-062)
+### Increment 3: Submit (CVR-062)
 
 The biggest piece and the only one with real unknowns.
 
@@ -145,7 +145,7 @@ The biggest piece and the only one with real unknowns.
 Exit: a PDF submits, returns `202`, and a resubmit of the same file replays
 rather than converting twice.
 
-### Increment 4 — Poll and download (CVR-063, CVR-064)
+### Increment 4: Poll and download (CVR-063, CVR-064)
 
 Map the durable `status` onto the existing `Job` + `progressNote`. Do not add
 SSE, a percent, or a new OpenAPI field; see
@@ -161,7 +161,7 @@ SSE, a percent, or a new OpenAPI field; see
 Exit: drop a PDF, get markdown on disk through the backend, and an app restart
 mid-run picks the job back up.
 
-### Increment 5 — Surface the decisions (CVR-065)
+### Increment 5: Surface the decisions (CVR-065)
 
 - [ ] Render `route.kind`, `route.reasonCodes`, `warnings[]`, and
   `failure{code,message}` data-driven, so M4 adds codes without touching the
@@ -170,7 +170,7 @@ mid-run picks the job back up.
 
 Exit: a user can tell why a file routed the way it did.
 
-### Increment 6 — Tests (CVR-067)
+### Increment 6: Tests (CVR-067)
 
 - [ ] Local success, restart recovery, backend unavailable, retry-safe replay.
 - [ ] Datalab fallback is the one scenario that waits for M5.

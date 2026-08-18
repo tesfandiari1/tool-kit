@@ -1,7 +1,7 @@
 import { CodeIcon, CopyIcon, EyeIcon, FolderOpenIcon, XIcon } from "@phosphor-icons/react";
 import { Button, Display, Row, Segmented, Spacer, SourceEditor, StatusDot, Tabs, Text } from "@ui";
 import { MarkdownViewer } from "./MarkdownViewer";
-import { saveNote, saveTone, type DocMode, type OpenDoc } from "./model";
+import { isDirty, saveNote, saveTone, type DocMode, type OpenDoc } from "./model";
 
 /// The right half of the workspace: every open result, one at a time.
 ///
@@ -12,6 +12,7 @@ export function DocumentPane({
   docs,
   activeId,
   mode,
+  allowEdit = true,
   onSelect,
   onClose,
   onModeChange,
@@ -22,6 +23,9 @@ export function DocumentPane({
   docs: OpenDoc[];
   activeId: string | null;
   mode: DocMode;
+  /// Whether the Read/Edit toggle is offered. False while the host has no way
+  /// to write the file back: an edit it cannot save is an edit it discards.
+  allowEdit?: boolean;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onModeChange: (mode: DocMode) => void;
@@ -50,7 +54,10 @@ export function DocumentPane({
     <section className="doc">
       <Tabs
         label="Open documents"
-        items={docs.map((d) => ({ id: d.id, label: d.title, dirty: d.save === "edited" }))}
+        /* `isDirty`, not `save === "edited"`: a document whose write the host
+           refused still holds the edit only in memory, so the strip must mark
+           it. Otherwise the tab looks settled and then asks on the way out. */
+        items={docs.map((d) => ({ id: d.id, label: d.title, dirty: isDirty(d.save) }))}
         value={doc.id}
         onChange={onSelect}
         onClose={onClose}
@@ -65,23 +72,25 @@ export function DocumentPane({
             {doc.title}
           </Display>
           <Spacer />
-          <Segmented
-            label="Document mode"
-            value={mode}
-            onChange={onModeChange}
-            options={[
-              {
-                value: "read" as const,
-                label: "Read",
-                icon: (on: boolean) => <EyeIcon weight={on ? "fill" : "regular"} />,
-              },
-              {
-                value: "edit" as const,
-                label: "Edit",
-                icon: () => <CodeIcon />,
-              },
-            ]}
-          />
+          {allowEdit && (
+            <Segmented
+              label="Document mode"
+              value={mode}
+              onChange={onModeChange}
+              options={[
+                {
+                  value: "read" as const,
+                  label: "Read",
+                  icon: (on: boolean) => <EyeIcon weight={on ? "fill" : "regular"} />,
+                },
+                {
+                  value: "edit" as const,
+                  label: "Edit",
+                  icon: () => <CodeIcon />,
+                },
+              ]}
+            />
+          )}
           <Button
             variant="ghost"
             size="sm"
@@ -125,7 +134,16 @@ export function DocumentPane({
         </Text>
       </header>
 
+      {/* Keyed on the document, so switching tabs unmounts the surface rather
+          than pushing new text through the one that is already there.
+          Without it a single CodeMirror instance serves every tab, and its
+          undo stack spans them: ⌘Z after a switch pops the swap that brought
+          this document in, restoring the *previous* document's text, which
+          then autosaves over this document's file. The read surface has the
+          milder version of the same bug — it kept the last document's scroll
+          offset — and the same key fixes it. */}
       <div
+        key={doc.id}
         className="doc-body"
         role="tabpanel"
         id={`ui-tabpanel-${doc.id}`}

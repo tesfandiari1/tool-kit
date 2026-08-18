@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { CheckCircleIcon, EyeIcon, FolderOpenIcon, WarningCircleIcon, XIcon } from "@phosphor-icons/react";
-import { Button, Input, Label, Mono, Row, Spacer, Status, Text } from "@ui";
+import { EyeIcon, FolderOpenIcon, XIcon } from "@phosphor-icons/react";
+import { Button, Input, Label, Mono, Row, Spacer, StatusDot, Text } from "@ui";
 import { commands } from "@/app/commands";
 import { basename, fmtWhen } from "@/app/format";
 import { HISTORY_LIMIT, type HistoryEntry } from "@/app/types";
@@ -124,13 +124,7 @@ export function HistoryPanel({
         <div className="hist-list">
           {rows.map((e) => (
             <div className="job" key={e.id}>
-              <Status tone={e.status === "done" ? "pass" : "fault"} label={e.status}>
-                {e.status === "done" ? (
-                  <CheckCircleIcon weight="fill" />
-                ) : (
-                  <WarningCircleIcon weight="fill" />
-                )}
-              </Status>
+              <StatusDot tone={e.status === "done" ? "pass" : "fault"} label={e.status} />
               <div className="job-body">
                 <Mono size="xs" tone="ink" className="job-name" title={e.sourcePath}>
                   {e.fileName}

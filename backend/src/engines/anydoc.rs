@@ -31,6 +31,9 @@ use crate::{
 pub(crate) const ANYDOC_ENGINE_NAME: &str = "anydoc";
 pub(crate) const ANYDOC_VERSION: &str = "0.1.9";
 
+/// The admission label of the one format detection cannot see.
+const CSV_FORMAT_LABEL: &str = "csv";
+
 /// Engine-specific detail persisted as attempt diagnostics and embedded in
 /// the manifest. Content-free: the detected format family and wall time only.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -111,9 +114,13 @@ impl AnyDocEngine {
         if detected == Some(anydoc::Format::Pdf) {
             return Ok(rejected(AnyDocRejection::UnsupportedDocument));
         }
+        // CSV is the one signature-less format: detection always returns
+        // `None`, so the admitted extension names it. Every other format is
+        // content-detected, and content that detects as nothing is corrupt or
+        // mislabeled, not "unsupported".
+        let detected = detected
+            .or_else(|| (admitted_label == CSV_FORMAT_LABEL).then_some(anydoc::Format::Csv));
         let Some(format) = detected else {
-            // Admission promised a known extension; content that detects as
-            // nothing is corrupt or mislabeled, not "unsupported".
             return Ok(rejected(AnyDocRejection::InvalidDocument));
         };
         // docx, xlsx, pptx and epub share one ZIP magic (doc/xls/ppt one OLE

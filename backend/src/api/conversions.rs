@@ -501,6 +501,10 @@ fn has_container_magic(magic: ContainerMagic, prefix: &[u8]) -> bool {
         ContainerMagic::Ole => {
             prefix.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])
         }
+        ContainerMagic::Rtf => prefix.starts_with(b"{\\rtf"),
+        // CSV has no signature to check. Admission rests on the extension and
+        // the declared media type; the engine still has the final say.
+        ContainerMagic::None => true,
     }
 }
 
