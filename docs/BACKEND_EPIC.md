@@ -1,7 +1,7 @@
 # Epic: Rust conversion backend
 
-**Status:** In progress — M2 closed, M3 AnyDoc next; M6 may run in parallel
-**Current milestone:** M3 — AnyDoc and local format routing
+**Status:** In progress — M2 closed, M3 Increment 4 next; M6 may run in parallel
+**Current milestone:** M3 — AnyDoc and local format routing (Increments 0-3 done)
 **Latest verified checkpoint:** `5c626e1` — M3 Increments 0-3, contract 0.4.0
 **Target:** CPU-only Rust/Axum modular monolith
 **Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)
@@ -25,7 +25,8 @@ integration boundary at a time.
 - Extend the existing Rust/Axum backend; do not replace it with FastAPI.
 - One converter container and one in-process durable worker initially.
 - SQLite and job artifacts live under one host-local `/data` dataset.
-- Worker and parser concurrency start at one.
+- Worker and parser concurrency start at one **per engine** (PDF and AnyDoc each
+  hold a separate permit; one PDF and one non-PDF job may parse concurrently).
 - Keep the PDF parser behind its bounded child-process boundary.
 - PDF -> `pdf-inspector`; proven non-PDF formats -> AnyDoc; approved hard cases
   -> Datalab.
@@ -46,7 +47,7 @@ integration boundary at a time.
 | M0 | Architecture, ownership boundaries, and scaffold | Complete | — |
 | M1 | Authenticated loopback PDF conversion vertical slice | Complete | M0 |
 | M2 | Durable SQLite jobs, sources, and artifacts | Complete | M1 |
-| M3 | AnyDoc and proven non-PDF local conversion | Planned | M2 |
+| M3 | AnyDoc and proven non-PDF local conversion | In progress | M2 |
 | M4 | Corpus-calibrated routing and quality policy | Planned | M3 |
 | M5 | Restart-safe Datalab fallback and privacy policy | Planned | M4 |
 | M6 | Desktop app uses the backend | Planned | M2 (M5 for one CVR-067 scenario) |
@@ -178,7 +179,28 @@ Execution increments, mirroring the M2 style. Each is independently gated.
 | 1 — Engine seam (CVR-031) | Engine-neutral `EngineOutcome`; de-PDF `EngineFailure` strings | Done 2026-08-18: all 119 tests green, no behavior change |
 | 2 — AnyDoc adapter (CVR-032, CVR-034) | `engines/anydoc.rs` with the error mapping; refuses PDF bytes; in-process per the owner decision | Done 2026-08-18: docx and xlsx round-trip the durable path; a PDF fed to the adapter fails closed |
 | 3 — Validation and capabilities (CVR-033) | Content-sniff plus the CSV extension hint; proven formats only; OpenAPI and capabilities together | Done 2026-08-18: admission table drives upload validation and `inputFormats`; `engines` array; OpenAPI 0.4.0 |
-| 4 — Fixtures and gates (CVR-035, CVR-036, CVR-037) | Per-family success and bounded-failure fixtures; diagnostics without content leakage; full gate plus container smoke | M3 gate |
+| 4 — Fixtures and gates (CVR-035–039) | Container smoke first; batch spike-proven formats; AnyDoc timeout; optional parse-path optimization | Partial 2026-08-18: desktop seven proven, smoke + timeout + hang/panic tests done; rtf/odt/ods/odp/csv outstanding |
+| 5 — Parse-path optimization (CVR-039) | Skip redundant source re-read/hash at parse when immutable source unchanged | Optional M3.5; measure after Inc 4 |
+
+**Architecture review (2026-08-18):** The core shape is sound — modular
+monolith, isolated PDF child worker, in-process AnyDoc crate inside the
+converter container (not a separate AnyDoc service). Parse stays fast
+(AnyDoc: single-digit to low tens of ms on spike fixtures); the durable job
+layer adds orchestration latency, not parser slowdown. Open risks: (1) M3
+container smoke has not been re-run since AnyDoc linked in (+2.68 MB image);
+(2) in-process AnyDoc contradicts the spike's child-worker containment
+recommendation — `catch_unwind` does not catch stack-overflow-class faults;
+(3) double source read/hash at upload and parse is avoidable overhead. See
+CVR-037–039 and the containment note on CVR-032.
+
+**Performance ladder (do not ticket separately — follow in order):**
+
+1. In-process AnyDoc, concurrency 1/engine — current.
+2. AnyDoc hard timeout — CVR-037.
+3. Skip redundant source re-read/hash — CVR-039 (optional M3.5).
+4. Raise AnyDoc concurrency after memory profiling — post-M3 gate only.
+5. Child-worker fallback — only if containment fails in the field (spike
+   documented shape in `pdf_inspector.rs`).
 
 - [x] **CVR-030:** Verify and pin a compatible AnyDoc revision, Rust API,
   licenses, supported formats, and CPU-only container requirements. Verified
@@ -202,7 +224,10 @@ Execution increments, mirroring the M2 style. Each is independently gated.
   interrupted attempt. The adapter refuses PDF input outright, so AnyDoc's
   embedded pdf-inspector can never bypass the isolated PDF worker. The
   child-worker shape in `pdf_inspector.rs` remains the documented fallback if
-  hostile input ever defeats AnyDoc's limits.
+  hostile input ever defeats AnyDoc's limits. **Containment policy (CVR-038):**
+  keep in-process for M3; add a hard outer timeout in CVR-037; revisit the
+  child-worker shape only if a field crash corrupts or kills the converter.
+  Do not build `tool-kit-anydoc-worker` preemptively.
 - [x] **CVR-033:** Expand upload validation and capabilities to only the file
   types proven by fixtures. One admission table (`SOURCE_FORMATS`) drives the
   extension/media-type/magic checks at upload, engine selection at execution,
@@ -215,29 +240,73 @@ Execution increments, mirroring the M2 style. Each is independently gated.
   stored source media type; the claim transaction stamps the matching engine
   identity, and a queued row with an engine-less media type fails closed
   instead of poisoning the queue.
-- [ ] **CVR-035:** Persist engine/version, warnings, fallback reason, output
+- [x] **CVR-035:** Persist engine/version, warnings, fallback reason, output
   hash, and engine-specific diagnostics without leaking document content.
+  AnyDoc attempts persist `classification: structured_document` and
+  diagnostics of `{format, processingTimeMs}` only; the family matrix asserts
+  both, and the docx round-trip asserts the client filename never reaches the
+  manifest.
+  **Audit first:** manifests and attempt rows already carry engine name/version,
+  route, diagnostics JSON, and output hash. Narrow remaining work to populating
+  `warnings` from engine output where applicable; close the ticket if the audit
+  passes.
 - [ ] **CVR-036:** Add licensed or synthetic success and safe-failure fixtures
-  for each advertised format family.
-- [ ] **CVR-037:** Re-run the container and contract gates with AnyDoc present,
-  including timeout, output ceiling, and malformed-input behavior.
+  for each advertised format family. **Batch, do not increment per family:**
+  the spike converted docx, xlsx, pptx, epub, and rtf from upstream MIT
+  fixtures (`firecrawl/anydoc` `tests/fixtures/`); odt, ods, and odp were not
+  spike-tested. State of play 2026-08-18: the desktop-intersection seven
+  (doc, docx, ppt, pptx, xls, xlsx, epub) are fully in — admission rows,
+  round-trip fixtures, and bounded-failure fixtures — and rtf, odt, ods, odp,
+  and csv (extension hint; adapter support landed with the timeout work) are
+  the remaining batch: five admission rows, migration 0003 for the five media
+  types, five fixtures, and five contract tests. Record licenses in
+  `backend/tests/fixtures/SOURCES.md`. Do not rebuild per-family increments —
+  the spike was the per-family proof.
+- [x] **CVR-037:** Re-run the container and contract gates with AnyDoc present.
+  **Do this first in Increment 4**, before widening formats: graceful and
+  SIGKILL restart smokes (`backend/scripts/container-smoke.sh`), full Rust gate,
+  and contract tests against the built image with AnyDoc linked. Add an AnyDoc
+  hard outer timeout (reuse `TOOLKIT_CONVERTER_PDF_TIMEOUT_SECS` or a dedicated
+  env) wrapping `spawn_blocking`; malformed-input and output-ceiling behavior
+  must match PDF-engine expectations. Include a test that a simulated AnyDoc
+  hang or panic fails the job without wedging the worker loop. Done: the smoke
+  passed on 2026-08-18 at run `20260818T192759Z` against image
+  `sha256:cd989ed8…` (graceful and SIGKILL); the adapter wraps the parse in
+  `tokio::time::timeout` reusing the worker timeout (a timed-out task detaches,
+  bounded by AnyDoc's internal limits); hang and panic wrapper tests pass;
+  the failure matrix covers malformed input and the output ceiling.
+- [x] **CVR-038:** Record the AnyDoc containment policy: in-process for M3;
+  hard timeout required (CVR-037); child-worker fallback trigger documented on
+  CVR-032. No preemptive second worker binary.
+- [ ] **CVR-039:** Skip the redundant full source re-read and SHA-256
+  re-computation at parse time when the immutable source path, byte length, and
+  hash were validated at claim/submit and the file has not changed. Optional
+  M3.5 after Increment 4 gate; measure on typical docx/xlsx before landing.
 
 **M3 gate:** Every advertised local format has a passing conversion fixture and
 a bounded failure fixture. PDFs are never parsed twice, and incomplete output
-never silently succeeds.
+never silently succeeds. Container restart smokes pass with AnyDoc present.
+AnyDoc conversions honor a hard outer timeout.
 
 ## M4 — Routing and quality policy
 
+**Scope discipline (2026-08-18 review):** M4 gate is a **fixture regression
+suite**, not a rate-calibration program. Keep `backend/evals/` as manifest
+metadata only until this milestone; do not build harness infrastructure in M3.
+`standard` and `local_only` are behaviourally identical until M4 ships — do
+not expose both as distinct user choices before then.
+
 - [ ] **CVR-040:** Populate the labeled corpus with native, scanned, image,
   mixed, dense-table, multi-column, form, encoding-damaged, encrypted,
-  malformed, and over-limit PDFs.
+  malformed, and over-limit PDFs. PDF-only; AnyDoc families are gated in M3.
 - [ ] **CVR-041:** Define stable quality signals and fallback reason codes from
   real engine output; avoid filename and page-count heuristics.
 - [ ] **CVR-042:** Implement explicit `standard`, `local_only`, and
   `best_quality` routing policy as a pure, table-driven decision boundary.
 - [ ] **CVR-043:** Calibrate dense/complex routing against the corpus and record
-  false-local-success and unnecessary-remote-routing rates. Sized as a fixture
-  regression suite first; add rate calibration only when real volume exists.
+  false-local-success and unnecessary-remote-routing rates. **Defer rate
+  calibration to M8 or until real volume exists.** M4 gate passes on fixture
+  pass/fail only; do not block M5 on percentage targets.
 - [ ] **CVR-044:** Expose route, reason codes, warnings, and policy decisions in
   status and provenance without exposing document content.
 - [ ] **CVR-045:** Add regression tests that prevent scanned, mixed, damaged,
@@ -248,10 +317,21 @@ aware. Complexity metadata alone does not cause external transmission.
 
 ## M5 — Datalab fallback
 
+**Highest-complexity milestone (2026-08-18 review):** uncertain billable
+submission and restart-safe polling are where production bugs live. **Port the
+desktop taxonomy from `src-tauri/src/providers.rs` verbatim** — especially
+`send_retrying()` (retry only when the server never started work),
+`terminal_poll_error()`, and the rule that result-fetch 5xx/429 stays transient
+after the work is already billed. Do not redesign Datalab semantics in the
+backend. M6 per-file fallback to the direct Datalab path ([`DESKTOP_EXECUTION_PLAN.md`](DESKTOP_EXECUTION_PLAN.md))
+may ship before M5; treat backend Datalab as an optimization, not a desktop
+blocker.
+
 - [ ] **CVR-050:** Add typed Datalab configuration and load its credential only
   inside the backend.
 - [ ] **CVR-051:** Implement a bounded submit/poll/result HTTP adapter with
-  stable errors, timeouts, retry classification, and redacted logs.
+  stable errors, timeouts, retry classification, and redacted logs. Match
+  `providers.rs` retry and transient/terminal classification.
 - [ ] **CVR-052:** Extend the durable state model for remote submission,
   polling, finalization, and uncertain acceptance through a contract-reviewed
   migration.
@@ -272,6 +352,12 @@ leave the network, and a known or uncertain remote request is never duplicated.
 
 ## M6 — Desktop integration
 
+**Format gap (2026-08-18 review):** the desktop accepts ~18 convert extensions;
+the backend advertises three until M3 Increment 4 completes. M6 must not present
+backend routing as all-or-nothing. Increment plan and per-file fallback live in
+[`DESKTOP_EXECUTION_PLAN.md`](DESKTOP_EXECUTION_PLAN.md). Run
+`pnpm generate:api` as Increment 0 — the committed schema trails OpenAPI 0.4.0.
+
 - [ ] **CVR-060:** Add backend URL and device-token settings outside React
   state, keeping the token in the macOS Keychain.
 - [ ] **CVR-061:** Generate or validate and commit the Tauri HTTP client/schema
@@ -285,16 +371,33 @@ leave the network, and a known or uncertain remote request is never duplicated.
   collision-safe output naming.
 - [ ] **CVR-065:** Show selected route, warnings, privacy decisions, and
   actionable failures without exposing provider credentials to the webview.
+  **Gate Run on `capabilities.inputFormats`:** disable or fall back to the
+  direct path for extensions the backend does not advertise; never fail silently
+  at upload for formats the UI allowed.
 - [ ] **CVR-066:** Keep the existing direct-provider path behind a reversible
   switch until the deployment gate passes.
 - [ ] **CVR-067:** Add end-to-end desktop tests for local success, Datalab
   fallback, restart recovery, backend unavailability, and retry-safe replay.
 
+- [ ] **CVR-081:** Capture direct-path baselines (~10 representative files:
+  native PDF, scanned PDF, docx, xlsx, and formats still on Datalab) and
+  compare output completeness, routing, and failure behavior against the
+  backend path. **Moved from M8** — run before cutover, not after M7.
+
 **M6 gate:** The desktop completes representative local and remote conversions,
-recovers active jobs, and never exposes backend or provider credentials to the
-webview.
+recovers active jobs, never exposes backend or provider credentials to the
+webview, and CVR-081 baselines are recorded.
 
 ## M7 — LAN deployment and operations
+
+**v1 LAN cutover subset (2026-08-18 review):** ship with CVR-070 (Caddy),
+CVR-071 (per-device tokens), CVR-073 (data layout off SMB/NFS), and CVR-075
+(backup/restore proof). **Defer without blocking cutover:** CVR-076 (full SBOM
+— run `cargo auditable` once and document licenses instead), CVR-077 (full
+runbooks — one README ops section until a second host exists), CVR-078 (subset
+of container smoke plus a manual host checklist). Rate-limit `/health/ready`
+when Caddy exposes the LAN — the unauthenticated readiness flood remains an
+open finding from M2 Increment 5.
 
 - [ ] **CVR-070:** Add Caddy with internal HTTPS and expose only the proxy on
   the selected LAN interface.
@@ -306,7 +409,10 @@ webview.
 - [ ] **CVR-073:** Place SQLite, artifacts, and Caddy state on explicit
   host-local persistent datasets; keep the live database off SMB/NFS.
 - [ ] **CVR-074:** Add retention, conservative orphan cleanup, disk-space
-  readiness, and redacted operational metrics.
+  readiness, and redacted operational metrics. Default ops surface is JSON logs
+  plus Compose healthcheck; optional `GET /metrics` on loopback or internal
+  network only — no OTel sidecar or Grafana in this Compose file. See
+  [`MONITORING_AND_PROGRESS.md`](MONITORING_AND_PROGRESS.md).
 - [ ] **CVR-075:** Document and prove coordinated backup and restore for the
   SQLite database plus artifacts.
 - [ ] **CVR-076:** Generate an SBOM and complete transitive license, image,
@@ -321,10 +427,11 @@ backup/restore tests, and only Caddy is reachable on the LAN.
 
 ## M8 — Evaluation, cutover, and cleanup
 
+CVR-081 moved to M6 (baseline capture before cutover). CVR-080 overlaps M4
+corpus freeze — run once when M4 fixtures are stable, not twice.
+
 - [ ] **CVR-080:** Freeze the labeled corpus and expected routing/results for
   release comparison.
-- [ ] **CVR-081:** Capture current desktop-path baselines and compare output
-  completeness, routing, latency, and failure behavior.
 - [ ] **CVR-082:** Run the full desktop-to-backend acceptance suite and a real
   multi-document soak on the deployed host.
 - [ ] **CVR-083:** Make the backend route the desktop default through a
@@ -365,16 +472,22 @@ work.
 
 ## Next execution sequence
 
-Execute M3 in the backend session, in the increment order in the M3 section
-above: spike, engine seam, adapter, validation and capabilities, fixtures and
-gates. M6 desktop integration may run in parallel in a second session under
-the ownership table in [`HANDOFF.md`](HANDOFF.md). The one coordination point
-is `pnpm generate:api` after CVR-033 widens `inputFormats`, run by whichever
-session lands second; the M3 session never writes `src/app/api/schema.ts`.
+**Now:** M3 Increment 4 — CVR-037 container smoke and gates **first**, then
+CVR-035 audit, CVR-036 batch format expansion, CVR-038 policy record. CVR-039
+(parse-path optimization) is optional M3.5 after the gate passes.
+
+M6 desktop integration may run in parallel in a second session under the
+ownership table in [`HANDOFF.md`](HANDOFF.md). The one coordination point is
+`pnpm generate:api` after M3 widens `inputFormats`; run by whichever session
+lands second; the M3 session never writes `src/app/api/schema.ts`.
+
+Recommended milestone order after M3: M6 (with per-file Datalab fallback) may
+parallel M4; M5 after M4 fixture suite; M7-lite (CVR-070/071/073/075) before
+full M7 ops debloat; M8 cutover last.
 
 The M2 plan ([`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)) is
-complete. The M6 plan, its increment order, and the parallel-session reasoning
-are in [`DESKTOP_EXECUTION_PLAN.md`](DESKTOP_EXECUTION_PLAN.md). See
+complete — historical reference only. Active increment detail for M6 is in
+[`DESKTOP_EXECUTION_PLAN.md`](DESKTOP_EXECUTION_PLAN.md). See
 [`HANDOFF.md`](HANDOFF.md) before touching files.
 
 ## Verification log
@@ -739,3 +852,48 @@ Closes CVR-032, CVR-033, and CVR-034. Backend moves to 0.4.0.
   matrix, 5 failure modes). `docker build` succeeds; the image is
   42,886,364 bytes, +2.68 MB over the M2 image with AnyDoc linked in. The
   container smoke stays with Increment 4 (CVR-037).
+
+### 2026-08-18 — Architecture review and epic debloat
+
+Adversarial review of M3–M8 sequencing, performance path, and plan bloat.
+Woven into milestone sections above; no code changes.
+
+- **Verdict:** core shape (monolith + SQLite + PDF child + in-process AnyDoc
+  crate) is correct. Parse stays fast; orchestration adds latency, not parser
+  slowdown.
+- **M3 Increment 4 reordered:** CVR-037 container smoke first; CVR-036 batch
+  all spike-proven AnyDoc families; added CVR-038 (containment policy) and
+  CVR-039 (optional parse-path optimization).
+- **Debloat:** M4 rate calibration deferred; M7 v1 subset identified;
+  CVR-081 moved to M6; M5 must port `providers.rs` retry taxonomy.
+- **Clarified:** parser concurrency is per engine, not global.
+
+### 2026-08-18 — M3 Increment 4 fixture matrix, timeout, and gates
+
+Closes CVR-035, CVR-037, and CVR-038. CVR-036 is complete for the
+desktop-intersection seven; rtf, odt, ods, odp, and csv remain as the batch
+noted on the ticket.
+
+- The admission table now covers the desktop seven (doc, docx, ppt, pptx,
+  xls, xlsx, epub). Every family has a vendored MIT success fixture from the
+  upstream AnyDoc corpus plus a bounded-failure fixture, recorded in
+  `backend/tests/fixtures/SOURCES.md`; the two truncated xls/epub fixtures
+  are derived locally from the vendored files. The contract suite proves all
+  seven round-trips and six fail-closed cases, and a docx fixture proves the
+  truncated-docx failure mode.
+- The adapter wraps `spawn_blocking` in `tokio::time::timeout` reusing the
+  worker timeout (CVR-037): a hang fails the job `worker_timeout` and the
+  worker loop never waits on the parse again; the detached task stays bounded
+  by AnyDoc's internal limits. Wrapper tests cover hang, panic, and the
+  engine serving the next conversion immediately.
+- Detection failure after admission maps to `invalid_document`, not
+  `unsupported_document` — a corrupt known container is not an unknown
+  format.
+- The CSV extension hint exists in the adapter (media type `text/csv` names
+  the format when detection returns nothing) with an engine-level test; the
+  admission row lands with the remaining CVR-036 batch.
+- Gates: format, check, strict Clippy deny-set, `git diff --check`,
+  `docker compose config`, and 132 backend tests (67 library, 1 server, 3
+  parser worker, 41 HTTP contract, 5 crash recovery, 10 integrity matrix, 5
+  failure modes). Container smoke run `20260818T192759Z` passed graceful and
+  SIGKILL phases against image `sha256:cd989ed8…` with AnyDoc linked in.

@@ -498,6 +498,9 @@ fn has_container_magic(magic: ContainerMagic, prefix: &[u8]) -> bool {
     match magic {
         ContainerMagic::Pdf => has_pdf_signature(prefix),
         ContainerMagic::Zip => prefix.starts_with(b"PK\x03\x04"),
+        ContainerMagic::Ole => {
+            prefix.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])
+        }
     }
 }
 

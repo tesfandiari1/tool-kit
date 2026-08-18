@@ -10,7 +10,11 @@
 //! worker is the only PDF path, and AnyDoc's embedded pdf-inspector must
 //! never bypass it.
 
-use std::{panic, sync::Arc, time::Instant};
+use std::{
+    panic,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -35,16 +39,22 @@ pub(crate) struct AnyDocDiagnostics {
     pub format: String,
     pub processing_time_ms: u64,
 }
-
 #[derive(Clone, Debug)]
 pub struct AnyDocEngine {
     max_output_bytes: u64,
+    timeout: Duration,
     permits: Arc<Semaphore>,
 }
+
+/// The one signature-less format: detection cannot see CSV, so the declared
+/// media type names it. Every other format is content-detected only.
+const CSV_MEDIA_TYPE: &str = "text/csv";
+
 impl AnyDocEngine {
-    pub fn new(max_output_bytes: u64, parser_concurrency: usize) -> Self {
+    pub fn new(max_output_bytes: u64, parser_concurrency: usize, timeout: Duration) -> Self {
         Self {
             max_output_bytes,
+            timeout,
             permits: Arc::new(Semaphore::new(parser_concurrency.max(1))),
         }
     }
@@ -56,12 +66,28 @@ impl AnyDocEngine {
             .map_err(|_| EngineFailure::Unavailable)
     }
 
+    /// Runs blocking work on a blocking thread under a hard deadline. A hang
+    /// becomes `Timeout` and a panic becomes `Crashed`; the worker loop never
+    /// waits on the parse again. A timed-out task keeps running detached,
+    /// bounded by AnyDoc's internal resource limits.
+    async fn run_bounded<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, EngineFailure> {
+        let handle = tokio::task::spawn_blocking(work);
+        match tokio::time::timeout(self.timeout, handle).await {
+            Err(_) => Err(EngineFailure::Timeout),
+            Ok(join) => join.map_err(|_| EngineFailure::Crashed),
+        }
+    }
+
     pub async fn convert(
         &self,
         paths: &AttemptPaths,
         source: ValidatedOpenFile,
         _permit: OwnedSemaphorePermit,
         cancellation: watch::Receiver<bool>,
+        media_type: &str,
     ) -> Result<EngineOutcome, EngineFailure> {
         if *cancellation.borrow() {
             return Err(EngineFailure::Interrupted);
@@ -85,23 +111,26 @@ impl AnyDocEngine {
             return Err(EngineFailure::Protocol);
         }
 
-        let Some(format) = anydoc::Format::from_bytes(&bytes) else {
-            return Ok(rejected(AnyDocRejection::UnsupportedDocument));
-        };
-        if format == anydoc::Format::Pdf {
+        let detected = anydoc::Format::from_bytes(&bytes);
+        if detected == Some(anydoc::Format::Pdf) {
             return Ok(rejected(AnyDocRejection::UnsupportedDocument));
         }
+        let hint = (media_type == CSV_MEDIA_TYPE).then_some(anydoc::Format::Csv);
+        let Some(format) = detected.or(hint) else {
+            // Admission promised a known extension; content that detects as
+            // nothing is corrupt or mislabeled, not "unsupported".
+            return Ok(rejected(AnyDocRejection::InvalidDocument));
+        };
 
-        let max_output_bytes = self.max_output_bytes;
-        let conversion = tokio::task::spawn_blocking(move || {
-            let started = Instant::now();
-            let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                anydoc::to_markdown_bytes(&bytes, format)
-            }));
-            (result, started.elapsed())
-        })
-        .await
-        .map_err(|_| EngineFailure::Crashed)?;
+        let conversion = self
+            .run_bounded(move || {
+                let started = Instant::now();
+                let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                    anydoc::to_markdown_bytes(&bytes, format)
+                }));
+                (result, started.elapsed())
+            })
+            .await?;
         let (result, elapsed) = conversion;
         let markdown = match result {
             Err(_) => return Err(EngineFailure::Crashed),
@@ -113,7 +142,7 @@ impl AnyDocEngine {
             return Ok(rejected(AnyDocRejection::InvalidDocument));
         }
         let output_bytes = markdown.len() as u64;
-        if output_bytes > max_output_bytes {
+        if output_bytes > self.max_output_bytes {
             return Ok(rejected(AnyDocRejection::DocumentExceedsLimits));
         }
         if *cancellation.borrow() {
@@ -266,11 +295,11 @@ mod tests {
             sha256: hex::encode(Sha256::digest(pdf)),
         };
 
-        let engine = AnyDocEngine::new(1024 * 1024, 1);
+        let engine = AnyDocEngine::new(1024 * 1024, 1, Duration::from_secs(30));
         let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
-            .convert(&paths, source, permit, cancellation)
+            .convert(&paths, source, permit, cancellation, "application/rtf")
             .await
             .unwrap();
 
@@ -302,11 +331,11 @@ mod tests {
             sha256: hex::encode(Sha256::digest(rtf)),
         };
 
-        let engine = AnyDocEngine::new(1024 * 1024, 1);
+        let engine = AnyDocEngine::new(1024 * 1024, 1, Duration::from_secs(30));
         let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
-            .convert(&paths, source, permit, cancellation)
+            .convert(&paths, source, permit, cancellation, "application/rtf")
             .await
             .unwrap();
 
@@ -320,5 +349,62 @@ mod tests {
         assert_eq!(analysis.diagnostics["format"], "rtf");
         let markdown = std::fs::read_to_string(paths.staged_markdown()).unwrap();
         assert!(markdown.contains("Hello from AnyDoc."));
+    }
+
+    #[tokio::test]
+    async fn a_hanging_conversion_times_out_and_the_engine_serves_again() {
+        let engine = AnyDocEngine::new(1024, 1, Duration::from_millis(50));
+        let hung = engine
+            .run_bounded(|| std::thread::sleep(Duration::from_secs(2)))
+            .await;
+        assert_eq!(hung.unwrap_err(), EngineFailure::Timeout);
+        // The detached sleeper expires on its own; the loop is not wedged.
+        let next = engine.run_bounded(|| 42).await.unwrap();
+        assert_eq!(next, 42);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_conversion_is_a_crash_not_a_wedge() {
+        let engine = AnyDocEngine::new(1024, 1, Duration::from_secs(5));
+        let result: Result<(), EngineFailure> =
+            engine.run_bounded(|| panic!("deliberate test panic")).await;
+        assert_eq!(result.unwrap_err(), EngineFailure::Crashed);
+    }
+
+    #[tokio::test]
+    async fn csv_converts_through_the_media_type_hint() {
+        let directory = tempfile::tempdir().unwrap();
+        let attempt = directory.path().join("attempt");
+        let publication_staging = attempt.join("publication.staging");
+        std::fs::create_dir_all(&publication_staging).unwrap();
+        let paths = AttemptPaths {
+            source: attempt.join("input"),
+            published: attempt.join("artifacts"),
+            publication_staging,
+            attempt,
+        };
+        let csv = b"kind,value\nalpha,1\n".as_slice();
+        let source_path = directory.path().join("source.csv");
+        tokio::fs::write(&source_path, csv).await.unwrap();
+        let source = ValidatedOpenFile {
+            file: tokio::fs::File::open(&source_path).await.unwrap(),
+            byte_length: csv.len() as u64,
+            sha256: hex::encode(Sha256::digest(csv)),
+        };
+
+        let engine = AnyDocEngine::new(1024 * 1024, 1, Duration::from_secs(30));
+        let permit = engine.acquire().await.unwrap();
+        let (_cancel, cancellation) = watch::channel(false);
+        let outcome = engine
+            .convert(&paths, source, permit, cancellation, "text/csv")
+            .await
+            .unwrap();
+
+        let EngineOutcome::Converted { analysis, .. } = outcome else {
+            panic!("csv must convert through the hint");
+        };
+        assert_eq!(analysis.diagnostics["format"], "csv");
+        let markdown = std::fs::read_to_string(paths.staged_markdown()).unwrap();
+        assert!(markdown.contains("alpha"));
     }
 }

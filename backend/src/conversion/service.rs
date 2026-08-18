@@ -441,7 +441,7 @@ impl ConversionService {
             }
             LocalEngineKind::AnyDoc => {
                 self.anydoc_engine
-                    .convert(&paths, source, permit, shutdown)
+                    .convert(&paths, source, permit, shutdown, &job.source.media_type)
                     .await
             }
         };

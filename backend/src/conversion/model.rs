@@ -57,9 +57,8 @@ impl From<ConversionProfile> for Profile {
 /// detection happens from content at execution time; this table is the
 /// admission boundary.
 ///
-/// A format appears here only with a passing round-trip fixture. The M2
-/// database constraint in migration 0002 is deliberately wider than this
-/// table; rows outside it fail closed at claim time.
+/// A format appears here only with a passing round-trip fixture, and the
+/// migration 0002 CHECK constraint matches this table exactly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SourceFormat {
     pub extension: &'static str,
@@ -75,7 +74,7 @@ pub(crate) struct SourceFormat {
 pub(crate) enum ContainerMagic {
     Pdf,
     Zip,
-    // Ole joins with the doc/ppt/xls fixtures in Increment 4.
+    Ole,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,11 +99,46 @@ pub(crate) const SOURCE_FORMATS: &[SourceFormat] = &[
         format_label: "docx",
     },
     SourceFormat {
+        extension: "doc",
+        media_type: "application/msword",
+        magic: ContainerMagic::Ole,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "doc",
+    },
+    SourceFormat {
+        extension: "pptx",
+        media_type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "pptx",
+    },
+    SourceFormat {
+        extension: "ppt",
+        media_type: "application/vnd.ms-powerpoint",
+        magic: ContainerMagic::Ole,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "ppt",
+    },
+    SourceFormat {
         extension: "xlsx",
         media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         magic: ContainerMagic::Zip,
         engine: LocalEngineKind::AnyDoc,
         format_label: "excel",
+    },
+    SourceFormat {
+        extension: "xls",
+        media_type: "application/vnd.ms-excel",
+        magic: ContainerMagic::Ole,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "excel",
+    },
+    SourceFormat {
+        extension: "epub",
+        media_type: "application/epub+zip",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "epub",
     },
 ];
 

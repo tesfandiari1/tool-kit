@@ -44,7 +44,14 @@ impl AppState {
         )?;
         // AnyDoc runs in-process: pure Rust, typed errors, internal resource
         // limits, and `catch_unwind` at the adapter. Parser concurrency one.
-        let anydoc_engine = AnyDocEngine::new(settings.limits.max_output_bytes, 1);
+        // The hard timeout reuses the worker timeout: an in-process call
+        // cannot be killed, so a hang fails the job and leaves a detached
+        // blocking task bounded by AnyDoc's internal limits.
+        let anydoc_engine = AnyDocEngine::new(
+            settings.limits.max_output_bytes,
+            1,
+            settings.limits.pdf_timeout,
+        );
 
         let service = ConversionService::new(
             repository,

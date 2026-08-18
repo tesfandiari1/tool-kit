@@ -70,7 +70,7 @@ paths:
               $ref: "#/components/schemas/ConversionSubmission"
             encoding:
               source:
-                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/msword, application/vnd.openxmlformats-officedocument.presentationml.presentation, application/vnd.ms-powerpoint, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel, application/epub+zip
       responses:
         "202":
           description: Upload completed and the conversion was accepted
@@ -444,9 +444,19 @@ components:
             - type: string
               const: application/vnd.openxmlformats-officedocument.wordprocessingml.document
             - type: string
+              const: application/msword
+            - type: string
+              const: application/vnd.openxmlformats-officedocument.presentationml.presentation
+            - type: string
+              const: application/vnd.ms-powerpoint
+            - type: string
               const: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
-          minItems: 3
-          maxItems: 3
+            - type: string
+              const: application/vnd.ms-excel
+            - type: string
+              const: application/epub+zip
+          minItems: 8
+          maxItems: 8
         outputFormats:
           type: array
           items:

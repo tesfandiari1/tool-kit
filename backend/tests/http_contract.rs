@@ -75,7 +75,12 @@ async fn public_health_and_capabilities_are_truthful() {
         serde_json::json!([
             "application/pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel",
+            "application/epub+zip"
         ])
     );
     let engines = conversion["engines"].as_array().unwrap();
@@ -461,30 +466,183 @@ async fn docx_completes_through_anydoc_and_replays() {
 }
 
 #[tokio::test]
-async fn xlsx_completes_through_anydoc_with_the_excel_family_label() {
+async fn every_advertised_anydoc_family_converts() {
     let app = test_app().await;
-    let xlsx = include_bytes!("fixtures/anydoc/sheet.xlsx").as_slice();
+    for (fixture, filename, media_type, label) in [
+        (
+            include_bytes!("fixtures/anydoc/sheet.xlsx").as_slice(),
+            "sheet.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "excel",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/sheet.xls").as_slice(),
+            "sheet.xls",
+            "application/vnd.ms-excel",
+            "excel",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/pres.pptx").as_slice(),
+            "deck.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "pptx",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/handmade-multimaster.ppt").as_slice(),
+            "deck.ppt",
+            "application/vnd.ms-powerpoint",
+            "ppt",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/text.doc").as_slice(),
+            "notes.doc",
+            "application/msword",
+            "doc",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/book.epub").as_slice(),
+            "book.epub",
+            "application/epub+zip",
+            "epub",
+        ),
+    ] {
+        let body = multipart_body_with_media_type(
+            Uuid::new_v4(),
+            "standard",
+            fixture,
+            filename,
+            media_type,
+        );
+        let response = app
+            .submit(body, &format!("anydoc-family-{filename}"), TOKEN)
+            .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED, "{label}");
+        let submitted = json_body(response).await;
+        let job_id = submitted["data"]["id"].as_str().unwrap().to_owned();
+        let completed = app.wait_for_terminal(&job_id).await;
+        assert_eq!(
+            completed["data"]["status"], "succeeded",
+            "{label}: {completed:#}"
+        );
+        assert_eq!(
+            completed["data"]["route"]["kind"], "local_anydoc",
+            "{label}"
+        );
+
+        let manifest = app
+            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
+            .await;
+        assert_eq!(manifest.status(), StatusCode::OK, "{label}");
+        let manifest: Value =
+            serde_json::from_slice(&manifest.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(manifest["engine"]["name"], "anydoc", "{label}");
+        assert_eq!(manifest["document"]["format"], label, "{label}");
+        assert!(manifest["document"]["processingTimeMs"].is_u64(), "{label}");
+    }
+}
+
+#[tokio::test]
+async fn broken_and_hostile_anydoc_inputs_fail_closed_without_artifacts() {
+    let app = test_app().await;
+    for (fixture, filename, media_type, code) in [
+        (
+            include_bytes!("fixtures/anydoc/truncated.docx").as_slice(),
+            "broken.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "invalid_document",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/truncated.doc").as_slice(),
+            "broken.doc",
+            "application/msword",
+            "invalid_document",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/truncated.xls").as_slice(),
+            "broken.xls",
+            "application/vnd.ms-excel",
+            "invalid_document",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/truncated.epub").as_slice(),
+            "broken.epub",
+            "application/epub+zip",
+            "invalid_document",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/deepnest.ppt").as_slice(),
+            "deep.ppt",
+            "application/vnd.ms-powerpoint",
+            "document_exceeds_limits",
+        ),
+        (
+            include_bytes!("fixtures/anydoc/hugespan.pptx").as_slice(),
+            "huge.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "document_exceeds_limits",
+        ),
+    ] {
+        let body = multipart_body_with_media_type(
+            Uuid::new_v4(),
+            "standard",
+            fixture,
+            filename,
+            media_type,
+        );
+        let response = app
+            .submit(body, &format!("anydoc-broken-{filename}"), TOKEN)
+            .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED, "{code}");
+        let submitted = json_body(response).await;
+        let job_id = submitted["data"]["id"].as_str().unwrap().to_owned();
+        let completed = app.wait_for_terminal(&job_id).await;
+        assert_eq!(
+            completed["data"]["status"], "failed",
+            "{code}: {completed:#}"
+        );
+        assert_eq!(completed["data"]["failure"]["code"], code, "{code}");
+
+        let artifacts = app
+            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
+            .await;
+        assert!(
+            json_body(artifacts).await["data"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{code}"
+        );
+        let markdown = app
+            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
+            .await;
+        assert_eq!(markdown.status(), StatusCode::NOT_FOUND, "{code}");
+    }
+    assert_eq!(count_named_files(app.data_dir(), "result.md"), 0);
+}
+
+#[tokio::test]
+async fn anydoc_output_ceiling_fails_closed() {
+    let app = test_app_with_output_limit(64).await;
+    let docx = include_bytes!("fixtures/anydoc/text.docx").as_slice();
     let body = multipart_body_with_media_type(
         Uuid::new_v4(),
         "standard",
-        xlsx,
-        "sheet.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        docx,
+        "notes.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     );
-
-    let response = app.submit(body, "anydoc-xlsx-1", TOKEN).await;
+    let response = app.submit(body, "anydoc-ceiling-1", TOKEN).await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let submitted = json_body(response).await;
     let job_id = submitted["data"]["id"].as_str().unwrap().to_owned();
 
     let completed = app.wait_for_terminal(&job_id).await;
-    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
-    let manifest = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await;
-    let manifest_bytes = manifest.into_body().collect().await.unwrap().to_bytes();
-    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
-    assert_eq!(manifest["document"]["format"], "excel");
+    assert_eq!(completed["data"]["status"], "failed", "{completed:#}");
+    assert_eq!(
+        completed["data"]["failure"]["code"],
+        "document_exceeds_limits"
+    );
 }
 
 #[tokio::test]
