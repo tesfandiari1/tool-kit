@@ -61,7 +61,7 @@ Excluded from this unit:
 | 3 — Single durable worker | Complete | One FIFO runner; adversarial lifecycle and integrity fixes verified |
 | 4 — Startup reconciliation | Complete | State-specific recovery and bounded bundle validation verified |
 | 5 — Runtime and Compose | Complete | Live readiness, persistent capabilities/OpenAPI, `/data` volume |
-| 6 — Adversarial/release gates | Pending | Crash-barrier tests and graceful/forced restart smokes on the built image |
+| 6 — Adversarial/release gates | Complete | Fault barriers, integrity matrices, and graceful/forced restart smokes on the built image |
 
 The settled Increment 5 checkpoint passed format, check, Clippy with warnings
 denied, `git diff --check`, `docker compose config`, `docker build`, and 96
@@ -69,9 +69,21 @@ backend tests (56 library, 1 server, 3 parser worker, 36 HTTP contract). That
 image build is the first to succeed since `e8e8ca5` added
 `sqlx::migrate!("./migrations")`, because the builder stage copied only
 `Cargo.toml`, `Cargo.lock`, and `src`, and the macro reads the SQL at compile
-time. This is not the final M2 result. The graceful and forced-kill restart
-smokes remain for Increment 6. The checkpoint is `2f3158d`, merged as
-`b70ce44`.
+time. The checkpoint is `2f3158d`, merged as `b70ce44`.
+
+Increment 6 then closed M2. It added a deterministic fault barrier at four crash
+windows, a ten-case source and artifact integrity matrix, the missing failure
+modes, and `backend/scripts/container-smoke.sh`, which runs the graceful and
+forced-kill restart gates against the built image. Backend tests went from 96 to
+119 and both smokes pass.
+
+**One box in Increment 3 had been ticked without the code.** "Add a test-only
+deterministic fault barrier after transactional claim" was marked done, and no
+barrier existed anywhere in the crate. The consequence was not cosmetic: every
+recovery test injected a stored state directly, so nothing proved the service
+writes `finalizing` before it renames published files, or renames before it
+commits `succeeded`. That ordering is the reason the `finalizing` state exists.
+`src/faults.rs` and `tests/crash_recovery.rs` now prove it.
 
 ## Requirements and acceptance rules
 
@@ -426,32 +438,52 @@ container is what proves a restart keeps the jobs.
 
 Related: CVR-028, CVR-029.
 
-- [ ] Test restart with a queued job.
-- [ ] Use deterministic fault barriers to crash after claim, after entering
+- [x] Test restart with a queued job. `crash_recovery.rs`. This reached the
+  `ConversionState::Queued` arm of `reconcile_job` for the first time.
+- [x] Use deterministic fault barriers to crash after claim, after entering
   `finalizing`, after publication rename, and before the success commit.
-- [ ] Test replay and conflict after a fresh process starts.
-- [ ] Test replay while active capacity is full and verify that replay,
-  conflict, and capacity rejection leave no staged source.
-- [ ] Test that a simulated pre-acceptance crash orphan is moved into quarantine
-  and is not automatically deleted.
-- [ ] Test missing, truncated, hash-mismatched, non-regular, and symlinked
-  source files before initial claim and recovered retry.
-- [ ] Test missing, truncated, hash-mismatched, non-regular, and symlinked
-  artifacts.
-- [ ] Verify each corrupt-artifact case exposes
+  `src/faults.rs` plus four tests in `crash_recovery.rs`.
+- [x] Test replay and conflict after a fresh process starts. Covered in-process
+  by `http_contract.rs`, and against a real restarted container by the smoke.
+- [x] Test replay while active capacity is full and verify that replay,
+  conflict, and capacity rejection leave no staged source. The conflict-at-
+  capacity half is `failure_modes.rs`, which takes a different repository branch
+  than the capacity rejection: `create_or_replay` answers Conflict before it
+  ever counts active jobs.
+- [x] Test that a simulated pre-acceptance crash orphan is moved into quarantine
+  and is not automatically deleted. Already covered in `http_contract.rs`.
+- [x] Test missing, truncated, hash-mismatched, non-regular, and symlinked
+  source files before initial claim and recovered retry. `integrity_matrix.rs`.
+- [x] Test missing, truncated, hash-mismatched, non-regular, and symlinked
+  artifacts. `integrity_matrix.rs`.
+- [x] Verify each corrupt-artifact case exposes
   `failed`/`artifact_integrity_failed`, retains internal audit metadata, and
-  serves no artifacts.
-- [ ] Test migration failure, locked database timeout, unwritable data root,
-  output-write failure, and active-capacity rejection.
-- [ ] Test graceful shutdown with idle and active workers.
-- [ ] Run the existing M1 PDF fixtures and HTTP-contract suite so routing
-  behavior does not drift. The labeled corpus remains an M4/M8 gate.
-- [ ] Build the image and perform a real sequence: submit -> stop container ->
+  serves no artifacts. Asserted for all five artifact cases.
+- [x] Test migration failure, locked database timeout, unwritable data root,
+  and active-capacity rejection. `failure_modes.rs`. **Output-write failure is
+  deferred**, with no portable way to make a write fail inside a temporary data
+  root that does not also make the test lie about which call failed.
+- [x] Test graceful shutdown with idle and active workers. The active-worker
+  drain branch of `shutdown_until` had never run end to end before.
+- [x] Run the HTTP-contract suite so routing behavior does not drift.
+  **There are no M1 PDF fixtures to run.** The repository contains no `.pdf`
+  file. Every PDF is synthesized in-process by `clean_pdf()`. A fixture corpus
+  is CVR-040's work in M4, so this line was unbuildable as written.
+- [x] Build the image and perform a real sequence: submit -> stop container ->
   start container -> poll -> download -> verify hashes.
-- [ ] Perform a separate unclean restart with `SIGKILL` while a fault barrier
-  holds a known nonterminal state and the WAL contains uncheckpointed work;
-  restart and verify deterministic recovery.
-- [ ] Record commands, versions, results, and any exceptions in the epic.
+  `backend/scripts/container-smoke.sh --phase graceful`.
+- [x] Perform a separate unclean restart with `SIGKILL` while a barrier holds a
+  known nonterminal state and the WAL contains uncheckpointed work; restart and
+  verify deterministic recovery. `--phase sigkill`. The in-process fault barrier
+  cannot reach into a container, so the hold uses the documented
+  `TOOLKIT_CONVERTER_PDF_WORKER_PATH` override pointed at a stub worker that
+  sleeps. The held state is polled for, not assumed.
+- [x] Record commands, versions, results, and any exceptions in the epic.
+
+The container smoke proves the graceful and forced-kill windows only. The other
+two barriers, entering `finalizing` and the post-rename boundary, are held in
+the Rust suite, because holding them from outside the process is not possible
+without a code seam. Do not read the smoke as covering them.
 
 Exit: every M2 gate passes with evidence; AnyDoc work may begin only afterward.
 

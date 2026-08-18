@@ -9,6 +9,7 @@ use crate::{
     config::{Limits, Settings},
     conversion::ConversionService,
     engines::{EngineStartupError, PdfInspectorEngine},
+    faults::FaultBarrier,
     jobs::{JobRuntime, StartupRecovery},
     persistence::{RepositoryError, SqliteRepository},
 };
@@ -73,6 +74,12 @@ impl AppState {
 
     pub(crate) fn limits(&self) -> &Limits {
         &self.limits
+    }
+
+    /// Test-only. The barrier is disarmed unless a test arms it, so the live path
+    /// only ever pays for the loads inside [`FaultBarrier::hold`].
+    pub fn fault_barrier(&self) -> Arc<FaultBarrier> {
+        self.service.fault_barrier()
     }
 
     pub(crate) fn try_acquire_upload(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {

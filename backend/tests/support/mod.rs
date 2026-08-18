@@ -1,3 +1,6 @@
+// Several test binaries include this module and each one uses a subset of it.
+#![allow(dead_code)]
+
 use std::{
     io::Write as _,
     net::SocketAddr,
@@ -22,6 +25,7 @@ use uuid::Uuid;
 
 use tool_kit_converter::{
     config::{Limits, Settings},
+    faults::FaultBarrier,
     persistence::{
         hash_idempotency_key, CreateOutcome, NewConversion, NewSource, Profile, SqliteRepository,
         DATABASE_FILENAME,
@@ -300,6 +304,37 @@ impl TestHarness {
             .unwrap()
     }
 
+    /// Reads the durable status and active attempt straight from SQLite. A parked
+    /// worker still serves HTTP, but a test that is asserting on the state a crash
+    /// left behind must not read it through the code path it is testing.
+    pub(crate) async fn stored_status(&self, job_id: Uuid) -> (String, Uuid) {
+        let mut connection = self.database_connection().await;
+        let row = sqlx::query("SELECT status, active_attempt_id FROM conversions WHERE id = ?1")
+            .bind(job_id.hyphenated().to_string())
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        let status: String = row.try_get("status").unwrap();
+        let active_attempt_id: String = row.try_get("active_attempt_id").unwrap();
+        (status, Uuid::parse_str(&active_attempt_id).unwrap())
+    }
+
+    /// Every attempt's state in attempt order, so a test can prove the interrupted
+    /// attempt survived instead of being overwritten by the recovery attempt.
+    pub(crate) async fn attempt_states(&self, job_id: Uuid) -> Vec<String> {
+        let mut connection = self.database_connection().await;
+        sqlx::query(
+            "SELECT state FROM attempts WHERE conversion_id = ?1 ORDER BY attempt_number ASC",
+        )
+        .bind(job_id.hyphenated().to_string())
+        .fetch_all(&mut connection)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.try_get("state").unwrap())
+        .collect()
+    }
+
     pub(crate) async fn inject_active_attempt_state(&self, job_id: Uuid, state: &str) {
         let options = SqliteConnectOptions::new()
             .filename(self.data_dir.join(DATABASE_FILENAME))
@@ -376,6 +411,10 @@ impl TestApp {
 
     pub(crate) fn router(&self) -> Router {
         self.router.clone()
+    }
+
+    pub(crate) fn fault_barrier(&self) -> Arc<FaultBarrier> {
+        self.state.fault_barrier()
     }
 
     pub(crate) fn stop_job_claiming(&self) {

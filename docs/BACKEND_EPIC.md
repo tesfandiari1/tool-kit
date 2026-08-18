@@ -121,7 +121,7 @@ Current implementation snapshot:
 | Single worker | Complete | One FIFO runner, Notify plus polling, validated-handle parser input, fail-closed execution, and bounded cancellation/shutdown |
 | Startup reconciliation | Complete | State-specific recovery, bounded manifest/artifact validation, fresh attempts, and conservative orphan quarantine |
 | Runtime/OpenAPI/Compose | Complete | Live readiness, persistent capability response, `/data` named volume, and temporary generated-schema diff |
-| Release gates | Pending | Container build plus graceful and forced-kill restart smokes |
+| Release gates | Complete | Fault barriers, integrity matrices, and graceful plus forced-kill restart smokes on the built image |
 
 - [x] **CVR-020:** Add SQLx 0.9 with default features disabled and only
   `runtime-tokio`, `sqlite`, `migrate`, and `macros`; add embedded migrations,
@@ -153,12 +153,12 @@ Current implementation snapshot:
   capabilities, the matching backend OpenAPI update, and a Compose `/data` mount
   without adding a service. Generate/diff the TypeScript schema only in a
   temporary location; defer the committed desktop schema update to M6.
-- [ ] **CVR-028:** Test durable idempotency, process restart, queued-job
+- [x] **CVR-028:** Test durable idempotency, process restart, queued-job
   recovery, interrupted conversion/publication, corrupt or missing artifacts,
   corrupt or substituted sources, database failure, disk-write failure,
   rejection cleanup, pre-acceptance quarantine, deterministic crash windows,
   and the `artifact_integrity_failed` public contract.
-- [ ] **CVR-029:** Run the full Rust checks, Compose validation, image build,
+- [x] **CVR-029:** Run the full Rust checks, Compose validation, image build,
   a graceful stop/start smoke, and a forced-kill recovery smoke before closing
   M2.
 
@@ -347,7 +347,10 @@ Execute M2 only. Do not combine persistence with AnyDoc.
 
 The detailed file and test plan is in
 [`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md). Increments 0-5 are
-complete and verified. Increment 6 failure and release verification is next. See
+complete and verified, and M2 is closed. M6 desktop integration is next and may
+run in parallel with M3, because neither M3 nor M4 blocks any M6 ticket. The
+reasoning and the increment order are in
+[`DESKTOP_EXECUTION_PLAN.md`](DESKTOP_EXECUTION_PLAN.md). See
 [`HANDOFF.md`](HANDOFF.md)
 before touching files.
 
@@ -507,3 +510,79 @@ before touching files.
   `b70ce44`, with the frontend, backend, desktop, and GitGuardian CI checks
   all green. The graceful and
   forced-kill restart smokes remain for Increment 6.
+
+### 2026-08-17 — M2 Increment 6 failure and release gates
+
+Closes CVR-028 and CVR-029, and closes M2.
+
+- Added `backend/src/faults.rs`, a deterministic crash barrier armed only by
+  tests. Four call sites: after the claim, after the attempt enters
+  `finalizing`, after the publication rename, and immediately before the success
+  commit. All four sit between committed transactions, so a parked task holds no
+  SQLite write lock and a restarted `AppState` opens the same database. Arming
+  is unreachable from configuration, the environment, or any HTTP route, and the
+  live path costs one relaxed atomic load per barrier.
+- **An Increment 3 checkbox had been ticked without the code.** "Add a test-only
+  deterministic fault barrier after transactional claim" was marked done and no
+  barrier existed. Until now every recovery test injected a stored state
+  directly, which proves recovery handles each state but never proves the code
+  reaches them in order. `crash_before_success_commit_is_indistinguishable_from_after_publish`
+  now asserts the database holds zero artifact rows while the published bundle
+  is already complete and hash-consistent on disk. That is the publish-before-
+  commit ordering, stated as a test.
+- Added a ten-case integrity matrix in `tests/integrity_matrix.rs`: missing,
+  truncated, hash-mismatched at equal length, non-regular, and symlinked, for
+  both the immutable source and the published bundle. Nine of the ten were
+  untested. The only prior source-corruption test changed the byte length too,
+  so the SHA-256 comparison short-circuited and never ran.
+- Added `tests/failure_modes.rs`: conflict at active capacity, which takes the
+  Conflict branch before the capacity check and so has different cleanup;
+  graceful shutdown draining a genuinely in-flight conversion; a locked database
+  bounded by the busy timeout; an unwritable data root; and migration failure.
+- Added `tests/crash_recovery.rs`, which also reaches the
+  `ConversionState::Queued` arm of startup reconciliation for the first time.
+- Added `backend/scripts/container-smoke.sh` and `compose.yaml`
+  `stop_grace_period: 45s`. Docker's 10s default was killing the service 20s
+  before its own 30s shutdown grace expired, so every `docker compose stop`
+  looked like a crash and left an interrupted job for recovery.
+- Backend tests went from 96 to 119: 59 library, 1 server, 3 parser worker, 36
+  HTTP contract, 5 crash recovery, 10 integrity matrix, 5 failure modes. Three
+  consecutive full runs, no flakes. Format, `cargo check`, Clippy with warnings
+  denied, `git diff --check`, and `docker compose config` all pass.
+
+Container evidence, Docker 29.5.3 and Compose v5.1.4, image
+`sha256:7ce986e7…`, run from `38d3028`:
+
+- Graceful: readiness reported `database`, `dataRoot`, and `worker` all `ok`;
+  capabilities reported `durability: persistent` with `maxActiveJobs` present
+  and `maxEphemeralJobs` absent; a job submitted immediately before
+  `stop -t 45` completed after the restart; the container exited `0`, proving a
+  real SIGTERM drain rather than an escalated kill; both artifacts matched the
+  ledger hash, the `ETag`, and `Content-Length`; the manifest carried the
+  host-computed source hash and no filename; a replay returned the same job and
+  a changed `clientRunId` returned `409`; and a second restart returned
+  byte-identical artifacts.
+- Forced kill: the job was held in `converting_local` by pointing
+  `TOOLKIT_CONVERTER_PDF_WORKER_PATH` at a stub worker that sleeps, and the
+  state was polled for rather than assumed. `kill -s SIGKILL` gave exit `137`
+  with 238,992 bytes of uncheckpointed WAL still on the volume, so the recovered
+  state existed only there. Recovery minted a fresh attempt, the job succeeded,
+  and its Markdown hash matched the graceful run byte for byte. The earlier
+  completed job survived intact, which matters because startup recovery
+  revalidates every stored success and demotes a corrupt one.
+
+Deferred on purpose, not silently dropped:
+
+- **Output-write failure injection.** No portable way to make a write fail
+  inside a temporary data root without the test lying about which call failed.
+- **The M1 PDF fixture corpus.** The repository contains no `.pdf` file. Every
+  PDF is synthesized in-process. Building a corpus is CVR-040 in M4, so that
+  checklist line was unbuildable as written.
+- **A true multi-process restart in Rust.** The container smoke covers it
+  better, against the real release binary.
+- **The unauthenticated readiness flood.** Still open, still recorded in
+  `HANDOFF.md`, still belongs with Caddy and LAN exposure in M7.
+
+The container smoke proves the graceful and forced-kill windows only. The
+`finalizing` and post-rename barriers are held in the Rust suite, because
+holding them from outside the process needs a code seam.

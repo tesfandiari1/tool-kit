@@ -7,6 +7,11 @@ services:
     image: tool-kit-converter:dev
     restart: unless-stopped
     init: true
+    # Docker's default is a 10s wait between SIGTERM and SIGKILL, but
+    # TOOLKIT_CONVERTER_SHUTDOWN_GRACE_SECS is 30, so the default kills the
+    # service 20s before it may finish draining. Every stop would then look
+    # like a crash and leave an interrupted job for startup recovery.
+    stop_grace_period: 45s
     read_only: true
     user: "10001:10001"
     cap_drop:

@@ -130,6 +130,7 @@ Type is three families with non-overlapping jobs: **Instrument Serif** for displ
 - [`docs/HANDOFF.md`](docs/HANDOFF.md) — current work and parallel-session rules
 - [`docs/BACKEND_EPIC.md`](docs/BACKEND_EPIC.md) — conversion-backend milestones
 - [`docs/BACKEND_EXECUTION_PLAN.md`](docs/BACKEND_EXECUTION_PLAN.md) — M2 increments
+- [`docs/DESKTOP_EXECUTION_PLAN.md`](docs/DESKTOP_EXECUTION_PLAN.md) — M6 desktop integration and the order of the remaining milestones
 - [`docs/YAAK_ARCHITECTURE_REFERENCE.md`](docs/YAAK_ARCHITECTURE_REFERENCE.md) — Yaak files to steal (host, RPC, blobs, Keychain); do not fork the product
 - Local Tauri v2 docs: `/Users/tristin/code/tauri-skills/knowledgebase/tauri-v2`.
 

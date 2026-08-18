@@ -19,6 +19,7 @@ use crate::{
         PreparedSubmission, PublishedArtifact,
     },
     engines::{EngineFailure, EngineOutcome, PdfInspectorEngine},
+    faults::{FaultBarrier, FaultPoint},
     persistence::{
         hash_idempotency_key, ArtifactKind as StoredArtifactKind, ConversionState, CreateOutcome,
         DocumentClassification, EngineRecord, FailedResult, FailureStage, LocalAnalysis,
@@ -48,6 +49,7 @@ pub struct ConversionService {
     engine: PdfInspectorEngine,
     max_output_bytes: u64,
     work_notification: Arc<Notify>,
+    faults: Arc<FaultBarrier>,
 }
 
 impl ConversionService {
@@ -63,6 +65,7 @@ impl ConversionService {
             engine,
             max_output_bytes,
             work_notification: Arc::new(Notify::new()),
+            faults: Arc::new(FaultBarrier::default()),
         }
     }
 
@@ -201,6 +204,11 @@ impl ConversionService {
         Arc::clone(&self.work_notification)
     }
 
+    /// Test-only. The returned barrier is disarmed and only a test can arm it.
+    pub(crate) fn fault_barrier(&self) -> Arc<FaultBarrier> {
+        Arc::clone(&self.faults)
+    }
+
     pub(crate) fn recovery_repository(&self) -> &SqliteRepository {
         &self.repository
     }
@@ -317,6 +325,7 @@ impl ConversionService {
                 state: job.state,
             });
         }
+        self.faults.hold(FaultPoint::AfterClaim).await;
         if *shutdown.borrow() {
             tracing::info!(%job_id, %attempt_id, "preserving claimed conversion during forced shutdown");
             return Ok(());
@@ -524,6 +533,7 @@ impl ConversionService {
             .repository
             .mark_finalizing(job_id, attempt_id, analysis)
             .await?;
+        self.faults.hold(FaultPoint::AfterFinalizing).await;
 
         let completed_at = now();
         let manifest = ConversionManifest {
@@ -631,6 +641,7 @@ impl ConversionService {
                 return Ok(());
             }
         }
+        self.faults.hold(FaultPoint::AfterPublish).await;
 
         let artifacts = match self.validate_finalizing_publication(&finalizing).await {
             Ok(artifacts) => artifacts,
@@ -648,6 +659,7 @@ impl ConversionService {
             }
             Err(ArtifactReadFailure::Transient(error)) => return Err(error.into()),
         };
+        self.faults.hold(FaultPoint::BeforeSuccessCommit).await;
         self.repository
             .finish_succeeded(job_id, attempt_id, artifacts)
             .await?;

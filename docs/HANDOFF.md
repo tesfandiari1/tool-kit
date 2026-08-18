@@ -6,17 +6,47 @@
 `main` for the next increment.
 **Backend checkpoint:** `2f3158d` — M2 Increments 0-5 verified, merged to `main`
 in PR #4 as `b70ce44` with all four CI checks green.
-**Recorded code state:** no uncommitted backend implementation changes.
+**Recorded code state:** M2 Increment 6 is implemented, green, and **staged in
+the index but not committed**. `git status --short` should show 18 staged paths
+and nothing else. New files: `backend/src/faults.rs`,
+`backend/tests/{crash_recovery,integrity_matrix,failure_modes}.rs`,
+`backend/scripts/container-smoke.sh`, `docs/DESKTOP_EXECUTION_PLAN.md`.
+Modified: `backend/src/{app,lib}.rs`, `backend/src/conversion/service.rs`,
+`backend/tests/support/mod.rs`, `backend/compose.yaml`,
+`backend/.dockerignore`, `package.json`, `CLAUDE.md`, and three `docs/` files.
+**Commit that set, do not rebuild it.** If the index looks empty, someone ran
+`git reset`, and the work is still in the working tree.
 **Read this first** in any parallel session, then re-read the live worktree.
 This file goes stale the moment someone lands a commit.
 
 ## Do this next
 
-1. **Implement M2 Increment 6, the failure and release gates.** The full
-   checklist is in `docs/BACKEND_EXECUTION_PLAN.md`. It is the last unit before
-   M2 closes: deterministic crash barriers, restart and replay tests, corrupt
-   and missing source/artifact cases, an image build, and a real submit ->
-   stop -> start -> poll -> download sequence plus a `SIGKILL` recovery smoke.
+1. **Commit Increment 6, then start M6 desktop integration.** M2 is closed:
+   119 backend tests pass and both container smokes pass. The plan for what
+   comes next is `docs/DESKTOP_EXECUTION_PLAN.md`, which re-sequences M6 ahead
+   of M3, M4, and M5. **None of the eight M6 tickets is blocked by M3 or M4**,
+   and only one sub-scenario of CVR-067 needs M5. M3 can run in parallel in a
+   second session under the ownership table below.
+
+   **Run the container smokes with a CPU-capped builder.** The image build is
+   the only part that saturates the machine, and the default builder lives
+   inside the Docker VM where `docker update` cannot reach it:
+
+   ```bash
+   docker buildx create --name toolkit-capped --driver docker-container --bootstrap
+   docker update --cpus 4 buildx_buildkit_toolkit-capped0
+   TOOLKIT_SMOKE_BUILDER=toolkit-capped backend/scripts/container-smoke.sh
+   ```
+
+   On a 12-core host that holds the builder at ~405% and host load near 4. The
+   running service is already capped by `cpus: 2.0` in `compose.yaml`.
+
+   **The fault barrier is production code that production never arms.**
+   `backend/src/faults.rs` is reachable only from a test holding an `AppState`.
+   Do not add a configuration flag, an environment variable, or an HTTP route
+   that arms it. Its four call sites sit between committed transactions on
+   purpose: a parked task must hold no SQLite write lock, or a restarted
+   `AppState` could not open the same database.
 2. **Increment 5 is done and needs review, not redoing.** Readiness probes
    SQLite, the data root, and the runner; capabilities report
    `durability: "persistent"` and `maxActiveJobs`; OpenAPI and `Cargo.toml` are
@@ -212,7 +242,19 @@ the root is the required layout, not clutter.
   purpose, because removing an environment variable changes the public surface
   and deserves its own decision. `backend/.env.example` and `backend/README.md`
   both say so. Do not wire it to anything on the assumption it was forgotten.
-- Increment 6 built-container restart gates remain pending.
+- M2 is closed. Increment 6 landed the fault barrier, a ten-case integrity
+  matrix, the missing failure modes, and `backend/scripts/container-smoke.sh`.
+  The gate passed format, check, Clippy with warnings denied,
+  `git diff --check`, `docker compose config`, and 119 backend tests (59
+  library, 1 server, 3 worker, 36 HTTP contract, 5 crash recovery, 10 integrity
+  matrix, 5 failure modes), run three times with no flakes. Both smokes pass:
+  graceful exits `0`, forced kill exits `137` with 238,992 bytes of
+  uncheckpointed WAL, and recovery mints a fresh attempt whose Markdown hash
+  matches the graceful run byte for byte.
+- **Deferred from Increment 6, on the record:** output-write failure injection
+  (no portable way to induce it), the M1 PDF fixture corpus (no `.pdf` exists in
+  the repo; that is CVR-040 in M4), and a multi-process restart test in Rust
+  (the container smoke covers it against the real binary).
 - The service remains loopback-only. No LAN, Caddy, AnyDoc, or Datalab
   fallback until their milestones.
 
@@ -290,6 +332,30 @@ dead-code hunting in this codebase, because object-literal methods
 dynamic `import()` all read as uncalled. Verify any "unused" claim with grep
 before acting on it. Graphify is not installed.
 
+## Automation hazards
+
+Both of these happened while implementing Increment 6, and both cost real time.
+Put the prohibitions in the prompt when you fan work out to subagents here.
+
+- **Never let an agent generate synthetic load.** One asked to prove a timing
+  assertion was not flaky "on a loaded machine" built one:
+  `for i in $(seq 1 $((ncpu*2))); do (while :; do :; done) & done`, cleaned up
+  with `kill $(jobs -p)`. `jobs -p` returns nothing in a non-interactive
+  `zsh -c`, so nothing died. The parent exited, 24 spin loops reparented to
+  PID 1, and the machine sat near 960% CPU until killed by hand. Killing matched
+  PIDs needs a zsh array (`PIDS=($(...))`): zsh does not word-split unquoted
+  variables, so `for p in $PIDS` yields one "illegal pid" argument.
+- **Scope agents to explicit paths and verify they finished before reverting.**
+  A gate agent did an unrequested docs consolidation that deleted
+  `BACKEND_EXECUTION_PLAN.md` and stripped its references from five files, then
+  **re-applied the same change after the first revert** because it was still
+  running. Check file mtimes rather than trusting a task-status report. Tracked
+  files come back with `git checkout HEAD --`; an untracked file is simply gone,
+  so `git add` new work early.
+
+Cap the Docker build rather than letting it take all cores. See the capped
+builder recipe under "Do this next".
+
 ## Verify
 
 ```bash
@@ -297,11 +363,23 @@ pnpm check           # tsc --noEmit + eslint + vitest         (fast inner loop)
 pnpm verify          # check + build + src-tauri clippy/tests (desktop scope)
 pnpm verify:backend  # converter clippy/tests
 pnpm verify:all      # both
+pnpm verify:container # built image + graceful and SIGKILL restart smokes
 ```
+
+`verify:container` is deliberately **not** part of `verify:all`. The other three
+are offline cargo/tsc/eslint runs; the container gate needs a Docker daemon,
+builds an image, and takes minutes, so folding it in would break the everyday
+gate on any machine without Docker running.
 
 CI (`.github/workflows/ci.yml`) runs frontend, backend, and desktop as three
 jobs on push/PR. Desktop clippy/tests
 use `macos-latest` because of `macos-private-api` and `keyring`.
+**CI does not run the container smoke.** It is a local release gate, so re-run
+it by hand before closing any milestone that touches persistence, the worker,
+the Dockerfile, or Compose. Its evidence lands in
+`backend/target/container-smoke/<utc-timestamp>/evidence.md`, which is
+gitignored; paste the relevant lines into the epic rather than linking the path.
+The Increment 6 run was `20260818T060016Z` against image `sha256:7ce986e7…`.
 
 ## Doc map
 
@@ -314,6 +392,7 @@ use `macos-latest` because of `macos-private-api` and `keyring`.
 | `docs/BACKEND_EPIC.md` | Milestone tracker and CVR tickets |
 | `docs/BACKEND_SERVICE_PLAN.md` | Approved architecture |
 | `docs/BACKEND_EXECUTION_PLAN.md` | M2 increment checklist |
+| `docs/DESKTOP_EXECUTION_PLAN.md` | M6 desktop integration plan and milestone ordering |
 | `docs/BACKEND_BASELINE.md` | Scaffold ownership / staging paths |
 | `docs/YAAK_ARCHITECTURE_REFERENCE.md` | Yaak patterns to steal, not fork |
 | `backend/README.md` | Converter setup and env vars |

@@ -80,6 +80,8 @@ loopback-only and is not ready for LAN deployment yet.
   release gates
 - [`docs/BACKEND_EXECUTION_PLAN.md`](docs/BACKEND_EXECUTION_PLAN.md) — M2
   increment checklist
+- [`docs/DESKTOP_EXECUTION_PLAN.md`](docs/DESKTOP_EXECUTION_PLAN.md) — M6
+  desktop integration and the order of the remaining milestones
 - [`backend/README.md`](backend/README.md) — backend setup and verification
 
 ## License
