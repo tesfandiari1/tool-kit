@@ -1,6 +1,6 @@
 # Epic: Rust conversion backend
 
-**Status:** In progress — M2 Increments 0-3 verified; Increment 4 next
+**Status:** In progress — M2 Increments 0-4 verified; Increment 5 next
 **Current milestone:** M2 — durable SQLite jobs and artifacts
 **Target:** CPU-only Rust/Axum modular monolith
 **Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)
@@ -118,7 +118,7 @@ Current implementation snapshot:
 | SQLite repository | Complete | File-backed migration, WAL/FULL/FK checks, transactional idempotency/capacity, FIFO claims, and recovery primitives |
 | Durable ingest/artifacts | Complete | Persistent source and attempt layout, atomic publication, hashes, cleanup, quarantine primitives, and restart-visible reads |
 | Single worker | Complete | One FIFO runner, Notify plus polling, validated-handle parser input, fail-closed execution, and bounded cancellation/shutdown |
-| Startup reconciliation | Next | State-specific recovery, manifest validation, recovered attempts, and orphan quarantine |
+| Startup reconciliation | Complete | State-specific recovery, bounded manifest/artifact validation, fresh attempts, and conservative orphan quarantine |
 | Runtime/OpenAPI/Compose | Pending | Live readiness, persistent capability response, `/data` mount, and temporary generated-schema diff |
 | Release gates | Pending | Container build plus graceful and forced-kill restart smokes |
 
@@ -142,7 +142,7 @@ Current implementation snapshot:
 - [x] **CVR-025:** Persist every state transition, active attempt, route,
   classification, warning, stable failure, engine version, artifact path, and
   hash.
-- [ ] **CVR-026:** Reconcile `queued`, `converting_local`, `finalizing`, and
+- [x] **CVR-026:** Reconcile `queued`, `converting_local`, `finalizing`, and
   successful jobs at startup; verify immutable source integrity, preserve
   attempt history, transition corrupted successes to
   `failed`/`artifact_integrity_failed` without serving artifacts, and quarantine
@@ -345,8 +345,8 @@ Execute M2 only. Do not combine persistence with AnyDoc.
    marking M2 complete.
 
 The detailed file and test plan is in
-[`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md). Increments 0-3 are
-complete and verified. Increment 4 startup reconciliation is next. See
+[`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md). Increments 0-4 are
+complete and verified. Increment 5 runtime/OpenAPI/Compose integration is next. See
 [`HANDOFF.md`](HANDOFF.md)
 before touching files.
 
@@ -422,5 +422,30 @@ before touching files.
 - Committed the backend-only durable-runner checkpoint as `f189265`; concurrent
   frontend, Tauri, dependency, Docker, and unrelated documentation changes were
   not staged with it.
-- Startup reconciliation, live readiness, the M2 capabilities/OpenAPI delta,
-  Compose persistence, and container restart smokes remain pending.
+- Live readiness, the M2 capabilities/OpenAPI delta, Compose persistence, and
+  container restart smokes remain pending.
+
+### 2026-08-17 — M2 Increment 4 startup-recovery checkpoint
+
+- Startup reconciliation now runs before the durable worker starts and handles
+  queued, interrupted, finalizing, and succeeded rows through explicit
+  state-specific rules.
+- Recovered work always receives a fresh attempt. Immutable sources are
+  length/hash validated before requeue, recovery attempts are bounded, and
+  corrupt sources fail without parser execution.
+- Published bundles use one shared, bounded validator for finalization,
+  startup, status, listing, and download. It verifies the exact two-file
+  directory, strict manifest identity, output size/hash, and already-open file
+  handle before success or streaming.
+- A corrupted historical success becomes
+  `failed`/`artifact_integrity_failed`; its artifact rows and files remain for
+  audit, while downloads fail closed.
+- Canonical UUID job directories without database ownership move into the
+  existing collision-safe `quarantine/pre-acceptance` namespace; recovery does
+  not recursively inspect or delete unknown trees.
+- The settled gate passed format, check, Clippy with warnings denied,
+  `git diff --check`, and 90 backend tests: 54 library, 1 server, 3 parser
+  worker, and 32 HTTP-contract tests. The restart suite runs on the default
+  test stack.
+- Live readiness, the persistent capabilities/OpenAPI delta, Compose `/data`
+  wiring, and built-container restart smokes remain for Increments 5-6.

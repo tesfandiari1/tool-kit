@@ -12,18 +12,11 @@ use crate::{
     persistence::RepositoryError,
 };
 
+mod recovery;
+
+pub(crate) use recovery::StartupRecovery;
+
 const MAX_FORCE_CANCEL_WAIT: Duration = Duration::from_millis(250);
-
-pub(crate) trait StartupRecoveryHook {
-    async fn run(&self, service: &ConversionService);
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct NoopStartupRecovery;
-
-impl StartupRecoveryHook for NoopStartupRecovery {
-    async fn run(&self, _service: &ConversionService) {}
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RunnerStatus {

@@ -9,7 +9,7 @@ use crate::{
     config::{Limits, Settings},
     conversion::ConversionService,
     engines::{EngineStartupError, PdfInspectorEngine},
-    jobs::{JobRuntime, NoopStartupRecovery, StartupRecoveryHook},
+    jobs::{JobRuntime, StartupRecovery},
     persistence::{RepositoryError, SqliteRepository},
 };
 
@@ -42,8 +42,16 @@ impl AppState {
             settings.pdf_threads,
         )?;
 
-        let service = ConversionService::new(repository, artifacts, engine);
-        NoopStartupRecovery.run(&service).await;
+        let service = ConversionService::new(
+            repository,
+            artifacts,
+            engine,
+            settings.limits.max_output_bytes,
+        );
+        StartupRecovery::new(settings.recovery_limit)
+            .run(&service)
+            .await
+            .map_err(|source| StartupError::Recovery(Box::new(source)))?;
         let jobs = JobRuntime::spawn(service.clone(), settings.worker_poll_interval);
 
         Ok(Self {
@@ -114,6 +122,8 @@ pub enum StartupError {
     Persistence(#[from] RepositoryError),
     #[error(transparent)]
     PdfEngine(#[from] EngineStartupError),
+    #[error("startup recovery failed")]
+    Recovery(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("configured active job limit does not fit the persistence layer")]
     JobLimitOutOfRange,
 }

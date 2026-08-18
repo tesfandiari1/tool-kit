@@ -7,8 +7,8 @@
 **Last updated:** 2026-08-17
 
 **Implementation snapshot:** M2 contract freeze, SQLite persistence, durable
-ingest/artifacts, and the single FIFO worker are implemented and verified.
-Startup reconciliation, live readiness, the M2 capabilities/OpenAPI update,
+ingest/artifacts, the single FIFO worker, and startup reconciliation are
+implemented and verified. Live readiness, the M2 capabilities/OpenAPI update,
 Compose persistence, and container restart smokes remain pending.
 
 ## Goal

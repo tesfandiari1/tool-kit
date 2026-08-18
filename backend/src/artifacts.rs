@@ -27,7 +27,6 @@ const PUBLICATION_STAGING_DIRECTORY: &str = "publication.staging";
 const ARTIFACTS_DIRECTORY: &str = "artifacts";
 const QUARANTINE_DIRECTORY: &str = "quarantine";
 const PREACCEPTANCE_DIRECTORY: &str = "pre-acceptance";
-const ORPHANED_DIRECTORY: &str = "orphaned";
 
 #[derive(Clone, Debug)]
 pub struct ArtifactStore {
@@ -110,7 +109,6 @@ impl ArtifactStore {
         let quarantine = store.root.join(QUARANTINE_DIRECTORY);
         ensure_private_directory(&quarantine)?;
         ensure_private_directory(&quarantine.join(PREACCEPTANCE_DIRECTORY))?;
-        ensure_private_directory(&quarantine.join(ORPHANED_DIRECTORY))?;
 
         Ok(store)
     }
@@ -496,6 +494,26 @@ impl ArtifactStore {
         .await
     }
 
+    /// Opens and hashes a published artifact only after its no-follow file
+    /// metadata proves that the read is within the caller's byte limit.
+    pub async fn open_bounded_validated_artifact(
+        &self,
+        job_id: Uuid,
+        attempt_id: Uuid,
+        artifact: PublishedArtifact,
+        maximum_byte_length: u64,
+        expected_byte_length: Option<u64>,
+        expected_sha256: Option<&str>,
+    ) -> Result<ValidatedOpenFile, ArtifactError> {
+        self.open_validated_relative_file_with_limit(
+            &artifact_relative_path(job_id, attempt_id, artifact),
+            Some(maximum_byte_length),
+            expected_byte_length,
+            expected_sha256,
+        )
+        .await
+    }
+
     pub fn resolve_relative(&self, relative: &Path) -> Result<PathBuf, ArtifactError> {
         if relative.as_os_str().is_empty()
             || relative
@@ -597,75 +615,6 @@ impl ArtifactStore {
             }
         }
         Err(ArtifactError::QuarantineReservationExhausted(job_id))
-    }
-
-    /// Moves a canonical UUID job directory with no database owner into a
-    /// backend-owned quarantine. The ID-derived source is resolved without
-    /// following symlinks before any mutation occurs.
-    pub async fn quarantine_orphan(&self, job_id: Uuid) -> Result<PathBuf, ArtifactError> {
-        for _ in 0..8 {
-            let quarantine_id = Uuid::new_v4();
-            match self.quarantine_orphan_as(job_id, quarantine_id).await {
-                Err(ArtifactError::PathAlreadyExists(_)) => continue,
-                result => return result,
-            }
-        }
-        Err(ArtifactError::QuarantineReservationExhausted(job_id))
-    }
-
-    async fn quarantine_orphan_as(
-        &self,
-        job_id: Uuid,
-        quarantine_id: Uuid,
-    ) -> Result<PathBuf, ArtifactError> {
-        let orphaned_relative = PathBuf::from(QUARANTINE_DIRECTORY).join(ORPHANED_DIRECTORY);
-        self.require_owned_directory_relative(&orphaned_relative)
-            .await?;
-        let job_relative = job_relative_path(job_id);
-        let job = self.resolve_existing_relative(&job_relative).await?;
-        require_directory(&job).await?;
-
-        let reservation_relative = orphaned_quarantine_reservation_relative_path(
-            job_id,
-            quarantine_id,
-        );
-        let reservation = self.resolve_relative(&reservation_relative)?;
-        match create_private_directory(&reservation).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(ArtifactError::PathAlreadyExists(reservation));
-            }
-            Err(source) => {
-                return Err(ArtifactError::Quarantine {
-                    path: reservation,
-                    source,
-                });
-            }
-        }
-
-        let quarantine_relative = orphaned_quarantine_relative_path(job_id, quarantine_id);
-        let quarantine = self.resolve_relative(&quarantine_relative)?;
-        require_absent(&quarantine).await?;
-        if let Err(source) = fs::rename(&job, &quarantine).await {
-            let _ = fs::remove_dir(&reservation).await;
-            return Err(ArtifactError::Quarantine { path: job, source });
-        }
-        sync_directory(self.root.join(JOBS_DIRECTORY))
-            .await
-            .map_err(|source| ArtifactError::Quarantine { path: job, source })?;
-        sync_directory(reservation)
-            .await
-            .map_err(|source| ArtifactError::Quarantine {
-                path: quarantine.clone(),
-                source,
-            })?;
-        sync_directory(self.root.join(QUARANTINE_DIRECTORY).join(ORPHANED_DIRECTORY))
-            .await
-            .map_err(|source| ArtifactError::Quarantine {
-                path: quarantine,
-                source,
-            })?;
-        Ok(quarantine_relative)
     }
 
     async fn quarantine_preacceptance_as(
@@ -913,7 +862,32 @@ impl ArtifactStore {
         expected_byte_length: Option<u64>,
         expected_sha256: Option<&str>,
     ) -> Result<ValidatedOpenFile, ArtifactError> {
+        self.open_validated_relative_file_with_limit(
+            relative,
+            None,
+            expected_byte_length,
+            expected_sha256,
+        )
+        .await
+    }
+
+    async fn open_validated_relative_file_with_limit(
+        &self,
+        relative: &Path,
+        maximum_byte_length: Option<u64>,
+        expected_byte_length: Option<u64>,
+        expected_sha256: Option<&str>,
+    ) -> Result<ValidatedOpenFile, ArtifactError> {
         let (path, mut file, metadata) = self.open_owned_regular_relative(relative).await?;
+        if let Some(maximum) = maximum_byte_length {
+            if metadata.len() > maximum {
+                return Err(ArtifactError::ByteLengthLimitExceeded {
+                    path,
+                    maximum,
+                    actual: metadata.len(),
+                });
+            }
+        }
         if let Some(expected) = expected_byte_length {
             if metadata.len() != expected {
                 return Err(ArtifactError::ByteLengthMismatch {
@@ -923,7 +897,7 @@ impl ArtifactStore {
                 });
             }
         }
-        let sha256 = hash_open_file(&path, &mut file).await?;
+        let sha256 = hash_open_file(&path, &mut file, maximum_byte_length).await?;
         let final_metadata =
             file.metadata()
                 .await
@@ -1034,19 +1008,6 @@ pub fn preacceptance_quarantine_reservation_relative_path(
 
 pub fn preacceptance_quarantine_relative_path(job_id: Uuid, quarantine_id: Uuid) -> PathBuf {
     preacceptance_quarantine_reservation_relative_path(job_id, quarantine_id).join("job")
-}
-
-pub fn orphaned_quarantine_reservation_relative_path(
-    job_id: Uuid,
-    quarantine_id: Uuid,
-) -> PathBuf {
-    PathBuf::from(QUARANTINE_DIRECTORY)
-        .join(ORPHANED_DIRECTORY)
-        .join(format!("{job_id}-{quarantine_id}"))
-}
-
-pub fn orphaned_quarantine_relative_path(job_id: Uuid, quarantine_id: Uuid) -> PathBuf {
-    orphaned_quarantine_reservation_relative_path(job_id, quarantine_id).join("job")
 }
 
 async fn validate_publication_contents(path: &Path) -> Result<(), ArtifactError> {
@@ -1203,12 +1164,23 @@ async fn sync_directory(path: PathBuf) -> std::io::Result<()> {
         .map_err(std::io::Error::other)?
 }
 
-async fn hash_open_file(path: &Path, file: &mut fs::File) -> Result<String, ArtifactError> {
+async fn hash_open_file(
+    path: &Path,
+    file: &mut fs::File,
+    maximum_byte_length: Option<u64>,
+) -> Result<String, ArtifactError> {
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
     loop {
+        let read_capacity = maximum_byte_length.map_or(buffer.len(), |maximum| {
+            maximum
+                .saturating_sub(total)
+                .saturating_add(1)
+                .min(buffer.len() as u64) as usize
+        });
         let count = file
-            .read(&mut buffer)
+            .read(&mut buffer[..read_capacity])
             .await
             .map_err(|source| ArtifactError::InspectPath {
                 path: path.to_owned(),
@@ -1216,6 +1188,22 @@ async fn hash_open_file(path: &Path, file: &mut fs::File) -> Result<String, Arti
             })?;
         if count == 0 {
             break;
+        }
+        total = total.checked_add(count as u64).ok_or_else(|| {
+            ArtifactError::ByteLengthLimitExceeded {
+                path: path.to_owned(),
+                maximum: maximum_byte_length.unwrap_or(u64::MAX),
+                actual: u64::MAX,
+            }
+        })?;
+        if let Some(maximum) = maximum_byte_length {
+            if total > maximum {
+                return Err(ArtifactError::ByteLengthLimitExceeded {
+                    path: path.to_owned(),
+                    maximum,
+                    actual: total,
+                });
+            }
         }
         digest.update(&buffer[..count]);
     }
@@ -1318,6 +1306,12 @@ pub enum ArtifactError {
     ByteLengthMismatch {
         path: PathBuf,
         expected: u64,
+        actual: u64,
+    },
+    #[error("artifact exceeds the byte limit at {path:?}: maximum {maximum}, got {actual}")]
+    ByteLengthLimitExceeded {
+        path: PathBuf,
+        maximum: u64,
         actual: u64,
     },
     #[error("artifact SHA-256 mismatch at {path:?}: expected {expected}, got {actual}")]
@@ -1455,6 +1449,50 @@ mod tests {
             ))
             .await
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn bounded_artifact_open_rejects_oversize_metadata_before_hash_validation() {
+        let directory = tempdir().unwrap();
+        let store = ArtifactStore::initialize(directory.path()).unwrap();
+        let job_id = Uuid::new_v4();
+        let attempt_id = Uuid::new_v4();
+        let prepared = store.prepare_submission(job_id).await.unwrap();
+        tokio::fs::write(&prepared.paths.source_staging, b"source")
+            .await
+            .unwrap();
+        store.publish_source(&prepared).await.unwrap();
+        store
+            .create_retry_attempt(job_id, attempt_id)
+            .await
+            .unwrap();
+        let attempt = store.prepare_artifacts(job_id, attempt_id).await.unwrap();
+        tokio::fs::write(attempt.staged_markdown(), b"123456789")
+            .await
+            .unwrap();
+        tokio::fs::write(attempt.staged_manifest(), b"{}")
+            .await
+            .unwrap();
+        store.publish_artifacts(job_id, attempt_id).await.unwrap();
+
+        let result = store
+            .open_bounded_validated_artifact(
+                job_id,
+                attempt_id,
+                PublishedArtifact::Markdown,
+                8,
+                None,
+                Some(&"0".repeat(64)),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ArtifactError::ByteLengthLimitExceeded {
+                maximum: 8,
+                actual: 9,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

@@ -7,18 +7,14 @@ This file goes stale the moment someone lands a commit.
 
 ## Do this next
 
-1. **Implement M2 Increment 4 startup reconciliation.** Run it before the
-   worker starts: reconcile interrupted/finalizing/succeeded rows, validate
-   manifest identity, create bounded fresh attempts, and quarantine only safe
-   canonical unowned job directories.
-2. **Implement M2 Increment 5 contract/runtime work.** Make readiness depend on
+1. **Implement M2 Increment 5 contract/runtime work.** Make readiness depend on
    SQLite, the data root, and runner health; change capabilities to persistent
    durability plus `maxActiveJobs`; update backend OpenAPI first; generate and
    diff TypeScript only under `/private/tmp`; leave the committed frontend
    schema for M6; mount persistent `/data` in Compose.
-3. **Run M2 release gates.** Full Rust gates, Compose validation, image build,
+2. **Run M2 release gates.** Full Rust gates, Compose validation, image build,
    graceful restart, and forced-kill recovery must pass before M3/AnyDoc.
-4. **Desktop OpenAPI prep is done; M6 still owns the wire-up.** The user
+3. **Desktop OpenAPI prep is done; M6 still owns the wire-up.** The user
    authorized shaping the frontend to the contract ahead of M6. `src/app/api/`
    is a standard openapi-typescript/openapi-fetch layer, and
    `commands.serviceRequest` is its typed IPC door. Remaining M6 work: the
@@ -27,11 +23,11 @@ This file goes stale the moment someone lands a commit.
    in sync with `backend/openapi/openapi.yaml`, not rewritten; still
    regenerate it via `pnpm generate:api` only when M2's OpenAPI delta lands
    (CVR-027).
-6. **The desktop frontend slice is committed** (see "Recent desktop commit").
+4. **The desktop frontend slice is committed** (see "Recent desktop commit").
    Still uncommitted and not owned by it: `backend/**`, `docs/BACKEND_*.md`,
    `src-tauri/**` (including untracked `src/history.rs`), and the dependency
    lockfiles. Keep staging explicit paths.
-7. **Do not** create a root Cargo workspace, bump TypeScript 7, migrate
+5. **Do not** create a root Cargo workspace, bump TypeScript 7, migrate
    `keyring` 4, unpin `pdf-inspector`, or take `libc` 1.0 (still alpha).
 
 ## Parallel session ownership
@@ -141,8 +137,15 @@ the root is the required layout, not clutter.
   cancellation/shutdown under the HTTP supervisor's same deadline. The settled
   gate passed format, check, Clippy, `git diff --check`, and 77 backend tests;
   the backend-only checkpoint is `f189265`.
-- M2 Increment 4 startup reconciliation and Increment 5
-  readiness/capabilities/OpenAPI/Compose work are not implemented yet.
+- M2 Increment 4 is complete and verified: startup reconciliation runs before
+  the worker, preserves interrupted attempt history, bounds fresh attempts,
+  validates sources and exact published bundles, fails corrupt historical
+  successes closed while retaining audit data, and quarantines only canonical
+  unowned job trees. The settled gate passed format, check, Clippy,
+  `git diff --check`, and 90 backend tests (54 library, 1 server, 3 worker, 32
+  HTTP contract) on the default test stack.
+- M2 Increment 5 readiness/capabilities/OpenAPI/Compose work and Increment 6
+  built-container restart gates remain pending.
 - The service remains loopback-only. No LAN, Caddy, AnyDoc, or Datalab
   fallback until their milestones.
 
