@@ -8,7 +8,7 @@ use crate::{
     auth::{AuthLoadError, BootstrapAuth},
     config::{Limits, Settings},
     conversion::ConversionService,
-    engines::{EngineStartupError, PdfInspectorEngine},
+    engines::{AnyDocEngine, EngineStartupError, PdfInspectorEngine},
     faults::FaultBarrier,
     jobs::{JobRuntime, StartupRecovery},
     persistence::{RepositoryError, SqliteRepository},
@@ -35,18 +35,22 @@ impl AppState {
             settings.database_busy_timeout,
         )
         .await?;
-        let engine = PdfInspectorEngine::initialize(
+        let pdf_engine = PdfInspectorEngine::initialize(
             settings.pdf_worker_path.clone(),
             settings.pdf_bcmaps_dir.clone(),
             settings.limits.pdf_timeout,
             settings.limits.max_output_bytes,
             settings.pdf_threads,
         )?;
+        // AnyDoc runs in-process: pure Rust, typed errors, internal resource
+        // limits, and `catch_unwind` at the adapter. Parser concurrency one.
+        let anydoc_engine = AnyDocEngine::new(settings.limits.max_output_bytes, 1);
 
         let service = ConversionService::new(
             repository,
             artifacts,
-            engine,
+            pdf_engine,
+            anydoc_engine,
             settings.limits.max_output_bytes,
         );
         StartupRecovery::new(settings.recovery_limit)

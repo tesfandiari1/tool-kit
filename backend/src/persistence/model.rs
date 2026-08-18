@@ -122,6 +122,9 @@ pub enum DocumentClassification {
     Scanned,
     ImageBased,
     Mixed,
+    /// A structured non-PDF document (Word, PowerPoint, Excel, EPUB) parsed
+    /// locally by AnyDoc.
+    StructuredDocument,
 }
 
 impl DocumentClassification {
@@ -131,6 +134,7 @@ impl DocumentClassification {
             Self::Scanned => "scanned",
             Self::ImageBased => "image_based",
             Self::Mixed => "mixed",
+            Self::StructuredDocument => "structured_document",
         }
     }
 }

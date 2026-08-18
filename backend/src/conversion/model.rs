@@ -51,6 +51,83 @@ impl From<ConversionProfile> for Profile {
     }
 }
 
+/// One advertised upload format: the accepted extension, the canonical media
+/// type stored with the source, the container signature the upload path
+/// requires, and the local engine that converts it. Authoritative format
+/// detection happens from content at execution time; this table is the
+/// admission boundary.
+///
+/// A format appears here only with a passing round-trip fixture. The M2
+/// database constraint in migration 0002 is deliberately wider than this
+/// table; rows outside it fail closed at claim time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SourceFormat {
+    pub extension: &'static str,
+    pub media_type: &'static str,
+    pub magic: ContainerMagic,
+    pub engine: LocalEngineKind,
+    /// The family label AnyDoc reports in its diagnostics; used to check
+    /// manifest consistency for non-PDF jobs. Unused for PDF.
+    pub format_label: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ContainerMagic {
+    Pdf,
+    Zip,
+    // Ole joins with the doc/ppt/xls fixtures in Increment 4.
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalEngineKind {
+    Pdf,
+    AnyDoc,
+}
+
+pub(crate) const SOURCE_FORMATS: &[SourceFormat] = &[
+    SourceFormat {
+        extension: "pdf",
+        media_type: "application/pdf",
+        magic: ContainerMagic::Pdf,
+        engine: LocalEngineKind::Pdf,
+        format_label: "pdf",
+    },
+    SourceFormat {
+        extension: "docx",
+        media_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "docx",
+    },
+    SourceFormat {
+        extension: "xlsx",
+        media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        magic: ContainerMagic::Zip,
+        engine: LocalEngineKind::AnyDoc,
+        format_label: "excel",
+    },
+];
+
+pub(crate) fn source_format_by_extension(extension: &str) -> Option<&'static SourceFormat> {
+    SOURCE_FORMATS
+        .iter()
+        .find(|format| format.extension.eq_ignore_ascii_case(extension))
+}
+
+pub(crate) fn source_format_by_media_type(media_type: &str) -> Option<&'static SourceFormat> {
+    SOURCE_FORMATS
+        .iter()
+        .find(|format| format.media_type == media_type)
+}
+
+/// The media types the service advertises and accepts, in table order.
+pub(crate) fn advertised_media_types() -> Vec<&'static str> {
+    SOURCE_FORMATS
+        .iter()
+        .map(|format| format.media_type)
+        .collect()
+}
+
 impl From<Profile> for ConversionProfile {
     fn from(value: Profile) -> Self {
         match value {
@@ -157,6 +234,7 @@ pub struct JobFailure {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceMetadata {
+    pub media_type: String,
     pub byte_length: u64,
     pub sha256: String,
 }

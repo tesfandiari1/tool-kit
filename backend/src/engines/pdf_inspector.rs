@@ -12,19 +12,20 @@ use thiserror::Error;
 use tokio::{
     fs,
     io::AsyncReadExt,
-    process::{Child, Command},
+    process::Command,
     sync::{watch, OwnedSemaphorePermit, Semaphore},
-    time::sleep,
 };
 
-use super::{EngineAnalysis, EngineFailure, EngineOutcome};
+use super::child::wait_for_child;
+use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
     persistence::DocumentClassification,
     worker_protocol::{
-        FallbackReason, Inspection, PdfTypeLabel, WorkerOutcome, WorkerReport, MARKDOWN_FILE,
-        PDF_INSPECTOR_VERSION, WORKER_EXPECTED_SOURCE_BYTES_ENV, WORKER_EXPECTED_SOURCE_SHA256_ENV,
-        WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION, WORKER_REPORT_FILE,
+        FallbackReason, Inspection, PdfTypeLabel, RejectionCode, WorkerOutcome, WorkerReport,
+        MARKDOWN_FILE, PDF_INSPECTOR_VERSION, WORKER_EXPECTED_SOURCE_BYTES_ENV,
+        WORKER_EXPECTED_SOURCE_SHA256_ENV, WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION,
+        WORKER_REPORT_FILE,
     },
 };
 
@@ -93,7 +94,7 @@ impl PdfInspectorEngine {
         paths: &AttemptPaths,
         source: ValidatedOpenFile,
         _permit: OwnedSemaphorePermit,
-        mut cancellation: watch::Receiver<bool>,
+        cancellation: watch::Receiver<bool>,
     ) -> Result<EngineOutcome, EngineFailure> {
         if *cancellation.borrow() {
             return Err(EngineFailure::Interrupted);
@@ -129,38 +130,7 @@ impl PdfInspectorEngine {
         }
 
         let mut child = command.spawn().map_err(|_| EngineFailure::Unavailable)?;
-        let mut deadline = Box::pin(sleep(self.timeout));
-        let status = loop {
-            tokio::select! {
-                biased;
-                changed = cancellation.changed() => {
-                    let interrupted = changed.is_err() || *cancellation.borrow_and_update();
-                    if interrupted {
-                        kill_and_reap(&mut child).await;
-                        return Err(EngineFailure::Interrupted);
-                    }
-                }
-                _ = &mut deadline => {
-                    kill_and_reap(&mut child).await;
-                    return Err(EngineFailure::Timeout);
-                }
-                result = child.wait() => {
-                    match result {
-                        Ok(status) => break status,
-                        Err(_) => {
-                            kill_and_reap(&mut child).await;
-                            return Err(EngineFailure::Crashed);
-                        }
-                    }
-                }
-            }
-        };
-        if !status.success() {
-            return Err(EngineFailure::Crashed);
-        }
-        if *cancellation.borrow() {
-            return Err(EngineFailure::Interrupted);
-        }
+        wait_for_child(&mut child, self.timeout, cancellation).await?;
 
         self.read_and_validate_report(paths).await
     }
@@ -243,7 +213,9 @@ impl PdfInspectorEngine {
                 {
                     return Err(EngineFailure::Protocol);
                 }
-                EngineOutcome::Rejected { code }
+                EngineOutcome::Rejected {
+                    rejection: rejection(code),
+                }
             }
         };
         fs::remove_file(report_path)
@@ -251,11 +223,6 @@ impl PdfInspectorEngine {
             .map_err(|_| EngineFailure::Protocol)?;
         Ok(outcome)
     }
-}
-
-async fn kill_and_reap(child: &mut Child) {
-    let _ = child.start_kill();
-    let _ = child.wait().await;
 }
 
 fn validate_worker(path: &Path) -> Result<(), EngineStartupError> {
@@ -421,6 +388,26 @@ fn validate_complete_inspection(inspection: &Inspection) -> Result<(), EngineFai
         return Err(EngineFailure::Protocol);
     }
     Ok(())
+}
+
+/// Maps the worker's rejection wire codes to the engine-owned rejection.
+/// The strings are the public failure code and message; do not reword them
+/// without a contract review.
+fn rejection(code: RejectionCode) -> EngineRejection {
+    match code {
+        RejectionCode::EncryptedPdf => EngineRejection {
+            code: code.as_str(),
+            message: "Encrypted PDFs are not accepted.",
+        },
+        RejectionCode::InvalidPdf => EngineRejection {
+            code: code.as_str(),
+            message: "The uploaded file is not a valid PDF.",
+        },
+        RejectionCode::InvalidPdfStructure => EngineRejection {
+            code: code.as_str(),
+            message: "The PDF structure is invalid.",
+        },
+    }
 }
 
 /// Maps the worker's PDF inspection into the engine-neutral analysis. The

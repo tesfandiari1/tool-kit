@@ -217,12 +217,11 @@ impl SqliteRepository {
 
     pub async fn claim_next_queued(
         &self,
-        start: LocalStart,
+        start_for: impl FnOnce(&str) -> Option<LocalStart>,
     ) -> Result<Option<StoredConversion>, RepositoryError> {
-        validate_local_start(&start)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let next = sqlx::query(
-            "SELECT c.id AS conversion_id, a.id AS attempt_id
+            "SELECT c.id AS conversion_id, a.id AS attempt_id, c.source_media_type
              FROM conversions AS c
              JOIN attempts AS a
                ON a.conversion_id = c.id
@@ -243,6 +242,22 @@ impl SqliteRepository {
         };
         let conversion_id = parse_uuid(next.try_get("conversion_id")?, "conversions.id")?;
         let attempt_id = parse_uuid(next.try_get("attempt_id")?, "attempts.id")?;
+        let source_media_type: String = next.try_get("source_media_type")?;
+        let Some(start) = start_for(&source_media_type) else {
+            // A queued row whose source media type has no engine cannot be
+            // executed. Fail it in the same transaction so it never poisons
+            // the queue.
+            fail_unclaimable_source(&mut transaction, conversion_id, attempt_id).await?;
+            commit_transition(
+                transaction,
+                CommitOperation::ClaimNextQueued,
+                conversion_id,
+                attempt_id,
+            )
+            .await?;
+            return Ok(None);
+        };
+        validate_local_start(&start)?;
         apply_start_local(&mut transaction, conversion_id, attempt_id, &start).await?;
         let conversion = load_required_conversion(&mut transaction, conversion_id).await?;
         commit_transition(
@@ -785,6 +800,49 @@ struct ActiveAttemptHeader {
     highest_recovery_count: u32,
 }
 
+/// Fails a queued conversion in place when its source media type has no
+/// engine. Defense in depth: upload validation keeps such rows out, so this
+/// only fires on corrupted or hand-edited data.
+async fn fail_unclaimable_source(
+    transaction: &mut Transaction<'_, Sqlite>,
+    conversion_id: Uuid,
+    attempt_id: Uuid,
+) -> Result<(), RepositoryError> {
+    let updated_at = now_rfc3339()?;
+    let conversion_id = conversion_id.hyphenated().to_string();
+    let attempt_id = attempt_id.hyphenated().to_string();
+    let attempt = sqlx::query(
+        "UPDATE attempts
+         SET state = 'failed', failure_code = 'source_integrity_failed',
+             failure_message = 'The immutable source failed integrity validation.',
+             updated_at = ?1, finished_at = ?1
+         WHERE conversion_id = ?2 AND id = ?3 AND state = 'queued'",
+    )
+    .bind(&updated_at)
+    .bind(&conversion_id)
+    .bind(&attempt_id)
+    .execute(&mut **transaction)
+    .await?;
+    require_one_transition_row(attempt.rows_affected(), "attempts.state")?;
+
+    let conversion = sqlx::query(
+        "UPDATE conversions
+         SET status = 'failed', failure_code = 'source_integrity_failed',
+             failure_message = 'The immutable source failed integrity validation.',
+             updated_at = ?1
+         WHERE id = ?2 AND auth_scope = ?3 AND active_attempt_id = ?4
+           AND status = 'queued'",
+    )
+    .bind(&updated_at)
+    .bind(&conversion_id)
+    .bind(AUTH_SCOPE)
+    .bind(&attempt_id)
+    .execute(&mut **transaction)
+    .await?;
+    require_one_transition_row(conversion.rows_affected(), "conversions.status")?;
+    Ok(())
+}
+
 async fn apply_start_local(
     transaction: &mut Transaction<'_, Sqlite>,
     conversion_id: Uuid,
@@ -1292,9 +1350,15 @@ fn validate_new_conversion(input: &NewConversion) -> Result<(), RepositoryError>
             "source path does not belong to the conversion",
         ));
     }
-    if input.source.media_type != "application/pdf" {
+    // The media-type policy lives in the conversion domain's source-format
+    // table; the ledger keeps storage invariants only. Claim-time engine
+    // resolution fails closed on any media type with no engine.
+    if input.source.media_type.is_empty()
+        || input.source.media_type.len() > 127
+        || input.source.media_type.chars().any(char::is_control)
+    {
         return Err(RepositoryError::InvalidInput(
-            "source media type is unsupported",
+            "source media type is invalid",
         ));
     }
     if input.source.byte_length == 0 || input.source.byte_length > i64::MAX as u64 {
@@ -1568,6 +1632,157 @@ mod tests {
     };
 
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn migration_0002_upgrades_a_populated_m2_database() {
+        use sqlx::migrate::Migrator;
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join(DATABASE_FILENAME);
+        let options = SqliteConnectOptions::new()
+            .filename(&database_path)
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+
+        // Apply only the M2 schema through the real migrator path: a directory
+        // holding just 0001. Then populate it like a real M2 service.
+        let m2_migrations = TempDir::new().unwrap();
+        std::fs::write(
+            m2_migrations.path().join("0001_conversion_jobs.sql"),
+            include_str!("../../migrations/0001_conversion_jobs.sql"),
+        )
+        .unwrap();
+        Migrator::new(m2_migrations.path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+
+        let job_id = "11111111-2222-4333-8444-555555555555";
+        let attempt_id = "66666666-7777-4888-8999-000000000000";
+        let digest = "a".repeat(64);
+        sqlx::query(
+            "INSERT INTO conversions (
+                id, client_run_id, auth_scope, idempotency_key_hash,
+                request_fingerprint, profile, status, source_relative_path,
+                source_media_type, source_byte_length, source_sha256,
+                reason_codes_json, warnings_json, origin_request_id,
+                created_at, updated_at
+             ) VALUES (
+                ?1, ?1, 'bootstrap', ?2, ?2, 'standard', 'queued', ?3,
+                'application/pdf', 128, ?2, '[]', '[]', 'request-1',
+                '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'
+             )",
+        )
+        .bind(job_id)
+        .bind(&digest)
+        .bind(format!("jobs/{job_id}/source/input"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attempts (
+                id, conversion_id, attempt_number, state, recovery_count,
+                reason_codes_json, warnings_json, created_at, updated_at
+             ) VALUES (?1, ?2, 1, 'queued', 0, '[]', '[]',
+                '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z')",
+        )
+        .bind(attempt_id)
+        .bind(job_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The full migrator applies only 0002.
+        super::MIGRATOR.run(&pool).await.unwrap();
+
+        let surviving: i64 = sqlx::query("SELECT COUNT(*) AS n FROM conversions")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .try_get("n")
+            .unwrap();
+        assert_eq!(surviving, 1, "the M2 row must survive the rebuild");
+        let surviving_attempts: i64 = sqlx::query("SELECT COUNT(*) AS n FROM attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .try_get("n")
+            .unwrap();
+        assert_eq!(surviving_attempts, 1);
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // The widened constraints accept the new formats...
+        let docx_id = "aaaaaaaa-1111-4111-8222-333333333333";
+        sqlx::query(
+            "INSERT INTO conversions (
+                id, client_run_id, auth_scope, idempotency_key_hash,
+                request_fingerprint, profile, status, source_relative_path,
+                source_media_type, source_byte_length, source_sha256,
+                reason_codes_json, warnings_json, origin_request_id,
+                created_at, updated_at
+             ) VALUES (
+                ?1, ?1, 'bootstrap', ?2, ?2, 'local_only', 'queued', ?3,
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                256, ?2, '[]', '[]', 'request-2',
+                '2026-08-18T00:00:01Z', '2026-08-18T00:00:01Z'
+             )",
+        )
+        .bind(docx_id)
+        .bind("b".repeat(64))
+        .bind(format!("jobs/{docx_id}/source/input"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let docx_attempt = "bbbbbbbb-2222-4333-8444-555555555555";
+        sqlx::query(
+            "INSERT INTO attempts (
+                id, conversion_id, attempt_number, state, recovery_count,
+                classification, reason_codes_json, warnings_json,
+                created_at, updated_at
+             ) VALUES (?1, ?2, 1, 'queued', 0, 'structured_document', '[]', '[]',
+                '2026-08-18T00:00:01Z', '2026-08-18T00:00:01Z')",
+        )
+        .bind(docx_attempt)
+        .bind(docx_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // ...and still reject nonsense.
+        let bad_id = "cccccccc-3333-4333-8444-555555555555";
+        let rejected = sqlx::query(
+            "INSERT INTO conversions (
+                id, client_run_id, auth_scope, idempotency_key_hash,
+                request_fingerprint, profile, status, source_relative_path,
+                source_media_type, source_byte_length, source_sha256,
+                reason_codes_json, warnings_json, origin_request_id,
+                created_at, updated_at
+             ) VALUES (
+                ?1, ?1, 'bootstrap', ?2, ?2, 'standard', 'queued', ?3,
+                'text/plain', 64, ?2, '[]', '[]', 'request-3',
+                '2026-08-18T00:00:02Z', '2026-08-18T00:00:02Z'
+             )",
+        )
+        .bind(bad_id)
+        .bind("c".repeat(64))
+        .bind(format!("jobs/{bad_id}/source/input"))
+        .execute(&pool)
+        .await;
+        assert!(rejected.is_err(), "an unlisted media type must be rejected");
+
+        pool.close().await;
+    }
 
     #[tokio::test]
     async fn migrations_configure_a_file_backed_database_and_repeat_cleanly() {
@@ -2231,7 +2446,7 @@ mod tests {
             tasks.push(tokio::spawn(async move {
                 barrier.wait().await;
                 repository
-                    .claim_next_queued(local_start())
+                    .claim_next_queued(|_| Some(local_start()))
                     .await
                     .unwrap()
                     .unwrap()
@@ -2254,13 +2469,13 @@ mod tests {
             .all(|conversion| conversion.state == ConversionState::ConvertingLocal));
 
         let last = repository
-            .claim_next_queued(local_start())
+            .claim_next_queued(|_| Some(local_start()))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(last.id, third.id);
         assert!(repository
-            .claim_next_queued(local_start())
+            .claim_next_queued(|_| Some(local_start()))
             .await
             .unwrap()
             .is_none());
@@ -2459,13 +2674,13 @@ mod tests {
             .is_some());
 
         let claimed_second = repository
-            .claim_next_queued(local_start())
+            .claim_next_queued(|_| Some(local_start()))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(claimed_second.id, second.id);
         let claimed_recovery = repository
-            .claim_next_queued(local_start())
+            .claim_next_queued(|_| Some(local_start()))
             .await
             .unwrap()
             .unwrap();

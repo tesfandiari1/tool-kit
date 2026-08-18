@@ -19,8 +19,8 @@ use crate::{
         PreparedSubmission, PublishedArtifact,
     },
     engines::{
-        is_complete_native_inspection, EngineAnalysis, EngineFailure, EngineOutcome,
-        PdfInspectorEngine,
+        is_complete_native_inspection, AnyDocDiagnostics, AnyDocEngine, EngineAnalysis,
+        EngineFailure, EngineOutcome, PdfInspectorEngine, ANYDOC_ENGINE_NAME, ANYDOC_VERSION,
     },
     faults::{FaultBarrier, FaultPoint},
     persistence::{
@@ -33,23 +33,28 @@ use crate::{
 };
 
 use super::{
-    model::{now, ManifestEngine, ManifestOutput, ManifestRoute, ManifestSource},
+    model::{
+        now, source_format_by_media_type, LocalEngineKind, ManifestEngine, ManifestOutput,
+        ManifestRoute, ManifestSource,
+    },
     ArtifactKind, ArtifactRecord, ArtifactView, ConversionManifest, ConversionProfile, JobStatus,
     JobView, SourceMetadata,
 };
 
-const SOURCE_MEDIA_TYPE: &str = "application/pdf";
 const MARKDOWN_MEDIA_TYPE: &str = "text/markdown; charset=utf-8";
 const MANIFEST_MEDIA_TYPE: &str = "application/json";
 const LOCAL_ROUTE: &str = "local_pdf";
 const NATIVE_TEXT_REASON: &str = "native_text_pdf";
+const LOCAL_ANYDOC_ROUTE: &str = "local_anydoc";
+const STRUCTURED_DOCUMENT_REASON: &str = "structured_document";
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct ConversionService {
     repository: SqliteRepository,
     artifacts: ArtifactStore,
-    engine: PdfInspectorEngine,
+    pdf_engine: PdfInspectorEngine,
+    anydoc_engine: AnyDocEngine,
     max_output_bytes: u64,
     work_notification: Arc<Notify>,
     faults: Arc<FaultBarrier>,
@@ -59,13 +64,15 @@ impl ConversionService {
     pub fn new(
         repository: SqliteRepository,
         artifacts: ArtifactStore,
-        engine: PdfInspectorEngine,
+        pdf_engine: PdfInspectorEngine,
+        anydoc_engine: AnyDocEngine,
         max_output_bytes: u64,
     ) -> Self {
         Self {
             repository,
             artifacts,
-            engine,
+            pdf_engine,
+            anydoc_engine,
             max_output_bytes,
             work_notification: Arc::new(Notify::new()),
             faults: Arc::new(FaultBarrier::default()),
@@ -139,7 +146,7 @@ impl ConversionService {
             profile: submission.profile.into(),
             source: NewSource {
                 relative_path: portable_relative(source_relative_path(job_id)),
-                media_type: SOURCE_MEDIA_TYPE.to_owned(),
+                media_type: submission.source.media_type.clone(),
                 byte_length: published_source.byte_length,
                 sha256: published_source.sha256,
             },
@@ -246,7 +253,7 @@ impl ConversionService {
     pub(crate) async fn claim_next_queued(
         &self,
     ) -> Result<Option<StoredConversion>, RepositoryError> {
-        self.repository.claim_next_queued(local_start()).await
+        self.repository.claim_next_queued(local_start).await
     }
 
     pub async fn artifact_views(
@@ -334,9 +341,19 @@ impl ConversionService {
             return Ok(());
         }
 
-        if job.source.relative_path != portable_relative(source_relative_path(job_id))
-            || job.source.media_type != SOURCE_MEDIA_TYPE
-        {
+        let Some(source_format) = source_format_by_media_type(&job.source.media_type) else {
+            self.finish_failure(
+                job_id,
+                attempt_id,
+                FailureStage::ConvertingLocal,
+                "source_integrity_failed",
+                "The immutable source failed integrity validation.",
+                true,
+            )
+            .await?;
+            return Ok(());
+        };
+        if job.source.relative_path != portable_relative(source_relative_path(job_id)) {
             self.finish_failure(
                 job_id,
                 attempt_id,
@@ -379,7 +396,11 @@ impl ConversionService {
             },
         };
 
-        let permit = match self.engine.acquire().await {
+        let permit = match source_format.engine {
+            LocalEngineKind::Pdf => self.pdf_engine.acquire().await,
+            LocalEngineKind::AnyDoc => self.anydoc_engine.acquire().await,
+        };
+        let permit = match permit {
             Ok(permit) => permit,
             Err(failure) => {
                 self.finish_failure(
@@ -412,7 +433,19 @@ impl ConversionService {
             }
         };
 
-        match self.engine.convert(&paths, source, permit, shutdown).await {
+        let conversion = match source_format.engine {
+            LocalEngineKind::Pdf => {
+                self.pdf_engine
+                    .convert(&paths, source, permit, shutdown)
+                    .await
+            }
+            LocalEngineKind::AnyDoc => {
+                self.anydoc_engine
+                    .convert(&paths, source, permit, shutdown)
+                    .await
+            }
+        };
+        match conversion {
             Ok(EngineOutcome::Converted {
                 analysis,
                 byte_length,
@@ -447,24 +480,13 @@ impl ConversionService {
                     "conversion attempt completed"
                 );
             }
-            Ok(EngineOutcome::Rejected { code }) => {
-                let message = match code {
-                    crate::worker_protocol::RejectionCode::EncryptedPdf => {
-                        "Encrypted PDFs are not accepted."
-                    }
-                    crate::worker_protocol::RejectionCode::InvalidPdf => {
-                        "The uploaded file is not a valid PDF."
-                    }
-                    crate::worker_protocol::RejectionCode::InvalidPdfStructure => {
-                        "The PDF structure is invalid."
-                    }
-                };
+            Ok(EngineOutcome::Rejected { rejection }) => {
                 self.finish_failure(
                     job_id,
                     attempt_id,
                     FailureStage::ConvertingLocal,
-                    code.as_str(),
-                    message,
+                    rejection.code,
+                    rejection.message,
                     true,
                 )
                 .await?;
@@ -503,13 +525,30 @@ impl ConversionService {
         let job_id = job.id;
         let attempt_id = job.active_attempt.id;
         let request_id = job.origin_request_id.clone();
-        let analysis = local_analysis(&engine_analysis, vec![NATIVE_TEXT_REASON.to_owned()]);
+        let reason_code =
+            match source_format_by_media_type(&job.source.media_type).map(|format| format.engine) {
+                Some(LocalEngineKind::AnyDoc) => STRUCTURED_DOCUMENT_REASON,
+                _ => NATIVE_TEXT_REASON,
+            };
+        let analysis = local_analysis(&engine_analysis, vec![reason_code.to_owned()]);
         let finalizing = self
             .repository
             .mark_finalizing(job_id, attempt_id, analysis)
             .await?;
         self.faults.hold(FaultPoint::AfterFinalizing).await;
 
+        let Some(engine_record) = finalizing.active_attempt.engine.clone() else {
+            self.finish_failure(
+                job_id,
+                attempt_id,
+                FailureStage::Finalizing,
+                EngineFailure::Protocol.code(),
+                "The service could not publish conversion artifacts.",
+                true,
+            )
+            .await?;
+            return Ok(());
+        };
         let completed_at = now();
         let manifest = ConversionManifest {
             schema_version: 1,
@@ -518,18 +557,23 @@ impl ConversionService {
             client_run_id: finalizing.client_run_id,
             profile: finalizing.profile.into(),
             source: ManifestSource {
-                media_type: SOURCE_MEDIA_TYPE.to_owned(),
+                media_type: finalizing.source.media_type.clone(),
                 byte_length: finalizing.source.byte_length,
                 sha256: finalizing.source.sha256.clone(),
             },
             engine: ManifestEngine {
-                name: "pdf-inspector".to_owned(),
-                version: PDF_INSPECTOR_VERSION.to_owned(),
+                name: engine_record.name,
+                version: engine_record.version,
                 features: Vec::new(),
             },
             route: ManifestRoute {
-                kind: LOCAL_ROUTE.to_owned(),
-                reason_codes: vec![NATIVE_TEXT_REASON.to_owned()],
+                kind: match source_format_by_media_type(&finalizing.source.media_type)
+                    .map(|format| format.engine)
+                {
+                    Some(LocalEngineKind::AnyDoc) => LOCAL_ANYDOC_ROUTE.to_owned(),
+                    _ => LOCAL_ROUTE.to_owned(),
+                },
+                reason_codes: vec![reason_code.to_owned()],
             },
             document: engine_analysis.diagnostics,
             warnings: Vec::new(),
@@ -941,14 +985,25 @@ pub(crate) fn submission_fingerprint(
     hex::encode(digest.finalize())
 }
 
-fn local_start() -> LocalStart {
-    LocalStart {
-        engine: EngineRecord {
-            name: "pdf-inspector".to_owned(),
-            version: PDF_INSPECTOR_VERSION.to_owned(),
+fn local_start(media_type: &str) -> Option<LocalStart> {
+    let format = source_format_by_media_type(media_type)?;
+    let start = match format.engine {
+        LocalEngineKind::Pdf => LocalStart {
+            engine: EngineRecord {
+                name: "pdf-inspector".to_owned(),
+                version: PDF_INSPECTOR_VERSION.to_owned(),
+            },
+            route: LOCAL_ROUTE.to_owned(),
         },
-        route: LOCAL_ROUTE.to_owned(),
-    }
+        LocalEngineKind::AnyDoc => LocalStart {
+            engine: EngineRecord {
+                name: ANYDOC_ENGINE_NAME.to_owned(),
+                version: ANYDOC_VERSION.to_owned(),
+            },
+            route: LOCAL_ANYDOC_ROUTE.to_owned(),
+        },
+    };
+    Some(start)
 }
 
 fn local_analysis(analysis: &EngineAnalysis, reason_codes: Vec<String>) -> LocalAnalysis {
@@ -1005,7 +1060,7 @@ fn validate_artifact_metadata(
 
 fn validate_source_metadata(job: &StoredConversion) -> Result<(), ArtifactReadFailure> {
     if job.source.relative_path != portable_relative(source_relative_path(job.id))
-        || job.source.media_type != SOURCE_MEDIA_TYPE
+        || source_format_by_media_type(&job.source.media_type).is_none()
     {
         return Err(ArtifactReadFailure::Integrity);
     }
@@ -1034,17 +1089,35 @@ fn validate_manifest(
     let Some(started_at) = attempt.started_at.as_deref() else {
         return Err(ArtifactReadFailure::Integrity);
     };
-    // The document detail is engine-specific JSON. Only the pdf-inspector
-    // shape exists today; a second engine extends this branch keyed on
-    // `engine.name`.
-    let document_inspection: Inspection = serde_json::from_value(manifest.document.clone())
-        .map_err(|_| ArtifactReadFailure::Integrity)?;
+    // The document detail is engine-specific JSON, checked against the shape
+    // of the engine that produced it.
     let manifest_inspection = manifest.document.clone();
-    let manifest_classification = match document_inspection.pdf_type {
-        PdfTypeLabel::TextBased => "text_based",
-        PdfTypeLabel::Scanned => "scanned",
-        PdfTypeLabel::ImageBased => "image_based",
-        PdfTypeLabel::Mixed => "mixed",
+    let manifest_classification: &str = match engine.name.as_str() {
+        "pdf-inspector" => {
+            let document_inspection: Inspection = serde_json::from_value(manifest.document.clone())
+                .map_err(|_| ArtifactReadFailure::Integrity)?;
+            if !is_complete_native_inspection(&document_inspection) {
+                return Err(ArtifactReadFailure::Integrity);
+            }
+            match document_inspection.pdf_type {
+                PdfTypeLabel::TextBased => "text_based",
+                PdfTypeLabel::Scanned => "scanned",
+                PdfTypeLabel::ImageBased => "image_based",
+                PdfTypeLabel::Mixed => "mixed",
+            }
+        }
+        ANYDOC_ENGINE_NAME => {
+            let diagnostics: AnyDocDiagnostics = serde_json::from_value(manifest.document.clone())
+                .map_err(|_| ArtifactReadFailure::Integrity)?;
+            let expected = source_format_by_media_type(&job.source.media_type)
+                .filter(|format| format.engine == LocalEngineKind::AnyDoc)
+                .map(|format| format.format_label);
+            if Some(diagnostics.format.as_str()) != expected {
+                return Err(ArtifactReadFailure::Integrity);
+            }
+            "structured_document"
+        }
+        _ => return Err(ArtifactReadFailure::Integrity),
     };
     OffsetDateTime::parse(&manifest.started_at, &Rfc3339)
         .map_err(|_| ArtifactReadFailure::Integrity)?;
@@ -1084,7 +1157,6 @@ fn validate_manifest(
         || manifest.warnings != job.warnings
         || manifest_inspection != *inspection
         || classification != manifest_classification
-        || !is_complete_native_inspection(&document_inspection)
         || manifest.output.media_type != MARKDOWN_MEDIA_TYPE
         || markdown_byte_length == 0
         || manifest.output.byte_length != markdown_byte_length
@@ -1118,26 +1190,39 @@ fn validate_manifest_shape(value: &serde_json::Value) -> Result<(), ArtifactRead
     require_exact_object_keys(&value["source"], &["mediaType", "byteLength", "sha256"])?;
     require_exact_object_keys(&value["engine"], &["name", "version", "features"])?;
     require_exact_object_keys(&value["route"], &["kind", "reasonCodes"])?;
-    require_exact_object_keys(
-        &value["document"],
-        &[
-            "pdfType",
-            "confidence",
-            "pageCount",
-            "pagesNeedingOcr",
-            "ocrReasonsByPage",
-            "hasEncodingIssues",
-            "isComplex",
-            "pagesWithTables",
-            "pagesWithColumns",
-            "processingTimeMs",
-        ],
-    )?;
-    let reasons = value["document"]["ocrReasonsByPage"]
-        .as_array()
+    // The document object carries the producing engine's own diagnostics
+    // shape; an unknown engine's manifest is not verifiable.
+    let engine_name = value["engine"]["name"]
+        .as_str()
         .ok_or(ArtifactReadFailure::Integrity)?;
-    for page in reasons {
-        require_exact_object_keys(page, &["page", "reasons"])?;
+    match engine_name {
+        "pdf-inspector" => {
+            require_exact_object_keys(
+                &value["document"],
+                &[
+                    "pdfType",
+                    "confidence",
+                    "pageCount",
+                    "pagesNeedingOcr",
+                    "ocrReasonsByPage",
+                    "hasEncodingIssues",
+                    "isComplex",
+                    "pagesWithTables",
+                    "pagesWithColumns",
+                    "processingTimeMs",
+                ],
+            )?;
+            let reasons = value["document"]["ocrReasonsByPage"]
+                .as_array()
+                .ok_or(ArtifactReadFailure::Integrity)?;
+            for page in reasons {
+                require_exact_object_keys(page, &["page", "reasons"])?;
+            }
+        }
+        ANYDOC_ENGINE_NAME => {
+            require_exact_object_keys(&value["document"], &["format", "processingTimeMs"])?;
+        }
+        _ => return Err(ArtifactReadFailure::Integrity),
     }
     require_exact_object_keys(&value["output"], &["mediaType", "byteLength", "sha256"])?;
     Ok(())
@@ -1347,7 +1432,7 @@ mod tests {
             "clientRunId": null,
             "profile": null,
             "source": {"mediaType": null, "byteLength": null, "sha256": null},
-            "engine": {"name": null, "version": null, "features": null},
+            "engine": {"name": "pdf-inspector", "version": null, "features": null},
             "route": {"kind": null, "reasonCodes": null},
             "document": {
                 "pdfType": null,
