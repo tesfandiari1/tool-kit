@@ -1,7 +1,7 @@
 # Conversion evaluation corpus
 
 The conversion service is corpus-gated. A parser or advertised format is not
-accepted because one sample worked; it must pass labeled success and failure
+accepted because one sample worked. It must pass labeled success and failure
 fixtures representing the routing and completeness risks in this document.
 
 ## Data rules

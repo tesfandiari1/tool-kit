@@ -565,6 +565,12 @@ async fn broken_and_hostile_anydoc_inputs_fail_closed_without_artifacts() {
             "invalid_document",
         ),
         (
+            include_bytes!("fixtures/anydoc/truncated.xlsx").as_slice(),
+            "broken.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "invalid_document",
+        ),
+        (
             include_bytes!("fixtures/anydoc/truncated.epub").as_slice(),
             "broken.epub",
             "application/epub+zip",
@@ -619,6 +625,42 @@ async fn broken_and_hostile_anydoc_inputs_fail_closed_without_artifacts() {
         assert_eq!(markdown.status(), StatusCode::NOT_FOUND, "{code}");
     }
     assert_eq!(count_named_files(app.data_dir(), "result.md"), 0);
+}
+
+#[tokio::test]
+async fn a_cross_family_mislabelled_container_fails_before_conversion() {
+    // docx/xlsx/pptx/epub all carry the same ZIP magic, so upload admission
+    // cannot separate them. An xlsx sent as .docx used to convert fine and
+    // then trip the manifest check as `artifact_integrity_failed` - a
+    // corruption code for a merely misnamed file. It must fail as an invalid
+    // document instead, and before any parsing happens.
+    let app = test_app().await;
+    let body = multipart_body_with_media_type(
+        Uuid::new_v4(),
+        "standard",
+        include_bytes!("fixtures/anydoc/sheet.xlsx").as_slice(),
+        "actually-a-sheet.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    );
+    let response = app.submit(body, "anydoc-mislabelled-1", TOKEN).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job_id = json_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let completed = app.wait_for_terminal(&job_id).await;
+    assert_eq!(completed["data"]["status"], "failed", "{completed:#}");
+    assert_eq!(
+        completed["data"]["failure"]["code"], "invalid_document",
+        "{completed:#}"
+    );
+    let artifacts = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
+        .await;
+    assert!(json_body(artifacts).await["data"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -706,6 +748,66 @@ async fn anydoc_upload_boundaries_enforce_extension_media_type_and_magic() {
             assert_eq!(json_body(response).await["error"]["code"], code, "{key}");
         }
     }
+}
+
+#[tokio::test]
+async fn a_succeeded_anydoc_job_survives_restart_without_wedging_startup() {
+    // Startup reconciliation revalidates every stored success. It once knew
+    // only the four PDF classifications, so a succeeded AnyDoc attempt
+    // (`structured_document`) failed the metadata invariant and aborted
+    // startup - the whole service refused to boot, not just that one job.
+    let harness = TestHarness::new();
+    let docx = include_bytes!("fixtures/anydoc/text.docx").as_slice();
+    let body = multipart_body_with_media_type(
+        Uuid::new_v4(),
+        "standard",
+        docx,
+        "notes.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    );
+    let first = harness.app().await;
+
+    let response = first.submit(body, "anydoc-restart-1", TOKEN).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job_id = json_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let completed = first.wait_for_terminal(&job_id).await;
+    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+    let markdown_before = first
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
+        .await
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    first.shutdown(Duration::from_secs(1)).await;
+    drop(first);
+
+    // Booting at all is half the assertion: recovery runs before this returns.
+    let restarted = harness.app().await;
+    let status = restarted
+        .authorized_get(&format!("/api/v1/conversions/{job_id}"))
+        .await;
+    assert_eq!(status.status(), StatusCode::OK);
+    let after = json_body(status).await;
+    assert_eq!(after["data"]["status"], "succeeded", "{after:#}");
+    let markdown_after = restarted
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
+        .await;
+    assert_eq!(markdown_after.status(), StatusCode::OK);
+    assert_eq!(
+        markdown_after
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+        markdown_before,
+        "anydoc markdown changed across a restart"
+    );
 }
 
 #[tokio::test]

@@ -441,7 +441,7 @@ impl ConversionService {
             }
             LocalEngineKind::AnyDoc => {
                 self.anydoc_engine
-                    .convert(&paths, source, permit, shutdown, &job.source.media_type)
+                    .convert(&paths, source, permit, shutdown, source_format.format_label)
                     .await
             }
         };
@@ -571,7 +571,11 @@ impl ConversionService {
                     .map(|format| format.engine)
                 {
                     Some(LocalEngineKind::AnyDoc) => LOCAL_ANYDOC_ROUTE.to_owned(),
-                    _ => LOCAL_ROUTE.to_owned(),
+                    // `None` is unreachable: the claim fails an engine-less
+                    // media type closed. Spelled out rather than wildcarded so
+                    // a third engine is a compile error, not a job silently
+                    // labelled `local_pdf`.
+                    Some(LocalEngineKind::Pdf) | None => LOCAL_ROUTE.to_owned(),
                 },
                 reason_codes: vec![reason_code.to_owned()],
             },

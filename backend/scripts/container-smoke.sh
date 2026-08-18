@@ -245,6 +245,14 @@ assert_eq "fixture bytes" "$(wc -c < "$FIXTURE" | tr -d ' ')" "$FIXTURE_BYTES"
 assert_eq "fixture sha256" "$(sha256 "$FIXTURE")" "$FIXTURE_SHA"
 SOURCE_SHA="$(sha256 "$FIXTURE")"
 
+# The AnyDoc half of the image. The PDF above is synthesized so the script stays
+# self-contained, but a real docx cannot be; this is the same vendored fixture
+# the contract suite uses, so a container run and `cargo test` prove one engine.
+DOCX_FIXTURE="${BACKEND_DIR}/tests/fixtures/anydoc/text.docx"
+[ -r "$DOCX_FIXTURE" ] || fail "missing AnyDoc fixture ${DOCX_FIXTURE}"
+DOCX_SHA="$(sha256 "$DOCX_FIXTURE")"
+DOCX_BYTES="$(wc -c < "$DOCX_FIXTURE" | tr -d ' ')"
+
 # ---------------------------------------------------------------- http helpers
 
 api() {
@@ -267,6 +275,15 @@ submit() {
     -F "clientRunId=${run_id}" \
     -F "profile=standard" \
     -F "source=@${FIXTURE};type=application/pdf"
+}
+
+submit_docx() {
+  local key="$1" run_id="$2" out="$3" hdr="$4"
+  api POST /api/v1/conversions "$out" "$hdr" \
+    -H "Idempotency-Key: ${key}" \
+    -F "clientRunId=${run_id}" \
+    -F "profile=standard" \
+    -F "source=@${DOCX_FIXTURE};type=application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 }
 
 wait_ready() {
@@ -411,6 +428,34 @@ if [ "$PHASE" = "all" ] || [ "$PHASE" = "graceful" ]; then
 
   verify_bundle "$JOB_A" "${RUN_DIR}/download-1"
   MD_SHA="$(sha256 "${RUN_DIR}/download-1/result.md")"
+
+  # AnyDoc inside the container, not merely linked into it. The Rust suite
+  # proves the adapter; only this proves the shipped image can run it.
+  log "AnyDoc conversion against the restarted container"
+  submit_docx "smoke-anydoc-0001" "$(newuuid)" \
+    "${RUN_DIR}/d-submit.json" "${RUN_DIR}/d-submit.h"
+  assert_eq "docx submit status" "$(status_of "${RUN_DIR}/d-submit.h")" "202"
+  JOB_D="$(jq -r '.data.id' < "${RUN_DIR}/d-submit.json")"
+  printf -- '- anydoc job: `%s`\n' "$JOB_D" >> "$EVIDENCE"
+  poll_until "$JOB_D" succeeded 180
+  api GET "/api/v1/conversions/${JOB_D}/artifacts" \
+    "${RUN_DIR}/d-artifacts.json" "${RUN_DIR}/d-artifacts.h"
+  assert_json "anydoc artifact count" '.data|length' "${RUN_DIR}/d-artifacts.json" "2"
+  api GET "/api/v1/conversions/${JOB_D}/artifacts/manifest" \
+    "${RUN_DIR}/d-manifest.json" "${RUN_DIR}/d-manifest.h"
+  DM="${RUN_DIR}/d-manifest.json"
+  assert_json "anydoc route" '.route.kind' "$DM" "local_anydoc"
+  assert_json "anydoc engine" '.engine.name' "$DM" "anydoc"
+  assert_json "anydoc engine version" '.engine.version' "$DM" "0.1.9"
+  assert_json "anydoc document format" '.document.format' "$DM" "docx"
+  assert_json "anydoc source sha256" '.source.sha256' "$DM" "$DOCX_SHA"
+  assert_json "anydoc source byteLength" '.source.byteLength' "$DM" "$DOCX_BYTES"
+  if grep -q 'text.docx' "$DM"; then fail "the anydoc manifest leaked the uploaded filename"; fi
+  api GET "/api/v1/conversions/${JOB_D}/artifacts/markdown" \
+    "${RUN_DIR}/d-result.md" "${RUN_DIR}/d-result.h"
+  assert_eq "anydoc markdown status" "$(status_of "${RUN_DIR}/d-result.h")" "200"
+  [ -s "${RUN_DIR}/d-result.md" ] || fail "anydoc published empty markdown"
+  printf -- '- PASS AnyDoc converted a docx inside the container (route local_anydoc)\n' >> "$EVIDENCE"
 
   submit "smoke-graceful-0001" "$(newuuid)" "${RUN_DIR}/a-conflict.json" "${RUN_DIR}/a-conflict.h"
   assert_eq "conflict after restart" "$(status_of "${RUN_DIR}/a-conflict.h")" "409"

@@ -2,8 +2,8 @@
 
 **Status:** Approved direction; implementation in progress
 **Target:** CPU-only Rust/Axum service in Docker Compose
-**Current milestone:** M3 — AnyDoc and local format routing
-**Latest verified checkpoint:** `01f1bf1` — M2 Increments 0-6, M2 closed
+**Current milestone:** M3. AnyDoc and local format routing
+**Latest verified checkpoint:** `01f1bf1`. M2 Increments 0-6, M2 closed
 **Session handoff:** [`HANDOFF.md`](HANDOFF.md)
 **Last updated:** 2026-08-18
 
@@ -14,6 +14,15 @@ reconciliation, live readiness, the capabilities/OpenAPI update, Compose
 AnyDoc for proven non-PDF formats; the Increment 0 spike returned go with a
 bounded-child-worker containment decision, recorded in
 [`BACKEND_EPIC.md`](BACKEND_EPIC.md).
+
+## Documentation style
+
+Project docs use **standard** STE voice: American spelling, active voice, no
+em dashes, no semicolons between independent sentences. Use a colon in section
+titles (`## M3: AnyDoc and local format routing`), in increment tables
+(`| 0: AnyDoc spike |`), and in doc-map link lines (`[HANDOFF.md](HANDOFF.md):
+session state`). Keep one name for one thing across documents. Do not rewrite
+code, commands, identifiers, or quotations to match prose rules.
 
 ## Goal
 
@@ -84,7 +93,7 @@ The initial production Compose stack contains two services:
 - `proxy`: Caddy, internal TLS, and the only published LAN port; and
 - `converter`: the Rust API and its single durable worker loop.
 
-SQLite is embedded in `converter`; it is not a separate container. Development
+SQLite is embedded in `converter`. It is not a separate container. Development
 continues to publish the converter on loopback and can omit Caddy.
 
 ## Fixed decisions
@@ -346,7 +355,7 @@ the internal topology.
 - Datalab credentials remain backend-only; `local_only` content is never sent
   externally.
 - Logs contain request/job/attempt IDs, routes, versions, timings, and stable
-  error codes—not source content or credentials.
+  error codes, not source content or credentials.
 - Exact engine versions, output hashes, warnings, and fallback reasons are
   recorded in the database and manifest.
 - Backup and restore treat SQLite plus job artifacts as one coordinated

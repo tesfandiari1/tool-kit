@@ -137,6 +137,22 @@ impl DocumentClassification {
             Self::StructuredDocument => "structured_document",
         }
     }
+
+    /// The inverse of `as_str`. Kept beside it on purpose: startup recovery
+    /// validates stored classifications, and a copy of this vocabulary living
+    /// in another module silently rejected `structured_document` and refused
+    /// to boot after any AnyDoc job succeeded.
+    pub(crate) fn from_stored(value: &str) -> Option<Self> {
+        [
+            Self::TextBased,
+            Self::Scanned,
+            Self::ImageBased,
+            Self::Mixed,
+            Self::StructuredDocument,
+        ]
+        .into_iter()
+        .find(|candidate| candidate.as_str() == value)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

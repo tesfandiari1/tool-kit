@@ -2,7 +2,7 @@
 
 **Status:** Complete
 **Epic tickets:** CVR-020 through CVR-029
-**Latest verified checkpoint:** `01f1bf1` — Increments 0-6 complete and
+**Latest verified checkpoint:** `01f1bf1`. Increments 0-6 complete and
 committed on `main`; M2 is closed.
 **Complexity:** Medium-high
 **Estimated implementation shape:** One baseline increment plus six bounded
@@ -55,13 +55,13 @@ Excluded from this unit:
 
 | Increment | Status | Notes |
 |---|---|---|
-| 0 — Contract freeze | Complete | Baseline and generated-client parity recorded |
-| 1 — Persistence foundation | Complete | SQLite repository, migration, transactions, recovery queries |
-| 2 — Durable ingest/artifacts | Complete | Persistent source/artifact ownership and restart-visible API reads |
-| 3 — Single durable worker | Complete | One FIFO runner; adversarial lifecycle and integrity fixes verified |
-| 4 — Startup reconciliation | Complete | State-specific recovery and bounded bundle validation verified |
-| 5 — Runtime and Compose | Complete | Live readiness, persistent capabilities/OpenAPI, `/data` volume |
-| 6 — Adversarial/release gates | Complete | Fault barriers, integrity matrices, and graceful/forced restart smokes on the built image |
+| 0: Contract freeze | Complete | Baseline and generated-client parity recorded |
+| 1: Persistence foundation | Complete | SQLite repository, migration, transactions, recovery queries |
+| 2: Durable ingest/artifacts | Complete | Persistent source/artifact ownership and restart-visible API reads |
+| 3: Single durable worker | Complete | One FIFO runner; adversarial lifecycle and integrity fixes verified |
+| 4: Startup reconciliation | Complete | State-specific recovery and bounded bundle validation verified |
+| 5: Runtime and Compose | Complete | Live readiness, persistent capabilities/OpenAPI, `/data` volume |
+| 6: Adversarial/release gates | Complete | Fault barriers, integrity matrices, and graceful/forced restart smokes on the built image |
 
 The settled Increment 5 checkpoint passed format, check, Clippy with warnings
 denied, `git diff --check`, `docker compose config`, `docker build`, and 96
@@ -222,7 +222,7 @@ No API request spawns a conversion task.
 
 ## Work sequence
 
-### Increment 0 — Freeze the M1 contract
+### Increment 0: Freeze the M1 contract
 
 Related: CVR-028; CVR-019 remains the completed M1 coverage ticket.
 
@@ -238,7 +238,7 @@ Related: CVR-028; CVR-019 remains the completed M1 coverage ticket.
 Exit: current behavior is protected by tests, and any intentional contract
 change will be visible.
 
-### Increment 1 — Persistence foundation
+### Increment 1: Persistence foundation
 
 Related: CVR-020, CVR-021, CVR-022.
 
@@ -280,7 +280,7 @@ backend/src/conversion/registry.rs   # removed or reduced to repository types
 Exit: the repository passes migration, CRUD, transition, idempotency, and
 claim tests against a file-backed temporary SQLite database.
 
-### Increment 2 — Durable ingest and artifacts
+### Increment 2: Durable ingest and artifacts
 
 Related: CVR-021, CVR-023, CVR-025.
 
@@ -321,7 +321,7 @@ backend/src/persistence/sqlite.rs
 Exit: a returned `202` can be recovered from a new process using only the same
 database and `/data` tree; a failed submission leaves no accepted job.
 
-### Increment 3 — Single durable worker
+### Increment 3: Single durable worker
 
 Related: CVR-024, CVR-025.
 
@@ -355,7 +355,7 @@ backend/src/engines/pdf_inspector.rs
 Exit: submissions never create conversion tasks directly, queue order is
 deterministic, and one worker processes queued jobs across wake-up and polling.
 
-### Increment 4 — Startup reconciliation
+### Increment 4: Startup reconciliation
 
 Related: CVR-026.
 
@@ -393,7 +393,7 @@ backend/src/app.rs
 Exit: every crash window has a deterministic next state, and restart cannot
 manufacture success or start concurrent attempts for one job.
 
-### Increment 5 — Runtime and Compose integration
+### Increment 5: Runtime and Compose integration
 
 Related: CVR-027.
 
@@ -434,7 +434,7 @@ exit is wired, not yet demonstrated: `/data` is a named volume the image
 pre-creates as `10001:10001`, and the Increment 6 smoke against the built
 container is what proves a restart keeps the jobs.
 
-### Increment 6 — Failure and release verification
+### Increment 6: Failure and release verification
 
 Related: CVR-028, CVR-029.
 

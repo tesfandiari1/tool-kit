@@ -20,6 +20,7 @@ with, the adapter is broken.
 | `anydoc/deepnest.ppt` | `tests/fixtures/abuse/deepnest--errors.ppt` | MIT |
 | `anydoc/hugespan.pptx` | `tests/fixtures/abuse/hugespan--errors.pptx` | MIT |
 | `anydoc/truncated.xls` | derived: first 2000 bytes of `sheet.xls` | MIT |
+| `anydoc/truncated.xlsx` | derived: first 2000 bytes of `sheet.xlsx` | MIT |
 | `anydoc/truncated.epub` | derived: first 2000 bytes of `book.epub` | MIT |
 
 The fuller per-family matrix, including failure fixtures, is Increment 4

@@ -46,10 +46,6 @@ pub struct AnyDocEngine {
     permits: Arc<Semaphore>,
 }
 
-/// The one signature-less format: detection cannot see CSV, so the declared
-/// media type names it. Every other format is content-detected only.
-const CSV_MEDIA_TYPE: &str = "text/csv";
-
 impl AnyDocEngine {
     pub fn new(max_output_bytes: u64, parser_concurrency: usize, timeout: Duration) -> Self {
         Self {
@@ -85,9 +81,9 @@ impl AnyDocEngine {
         &self,
         paths: &AttemptPaths,
         source: ValidatedOpenFile,
-        _permit: OwnedSemaphorePermit,
+        permit: OwnedSemaphorePermit,
         cancellation: watch::Receiver<bool>,
-        media_type: &str,
+        admitted_label: &str,
     ) -> Result<EngineOutcome, EngineFailure> {
         if *cancellation.borrow() {
             return Err(EngineFailure::Interrupted);
@@ -115,15 +111,28 @@ impl AnyDocEngine {
         if detected == Some(anydoc::Format::Pdf) {
             return Ok(rejected(AnyDocRejection::UnsupportedDocument));
         }
-        let hint = (media_type == CSV_MEDIA_TYPE).then_some(anydoc::Format::Csv);
-        let Some(format) = detected.or(hint) else {
+        let Some(format) = detected else {
             // Admission promised a known extension; content that detects as
             // nothing is corrupt or mislabeled, not "unsupported".
             return Ok(rejected(AnyDocRejection::InvalidDocument));
         };
+        // docx, xlsx, pptx and epub share one ZIP magic (doc/xls/ppt one OLE
+        // magic), so admission cannot tell them apart. Catch the cross-family
+        // mislabel here, before parsing: otherwise the file converts fine and
+        // the manifest check rejects it afterwards as `artifact_integrity_failed`,
+        // a corruption code, for what is only a misnamed upload.
+        if format_label(format) != admitted_label {
+            return Ok(rejected(AnyDocRejection::InvalidDocument));
+        }
 
         let conversion = self
             .run_bounded(move || {
+                // Held inside the blocking closure, not by `convert`. On
+                // timeout the task detaches and keeps parsing, so releasing
+                // the permit when this function returns would let the next
+                // job parse alongside it and break the one-parse-per-engine
+                // invariant the epic states.
+                let _permit = permit;
                 let started = Instant::now();
                 let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                     anydoc::to_markdown_bytes(&bytes, format)
@@ -299,7 +308,7 @@ mod tests {
         let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
-            .convert(&paths, source, permit, cancellation, "application/rtf")
+            .convert(&paths, source, permit, cancellation, "rtf")
             .await
             .unwrap();
 
@@ -335,7 +344,7 @@ mod tests {
         let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
-            .convert(&paths, source, permit, cancellation, "application/rtf")
+            .convert(&paths, source, permit, cancellation, "rtf")
             .await
             .unwrap();
 
@@ -369,42 +378,5 @@ mod tests {
         let result: Result<(), EngineFailure> =
             engine.run_bounded(|| panic!("deliberate test panic")).await;
         assert_eq!(result.unwrap_err(), EngineFailure::Crashed);
-    }
-
-    #[tokio::test]
-    async fn csv_converts_through_the_media_type_hint() {
-        let directory = tempfile::tempdir().unwrap();
-        let attempt = directory.path().join("attempt");
-        let publication_staging = attempt.join("publication.staging");
-        std::fs::create_dir_all(&publication_staging).unwrap();
-        let paths = AttemptPaths {
-            source: attempt.join("input"),
-            published: attempt.join("artifacts"),
-            publication_staging,
-            attempt,
-        };
-        let csv = b"kind,value\nalpha,1\n".as_slice();
-        let source_path = directory.path().join("source.csv");
-        tokio::fs::write(&source_path, csv).await.unwrap();
-        let source = ValidatedOpenFile {
-            file: tokio::fs::File::open(&source_path).await.unwrap(),
-            byte_length: csv.len() as u64,
-            sha256: hex::encode(Sha256::digest(csv)),
-        };
-
-        let engine = AnyDocEngine::new(1024 * 1024, 1, Duration::from_secs(30));
-        let permit = engine.acquire().await.unwrap();
-        let (_cancel, cancellation) = watch::channel(false);
-        let outcome = engine
-            .convert(&paths, source, permit, cancellation, "text/csv")
-            .await
-            .unwrap();
-
-        let EngineOutcome::Converted { analysis, .. } = outcome else {
-            panic!("csv must convert through the hint");
-        };
-        assert_eq!(analysis.diagnostics["format"], "csv");
-        let markdown = std::fs::read_to_string(paths.staged_markdown()).unwrap();
-        assert!(markdown.contains("alpha"));
     }
 }

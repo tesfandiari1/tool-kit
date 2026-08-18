@@ -5,8 +5,8 @@ use crate::{
     artifacts::{ArtifactError, PublicationState},
     conversion::{ArtifactReadFailure, ConversionService},
     persistence::{
-        AttemptState, ConversionState, FailedResult, FailureStage, RepositoryError, RequeueOutcome,
-        StoredConversion, StoredFailure,
+        AttemptState, ConversionState, DocumentClassification, FailedResult, FailureStage,
+        RepositoryError, RequeueOutcome, StoredConversion, StoredFailure,
     },
 };
 
@@ -324,7 +324,7 @@ fn validate_candidate_invariants(job: &StoredConversion) -> Result<(), StartupRe
 }
 
 fn is_known_classification(value: &str) -> bool {
-    matches!(value, "text_based" | "scanned" | "image_based" | "mixed")
+    DocumentClassification::from_stored(value).is_some()
 }
 
 fn invalid_metadata<T>(

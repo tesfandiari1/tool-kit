@@ -1,9 +1,10 @@
 # Tool-Kit conversion backend
 
 This standalone Rust/Axum service is the production foundation for the Tool-Kit
-desktop app's conversion backend. Its completed M1 slice accepts authenticated
-PDF uploads, converts complete native-text PDFs locally with `pdf-inspector`,
-and exposes job status, Markdown, and a versioned provenance manifest.
+desktop app's conversion backend. It accepts authenticated uploads, converts
+native-text PDFs with `pdf-inspector`, and converts supported non-PDF formats
+with AnyDoc. It exposes job status, Markdown, and a versioned provenance
+manifest.
 
 **Conversions are durable.** Accepted uploads, job records, idempotency
 records, and published artifacts live in an embedded SQLite database and an
@@ -13,10 +14,9 @@ or interrupted job is reconciled and resumed on the next start.
 The service is still **loopback-only**. Do not expose it to the LAN yet.
 Stronger parser isolation, per-device credentials, TLS, backups, and the TrueNAS
 overlay remain release-gated milestones in
-[`../docs/BACKEND_EPIC.md`](../docs/BACKEND_EPIC.md). The remaining M2 work is
-in [`../docs/BACKEND_EXECUTION_PLAN.md`](../docs/BACKEND_EXECUTION_PLAN.md), and
-parallel sessions start at [`../docs/HANDOFF.md`](../docs/HANDOFF.md). AnyDoc
-and Datalab follow only after the restart gates pass.
+[`../docs/BACKEND_EPIC.md`](../docs/BACKEND_EPIC.md). M2 is closed. M3 is in
+progress. Parallel sessions start at [`../docs/HANDOFF.md`](../docs/HANDOFF.md).
+Datalab routing is not active yet.
 
 The service is permanently CPU-only. It contains no local OCR, model-serving,
 PDFium, ONNX, or accelerator runtime. PDFs that are scanned, image-based, mixed,
@@ -30,20 +30,20 @@ without publishing partial Markdown. Datalab routing is not active yet.
 | `GET` | `/health/live` | Public | Process liveness, no dependencies |
 | `GET` | `/health/ready` | Public | Probe the database, data root, and worker |
 | `GET` | `/api/v1/capabilities` | Public | Current formats, profiles, capacity, and limits |
-| `POST` | `/api/v1/conversions` | Bearer | Stream and submit one PDF |
+| `POST` | `/api/v1/conversions` | Bearer | Stream and submit one supported document |
 | `GET` | `/api/v1/conversions/{id}` | Bearer | Poll one durable conversion |
 | `GET` | `/api/v1/conversions/{id}/artifacts` | Bearer | List published artifacts |
 | `GET` | `/api/v1/conversions/{id}/artifacts/markdown` | Bearer | Stream Markdown |
 | `GET` | `/api/v1/conversions/{id}/artifacts/manifest` | Bearer | Stream manifest JSON |
 
 The complete live contract is [`openapi/openapi.yaml`](openapi/openapi.yaml).
-Collection lookup, cancellation, retries, purge, non-PDF formats, and remote
-conversion are absent until their tracked milestones are implemented.
+Collection lookup, cancellation, retries, purge, and remote conversion are
+absent until their tracked milestones land.
 
 Profiles accepted today:
 
-- `standard` and `local_only` run the same local PDF path. A document that
-  cannot complete safely returns `needs_remote`; nothing is transmitted.
+- `standard` and `local_only` run the same local path. A document that
+  cannot complete safely returns `needs_remote`. Nothing is transmitted.
 - `best_quality` is a valid future profile but returns `409 profile_unavailable`
   until the Datalab adapter exists.
 

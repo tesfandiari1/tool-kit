@@ -1,33 +1,57 @@
 # Session handoff
 
 **Last updated:** 2026-08-18
-**Branch:** `main`. Backend code checkpoint `61fbe40`; later commits may be
-docs-only or M6 desktop work. `codex/backend-m2` (PR #1, PR #3) and
-`backend/m2-increment-5` (PR #4) are merged and deleted. Branch fresh off
-`main` for the next milestone.
-**Backend checkpoint:** `61fbe40` — M3 Increments 0-4 committed on `main`.
-AnyDoc converts the desktop seven (doc, docx, ppt, pptx, xls, xlsx, epub)
-in-process with a hard timeout; contract is 0.4.0; the container smoke passes
-with AnyDoc linked in.
-**Recorded code state:** the tree is clean. `3b99686` landed the shared clippy
-deny-set and docs sweep from the parallel session.
+**Branch:** `main`, HEAD `5f298f6`. Branch fresh off `main` for M6.
+**Backend checkpoint:** `5f298f6` plus an **uncommitted M3 close-out** in the
+worktree. M3 is complete: AnyDoc converts the desktop seven (doc, docx, ppt,
+pptx, xls, xlsx, epub) in-process under a hard timeout, contract is 0.4.0, and
+the container smoke converts a docx inside the image.
+**Recorded code state: the tree is dirty, in two unrelated piles.**
+1. The M3 close-out (this session): `backend/src/{engines/anydoc.rs,
+   jobs/recovery.rs, persistence/model.rs, conversion/service.rs}`,
+   `backend/tests/`, `backend/scripts/container-smoke.sh`, `BACKEND_EPIC.md`,
+   and this file. Gate is green; ready to commit.
+2. A **repo-wide prose sweep from a parallel session** (em dash to colon or
+   period) across `CLAUDE.md`, `AGENTS.md`, `README.md`,
+   `backend/README.md`, `backend/evals/README.md`, and four `docs/` files.
+   Mostly punctuation, but it carries a handful of real content edits and it
+   rewrote the generator-owned `<!-- gitnexus:start -->` block, which
+   `gitnexus analyze --index-only` exists to leave alone. **Six of those files
+   are outside backend ownership. Commit it separately, by whoever made it.**
+   Do not fold it into a backend commit and do not revert it blind.
 **Read this first** in any parallel session, then re-read the live worktree.
 This file goes stale the moment someone lands a commit.
 
 ## Do this next
 
-1. **Run M3 Increment 4 in the backend session; M6 may run in parallel.**
-   Sequencing decided 2026-08-18: the backend session takes M3 per the
-   increment table in `docs/BACKEND_EPIC.md`, and a desktop session may run
-   M6 from `docs/DESKTOP_EXECUTION_PLAN.md` at the same time. The one
-   coordination point is `pnpm generate:api` after the M2/CVR-027 and M3
-   deltas; the M3 session never writes `src/app/api/schema.ts`.
-   Increments 0-4 are complete except one batch: **rtf, odt, ods, odp, and
-   csv** remain for CVR-036 — five admission rows, migration 0003 for the
-   five media types, five fixtures, five contract tests. The adapter's CSV
-   extension hint is already in and unit-tested. Then the M3 gate review
-   closes M3. CVR-039 (skip redundant parse re-read) is optional M3.5 after
-   the gate. M2 is closed.
+1. **M3 is closed. Commit the close-out, then start M6.** The M3 gate is met
+   (see the 2026-08-18 close-out entry in `docs/BACKEND_EPIC.md`). M6 begins
+   with `pnpm generate:api`: the committed `src/app/api/schema.ts` trails
+   OpenAPI 0.4.0 by the CVR-027 and M3 deltas. Read the diff, do not
+   hand-reconcile it.
+
+   **CVR-036 was closed by narrowing, not by building.** rtf, odt, ods, odp,
+   and csv are **not planned**. The desktop cannot send them
+   (`src-tauri/src/jobs.rs`; `collect_input_files` drops them before upload),
+   so five admission rows, a migration 0003, five fixtures, and five contract
+   tests would have bought zero users. The rule is *advertise only what the
+   desktop sends*.
+
+   **The real format gap runs the other way.** Ten extensions the desktop does
+   accept have no local engine: png, jpg, jpeg, webp, tiff, tif, gif, bmp,
+   html, htm. AnyDoc cannot serve any of them. Those belong to the remote
+   route (M5) or the desktop per-file fallback (M6). CVR-065 must gate Run on
+   `capabilities.inputFormats` rather than assume the backend takes all 18.
+
+   **A PDF-shaped assumption in an engine-neutral layer crash-looped the
+   service, and PDF-only tests hid it.** Startup recovery knew only the four
+   PDF classifications, so the first successful AnyDoc job made the next boot
+   fail with `PersistedMetadataInvariant` and exit 1. When you add an engine,
+   grep for the other engine's vocabulary in shared layers, and make at least
+   one restart and one container test use the new engine's input.
+
+   CVR-039 (skip the redundant parse re-read) stays optional and unscheduled.
+   Measure first. M1 and M2 are closed.
 
    **Run the container smokes with a CPU-capped builder.** The image build is
    the only part that saturates the machine, and the default builder lives
@@ -48,41 +72,22 @@ This file goes stale the moment someone lands a commit.
    that arms it. Its four call sites sit between committed transactions on
    purpose: a parked task must hold no SQLite write lock, or a restarted
    `AppState` could not open the same database.
-2. **Increment 5 is done and needs review, not redoing.** Readiness probes
-   SQLite, the data root, and the runner; capabilities report
-   `durability: "persistent"` and `maxActiveJobs`; OpenAPI and `Cargo.toml` are
-   both `0.3.0`; Compose mounts the named volume `converter-data` at `/data`.
-   The TypeScript delta was generated and diffed under `/private/tmp` only, so
-   `src/app/api/schema.ts` is still byte-identical and belongs to M6.
+2. **M1 and M2 are closed and merged; do not redo them.** The blow-by-blow
+   lives in the `docs/BACKEND_EPIC.md` verification log. Two traps from that
+   work are still live and still easy to reintroduce: the Dockerfile must
+   keep copying `migrations/` and `build.rs` (or `sqlx::migrate!` cannot
+   compile in the image), and the runtime stage must keep
+   `RUN install -d -o 10001 -g 10001 -m 0700 /data` (a fresh named volume
+   otherwise lands as `root:root` and the service runs as `10001`). No
+   `VOLUME` instruction. it hands plain `docker run` an anonymous volume
+   nobody prunes.
 
-   **Two latent breaks were fixed there; do not reintroduce them.**
-   - The Dockerfile builder copied only `Cargo.toml Cargo.lock src`, so
-     `sqlx::migrate!("./migrations")` had no SQL to read at compile time and the
-     image had not built since `e8e8ca5` introduced that macro. `migrations/`
-     and `build.rs` are now build inputs.
-   - Compose never mounted `/data`, so every container restart lost the
-     database and every artifact while the contract claimed durability.
+   **One reviewed finding stays open on purpose.** `/health/ready` is
+   unauthenticated and opens a `BEGIN IMMEDIATE` transaction against a
+   four-connection pool per request, so a local process can flood it and
+   contend the write lock with the job runner. Exposure is loopback-only
+   today. Give it a real rate limit when Caddy and LAN exposure land (M7).
 
-   Both fixes were checked against a real build, not read off the Dockerfile.
-   `docker build -t tool-kit-converter:m2 backend` succeeds, and `ls -ldn /data`
-   inside that image reports mode `drwx------` owned by `10001:10001`.
-
-   **Gotcha: a fresh named volume takes the ownership of the image directory it
-   covers, and falls back to `root:root` when the image has no such directory.**
-   The service runs as `10001:10001`, so the runtime stage must keep
-   `RUN install -d -o 10001 -g 10001 -m 0700 /data` or the first
-   `docker compose up` cannot write. No `VOLUME` instruction: that hands plain
-   `docker run` an anonymous volume nobody prunes.
-
-   **One reviewed finding was left open on purpose.** `/health/ready` is
-   unauthenticated and now opens a `BEGIN IMMEDIATE` transaction against a
-   four-connection pool on every request, so a local process can flood it and
-   contend the SQLite write lock with the job runner. Per-request work is
-   bounded at two seconds, aggregate concurrency is not. It was not fixed
-   because neither obvious fix is free: caching a passing result reintroduces
-   the stale readiness this increment removed, and a concurrency cap changes
-   latency semantics under load. Exposure is loopback-only today. Give it a
-   real rate limit when Caddy and LAN exposure land, where that belongs.
 3. **Desktop OpenAPI prep is done; M6 still owns the wire-up.** The user
    authorized shaping the frontend to the contract ahead of M6. `src/app/api/`
    is a standard openapi-typescript/openapi-fetch layer, and
@@ -95,21 +100,7 @@ This file goes stale the moment someone lands a commit.
    `durability: "persistent"`, `maxActiveJobs` for `maxEphemeralJobs`, and the
    reworded summaries. Run `pnpm generate:api` as the first step of M6, not
    before.
-4. **Everything through Increment 5 is merged to `main` and green.** PR #1
-   (desktop restructure, CI, M1/M2 durability), PR #3 (Increment 4 startup
-   reconciliation), and PR #4 (Increment 5 runtime and Compose) are merged.
-   `main` is at `b70ce44`, the PR #4 merge of `2f3158d`, with the frontend,
-   backend, desktop, and GitGuardian checks all green. No backend work is
-   uncommitted. Re-check live status before editing and keep staging to
-   explicit owned paths.
-
-   **CI is the only gate that sees Linux-only code.** PR #1 failed on a
-   `needless_return` inside `#[cfg(target_os = "linux")]` in
-   `backend/src/bin/tool-kit-pdf-worker.rs`, which macOS never compiles and so
-   can never lint. Cross-compiling locally does not help: `libsqlite3-sys`
-   needs a Linux C toolchain. Treat a local backend pass as necessary but not
-   sufficient, and open a PR so the ubuntu job runs before merging.
-5. **Do not** create a root Cargo workspace, bump TypeScript 7, migrate
+4. **Do not** create a root Cargo workspace, bump TypeScript 7, migrate
    `keyring` 4, unpin `pdf-inspector`, or take `libc` 1.0 (still alpha).
 
 ## Parallel session ownership
@@ -118,7 +109,7 @@ This file goes stale the moment someone lands a commit.
 |---|---|---|
 | Backend / M2 | `backend/**`, `docs/BACKEND_*.md`, this file | `src/**`, `src-tauri/**` |
 | Desktop | `src/**`, `src-tauri/**` | `backend/**` persistence/worker/OpenAPI |
-| Shared docs | `README.md`, `CLAUDE.md` — append or reconcile | Reverting the other session's section |
+| Shared docs | `README.md`, `CLAUDE.md`: append or reconcile | Reverting the other session's section |
 
 Planning docs live in `docs/`, not the repo root. The baseline owned-path list
 is in `docs/BACKEND_BASELINE.md`. Shared repo files (`.github/`, `LICENSE`,
@@ -207,51 +198,16 @@ the root is the required layout, not clutter.
   namespaces. ESLint blocks importing the generated schema outside
   `src/app/api/`. Nothing consumes the client yet; `service_request` has no
   Rust handler until M6.
-- Backend M1 (authenticated loopback PDF slice) is complete and committed.
-- M2 Increment 0 (contract freeze) is complete on this branch (`433b6c3`,
-  later `d8445a5`).
-- M2 Increments 1-2 are complete: SQLite is the live job/idempotency store,
-  sources and artifacts use the persistent data root, submissions are durable
-  before `202`, and completed jobs/artifacts survive `AppState` restart.
-- M2 Increment 3 is complete and verified: one FIFO
-  runner claims from SQLite, wakes through `Notify`, polls as a fallback, uses
-  an exact validated source handle, verifies source length/SHA-256 again inside
-  the worker, fails closed on durable-state uncertainty, and performs bounded
-  cancellation/shutdown under the HTTP supervisor's same deadline. The settled
-  gate passed format, check, Clippy, `git diff --check`, and 77 backend tests;
-  the backend-only checkpoint is `f189265`.
-- M2 Increment 4 is complete and verified: startup reconciliation runs before
-  the worker, preserves interrupted attempt history, bounds fresh attempts,
-  validates sources and exact published bundles, fails corrupt historical
-  successes closed while retaining audit data, and quarantines only canonical
-  unowned job trees. The settled gate passed format, check, Clippy,
-  `git diff --check`, and 90 backend tests (54 library, 1 server, 3 worker, 32
-  HTTP contract) on the default test stack. The checkpoint is `449d7cb`.
-- M2 Increment 5 is complete and merged. `/health/ready`
-  runs three concurrent two-second-bounded checks (SQLite write transaction, a
-  create-and-remove probe file under `<data root>/.health/`, runner
-  failed/stopped) and answers `503` with per-check detail when any fails, while
-  `/health/live` stays dependency-free. Capabilities report persistent
-  durability and `maxActiveJobs`. OpenAPI and `backend/Cargo.toml` are both
-  `0.3.0`, and a contract test now pins `info.version` to `CARGO_PKG_VERSION`.
-  Compose mounts `converter-data` at `/data` and mirrors the image healthcheck
-  timing. The gate passed format, check, Clippy with warnings denied,
-  `git diff --check`, `docker compose config`, `docker build`, and 96 backend
-  tests (56 library, 1 server, 3 worker, 36 HTTP contract).
+- Backend M1, M2, and M3 are complete. M1 shipped the loopback PDF slice; M2
+  made jobs, sources, and artifacts durable across restart; M3 added AnyDoc
+  for the seven non-PDF desktop formats. Per-increment evidence, checkpoints,
+  and test counts are in the `docs/BACKEND_EPIC.md` verification log rather
+  than repeated here.
 - **`TOOLKIT_CONVERTER_SCRATCH_PARENT` is dead config.** `config.rs` parses and
-  validates it, and nothing else reads it. Increment 5 left it in place on
-  purpose, because removing an environment variable changes the public surface
-  and deserves its own decision. `backend/.env.example` and `backend/README.md`
-  both say so. Do not wire it to anything on the assumption it was forgotten.
-- M2 is closed. Increment 6 landed the fault barrier, a ten-case integrity
-  matrix, the missing failure modes, and `backend/scripts/container-smoke.sh`.
-  The gate passed format, check, Clippy with warnings denied,
-  `git diff --check`, `docker compose config`, and 119 backend tests (59
-  library, 1 server, 3 worker, 36 HTTP contract, 5 crash recovery, 10 integrity
-  matrix, 5 failure modes), run three times with no flakes. Both smokes pass:
-  graceful exits `0`, forced kill exits `137` with 238,992 bytes of
-  uncheckpointed WAL, and recovery mints a fresh attempt whose Markdown hash
-  matches the graceful run byte for byte.
+  validates it and nothing reads it. Left in place on purpose: removing an
+  environment variable changes the public surface and deserves its own
+  decision. `backend/.env.example` and `backend/README.md` both say so. Do not
+  wire it to anything on the assumption it was forgotten.
 - **Deferred from Increment 6, on the record:** output-write failure injection
   (no portable way to induce it), the M1 PDF fixture corpus (no `.pdf` exists in
   the repo; that is CVR-040 in M4), and a multi-process restart test in Rust
@@ -270,7 +226,7 @@ catch-up:
 ```bash
 pnpm outdated
 pnpm update --latest
-# then pin TypeScript back to 6.x — 7 breaks typescript-eslint
+# then pin TypeScript back to 6.x: 7 breaks typescript-eslint
 pnpm add -D typescript@6.0.3
 
 cargo update --manifest-path backend/Cargo.toml
@@ -354,6 +310,13 @@ Put the prohibitions in the prompt when you fan work out to subagents here.
   files come back with `git checkout HEAD --`; an untracked file is simply gone,
   so `git add` new work early.
 
+- **A read-only "audit and synthesize" fan-out is the wrong shape for this
+  repo.** One was run on 2026-08-18 to review M3: it produced a long ranked
+  report and fixed nothing, while the blocker, the missing xlsx fixture, the
+  PDF-only smoke, and the dead CSV hint all came from reading the code
+  directly. If you fan work out here, have the agents land patches behind a
+  gate, or do not fan it out.
+
 Cap the Docker build rather than letting it take all cores. See the capped
 builder recipe under "Do this next".
 
@@ -380,7 +343,8 @@ it by hand before closing any milestone that touches persistence, the worker,
 the Dockerfile, or Compose. Its evidence lands in
 `backend/target/container-smoke/<utc-timestamp>/evidence.md`, which is
 gitignored; paste the relevant lines into the epic rather than linking the path.
-The Increment 6 run was `20260818T060016Z` against image `sha256:7ce986e7…`.
+The latest run is `20260818T195919Z` against image `sha256:7b765043…`: both
+phases pass and the evidence includes the in-container AnyDoc docx conversion.
 
 ## Doc map
 
