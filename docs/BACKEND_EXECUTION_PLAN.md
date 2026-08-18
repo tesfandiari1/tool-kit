@@ -2,6 +2,7 @@
 
 **Status:** Approved — implementation in progress
 **Epic tickets:** CVR-020 through CVR-029
+**Latest verified checkpoint:** `449d7cb` — Increments 0-4 complete
 **Complexity:** Medium-high
 **Estimated implementation shape:** One baseline increment plus six bounded
 implementation increments, each independently testable
@@ -57,13 +58,14 @@ Excluded from this unit:
 | 1 — Persistence foundation | Complete | SQLite repository, migration, transactions, recovery queries |
 | 2 — Durable ingest/artifacts | Complete | Persistent source/artifact ownership and restart-visible API reads |
 | 3 — Single durable worker | Complete | One FIFO runner; adversarial lifecycle and integrity fixes verified |
-| 4 — Startup reconciliation | Next | Not implemented yet |
+| 4 — Startup reconciliation | Complete | State-specific recovery and bounded bundle validation verified |
 | 5 — Runtime and Compose | Pending | Readiness, capabilities/OpenAPI, `/data` mount |
 | 6 — Adversarial/release gates | Pending | Image build and graceful/forced restart smokes |
 
-The settled Increment 3 checkpoint passed format, check, Clippy, `git diff
---check`, and 77 backend tests. This is not the final M2 result; recovery,
-runtime-contract, Compose, and image restart gates remain.
+The settled Increment 4 checkpoint passed format, check, Clippy, `git diff
+--check`, and 90 backend tests. This is not the final M2 result;
+runtime-contract, Compose, and image restart gates remain. The checkpoint is
+committed as `449d7cb`.
 
 ## Requirements and acceptance rules
 
@@ -339,26 +341,26 @@ deterministic, and one worker processes queued jobs across wake-up and polling.
 
 Related: CVR-026.
 
-- [ ] Implement the state-specific recovery table above in one explicit
+- [x] Implement the state-specific recovery table above in one explicit
   reconciler.
-- [ ] Run recovery before readiness turns healthy and before the worker claims
+- [x] Run recovery before readiness turns healthy and before the worker claims
   new jobs.
-- [ ] Validate published artifact containment, file type, byte count, hash, and
+- [x] Validate published artifact containment, file type, byte count, hash, and
   manifest identity during reconciliation and download.
-- [ ] If a previously successful job has a missing or invalid required artifact,
+- [x] If a previously successful job has a missing or invalid required artifact,
   expose `failed` with the stable code `artifact_integrity_failed`, retain its
   attempt and artifact audit metadata, and return no downloadable artifacts.
-- [ ] Fail safely when the immutable source is missing, truncated,
+- [x] Fail safely when the immutable source is missing, truncated,
   hash-mismatched, non-regular, or replaced by a symlink; never run a recovered
   attempt on unverified bytes.
-- [ ] Give each retry a new attempt; never reuse or overwrite an interrupted
+- [x] Give each retry a new attempt; never reuse or overwrite an interrupted
   attempt directory.
-- [ ] Add a conservative orphan scan that only touches generated job paths,
+- [x] Add a conservative orphan scan that only touches generated job paths,
   never follows symlinks, and moves pre-acceptance orphan trees into quarantine
   without deleting them.
-- [ ] Add test-only deterministic fault barriers after entering `finalizing`,
-  immediately after publication rename, and before the success commit.
-- [ ] Emit structured recovery counts and reason codes without document
+- [x] Add deterministic persisted-state fixtures for interruption, publication,
+  and success-commit crash windows.
+- [x] Emit structured recovery counts and reason codes without document
   content.
 
 Likely files:
@@ -547,6 +549,6 @@ M2 is complete only when all of the following are true:
 
 ## Execution boundary
 
-M2 is approved. Increments 0-3 are complete and verified. Execute Increment 4
-startup reconciliation next; do not add AnyDoc or other scope. Parallel
+M2 is approved. Increments 0-4 are complete and verified. Execute Increment 5
+runtime/OpenAPI/Compose integration next; do not add AnyDoc or other scope. Parallel
 sessions start at [`HANDOFF.md`](HANDOFF.md).

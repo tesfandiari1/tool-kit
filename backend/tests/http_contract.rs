@@ -1,6 +1,6 @@
 mod support;
 
-use std::time::Duration;
+use std::{fs, time::Duration};
 
 use axum::{
     body::Body,
@@ -19,8 +19,35 @@ use support::{
     multipart_body, multipart_body_with_duplicate_profile, multipart_body_with_media_type,
     multipart_body_without_source, pdf_with_content, slow_multipart_prefix, streaming_body,
     test_app, test_app_with_max_jobs, test_app_with_output_limit, test_app_with_poll_interval,
-    test_app_with_upload_limits, test_app_with_worker_script, TestHarness, TOKEN,
+    test_app_with_upload_limits, test_app_with_worker_script, SeededJob, TestApp, TestHarness,
+    TOKEN,
 };
+
+async fn initialize_empty_harness(harness: &TestHarness) {
+    let app = harness.app().await;
+    app.shutdown(Duration::from_secs(1)).await;
+    drop(app);
+}
+
+async fn submit_succeeded_job(app: &TestApp, idempotency_key: &str) -> SeededJob {
+    let response = app
+        .submit(
+            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "fixture.pdf"),
+            idempotency_key,
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let submitted = json_body(response).await;
+    let seeded = SeededJob {
+        job_id: Uuid::parse_str(submitted["data"]["id"].as_str().unwrap()).unwrap(),
+        attempt_id: Uuid::parse_str(submitted["data"]["activeAttemptId"].as_str().unwrap())
+            .unwrap(),
+    };
+    let completed = app.wait_for_terminal(&seeded.job_id.to_string()).await;
+    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+    seeded
+}
 
 #[tokio::test]
 async fn public_health_and_capabilities_are_truthful() {
@@ -385,6 +412,267 @@ async fn corrupted_published_artifact_fails_closed_and_preserves_audit_files() {
         .await;
     assert_eq!(json_body(status).await["data"]["status"], "failed");
     assert!(markdown_path.exists());
+}
+
+#[tokio::test]
+async fn converting_job_requeues_with_a_fresh_attempt_and_completes_after_restart() {
+    let harness = TestHarness::new();
+    initialize_empty_harness(&harness).await;
+    let seeded = harness.insert_converting_job(&clean_pdf(), 0).await;
+    let interrupted_attempt = harness
+        .data_dir()
+        .join("jobs")
+        .join(seeded.job_id.to_string())
+        .join("attempts")
+        .join(seeded.attempt_id.to_string());
+
+    let restarted = harness.app().await;
+    let completed = restarted
+        .wait_for_terminal(&seeded.job_id.to_string())
+        .await;
+    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+    assert_ne!(
+        completed["data"]["activeAttemptId"],
+        seeded.attempt_id.to_string()
+    );
+    assert_eq!(harness.attempt_count(seeded.job_id).await, 2);
+    assert!(interrupted_attempt.exists());
+    assert!(!restarted.job_runner_failed());
+}
+
+#[tokio::test]
+async fn recovery_limit_produces_a_stable_failure_without_another_attempt() {
+    let harness = TestHarness::with_recovery_limit(1);
+    initialize_empty_harness(&harness).await;
+    let seeded = harness.insert_converting_job(&clean_pdf(), 1).await;
+
+    let restarted = harness.app().await;
+    let status = restarted
+        .authorized_get(&format!("/api/v1/conversions/{}", seeded.job_id))
+        .await;
+    assert_eq!(status.status(), StatusCode::OK);
+    let status = json_body(status).await;
+    assert_eq!(status["data"]["status"], "failed", "{status:#}");
+    assert_eq!(status["data"]["failure"]["code"], "recovery_limit_exceeded");
+    assert_eq!(
+        status["data"]["activeAttemptId"],
+        seeded.attempt_id.to_string()
+    );
+    assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
+}
+
+#[tokio::test]
+async fn corrupt_active_source_fails_recovery_without_creating_a_retry() {
+    let harness = TestHarness::new();
+    initialize_empty_harness(&harness).await;
+    let seeded = harness.insert_converting_job(&clean_pdf(), 0).await;
+    let source = harness
+        .data_dir()
+        .join("jobs")
+        .join(seeded.job_id.to_string())
+        .join("source/input");
+    fs::write(&source, b"%PDF-1.4\nmutated after durable acceptance\n").unwrap();
+
+    let restarted = harness.app().await;
+    let status = restarted
+        .authorized_get(&format!("/api/v1/conversions/{}", seeded.job_id))
+        .await;
+    let status = json_body(status).await;
+    assert_eq!(status["data"]["status"], "failed", "{status:#}");
+    assert_eq!(status["data"]["failure"]["code"], "source_integrity_failed");
+    assert_eq!(
+        status["data"]["activeAttemptId"],
+        seeded.attempt_id.to_string()
+    );
+    assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
+}
+
+#[tokio::test]
+async fn finalizing_job_with_a_valid_published_bundle_completes_during_restart() {
+    let harness = TestHarness::new();
+    let first = harness.app().await;
+    let seeded = submit_succeeded_job(&first, "recover-valid-finalizing").await;
+    first.shutdown(Duration::from_secs(1)).await;
+    drop(first);
+    harness.demote_succeeded_to_finalizing(seeded).await;
+
+    let restarted = harness.app().await;
+    let status = restarted
+        .authorized_get(&format!("/api/v1/conversions/{}", seeded.job_id))
+        .await;
+    let status = json_body(status).await;
+    assert_eq!(status["data"]["status"], "succeeded", "{status:#}");
+    assert_eq!(
+        status["data"]["activeAttemptId"],
+        seeded.attempt_id.to_string()
+    );
+    assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
+    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 2);
+    for name in ["markdown", "manifest"] {
+        let download = restarted
+            .authorized_get(&format!(
+                "/api/v1/conversions/{}/artifacts/{name}",
+                seeded.job_id
+            ))
+            .await;
+        assert_eq!(download.status(), StatusCode::OK, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn corrupted_succeeded_bundle_is_persisted_failed_on_restart_and_retained_for_audit() {
+    let harness = TestHarness::new();
+    let first = harness.app().await;
+    let seeded = submit_succeeded_job(&first, "recover-corrupt-succeeded").await;
+    first.shutdown(Duration::from_secs(1)).await;
+    drop(first);
+
+    let artifacts = harness
+        .data_dir()
+        .join("jobs")
+        .join(seeded.job_id.to_string())
+        .join("attempts")
+        .join(seeded.attempt_id.to_string())
+        .join("artifacts");
+    let markdown = artifacts.join("result.md");
+    let manifest = artifacts.join("manifest.json");
+    fs::write(&markdown, b"corrupted while the service was stopped").unwrap();
+
+    let restarted = harness.app().await;
+    let status = restarted
+        .authorized_get(&format!("/api/v1/conversions/{}", seeded.job_id))
+        .await;
+    let status = json_body(status).await;
+    assert_eq!(status["data"]["status"], "failed", "{status:#}");
+    assert_eq!(
+        status["data"]["failure"]["code"],
+        "artifact_integrity_failed"
+    );
+    assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
+    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 2);
+    assert!(markdown.exists());
+    assert!(manifest.exists());
+    for name in ["markdown", "manifest"] {
+        let download = restarted
+            .authorized_get(&format!(
+                "/api/v1/conversions/{}/artifacts/{name}",
+                seeded.job_id
+            ))
+            .await;
+        assert_eq!(download.status(), StatusCode::NOT_FOUND, "{name}");
+    }
+
+    restarted.shutdown(Duration::from_secs(1)).await;
+    drop(restarted);
+    let second_restart = harness.app().await;
+    let status = second_restart
+        .authorized_get(&format!("/api/v1/conversions/{}", seeded.job_id))
+        .await;
+    let status = json_body(status).await;
+    assert_eq!(status["data"]["status"], "failed", "{status:#}");
+    assert_eq!(
+        status["data"]["failure"]["code"],
+        "artifact_integrity_failed"
+    );
+    assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
+    assert!(markdown.exists());
+    assert!(manifest.exists());
+}
+
+#[tokio::test]
+async fn database_less_canonical_job_is_quarantined_without_touching_an_owned_sibling() {
+    let harness = TestHarness::new();
+    let first = harness.app().await;
+    let owned = submit_succeeded_job(&first, "recover-owned-sibling").await;
+    first.shutdown(Duration::from_secs(1)).await;
+    drop(first);
+
+    let orphan_id = Uuid::new_v4();
+    let orphan = harness.data_dir().join("jobs").join(orphan_id.to_string());
+    fs::create_dir_all(orphan.join("source")).unwrap();
+    fs::write(orphan.join("source/orphan-marker"), b"orphan audit").unwrap();
+    let owned_directory = harness
+        .data_dir()
+        .join("jobs")
+        .join(owned.job_id.to_string());
+
+    let restarted = harness.app().await;
+    assert!(!orphan.exists());
+    assert!(owned_directory.exists());
+    let preacceptance = harness.data_dir().join("quarantine/pre-acceptance");
+    let reservation_prefix = format!("{orphan_id}-");
+    let quarantine = fs::read_dir(preacceptance)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(&reservation_prefix))
+        })
+        .expect("orphan quarantine reservation was not created")
+        .path()
+        .join("job");
+    assert_eq!(
+        fs::read(quarantine.join("source/orphan-marker")).unwrap(),
+        b"orphan audit"
+    );
+    let owned_status = restarted
+        .authorized_get(&format!("/api/v1/conversions/{}", owned.job_id))
+        .await;
+    assert_eq!(json_body(owned_status).await["data"]["status"], "succeeded");
+}
+
+#[tokio::test]
+async fn invalid_finalizing_bundles_requeue_to_a_fresh_attempt() {
+    for case in ["unknown-manifest-field", "extra-publication-file"] {
+        let harness = TestHarness::new();
+        let first = harness.app().await;
+        let seeded = submit_succeeded_job(&first, case).await;
+        first.shutdown(Duration::from_secs(1)).await;
+        drop(first);
+        harness.demote_succeeded_to_finalizing(seeded).await;
+
+        let published = harness
+            .data_dir()
+            .join("jobs")
+            .join(seeded.job_id.to_string())
+            .join("attempts")
+            .join(seeded.attempt_id.to_string())
+            .join("artifacts");
+        match case {
+            "unknown-manifest-field" => {
+                let path = published.join("manifest.json");
+                let mut manifest: Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                manifest
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("unexpected".to_owned(), Value::Bool(true));
+                fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            }
+            "extra-publication-file" => {
+                fs::write(published.join("unexpected.bin"), b"unexpected").unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let restarted = harness.app().await;
+        let completed = restarted
+            .wait_for_terminal(&seeded.job_id.to_string())
+            .await;
+        assert_eq!(
+            completed["data"]["status"], "succeeded",
+            "{case}: {completed:#}"
+        );
+        assert_ne!(
+            completed["data"]["activeAttemptId"],
+            seeded.attempt_id.to_string(),
+            "{case}"
+        );
+        assert_eq!(harness.attempt_count(seeded.job_id).await, 2, "{case}");
+        assert!(published.exists(), "{case}: old audit bundle was removed");
+    }
 }
 
 #[tokio::test]

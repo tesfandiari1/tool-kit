@@ -14,7 +14,7 @@ use axum::{
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
+use sqlx::{sqlite::SqliteConnectOptions, Connection, Row, SqliteConnection};
 use tempfile::TempDir;
 use tokio_util::io::ReaderStream;
 use tower::ServiceExt;
@@ -39,6 +39,7 @@ struct TestOptions {
     max_jobs: usize,
     max_concurrent_uploads: usize,
     worker_poll_interval: Duration,
+    recovery_limit: usize,
 }
 
 impl Default for TestOptions {
@@ -50,15 +51,20 @@ impl Default for TestOptions {
             max_jobs: 8,
             max_concurrent_uploads: 2,
             worker_poll_interval: Duration::from_secs(1),
+            recovery_limit: 3,
         }
     }
 }
 
-/// Owns a reusable filesystem root independently from any one `AppState`.
-///
-/// M1 initializes a fresh ephemeral artifact session beneath this root for each
-/// app. M2 can change only `settings()` to point repeated app initializations at
-/// the same durable database and artifact directory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SeededJob {
+    pub(crate) job_id: Uuid,
+    pub(crate) attempt_id: Uuid,
+}
+
+/// Owns one reusable durable data root independently from any `AppState`.
+/// Repeated app initializations therefore exercise the same SQLite database,
+/// immutable sources, and published artifact trees.
 pub(crate) struct TestHarness {
     workspace: Arc<TempDir>,
     data_dir: PathBuf,
@@ -110,6 +116,12 @@ impl TestHarness {
         harness
     }
 
+    pub(crate) fn with_recovery_limit(recovery_limit: usize) -> Self {
+        let mut harness = Self::new();
+        harness.options.recovery_limit = recovery_limit;
+        harness
+    }
+
     #[cfg(unix)]
     pub(crate) fn with_worker_script(script: &str, worker_timeout: Duration) -> Self {
         use std::os::unix::fs::PermissionsExt;
@@ -132,6 +144,10 @@ impl TestHarness {
     }
 
     pub(crate) async fn insert_queued_without_notification(&self, source: &[u8]) -> Uuid {
+        self.insert_queued_job(source).await.job_id
+    }
+
+    pub(crate) async fn insert_queued_job(&self, source: &[u8]) -> SeededJob {
         let job_id = Uuid::new_v4();
         let attempt_id = Uuid::new_v4();
         let source_directory = self
@@ -175,7 +191,113 @@ impl TestHarness {
             .await
             .unwrap();
         assert!(matches!(outcome, CreateOutcome::Created(_)));
-        job_id
+        SeededJob { job_id, attempt_id }
+    }
+
+    pub(crate) async fn insert_converting_job(
+        &self,
+        source: &[u8],
+        recovery_count: u32,
+    ) -> SeededJob {
+        use tool_kit_converter::persistence::{EngineRecord, LocalStart};
+
+        let seeded = self.insert_queued_job(source).await;
+        let repository = SqliteRepository::open(
+            &self.data_dir,
+            self.options.max_jobs as u32,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        repository
+            .start_local(
+                seeded.job_id,
+                seeded.attempt_id,
+                LocalStart {
+                    engine: EngineRecord {
+                        name: "pdf-inspector".to_owned(),
+                        version: "1.15.0".to_owned(),
+                    },
+                    route: "local_pdf".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        drop(repository);
+
+        if recovery_count > 0 {
+            let mut connection = self.database_connection().await;
+            let updated = sqlx::query(
+                "UPDATE attempts
+                 SET recovery_count = ?1
+                 WHERE conversion_id = ?2 AND id = ?3",
+            )
+            .bind(i64::from(recovery_count))
+            .bind(seeded.job_id.hyphenated().to_string())
+            .bind(seeded.attempt_id.hyphenated().to_string())
+            .execute(&mut connection)
+            .await
+            .unwrap();
+            assert_eq!(updated.rows_affected(), 1);
+        }
+
+        seeded
+    }
+
+    pub(crate) async fn demote_succeeded_to_finalizing(&self, seeded: SeededJob) {
+        let mut connection = self.database_connection().await;
+        let mut transaction = connection.begin().await.unwrap();
+        let deleted = sqlx::query("DELETE FROM artifacts WHERE attempt_id = ?1")
+            .bind(seeded.attempt_id.hyphenated().to_string())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        assert_eq!(deleted.rows_affected(), 2);
+        let attempt = sqlx::query(
+            "UPDATE attempts
+             SET state = 'finalizing', finished_at = NULL
+             WHERE conversion_id = ?1 AND id = ?2 AND state = 'succeeded'",
+        )
+        .bind(seeded.job_id.hyphenated().to_string())
+        .bind(seeded.attempt_id.hyphenated().to_string())
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        assert_eq!(attempt.rows_affected(), 1);
+        let conversion = sqlx::query(
+            "UPDATE conversions
+             SET status = 'finalizing', failure_code = NULL, failure_message = NULL
+             WHERE id = ?1 AND active_attempt_id = ?2 AND status = 'succeeded'",
+        )
+        .bind(seeded.job_id.hyphenated().to_string())
+        .bind(seeded.attempt_id.hyphenated().to_string())
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        assert_eq!(conversion.rows_affected(), 1);
+        transaction.commit().await.unwrap();
+    }
+
+    pub(crate) async fn attempt_count(&self, job_id: Uuid) -> i64 {
+        let mut connection = self.database_connection().await;
+        sqlx::query("SELECT COUNT(*) AS count FROM attempts WHERE conversion_id = ?1")
+            .bind(job_id.hyphenated().to_string())
+            .fetch_one(&mut connection)
+            .await
+            .unwrap()
+            .try_get("count")
+            .unwrap()
+    }
+
+    pub(crate) async fn artifact_row_count(&self, attempt_id: Uuid) -> i64 {
+        let mut connection = self.database_connection().await;
+        sqlx::query("SELECT COUNT(*) AS count FROM artifacts WHERE attempt_id = ?1")
+            .bind(attempt_id.hyphenated().to_string())
+            .fetch_one(&mut connection)
+            .await
+            .unwrap()
+            .try_get("count")
+            .unwrap()
     }
 
     pub(crate) async fn inject_active_attempt_state(&self, job_id: Uuid, state: &str) {
@@ -227,9 +349,16 @@ impl TestHarness {
             pdf_threads: 2,
             database_busy_timeout: Duration::from_secs(5),
             worker_poll_interval: self.options.worker_poll_interval,
-            recovery_limit: 3,
+            recovery_limit: self.options.recovery_limit,
             shutdown_grace: Duration::from_secs(30),
         }
+    }
+
+    async fn database_connection(&self) -> SqliteConnection {
+        let options = SqliteConnectOptions::new()
+            .filename(self.data_dir.join(DATABASE_FILENAME))
+            .foreign_keys(true);
+        SqliteConnection::connect_with(&options).await.unwrap()
     }
 }
 

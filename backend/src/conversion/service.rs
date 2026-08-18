@@ -5,9 +5,10 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::{
     fs::OpenOptions,
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{watch, Notify},
 };
 use uuid::Uuid;
@@ -38,12 +39,14 @@ const MARKDOWN_MEDIA_TYPE: &str = "text/markdown; charset=utf-8";
 const MANIFEST_MEDIA_TYPE: &str = "application/json";
 const LOCAL_ROUTE: &str = "local_pdf";
 const NATIVE_TEXT_REASON: &str = "native_text_pdf";
+const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct ConversionService {
     repository: SqliteRepository,
     artifacts: ArtifactStore,
     engine: PdfInspectorEngine,
+    max_output_bytes: u64,
     work_notification: Arc<Notify>,
 }
 
@@ -52,11 +55,13 @@ impl ConversionService {
         repository: SqliteRepository,
         artifacts: ArtifactStore,
         engine: PdfInspectorEngine,
+        max_output_bytes: u64,
     ) -> Self {
         Self {
             repository,
             artifacts,
             engine,
+            max_output_bytes,
             work_notification: Arc::new(Notify::new()),
         }
     }
@@ -186,6 +191,37 @@ impl ConversionService {
 
     pub(crate) fn work_notification(&self) -> Arc<Notify> {
         Arc::clone(&self.work_notification)
+    }
+
+    pub(crate) fn recovery_repository(&self) -> &SqliteRepository {
+        &self.repository
+    }
+
+    pub(crate) fn recovery_artifacts(&self) -> &ArtifactStore {
+        &self.artifacts
+    }
+
+    pub(crate) async fn validate_recovery_source(
+        &self,
+        job: &StoredConversion,
+    ) -> Result<(), ArtifactReadFailure> {
+        validate_source_metadata(job)?;
+        self.artifacts
+            .validate_source(
+                job.id,
+                Some(job.source.byte_length),
+                Some(&job.source.sha256),
+            )
+            .await
+            .map_err(classify_artifact_error)?;
+        Ok(())
+    }
+
+    pub(crate) async fn validate_finalizing_publication(
+        &self,
+        job: &StoredConversion,
+    ) -> Result<SuccessfulArtifacts, ArtifactReadFailure> {
+        self.validate_published_artifacts(job, None).await
     }
 
     pub(crate) async fn claim_next_queued(
@@ -516,7 +552,7 @@ impl ConversionService {
                 .unwrap_or_else(|| finalizing.created_at.clone()),
             completed_at,
         };
-        let encoded = match serde_json::to_vec_pretty(&manifest) {
+        let encoded = match serde_json::to_vec(&manifest) {
             Ok(encoded) => encoded,
             Err(_) => {
                 self.finish_failure(
@@ -531,7 +567,18 @@ impl ConversionService {
                 return Ok(());
             }
         };
-        let manifest_sha256 = hex::encode(Sha256::digest(&encoded));
+        if encoded.len() as u64 > MAX_MANIFEST_BYTES {
+            self.finish_failure(
+                job_id,
+                attempt_id,
+                FailureStage::Finalizing,
+                "manifest_encoding_failed",
+                "The service could not publish conversion artifacts.",
+                true,
+            )
+            .await?;
+            return Ok(());
+        }
         if write_and_sync_new(&paths.staged_manifest(), &encoded)
             .await
             .is_err()
@@ -577,67 +624,21 @@ impl ConversionService {
             }
         }
 
-        let markdown_validation = self
-            .artifacts
-            .validate_artifact(
-                job_id,
-                attempt_id,
-                PublishedArtifact::Markdown,
-                Some(markdown_bytes),
-                Some(&markdown_sha256),
-            )
-            .await;
-        let manifest_validation = self
-            .artifacts
-            .validate_artifact(
-                job_id,
-                attempt_id,
-                PublishedArtifact::Manifest,
-                Some(encoded.len() as u64),
-                Some(&manifest_sha256),
-            )
-            .await;
-        for validation in [markdown_validation, manifest_validation] {
-            if let Err(error) = validation {
-                match classify_artifact_error(error) {
-                    ArtifactReadFailure::Integrity => {
-                        self.finish_failure(
-                            job_id,
-                            attempt_id,
-                            FailureStage::Finalizing,
-                            "artifact_integrity_failed",
-                            "A published artifact failed integrity validation.",
-                            false,
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                    ArtifactReadFailure::Transient(error) => return Err(error.into()),
-                }
+        let artifacts = match self.validate_finalizing_publication(&finalizing).await {
+            Ok(artifacts) => artifacts,
+            Err(ArtifactReadFailure::Integrity) => {
+                self.finish_failure(
+                    job_id,
+                    attempt_id,
+                    FailureStage::Finalizing,
+                    "artifact_integrity_failed",
+                    "A published artifact failed integrity validation.",
+                    false,
+                )
+                .await?;
+                return Ok(());
             }
-        }
-
-        let artifacts = SuccessfulArtifacts {
-            markdown: NewArtifact {
-                relative_path: portable_relative(artifact_relative_path(
-                    job_id,
-                    attempt_id,
-                    PublishedArtifact::Markdown,
-                )),
-                media_type: MARKDOWN_MEDIA_TYPE.to_owned(),
-                byte_length: markdown_bytes,
-                sha256: markdown_sha256,
-            },
-            manifest: NewArtifact {
-                relative_path: portable_relative(artifact_relative_path(
-                    job_id,
-                    attempt_id,
-                    PublishedArtifact::Manifest,
-                )),
-                media_type: MANIFEST_MEDIA_TYPE.to_owned(),
-                byte_length: encoded.len() as u64,
-                sha256: manifest_sha256,
-            },
+            Err(ArtifactReadFailure::Transient(error)) => return Err(error.into()),
         };
         self.repository
             .finish_succeeded(job_id, attempt_id, artifacts)
@@ -699,7 +700,7 @@ impl ConversionService {
         Ok(JobView::from_stored(&job))
     }
 
-    async fn validate_stored_artifacts(
+    pub(crate) async fn validate_stored_artifacts(
         &self,
         job: &StoredConversion,
     ) -> Result<(), ArtifactReadFailure> {
@@ -714,27 +715,97 @@ impl ConversionService {
         manifest: &StoredArtifact,
     ) -> Result<(), ArtifactReadFailure> {
         validate_artifact_metadata(job, markdown, manifest)?;
+        self.validate_published_artifacts(job, Some((markdown, manifest)))
+            .await?;
+        Ok(())
+    }
+
+    async fn validate_published_artifacts(
+        &self,
+        job: &StoredConversion,
+        expected: Option<(&StoredArtifact, &StoredArtifact)>,
+    ) -> Result<SuccessfulArtifacts, ArtifactReadFailure> {
+        validate_source_metadata(job)?;
         self.artifacts
-            .validate_artifact(
-                job.id,
-                job.active_attempt.id,
-                PublishedArtifact::Markdown,
-                Some(markdown.byte_length),
-                Some(&markdown.sha256),
-            )
+            .validate_published_contents(job.id, job.active_attempt.id)
             .await
             .map_err(classify_artifact_error)?;
-        self.artifacts
-            .validate_artifact(
+
+        let markdown_expected = expected.map(|(markdown, _)| markdown);
+        let manifest_expected = expected.map(|(_, manifest)| manifest);
+        let manifest = self
+            .artifacts
+            .open_bounded_validated_artifact(
                 job.id,
                 job.active_attempt.id,
                 PublishedArtifact::Manifest,
-                Some(manifest.byte_length),
-                Some(&manifest.sha256),
+                MAX_MANIFEST_BYTES,
+                manifest_expected.map(|artifact| artifact.byte_length),
+                manifest_expected.map(|artifact| artifact.sha256.as_str()),
             )
             .await
             .map_err(classify_artifact_error)?;
-        Ok(())
+        let mut encoded = Vec::with_capacity(manifest.byte_length as usize);
+        manifest
+            .file
+            .take(MAX_MANIFEST_BYTES + 1)
+            .read_to_end(&mut encoded)
+            .await
+            .map_err(|source| {
+                ArtifactReadFailure::Transient(ArtifactError::InspectPath {
+                    path: self
+                        .artifacts
+                        .attempt_paths(job.id, job.active_attempt.id)
+                        .manifest(),
+                    source,
+                })
+            })?;
+        if !manifest_bytes_match(&encoded, manifest.byte_length, &manifest.sha256) {
+            return Err(ArtifactReadFailure::Integrity);
+        }
+        let raw: serde_json::Value =
+            serde_json::from_slice(&encoded).map_err(|_| ArtifactReadFailure::Integrity)?;
+        validate_manifest_shape(&raw)?;
+        let decoded: ConversionManifest =
+            serde_json::from_value(raw).map_err(|_| ArtifactReadFailure::Integrity)?;
+        let markdown_limit =
+            markdown_read_limit(markdown_expected, &decoded.output, self.max_output_bytes)?;
+        let markdown = self
+            .artifacts
+            .open_bounded_validated_artifact(
+                job.id,
+                job.active_attempt.id,
+                PublishedArtifact::Markdown,
+                markdown_limit,
+                Some(decoded.output.byte_length),
+                Some(&decoded.output.sha256),
+            )
+            .await
+            .map_err(classify_artifact_error)?;
+        validate_manifest(job, &decoded, markdown.byte_length, &markdown.sha256)?;
+
+        Ok(SuccessfulArtifacts {
+            markdown: NewArtifact {
+                relative_path: portable_relative(artifact_relative_path(
+                    job.id,
+                    job.active_attempt.id,
+                    PublishedArtifact::Markdown,
+                )),
+                media_type: MARKDOWN_MEDIA_TYPE.to_owned(),
+                byte_length: markdown.byte_length,
+                sha256: markdown.sha256,
+            },
+            manifest: NewArtifact {
+                relative_path: portable_relative(artifact_relative_path(
+                    job.id,
+                    job.active_attempt.id,
+                    PublishedArtifact::Manifest,
+                )),
+                media_type: MANIFEST_MEDIA_TYPE.to_owned(),
+                byte_length: manifest.byte_length,
+                sha256: manifest.sha256,
+            },
+        })
     }
 
     async fn open_validated_artifact(
@@ -744,39 +815,20 @@ impl ConversionService {
         manifest: &StoredArtifact,
         kind: ArtifactKind,
     ) -> Result<ArtifactRecord, ArtifactReadFailure> {
-        validate_artifact_metadata(job, markdown, manifest)?;
-        let (selected, other, selected_kind, other_kind) = match kind {
-            ArtifactKind::Markdown => (
-                markdown,
-                manifest,
-                PublishedArtifact::Markdown,
-                PublishedArtifact::Manifest,
-            ),
-            ArtifactKind::Manifest => (
-                manifest,
-                markdown,
-                PublishedArtifact::Manifest,
-                PublishedArtifact::Markdown,
-            ),
+        self.validate_artifact_pair(job, markdown, manifest).await?;
+        let (selected, selected_kind) = match kind {
+            ArtifactKind::Markdown => (markdown, PublishedArtifact::Markdown),
+            ArtifactKind::Manifest => (manifest, PublishedArtifact::Manifest),
         };
         let opened = self
             .artifacts
-            .open_validated_artifact(
+            .open_bounded_validated_artifact(
                 job.id,
                 job.active_attempt.id,
                 selected_kind,
+                selected.byte_length,
                 Some(selected.byte_length),
                 Some(&selected.sha256),
-            )
-            .await
-            .map_err(classify_artifact_error)?;
-        self.artifacts
-            .validate_artifact(
-                job.id,
-                job.active_attempt.id,
-                other_kind,
-                Some(other.byte_length),
-                Some(&other.sha256),
             )
             .await
             .map_err(classify_artifact_error)?;
@@ -965,15 +1017,198 @@ fn validate_artifact_metadata(
     Ok(())
 }
 
+fn validate_source_metadata(job: &StoredConversion) -> Result<(), ArtifactReadFailure> {
+    if job.source.relative_path != portable_relative(source_relative_path(job.id))
+        || job.source.media_type != SOURCE_MEDIA_TYPE
+    {
+        return Err(ArtifactReadFailure::Integrity);
+    }
+    Ok(())
+}
+
+fn validate_manifest(
+    job: &StoredConversion,
+    manifest: &ConversionManifest,
+    markdown_byte_length: u64,
+    markdown_sha256: &str,
+) -> Result<(), ArtifactReadFailure> {
+    let attempt = &job.active_attempt;
+    let Some(engine) = attempt.engine.as_ref() else {
+        return Err(ArtifactReadFailure::Integrity);
+    };
+    let Some(route) = attempt.route.as_ref() else {
+        return Err(ArtifactReadFailure::Integrity);
+    };
+    let Some(inspection) = attempt.inspection.as_ref() else {
+        return Err(ArtifactReadFailure::Integrity);
+    };
+    let Some(classification) = attempt.classification.as_deref() else {
+        return Err(ArtifactReadFailure::Integrity);
+    };
+    let Some(started_at) = attempt.started_at.as_deref() else {
+        return Err(ArtifactReadFailure::Integrity);
+    };
+    let manifest_inspection =
+        serde_json::to_value(&manifest.document).map_err(|_| ArtifactReadFailure::Integrity)?;
+    let manifest_classification = match manifest.document.pdf_type {
+        PdfTypeLabel::TextBased => "text_based",
+        PdfTypeLabel::Scanned => "scanned",
+        PdfTypeLabel::ImageBased => "image_based",
+        PdfTypeLabel::Mixed => "mixed",
+    };
+    OffsetDateTime::parse(&manifest.started_at, &Rfc3339)
+        .map_err(|_| ArtifactReadFailure::Integrity)?;
+    OffsetDateTime::parse(&manifest.completed_at, &Rfc3339)
+        .map_err(|_| ArtifactReadFailure::Integrity)?;
+    match job.state {
+        ConversionState::Finalizing if attempt.finished_at.is_none() => {}
+        ConversionState::Succeeded => {
+            OffsetDateTime::parse(
+                attempt
+                    .finished_at
+                    .as_deref()
+                    .ok_or(ArtifactReadFailure::Integrity)?,
+                &Rfc3339,
+            )
+            .map_err(|_| ArtifactReadFailure::Integrity)?;
+        }
+        _ => return Err(ArtifactReadFailure::Integrity),
+    }
+
+    if manifest.schema_version != 1
+        || manifest.job_id != job.id
+        || manifest.attempt_id != attempt.id
+        || manifest.client_run_id != job.client_run_id
+        || manifest.profile != job.profile.into()
+        || manifest.source.media_type != job.source.media_type
+        || manifest.source.byte_length != job.source.byte_length
+        || manifest.source.sha256 != job.source.sha256
+        || manifest.engine.name != engine.name
+        || manifest.engine.version != engine.version
+        || !manifest.engine.features.is_empty()
+        || manifest.route.kind != *route
+        || job.route.as_deref() != Some(route.as_str())
+        || manifest.route.reason_codes != attempt.reason_codes
+        || manifest.route.reason_codes != job.reason_codes
+        || manifest.warnings != attempt.warnings
+        || manifest.warnings != job.warnings
+        || manifest_inspection != *inspection
+        || classification != manifest_classification
+        || !is_complete_native_inspection(&manifest.document)
+        || manifest.output.media_type != MARKDOWN_MEDIA_TYPE
+        || markdown_byte_length == 0
+        || manifest.output.byte_length != markdown_byte_length
+        || manifest.output.sha256 != markdown_sha256
+        || manifest.started_at != started_at
+    {
+        return Err(ArtifactReadFailure::Integrity);
+    }
+    Ok(())
+}
+
+fn validate_manifest_shape(value: &serde_json::Value) -> Result<(), ArtifactReadFailure> {
+    require_exact_object_keys(
+        value,
+        &[
+            "schemaVersion",
+            "jobId",
+            "attemptId",
+            "clientRunId",
+            "profile",
+            "source",
+            "engine",
+            "route",
+            "document",
+            "warnings",
+            "output",
+            "startedAt",
+            "completedAt",
+        ],
+    )?;
+    require_exact_object_keys(&value["source"], &["mediaType", "byteLength", "sha256"])?;
+    require_exact_object_keys(&value["engine"], &["name", "version", "features"])?;
+    require_exact_object_keys(&value["route"], &["kind", "reasonCodes"])?;
+    require_exact_object_keys(
+        &value["document"],
+        &[
+            "pdfType",
+            "confidence",
+            "pageCount",
+            "pagesNeedingOcr",
+            "ocrReasonsByPage",
+            "hasEncodingIssues",
+            "isComplex",
+            "pagesWithTables",
+            "pagesWithColumns",
+            "processingTimeMs",
+        ],
+    )?;
+    let reasons = value["document"]["ocrReasonsByPage"]
+        .as_array()
+        .ok_or(ArtifactReadFailure::Integrity)?;
+    for page in reasons {
+        require_exact_object_keys(page, &["page", "reasons"])?;
+    }
+    require_exact_object_keys(&value["output"], &["mediaType", "byteLength", "sha256"])?;
+    Ok(())
+}
+
+fn markdown_read_limit(
+    stored: Option<&StoredArtifact>,
+    output: &ManifestOutput,
+    configured_maximum: u64,
+) -> Result<u64, ArtifactReadFailure> {
+    if output.media_type != MARKDOWN_MEDIA_TYPE || output.byte_length == 0 {
+        return Err(ArtifactReadFailure::Integrity);
+    }
+    match stored {
+        Some(stored)
+            if stored.byte_length == output.byte_length && stored.sha256 == output.sha256 =>
+        {
+            Ok(stored.byte_length)
+        }
+        Some(_) => Err(ArtifactReadFailure::Integrity),
+        None if output.byte_length <= configured_maximum => Ok(configured_maximum),
+        None => Err(ArtifactReadFailure::Integrity),
+    }
+}
+
+fn manifest_bytes_match(bytes: &[u8], byte_length: u64, sha256: &str) -> bool {
+    bytes.len() as u64 == byte_length && hex::encode(Sha256::digest(bytes)) == sha256
+}
+
+fn is_complete_native_inspection(inspection: &Inspection) -> bool {
+    inspection.pdf_type == PdfTypeLabel::TextBased
+        && inspection.page_count > 0
+        && inspection.pages_needing_ocr.is_empty()
+        && !inspection.has_encoding_issues
+}
+
+fn require_exact_object_keys(
+    value: &serde_json::Value,
+    expected: &[&str],
+) -> Result<(), ArtifactReadFailure> {
+    let object = value.as_object().ok_or(ArtifactReadFailure::Integrity)?;
+    if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
+        return Err(ArtifactReadFailure::Integrity);
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
-enum ArtifactReadFailure {
+pub(crate) enum ArtifactReadFailure {
     Integrity,
     Transient(ArtifactError),
 }
 
-fn classify_artifact_error(error: ArtifactError) -> ArtifactReadFailure {
+pub(crate) fn classify_artifact_error(error: ArtifactError) -> ArtifactReadFailure {
     match error {
         ArtifactError::InspectPath { ref source, .. } if is_definitive_inspect_error(source) => {
+            ArtifactReadFailure::Integrity
+        }
+        ArtifactError::ValidatePublication { ref source, .. }
+            if is_definitive_inspect_error(source) =>
+        {
             ArtifactReadFailure::Integrity
         }
         ArtifactError::UnexpectedPublicationContents
@@ -984,6 +1219,7 @@ fn classify_artifact_error(error: ArtifactError) -> ArtifactReadFailure {
         | ArtifactError::NotRegularFile(_)
         | ArtifactError::UnsafeOwnedPath(_)
         | ArtifactError::ByteLengthMismatch { .. }
+        | ArtifactError::ByteLengthLimitExceeded { .. }
         | ArtifactError::HashMismatch { .. }
         | ArtifactError::FileChangedDuringValidation(_) => ArtifactReadFailure::Integrity,
         error => ArtifactReadFailure::Transient(error),
@@ -1030,7 +1266,17 @@ async fn sync_directory(path: PathBuf) -> std::io::Result<()> {
 mod tests {
     use std::{io::ErrorKind, path::PathBuf};
 
-    use super::{classify_artifact_error, ArtifactError, ArtifactReadFailure};
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+    use uuid::Uuid;
+
+    use super::{
+        classify_artifact_error, is_complete_native_inspection, manifest_bytes_match,
+        markdown_read_limit, validate_manifest_shape, ArtifactError, ArtifactReadFailure,
+        ManifestOutput,
+    };
+    use crate::persistence::{ArtifactKind as StoredArtifactKind, StoredArtifact};
+    use crate::worker_protocol::{Inspection, PageReasons, PdfTypeLabel};
 
     #[test]
     fn artifact_read_errors_distinguish_integrity_from_transient_io() {
@@ -1087,5 +1333,144 @@ mod tests {
             ArtifactReadFailure::Transient(ArtifactError::InspectPath { source, .. })
                 if source.kind() == ErrorKind::PermissionDenied
         ));
+    }
+
+    #[test]
+    fn publication_directory_races_use_the_same_error_boundary() {
+        let missing = ArtifactError::ValidatePublication {
+            path: PathBuf::from("artifacts"),
+            source: std::io::Error::from(ErrorKind::NotFound),
+        };
+        assert!(matches!(
+            classify_artifact_error(missing),
+            ArtifactReadFailure::Integrity
+        ));
+
+        let denied = ArtifactError::ValidatePublication {
+            path: PathBuf::from("artifacts"),
+            source: std::io::Error::from(ErrorKind::PermissionDenied),
+        };
+        assert!(matches!(
+            classify_artifact_error(denied),
+            ArtifactReadFailure::Transient(ArtifactError::ValidatePublication { source, .. })
+                if source.kind() == ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[test]
+    fn manifest_shape_rejects_unknown_nested_and_page_fields() {
+        let valid = json!({
+            "schemaVersion": 1,
+            "jobId": null,
+            "attemptId": null,
+            "clientRunId": null,
+            "profile": null,
+            "source": {"mediaType": null, "byteLength": null, "sha256": null},
+            "engine": {"name": null, "version": null, "features": null},
+            "route": {"kind": null, "reasonCodes": null},
+            "document": {
+                "pdfType": null,
+                "confidence": null,
+                "pageCount": null,
+                "pagesNeedingOcr": null,
+                "ocrReasonsByPage": [{"page": null, "reasons": null}],
+                "hasEncodingIssues": null,
+                "isComplex": null,
+                "pagesWithTables": null,
+                "pagesWithColumns": null,
+                "processingTimeMs": null
+            },
+            "warnings": null,
+            "output": {"mediaType": null, "byteLength": null, "sha256": null},
+            "startedAt": null,
+            "completedAt": null
+        });
+        assert!(validate_manifest_shape(&valid).is_ok());
+
+        for path in ["top", "source", "document", "page"] {
+            let mut mutated = valid.clone();
+            match path {
+                "top" => mutated["unexpected"] = json!(true),
+                "source" => mutated["source"]["unexpected"] = json!(true),
+                "document" => mutated["document"]["unexpected"] = json!(true),
+                "page" => {
+                    mutated["document"]["ocrReasonsByPage"][0]["unexpected"] = json!(true);
+                }
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                validate_manifest_shape(&mutated),
+                Err(ArtifactReadFailure::Integrity)
+            ));
+        }
+    }
+
+    #[test]
+    fn markdown_limits_preserve_valid_history_and_bound_new_publications() {
+        let stored = StoredArtifact {
+            attempt_id: Uuid::nil(),
+            kind: StoredArtifactKind::Markdown,
+            relative_path: "result.md".to_owned(),
+            media_type: super::MARKDOWN_MEDIA_TYPE.to_owned(),
+            byte_length: 10,
+            sha256: "a".repeat(64),
+            created_at: "created".to_owned(),
+        };
+        let output = ManifestOutput {
+            media_type: super::MARKDOWN_MEDIA_TYPE.to_owned(),
+            byte_length: 10,
+            sha256: "a".repeat(64),
+        };
+
+        assert_eq!(markdown_read_limit(Some(&stored), &output, 5).unwrap(), 10);
+        assert!(matches!(
+            markdown_read_limit(None, &output, 5),
+            Err(ArtifactReadFailure::Integrity)
+        ));
+        assert_eq!(markdown_read_limit(None, &output, 10).unwrap(), 10);
+
+        let mismatched = ManifestOutput {
+            sha256: "b".repeat(64),
+            ..output
+        };
+        assert!(matches!(
+            markdown_read_limit(Some(&stored), &mismatched, 10),
+            Err(ArtifactReadFailure::Integrity)
+        ));
+    }
+
+    #[test]
+    fn parsed_manifest_bytes_must_match_the_validated_handle_hash() {
+        let bytes = br#"{"schemaVersion":1}"#;
+        let sha256 = hex::encode(Sha256::digest(bytes));
+        assert!(manifest_bytes_match(bytes, bytes.len() as u64, &sha256));
+        assert!(!manifest_bytes_match(
+            br#"{"schemaVersion":2}"#,
+            bytes.len() as u64,
+            &sha256
+        ));
+    }
+
+    #[test]
+    fn completed_native_inspection_allows_historical_ocr_reason_details() {
+        let mut inspection = Inspection {
+            pdf_type: PdfTypeLabel::TextBased,
+            confidence: 1.0,
+            page_count: 1,
+            pages_needing_ocr: Vec::new(),
+            ocr_reasons_by_page: vec![PageReasons {
+                page: 1,
+                reasons: vec!["diagnostic_only".to_owned()],
+            }],
+            has_encoding_issues: false,
+            is_complex: false,
+            pages_with_tables: Vec::new(),
+            pages_with_columns: Vec::new(),
+            processing_time_ms: 1,
+        };
+        assert!(is_complete_native_inspection(&inspection));
+
+        inspection.pages_needing_ocr.push(1);
+        assert!(!is_complete_native_inspection(&inspection));
     }
 }
