@@ -39,7 +39,7 @@ const COMPACT_FALLBACK = { width: 560, height: 560 };
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const [secrets, setSecrets] = useState<SecretStatus>({ datalab: false, revai: false });
+  const [secrets, setSecrets] = useState<SecretStatus>({ datalab: false, revai: false, backend: false });
   const [jobs, setJobs] = useState<Job[]>([]);
   const [scan, setScan] = useState<Scan>(EMPTY_SCAN);
   const [now, setNow] = useState(() => Date.now());

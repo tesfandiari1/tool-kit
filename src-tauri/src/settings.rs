@@ -5,6 +5,25 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+const DEFAULT_BACKEND_URL: &str = "http://127.0.0.1:8080";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversionRoute {
+    /// Keep today's direct Datalab path until the backend deployment gate passes.
+    #[default]
+    Direct,
+    Backend,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversionProfile {
+    #[default]
+    Standard,
+    LocalOnly,
+}
+
 /// `#[serde(default)]` on the struct is load-bearing: without it, a settings.json
 /// written before a new field existed fails to parse, and `load()` silently falls
 /// back to defaults — wiping the user's output folder and job choice.
@@ -25,6 +44,15 @@ pub struct Settings {
     /// Much better on scanned, table-heavy documents; slower and costs more
     /// credits, and unnecessary for clean digital PDFs.
     pub datalab_high_accuracy: bool,
+    /// Reversible M6 route selection. Routing remains per-file when the
+    /// backend path is wired; unsupported formats continue to use Datalab.
+    pub conversion_route: ConversionRoute,
+    /// Base URL for the Rust conversion service. The bearer token is stored
+    /// separately in Keychain and never serialized with these settings.
+    pub backend_url: String,
+    /// Backend routing profile. `best_quality` is intentionally unavailable
+    /// until the backend implements it instead of returning 409.
+    pub conversion_profile: ConversionProfile,
     /// Leave a file alone when the history says it already has a result on
     /// disk. On by default: paying twice for the same conversion is the thing
     /// the history layer exists to prevent.
@@ -45,6 +73,9 @@ impl Default for Settings {
             datalab_format: "markdown".into(),
             datalab_pipeline_id: None,
             datalab_high_accuracy: true,
+            conversion_route: ConversionRoute::Direct,
+            backend_url: DEFAULT_BACKEND_URL.into(),
+            conversion_profile: ConversionProfile::Standard,
             skip_already_done: true,
             split_layout: None,
             expanded_width: None,
@@ -78,4 +109,54 @@ pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConversionProfile, ConversionRoute, Settings};
+
+    #[test]
+    fn defaults_keep_conversion_on_the_direct_provider() {
+        let settings = Settings::default();
+
+        assert_eq!(settings.conversion_route, ConversionRoute::Direct);
+        assert_eq!(settings.backend_url, "http://127.0.0.1:8080");
+        assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
+    }
+
+    #[test]
+    fn backend_settings_serialize_for_the_webview_without_a_token() {
+        let value = serde_json::to_value(Settings::default()).expect("settings should serialize");
+
+        assert_eq!(value["conversionRoute"], "direct");
+        assert_eq!(value["backendUrl"], "http://127.0.0.1:8080");
+        assert_eq!(value["conversionProfile"], "standard");
+        assert!(value.get("backendToken").is_none());
+    }
+
+    #[test]
+    fn settings_from_before_m6_keep_existing_values_and_gain_backend_defaults() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "inputs": ["/tmp/source.pdf"],
+                "outputDir": "/tmp/output",
+                "jobType": "convert",
+                "datalabFormat": "html",
+                "datalabPipelineId": "pl_existing",
+                "datalabHighAccuracy": false,
+                "skipAlreadyDone": false
+            }"#,
+        )
+        .expect("pre-M6 settings should deserialize");
+
+        assert_eq!(settings.inputs, ["/tmp/source.pdf"]);
+        assert_eq!(settings.output_dir.as_deref(), Some("/tmp/output"));
+        assert_eq!(settings.datalab_format, "html");
+        assert_eq!(settings.datalab_pipeline_id.as_deref(), Some("pl_existing"));
+        assert!(!settings.datalab_high_accuracy);
+        assert!(!settings.skip_already_done);
+        assert_eq!(settings.conversion_route, ConversionRoute::Direct);
+        assert_eq!(settings.backend_url, "http://127.0.0.1:8080");
+        assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
+    }
 }

@@ -14,7 +14,7 @@ import {
   TextInput,
 } from "@ui";
 import { commands } from "@/app/commands";
-import type { SecretId, SecretStatus, Settings } from "@/app/types";
+import { DEFAULT_BACKEND_URL, type SecretId, type SecretStatus, type Settings } from "@/app/types";
 
 export function SettingsPanel({
   settings,
@@ -46,10 +46,56 @@ export function SettingsPanel({
   return (
     <main className="flow">
       <Row gap={3}>
-        <Label tone="strong">API keys</Label>
+        <Label tone="strong">Settings</Label>
         <Spacer />
         <Button variant="ghost" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close settings" />
       </Row>
+
+      <Select
+        label="Conversion route"
+        hint="Direct keeps today's Datalab path. Backend will route each supported file through the local conversion service."
+        value={settings.conversionRoute}
+        onChange={(e) => {
+          onPersist({ conversionRoute: e.target.value === "backend" ? "backend" : "direct" });
+        }}
+        options={[
+          { value: "direct", label: "Direct provider" },
+          { value: "backend", label: "Conversion backend" },
+        ]}
+      />
+
+      {settings.conversionRoute === "backend" && (
+        <>
+          <BackendUrlField
+            value={settings.backendUrl}
+            onCommit={(backendUrl) => {
+              onPersist({ backendUrl });
+            }}
+          />
+          <Select
+            label="Conversion profile"
+            hint="Standard may use the configured fallback. Local only keeps document bytes on this machine."
+            value={settings.conversionProfile}
+            onChange={(e) => {
+              onPersist({
+                conversionProfile: e.target.value === "local_only" ? "local_only" : "standard",
+              });
+            }}
+            options={[
+              { value: "standard", label: "Standard" },
+              { value: "local_only", label: "Local only" },
+            ]}
+          />
+          <KeyField
+            label="Backend token"
+            hint="Bearer token"
+            saved={secrets.backend}
+            onSave={(v) => void saveKey("backend", v)}
+          />
+        </>
+      )}
+
+      <Label tone="strong">Provider keys</Label>
 
       <KeyField
         label="Datalab"
@@ -111,6 +157,37 @@ export function SettingsPanel({
   );
 }
 
+function BackendUrlField({
+  value,
+  onCommit,
+}: {
+  value: string;
+  onCommit: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const commit = () => {
+    const backendUrl = draft.trim() || DEFAULT_BACKEND_URL;
+    setDraft(backendUrl);
+    onCommit(backendUrl);
+  };
+
+  return (
+    <TextInput
+      label="Backend URL"
+      type="url"
+      value={draft}
+      placeholder={DEFAULT_BACKEND_URL}
+      onChange={(e) => {
+        setDraft(e.target.value);
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+      }}
+    />
+  );
+}
+
 /// Held in local state and committed on blur or Enter, never per keystroke.
 ///
 /// The pipeline id is folded into the history's output-format key, so every
@@ -157,13 +234,15 @@ function KeyField({
   saved: boolean;
   onSave: (value: string) => void;
 }) {
-  const [value, setValue] = useState("");
+  const [typed, setTyped] = useState(false);
   const inputId = useId();
-  const typed = value.trim().length > 0;
 
   const commit = () => {
-    onSave(value.trim());
-    setValue("");
+    const input = document.getElementById(inputId);
+    if (!(input instanceof HTMLInputElement)) return;
+    onSave(input.value.trim());
+    input.value = "";
+    setTyped(false);
   };
 
   return (
@@ -180,9 +259,8 @@ function KeyField({
           id={inputId}
           type="password"
           placeholder={saved ? "••••••••••••  stored in Keychain" : hint}
-          value={value}
           onChange={(e) => {
-            setValue(e.target.value);
+            setTyped(e.target.value.trim().length > 0);
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && typed) commit();

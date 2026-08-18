@@ -19,6 +19,7 @@ use settings::Settings;
 struct SecretStatus {
     datalab: bool,
     revai: bool,
+    backend: bool,
 }
 
 #[tauri::command]
@@ -26,13 +27,14 @@ fn secret_status() -> SecretStatus {
     SecretStatus {
         datalab: secrets::has_key("datalab"),
         revai: secrets::has_key("revai"),
+        backend: secrets::has_key("backend"),
     }
 }
 
 #[tauri::command]
 fn set_secret(provider: String, value: String) -> Result<(), String> {
     match provider.as_str() {
-        "datalab" | "revai" => secrets::set_key(&provider, value.trim()),
+        "datalab" | "revai" | "backend" => secrets::set_key(&provider, value.trim()),
         _ => Err("Unknown provider".into()),
     }
 }

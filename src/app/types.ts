@@ -3,7 +3,9 @@
 
 export type JobId = "convert" | "transcribe";
 export type Status = "queued" | "working" | "processing" | "done" | "failed";
-export type SecretId = "datalab" | "revai";
+export type SecretId = "datalab" | "revai" | "backend";
+export type ConversionRoute = "direct" | "backend";
+export type ConversionProfile = "standard" | "local_only";
 /// The compact launcher, or a panel that replaces the left column. Documents
 /// open beside it and are not a view.
 export type View = "run" | "settings" | "history";
@@ -62,6 +64,9 @@ export interface Settings {
   datalabFormat: string;
   datalabPipelineId: string | null;
   datalabHighAccuracy: boolean;
+  conversionRoute: ConversionRoute;
+  backendUrl: string;
+  conversionProfile: ConversionProfile;
   skipAlreadyDone: boolean;
   /// Last SplitPane layout. Null until the user has dragged the seam.
   splitLayout: Record<string, number> | null;
@@ -72,6 +77,8 @@ export interface Settings {
 
 export type SecretStatus = Record<SecretId, boolean>;
 
+export const DEFAULT_BACKEND_URL = "http://127.0.0.1:8080";
+
 export const DEFAULT_SETTINGS: Settings = {
   inputs: [],
   outputDir: null,
@@ -79,6 +86,9 @@ export const DEFAULT_SETTINGS: Settings = {
   datalabFormat: "markdown",
   datalabPipelineId: null,
   datalabHighAccuracy: true,
+  conversionRoute: "direct",
+  backendUrl: DEFAULT_BACKEND_URL,
+  conversionProfile: "standard",
   skipAlreadyDone: true,
   splitLayout: null,
   expandedWidth: null,
