@@ -1,37 +1,75 @@
 # Session handoff
 
-**Last updated:** 2026-08-18  
+**Last updated:** 2026-08-17  
 **Branch:** `main`. `codex/backend-m2` merged in PR #1 and PR #3 and was
 deleted. Branch fresh off `main` for the next increment.  
-**Backend checkpoint:** `449d7cb` — M2 Increments 0-4 verified
-**Recorded code state:** no uncommitted backend implementation changes
+**Backend checkpoint:** `449d7cb` — M2 Increments 0-4 verified. Increment 5 is
+implemented and gate-green on top of `a50ca54`, with no checkpoint SHA yet.
+**Recorded code state:** Increment 5 backend and doc changes are uncommitted.
+Review and stage explicit paths under `backend/` and `docs/`.
 **Read this first** in any parallel session, then re-read the live worktree.
 This file goes stale the moment someone lands a commit.
 
 ## Do this next
 
-1. **Implement M2 Increment 5 contract/runtime work.** Make readiness depend on
-   SQLite, the data root, and runner health; change capabilities to persistent
-   durability plus `maxActiveJobs`; update backend OpenAPI first; generate and
-   diff TypeScript only under `/private/tmp`; leave the committed frontend
-   schema for M6; mount persistent `/data` in Compose.
-2. **Run M2 release gates.** Full Rust gates, Compose validation, image build,
-   graceful restart, and forced-kill recovery must pass before M3/AnyDoc.
+1. **Implement M2 Increment 6, the failure and release gates.** The full
+   checklist is in `docs/BACKEND_EXECUTION_PLAN.md`. It is the last unit before
+   M2 closes: deterministic crash barriers, restart and replay tests, corrupt
+   and missing source/artifact cases, an image build, and a real submit ->
+   stop -> start -> poll -> download sequence plus a `SIGKILL` recovery smoke.
+2. **Increment 5 is done and needs review, not redoing.** Readiness probes
+   SQLite, the data root, and the runner; capabilities report
+   `durability: "persistent"` and `maxActiveJobs`; OpenAPI and `Cargo.toml` are
+   both `0.3.0`; Compose mounts the named volume `converter-data` at `/data`.
+   The TypeScript delta was generated and diffed under `/private/tmp` only, so
+   `src/app/api/schema.ts` is still byte-identical and belongs to M6.
+
+   **Two latent breaks were fixed there; do not reintroduce them.**
+   - The Dockerfile builder copied only `Cargo.toml Cargo.lock src`, so
+     `sqlx::migrate!("./migrations")` had no SQL to read at compile time and the
+     image had not built since `e8e8ca5` introduced that macro. `migrations/`
+     and `build.rs` are now build inputs.
+   - Compose never mounted `/data`, so every container restart lost the
+     database and every artifact while the contract claimed durability.
+
+   Both fixes were checked against a real build, not read off the Dockerfile.
+   `docker build -t tool-kit-converter:m2 backend` succeeds, and `ls -ldn /data`
+   inside that image reports mode `drwx------` owned by `10001:10001`.
+
+   **Gotcha: a fresh named volume takes the ownership of the image directory it
+   covers, and falls back to `root:root` when the image has no such directory.**
+   The service runs as `10001:10001`, so the runtime stage must keep
+   `RUN install -d -o 10001 -g 10001 -m 0700 /data` or the first
+   `docker compose up` cannot write. No `VOLUME` instruction: that hands plain
+   `docker run` an anonymous volume nobody prunes.
+
+   **One reviewed finding was left open on purpose.** `/health/ready` is
+   unauthenticated and now opens a `BEGIN IMMEDIATE` transaction against a
+   four-connection pool on every request, so a local process can flood it and
+   contend the SQLite write lock with the job runner. Per-request work is
+   bounded at two seconds, aggregate concurrency is not. It was not fixed
+   because neither obvious fix is free: caching a passing result reintroduces
+   the stale readiness this increment removed, and a concurrency cap changes
+   latency semantics under load. Exposure is loopback-only today. Give it a
+   real rate limit when Caddy and LAN exposure land, where that belongs.
 3. **Desktop OpenAPI prep is done; M6 still owns the wire-up.** The user
    authorized shaping the frontend to the contract ahead of M6. `src/app/api/`
    is a standard openapi-typescript/openapi-fetch layer, and
    `commands.serviceRequest` is its typed IPC door. Remaining M6 work: the
    Rust `service_request` handler, backend URL + Keychain token settings, and
-   wiring the client into the run view. `src/app/api/schema.ts` was verified
-   in sync with `backend/openapi/openapi.yaml`, not rewritten; still
-   regenerate it via `pnpm generate:api` only when M2's OpenAPI delta lands
-   (CVR-027).
+   wiring the client into the run view. **`src/app/api/schema.ts` is now stale
+   on purpose.** Increment 5 landed the CVR-027 OpenAPI delta, so the committed
+   schema no longer matches `backend/openapi/openapi.yaml`. The differences are
+   the new `ReadinessResponse` schema plus both `/health/ready` responses,
+   `durability: "persistent"`, `maxActiveJobs` for `maxEphemeralJobs`, and the
+   reworded summaries. Run `pnpm generate:api` as the first step of M6, not
+   before.
 4. **Everything through Increment 4 is merged to `main` and green.** PR #1
    (desktop restructure, CI, M1/M2 durability) and PR #3 (Increment 4 startup
-   reconciliation) are merged; `main` is at `1049b96` with CI passing on the
-   push trigger. No backend implementation changes remain uncommitted.
-   Re-check live status before editing and keep staging to explicit owned
-   paths.
+   reconciliation) are merged. `main` is at `a50ca54`, a docs-only commit on top
+   of the PR #3 merge `1049b96`, with CI passing on the push trigger. Increment
+   5 is the only uncommitted backend work. Re-check live status before editing
+   and keep staging to explicit owned paths.
 
    **CI is the only gate that sees Linux-only code.** PR #1 failed on a
    `needless_return` inside `#[cfg(target_os = "linux")]` in
@@ -123,7 +161,8 @@ the root is the required layout, not clutter.
   bridge-free design review.
 - Desktop frontend now has an OpenAPI client layer at `src/app/api/`
   (user-authorized pre-M6 prep). `schema.ts` is generated from
-  `backend/openapi/openapi.yaml` and verified in sync. `client.ts` is a
+  `backend/openapi/openapi.yaml` and now trails it by the Increment 5 delta,
+  which M6 regenerates. `client.ts` is a
   standard `openapi-fetch` client typed by that schema: call sites get the
   library's `{ data, error }` results, with `error` carrying the contract's
   ErrorEnvelope. `transport.ts` plugs a Tauri-backed `fetch` into
@@ -156,8 +195,23 @@ the root is the required layout, not clutter.
   unowned job trees. The settled gate passed format, check, Clippy,
   `git diff --check`, and 90 backend tests (54 library, 1 server, 3 worker, 32
   HTTP contract) on the default test stack. The checkpoint is `449d7cb`.
-- M2 Increment 5 readiness/capabilities/OpenAPI/Compose work and Increment 6
-  built-container restart gates remain pending.
+- M2 Increment 5 is implemented and gate-green, uncommitted. `/health/ready`
+  runs three concurrent two-second-bounded checks (SQLite write transaction, a
+  create-and-remove probe file under `<data root>/.health/`, runner
+  failed/stopped) and answers `503` with per-check detail when any fails, while
+  `/health/live` stays dependency-free. Capabilities report persistent
+  durability and `maxActiveJobs`. OpenAPI and `backend/Cargo.toml` are both
+  `0.3.0`, and a contract test now pins `info.version` to `CARGO_PKG_VERSION`.
+  Compose mounts `converter-data` at `/data` and mirrors the image healthcheck
+  timing. The gate passed format, check, Clippy with warnings denied,
+  `git diff --check`, `docker compose config`, `docker build`, and 96 backend
+  tests (56 library, 1 server, 3 worker, 36 HTTP contract).
+- **`TOOLKIT_CONVERTER_SCRATCH_PARENT` is dead config.** `config.rs` parses and
+  validates it, and nothing else reads it. Increment 5 left it in place on
+  purpose, because removing an environment variable changes the public surface
+  and deserves its own decision. `backend/.env.example` and `backend/README.md`
+  both say so. Do not wire it to anything on the assumption it was forgotten.
+- Increment 6 built-container restart gates remain pending.
 - The service remains loopback-only. No LAN, Caddy, AnyDoc, or Datalab
   fallback until their milestones.
 

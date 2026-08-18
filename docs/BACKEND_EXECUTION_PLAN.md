@@ -2,7 +2,9 @@
 
 **Status:** Approved — implementation in progress
 **Epic tickets:** CVR-020 through CVR-029
-**Latest verified checkpoint:** `449d7cb` — Increments 0-4 complete
+**Latest verified checkpoint:** `449d7cb` — Increments 0-4 complete.
+Increment 5 is implemented and gate-green on top of `a50ca54`, uncommitted, so
+it has no checkpoint SHA of its own yet.
 **Complexity:** Medium-high
 **Estimated implementation shape:** One baseline increment plus six bounded
 implementation increments, each independently testable
@@ -59,13 +61,18 @@ Excluded from this unit:
 | 2 — Durable ingest/artifacts | Complete | Persistent source/artifact ownership and restart-visible API reads |
 | 3 — Single durable worker | Complete | One FIFO runner; adversarial lifecycle and integrity fixes verified |
 | 4 — Startup reconciliation | Complete | State-specific recovery and bounded bundle validation verified |
-| 5 — Runtime and Compose | Pending | Readiness, capabilities/OpenAPI, `/data` mount |
-| 6 — Adversarial/release gates | Pending | Image build and graceful/forced restart smokes |
+| 5 — Runtime and Compose | Complete | Live readiness, persistent capabilities/OpenAPI, `/data` volume |
+| 6 — Adversarial/release gates | Pending | Crash-barrier tests and graceful/forced restart smokes on the built image |
 
-The settled Increment 4 checkpoint passed format, check, Clippy, `git diff
---check`, and 90 backend tests. This is not the final M2 result;
-runtime-contract, Compose, and image restart gates remain. The checkpoint is
-committed as `449d7cb`.
+The settled Increment 5 checkpoint passed format, check, Clippy with warnings
+denied, `git diff --check`, `docker compose config`, `docker build`, and 96
+backend tests (56 library, 1 server, 3 parser worker, 36 HTTP contract). That
+image build is the first to succeed since `e8e8ca5` added
+`sqlx::migrate!("./migrations")`, because the builder stage copied only
+`Cargo.toml`, `Cargo.lock`, and `src`, and the macro reads the SQL at compile
+time. This is not the final M2 result. The graceful and forced-kill restart
+smokes remain for Increment 6, and the checkpoint is uncommitted on top of
+`a50ca54`.
 
 ## Requirements and acceptance rules
 
@@ -379,21 +386,21 @@ manufacture success or start concurrent attempts for one job.
 
 Related: CVR-027.
 
-- [ ] Make `/health/ready` query SQLite and verify the configured data root is
+- [x] Make `/health/ready` query SQLite and verify the configured data root is
   usable without mutating user artifacts.
-- [ ] Change capabilities truthfully from `durability: ephemeral` to
+- [x] Change capabilities truthfully from `durability: ephemeral` to
   persistent durability and replace `maxEphemeralJobs` with `maxActiveJobs`.
   Update the backend OpenAPI, implementation, and contract assertions together;
   generate and diff the TypeScript schema in a temporary location, but leave
   `src/app/api/schema.ts` untouched until M6. This is the only planned M2
   response-shape change.
-- [ ] Add a named development volume or explicit bind-mount example for
+- [x] Add a named development volume or explicit bind-mount example for
   `/data`; preserve loopback-only publication and current hardening.
-- [ ] Keep only `/data` writable in the eventual production shape; retain a
+- [x] Keep only `/data` writable in the eventual production shape; retain a
   bounded scratch `tmpfs` only if the parser needs it.
-- [ ] Add healthcheck timing that allows migrations and reconciliation to
+- [x] Add healthcheck timing that allows migrations and reconciliation to
   finish.
-- [ ] Document local development reset as a recoverable, explicit operation;
+- [x] Document local development reset as a recoverable, explicit operation;
   never auto-delete the data root.
 
 Likely files:
@@ -410,6 +417,11 @@ backend/openapi/openapi.yaml
 
 Exit: Compose restart preserves accepted jobs and artifacts, and readiness
 reflects live persistence dependencies.
+
+Readiness is proven by the HTTP contract suite. The persistence half of that
+exit is wired, not yet demonstrated: `/data` is a named volume the image
+pre-creates as `10001:10001`, and the Increment 6 smoke against the built
+container is what proves a restart keeps the jobs.
 
 ### Increment 6 — Failure and release verification
 
@@ -549,6 +561,7 @@ M2 is complete only when all of the following are true:
 
 ## Execution boundary
 
-M2 is approved. Increments 0-4 are complete and verified. Execute Increment 5
-runtime/OpenAPI/Compose integration next; do not add AnyDoc or other scope. Parallel
-sessions start at [`HANDOFF.md`](HANDOFF.md).
+M2 is approved. Increments 0-5 are complete and verified, with Increment 5 still
+uncommitted. Execute Increment 6 failure and release verification next. Do not
+add AnyDoc or other scope. Parallel sessions start at
+[`HANDOFF.md`](HANDOFF.md).

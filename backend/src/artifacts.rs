@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncSeekExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 use uuid::Uuid;
 
@@ -27,6 +27,9 @@ const PUBLICATION_STAGING_DIRECTORY: &str = "publication.staging";
 const ARTIFACTS_DIRECTORY: &str = "artifacts";
 const QUARANTINE_DIRECTORY: &str = "quarantine";
 const PREACCEPTANCE_DIRECTORY: &str = "pre-acceptance";
+/// Readiness probe files live here, outside `jobs/`, so nothing that scans job
+/// storage can read a probe as conversion state.
+const HEALTH_DIRECTORY: &str = ".health";
 
 #[derive(Clone, Debug)]
 pub struct ArtifactStore {
@@ -95,12 +98,15 @@ impl ValidatedOpenFile {
 
 impl ArtifactStore {
     pub fn initialize(root: &Path) -> Result<Self, ArtifactError> {
-        std::fs::create_dir_all(root).map_err(ArtifactError::Initialize)?;
-        let metadata = std::fs::symlink_metadata(root).map_err(ArtifactError::Initialize)?;
+        // The data root defaults to `/data`, which exists only in the
+        // container, so the path is the whole diagnosis of a native start-up
+        // failure.
+        std::fs::create_dir_all(root).map_err(initialize_error(root))?;
+        let metadata = std::fs::symlink_metadata(root).map_err(initialize_error(root))?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(ArtifactError::InvalidDataRoot(root.to_owned()));
         }
-        let root = std::fs::canonicalize(root).map_err(ArtifactError::Initialize)?;
+        let root = std::fs::canonicalize(root).map_err(initialize_error(root))?;
         let store = Self {
             root: Arc::new(root),
         };
@@ -109,12 +115,57 @@ impl ArtifactStore {
         let quarantine = store.root.join(QUARANTINE_DIRECTORY);
         ensure_private_directory(&quarantine)?;
         ensure_private_directory(&quarantine.join(PREACCEPTANCE_DIRECTORY))?;
+        ensure_private_directory(&store.root.join(HEALTH_DIRECTORY))?;
 
         Ok(store)
     }
 
     pub fn root(&self) -> &Path {
         self.root.as_path()
+    }
+
+    /// Proves the data root still accepts writes by creating and removing one
+    /// probe file. It never reads, writes, or removes anything under `jobs/`,
+    /// so readiness cannot damage a stored conversion.
+    pub async fn probe_writable(&self) -> Result<(), ArtifactError> {
+        let directory = self.root.join(HEALTH_DIRECTORY);
+        match optional_metadata(&directory).await? {
+            Some(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(ArtifactError::UnsafeOwnedPath(directory));
+            }
+            Some(_) => {}
+            // A probe directory removed while the service runs is recreated
+            // rather than latched as permanently unready.
+            None => match create_private_directory(&directory).await {
+                Ok(()) => {}
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(source) => {
+                    return Err(ArtifactError::HealthProbe {
+                        path: directory,
+                        source,
+                    })
+                }
+            },
+        }
+
+        // The guard owns the removal so a failed write or a cancelled readiness
+        // check still leaves the directory empty. Readiness runs under a
+        // timeout, and a dropped future never resumes to run async cleanup.
+        let mut probe = ProbeFile::new(directory.join(Uuid::new_v4().to_string()));
+        write_health_probe(probe.path())
+            .await
+            .map_err(|source| ArtifactError::HealthProbe {
+                path: probe.path().to_owned(),
+                source,
+            })?;
+        fs::remove_file(probe.path())
+            .await
+            .map_err(|source| ArtifactError::HealthProbe {
+                path: probe.path().to_owned(),
+                source,
+            })?;
+        probe.mark_removed();
+        Ok(())
     }
 
     pub fn job_paths(&self, job_id: Uuid) -> JobPaths {
@@ -1083,6 +1134,52 @@ impl AttemptPaths {
     }
 }
 
+/// Removes a readiness probe file on drop. `Drop` cannot await, so the removal
+/// is synchronous, which is exactly what makes it survive cancellation.
+struct ProbeFile {
+    path: PathBuf,
+    removed: bool,
+}
+
+impl ProbeFile {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            removed: false,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn mark_removed(&mut self) {
+        self.removed = true;
+    }
+}
+
+impl Drop for ProbeFile {
+    fn drop(&mut self) {
+        if !self.removed {
+            // The file may never have been created. Nothing here can be
+            // reported, and a stale probe is the only thing worth preventing.
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Writes bytes as well as creating the file, because a full disk accepts the
+/// create and fails the write.
+async fn write_health_probe(path: &Path) -> std::io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await?;
+    file.write_all(b"ready").await?;
+    file.flush().await
+}
+
 async fn create_private_directory(path: &Path) -> std::io::Result<()> {
     fs::create_dir(path).await?;
     set_private_directory(path)
@@ -1095,11 +1192,18 @@ fn ensure_private_directory(path: &Path) -> Result<(), ArtifactError> {
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(path).map_err(ArtifactError::Initialize)?;
+            std::fs::create_dir(path).map_err(initialize_error(path))?;
         }
-        Err(error) => return Err(ArtifactError::Initialize(error)),
+        Err(source) => return Err(initialize_error(path)(source)),
     }
-    set_private_directory(path).map_err(ArtifactError::Initialize)
+    set_private_directory(path).map_err(initialize_error(path))
+}
+
+fn initialize_error(path: &Path) -> impl FnOnce(std::io::Error) -> ArtifactError + '_ {
+    move |source| ArtifactError::Initialize {
+        path: path.to_owned(),
+        source,
+    }
 }
 
 async fn optional_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, ArtifactError> {
@@ -1224,8 +1328,12 @@ fn set_private_directory(_path: &Path) -> std::io::Result<()> {
 
 #[derive(Debug, Error)]
 pub enum ArtifactError {
-    #[error("cannot initialize artifact storage")]
-    Initialize(#[source] std::io::Error),
+    #[error("cannot initialize artifact storage at {path:?}")]
+    Initialize {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("artifact data root is not a private regular directory: {0:?}")]
     InvalidDataRoot(PathBuf),
     #[error("cannot create submission storage at {path:?}")]
@@ -1336,6 +1444,12 @@ pub enum ArtifactError {
     },
     #[error("cannot reserve a collision-free preacceptance quarantine for job {0}")]
     QuarantineReservationExhausted(Uuid),
+    #[error("cannot write a readiness probe at {path:?}")]
+    HealthProbe {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[cfg(test)]
@@ -1349,8 +1463,8 @@ mod tests {
         artifact_relative_path, artifacts_relative_path, attempt_relative_path, job_relative_path,
         preacceptance_quarantine_relative_path, preacceptance_quarantine_reservation_relative_path,
         publication_staging_relative_path, source_relative_path, source_staging_relative_path,
-        ArtifactError, ArtifactStore, AttemptPaths, PublicationState, PublishedArtifact,
-        MANIFEST_FILE,
+        ArtifactError, ArtifactStore, AttemptPaths, ProbeFile, PublicationState, PublishedArtifact,
+        HEALTH_DIRECTORY, MANIFEST_FILE,
     };
     use crate::worker_protocol::MARKDOWN_FILE;
 
@@ -1778,6 +1892,46 @@ mod tests {
             store.list_owned_job_ids().await.unwrap(),
             vec![first, second]
         );
+    }
+
+    #[tokio::test]
+    async fn readiness_probe_leaves_job_storage_untouched() {
+        let directory = tempdir().unwrap();
+        let store = ArtifactStore::initialize(directory.path()).unwrap();
+        let job_id = Uuid::new_v4();
+        store.prepare_submission(job_id).await.unwrap();
+
+        store.probe_writable().await.unwrap();
+        store.probe_writable().await.unwrap();
+
+        // The probe directory sits beside `jobs/`, so the startup orphan scan
+        // that quarantines unowned storage never sees it.
+        assert_eq!(store.list_owned_job_ids().await.unwrap(), vec![job_id]);
+        assert!(store.job_paths(job_id).source_directory.is_dir());
+
+        let health = directory.path().join(HEALTH_DIRECTORY);
+        let mut left_behind = tokio::fs::read_dir(&health).await.unwrap();
+        assert!(left_behind.next_entry().await.unwrap().is_none());
+
+        tokio::fs::remove_dir(&health).await.unwrap();
+        store.probe_writable().await.unwrap();
+        assert!(health.is_dir());
+    }
+
+    #[test]
+    fn an_unfinished_readiness_probe_removes_its_file_on_drop() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("probe");
+
+        {
+            let guard = ProbeFile::new(path.clone());
+            std::fs::write(guard.path(), b"ready").unwrap();
+            assert!(path.is_file());
+        }
+
+        // Covers both the failed write and the cancelled check: neither reaches
+        // `mark_removed`, so a degraded data root cannot grow probe files.
+        assert!(!path.exists(), "a dropped probe file survived");
     }
 
     #[cfg(unix)]

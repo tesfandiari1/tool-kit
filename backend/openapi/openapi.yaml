@@ -1,10 +1,11 @@
 openapi: 3.1.0
 info:
   title: Tool-Kit Conversion Service
-  version: 0.2.0
+  version: 0.3.0
   description: >-
-    CPU-only M1 contract for ephemeral, authenticated clean-PDF conversion.
-    Jobs and idempotency records are process-local until the durable M2 model.
+    CPU-only contract for durable, authenticated clean-PDF conversion.
+    Accepted conversions, idempotency records, and published artifacts are
+    stored on disk and survive a service restart. Loopback-only.
 servers:
   - url: http://127.0.0.1:8080
     description: Loopback-only development
@@ -19,10 +20,26 @@ paths:
   /health/ready:
     get:
       operationId: getReadiness
-      summary: Report whether startup dependencies are ready
+      summary: Report whether the database, data root, and worker are usable
       responses:
         "200":
-          $ref: "#/components/responses/Health"
+          description: Every dependency check passed
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+        "503":
+          description: At least one dependency check failed
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
   /api/v1/capabilities:
     get:
       operationId: getCapabilities
@@ -40,7 +57,7 @@ paths:
   /api/v1/conversions:
     post:
       operationId: createConversion
-      summary: Stage a PDF and create an ephemeral asynchronous conversion
+      summary: Stage a PDF and create a durable asynchronous conversion
       security:
         - bootstrapBearer: []
       parameters:
@@ -91,7 +108,7 @@ paths:
   /api/v1/conversions/{id}:
     get:
       operationId: getConversion
-      summary: Poll one ephemeral conversion
+      summary: Poll one durable conversion
       security:
         - bootstrapBearer: []
       parameters:
@@ -207,7 +224,7 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: Process-local in M1; 1-128 URL-safe characters
+      description: Durable per-token record; 1-128 URL-safe characters
       schema:
         type: string
         minLength: 1
@@ -232,7 +249,7 @@ components:
         type: integer
         const: 1
     IdempotencyReplayed:
-      description: Whether this response reused a process-local idempotency record
+      description: Whether this response reused a stored idempotency record
       required: true
       schema:
         type: boolean
@@ -312,7 +329,7 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     TooManyRequests:
-      description: Ephemeral M1 job capacity reached
+      description: Active job capacity reached
       headers:
         X-Request-Id:
           $ref: "#/components/headers/RequestId"
@@ -359,6 +376,32 @@ components:
           const: tool-kit-converter
         serviceVersion:
           type: string
+    ReadinessResponse:
+      type: object
+      required: [status, service, serviceVersion, checks]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        service:
+          type: string
+          const: tool-kit-converter
+        serviceVersion:
+          type: string
+        checks:
+          type: object
+          required: [database, dataRoot, worker]
+          additionalProperties: false
+          properties:
+            database:
+              type: string
+              enum: [ok, failed]
+            dataRoot:
+              type: string
+              enum: [ok, failed]
+            worker:
+              type: string
+              enum: [ok, failed]
     CapabilitiesEnvelope:
       type: object
       required: [data]
@@ -392,7 +435,7 @@ components:
           type: boolean
         durability:
           type: string
-          const: ephemeral
+          const: persistent
         inputFormats:
           type: array
           prefixItems:
@@ -426,7 +469,7 @@ components:
               const: 1.15.0
         limits:
           type: object
-          required: [maxUploadBytes, maxOutputBytes, maxEphemeralJobs, maxConcurrentUploads]
+          required: [maxUploadBytes, maxOutputBytes, maxActiveJobs, maxConcurrentUploads]
           properties:
             maxUploadBytes:
               type: integer
@@ -434,7 +477,7 @@ components:
             maxOutputBytes:
               type: integer
               minimum: 1
-            maxEphemeralJobs:
+            maxActiveJobs:
               type: integer
               minimum: 1
             maxConcurrentUploads:
