@@ -1,12 +1,12 @@
 # Session handoff
 
 **Last updated:** 2026-08-17  
-**Branch:** `main`. `codex/backend-m2` merged in PR #1 and PR #3 and was
-deleted. Branch fresh off `main` for the next increment.  
-**Backend checkpoint:** `449d7cb` — M2 Increments 0-4 verified. Increment 5 is
-implemented and gate-green on top of `a50ca54`, with no checkpoint SHA yet.
-**Recorded code state:** Increment 5 backend and doc changes are uncommitted.
-Review and stage explicit paths under `backend/` and `docs/`.
+**Branch:** `main`. `codex/backend-m2` (PR #1, PR #3) and
+`backend/m2-increment-5` (PR #4) are merged and deleted. Branch fresh off
+`main` for the next increment.
+**Backend checkpoint:** `2f3158d` — M2 Increments 0-5 verified, merged to `main`
+in PR #4 as `b70ce44` with all four CI checks green.
+**Recorded code state:** no uncommitted backend implementation changes.
 **Read this first** in any parallel session, then re-read the live worktree.
 This file goes stale the moment someone lands a commit.
 
@@ -64,12 +64,13 @@ This file goes stale the moment someone lands a commit.
    `durability: "persistent"`, `maxActiveJobs` for `maxEphemeralJobs`, and the
    reworded summaries. Run `pnpm generate:api` as the first step of M6, not
    before.
-4. **Everything through Increment 4 is merged to `main` and green.** PR #1
-   (desktop restructure, CI, M1/M2 durability) and PR #3 (Increment 4 startup
-   reconciliation) are merged. `main` is at `a50ca54`, a docs-only commit on top
-   of the PR #3 merge `1049b96`, with CI passing on the push trigger. Increment
-   5 is the only uncommitted backend work. Re-check live status before editing
-   and keep staging to explicit owned paths.
+4. **Everything through Increment 5 is merged to `main` and green.** PR #1
+   (desktop restructure, CI, M1/M2 durability), PR #3 (Increment 4 startup
+   reconciliation), and PR #4 (Increment 5 runtime and Compose) are merged.
+   `main` is at `b70ce44`, the PR #4 merge of `2f3158d`, with the frontend,
+   backend, desktop, and GitGuardian checks all green. No backend work is
+   uncommitted. Re-check live status before editing and keep staging to
+   explicit owned paths.
 
    **CI is the only gate that sees Linux-only code.** PR #1 failed on a
    `needless_return` inside `#[cfg(target_os = "linux")]` in
@@ -195,7 +196,7 @@ the root is the required layout, not clutter.
   unowned job trees. The settled gate passed format, check, Clippy,
   `git diff --check`, and 90 backend tests (54 library, 1 server, 3 worker, 32
   HTTP contract) on the default test stack. The checkpoint is `449d7cb`.
-- M2 Increment 5 is implemented and gate-green, uncommitted. `/health/ready`
+- M2 Increment 5 is complete and merged. `/health/ready`
   runs three concurrent two-second-bounded checks (SQLite write transaction, a
   create-and-remove probe file under `<data root>/.health/`, runner
   failed/stopped) and answers `503` with per-check detail when any fails, while

@@ -1,8 +1,8 @@
 # Epic: Rust conversion backend
 
-**Status:** In progress — M2 Increments 0-4 verified; Increment 5 next
+**Status:** In progress — M2 Increments 0-5 verified, Increment 6 next
 **Current milestone:** M2 — durable SQLite jobs and artifacts
-**Latest verified checkpoint:** `449d7cb` — M2 Increment 4 startup recovery
+**Latest verified checkpoint:** `2f3158d` — M2 Increment 5 runtime and Compose
 **Target:** CPU-only Rust/Axum modular monolith
 **Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)
 **Immediate plan:** [`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)
@@ -346,8 +346,8 @@ Execute M2 only. Do not combine persistence with AnyDoc.
    marking M2 complete.
 
 The detailed file and test plan is in
-[`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md). Increments 0-4 are
-complete and verified. Increment 5 runtime/OpenAPI/Compose integration is next. See
+[`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md). Increments 0-5 are
+complete and verified. Increment 6 failure and release verification is next. See
 [`HANDOFF.md`](HANDOFF.md)
 before touching files.
 
@@ -503,6 +503,7 @@ before touching files.
 - Clippy on macOS never compiles the `#[cfg(target_os = "linux")]` blocks in
   `backend/src/bin/tool-kit-pdf-worker.rs`. This local pass is necessary and not
   sufficient. CI is the only gate that lints them.
-- Increment 5 is implemented and gated but uncommitted. It sits on top of
-  `a50ca54`, so it has no checkpoint SHA of its own yet. The graceful and
+- Increment 5 is committed as `2f3158d` and merged to `main` in PR #4 as
+  `b70ce44`, with the frontend, backend, desktop, and GitGuardian CI checks
+  all green. The graceful and
   forced-kill restart smokes remain for Increment 6.

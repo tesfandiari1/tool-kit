@@ -67,10 +67,10 @@ in `.env.local` (gitignored).
 ## Conversion backend
 
 The production conversion service lives in [`backend/`](backend/) and uses
-Rust/Axum. Its authenticated, CPU-only PDF vertical slice is implemented; the
-next milestone replaces ephemeral jobs and artifacts with embedded SQLite and
-a persistent `/data` volume. It remains loopback-only and is not ready for LAN
-deployment yet.
+Rust/Axum. Its authenticated, CPU-only PDF vertical slice is implemented, and
+jobs, sources, and artifacts now live in embedded SQLite and a persistent
+`/data` volume. Restart verification is the last M2 gate. It remains
+loopback-only and is not ready for LAN deployment yet.
 
 - [`docs/HANDOFF.md`](docs/HANDOFF.md) — current branch, next increment, and
   parallel-session ownership

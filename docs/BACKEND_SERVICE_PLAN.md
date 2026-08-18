@@ -3,14 +3,14 @@
 **Status:** Approved direction; implementation in progress
 **Target:** CPU-only Rust/Axum service in Docker Compose
 **Current milestone:** M2 — durable SQLite jobs and artifacts
-**Latest verified checkpoint:** `449d7cb` — M2 Increment 4 startup recovery
+**Latest verified checkpoint:** `2f3158d` — M2 Increment 5 runtime and Compose
 **Session handoff:** [`HANDOFF.md`](HANDOFF.md)
 **Last updated:** 2026-08-17
 
 **Implementation snapshot:** M2 contract freeze, SQLite persistence, durable
-ingest/artifacts, the single FIFO worker, and startup reconciliation are
-implemented and verified. Live readiness, the M2 capabilities/OpenAPI update,
-Compose persistence, and container restart smokes remain pending.
+ingest/artifacts, the single FIFO worker, startup reconciliation, live
+readiness, the capabilities/OpenAPI update, and Compose `/data` persistence are
+implemented and verified. Container restart smokes are the only M2 work left.
 
 ## Goal
 
@@ -152,16 +152,16 @@ Keep the current resource-oriented API:
 | `GET /api/v1/conversions/{id}/artifacts/manifest` | Stream the provenance manifest |
 | `GET /api/v1/capabilities` | Return enabled formats, profiles, capacity, and limits |
 | `GET /health/live` | Process liveness |
-| `GET /health/ready` | Database and writable-volume readiness once M2 lands |
+| `GET /health/ready` | Database, data-root, and worker readiness |
 
 `Idempotency-Key` remains required for submission. `clientRunId` correlates a
 desktop run without replacing server-generated job and attempt IDs. Polling is
 the initial progress mechanism; server-sent events and WebSockets are not
-needed for the expected volume. M2 updates capabilities from ephemeral
-durability/ephemeral-job capacity to persistent durability/active-job capacity;
-the backend OpenAPI contract changes with the implementation. M2 generates and
-diffs the TypeScript schema only in a temporary location to prove compatibility;
-the committed desktop schema remains untouched until M6.
+needed for the expected volume. M2 moved capabilities from ephemeral
+durability and ephemeral-job capacity to persistent durability and active-job
+capacity, and the backend OpenAPI contract changed with it. The TypeScript
+schema was generated and diffed only in a temporary location to prove
+compatibility. The committed desktop schema stays untouched until M6.
 
 ## Durable job model
 

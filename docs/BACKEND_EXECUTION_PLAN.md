@@ -2,9 +2,8 @@
 
 **Status:** Approved — implementation in progress
 **Epic tickets:** CVR-020 through CVR-029
-**Latest verified checkpoint:** `449d7cb` — Increments 0-4 complete.
-Increment 5 is implemented and gate-green on top of `a50ca54`, uncommitted, so
-it has no checkpoint SHA of its own yet.
+**Latest verified checkpoint:** `2f3158d` — Increments 0-5 complete, merged to
+`main` in PR #4 as `b70ce44`.
 **Complexity:** Medium-high
 **Estimated implementation shape:** One baseline increment plus six bounded
 implementation increments, each independently testable
@@ -71,8 +70,8 @@ image build is the first to succeed since `e8e8ca5` added
 `sqlx::migrate!("./migrations")`, because the builder stage copied only
 `Cargo.toml`, `Cargo.lock`, and `src`, and the macro reads the SQL at compile
 time. This is not the final M2 result. The graceful and forced-kill restart
-smokes remain for Increment 6, and the checkpoint is uncommitted on top of
-`a50ca54`.
+smokes remain for Increment 6. The checkpoint is `2f3158d`, merged as
+`b70ce44`.
 
 ## Requirements and acceptance rules
 
@@ -561,7 +560,6 @@ M2 is complete only when all of the following are true:
 
 ## Execution boundary
 
-M2 is approved. Increments 0-5 are complete and verified, with Increment 5 still
-uncommitted. Execute Increment 6 failure and release verification next. Do not
-add AnyDoc or other scope. Parallel sessions start at
-[`HANDOFF.md`](HANDOFF.md).
+M2 is approved. Increments 0-5 are complete, verified, and merged to `main`.
+Execute Increment 6 failure and release verification next. Do not add AnyDoc or
+other scope. Parallel sessions start at [`HANDOFF.md`](HANDOFF.md).
