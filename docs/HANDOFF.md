@@ -7,22 +7,18 @@ This file goes stale the moment someone lands a commit.
 
 ## Do this next
 
-1. **Finish and checkpoint the M2 Increment 3 hardening pass.** Increments 1-2
-   are complete. The single FIFO worker is implemented; four adversarial
-   lifecycle/integrity fixes are in final verification. Stage explicit backend
-   paths only. Never use `git add .` or `git add -A`.
-2. **Implement M2 Increment 4 startup reconciliation.** Run it before the
+1. **Implement M2 Increment 4 startup reconciliation.** Run it before the
    worker starts: reconcile interrupted/finalizing/succeeded rows, validate
    manifest identity, create bounded fresh attempts, and quarantine only safe
    canonical unowned job directories.
-3. **Implement M2 Increment 5 contract/runtime work.** Make readiness depend on
+2. **Implement M2 Increment 5 contract/runtime work.** Make readiness depend on
    SQLite, the data root, and runner health; change capabilities to persistent
    durability plus `maxActiveJobs`; update backend OpenAPI first; generate and
    diff TypeScript only under `/private/tmp`; leave the committed frontend
    schema for M6; mount persistent `/data` in Compose.
-4. **Run M2 release gates.** Full Rust gates, Compose validation, image build,
+3. **Run M2 release gates.** Full Rust gates, Compose validation, image build,
    graceful restart, and forced-kill recovery must pass before M3/AnyDoc.
-5. **Desktop OpenAPI prep is done; M6 still owns the wire-up.** The user
+4. **Desktop OpenAPI prep is done; M6 still owns the wire-up.** The user
    authorized shaping the frontend to the contract ahead of M6. `src/app/api/`
    is a standard openapi-typescript/openapi-fetch layer, and
    `commands.serviceRequest` is its typed IPC door. Remaining M6 work: the
@@ -138,12 +134,13 @@ the root is the required layout, not clutter.
 - M2 Increments 1-2 are complete: SQLite is the live job/idempotency store,
   sources and artifacts use the persistent data root, submissions are durable
   before `202`, and completed jobs/artifacts survive `AppState` restart.
-- M2 Increment 3 is implemented and in final hardening verification: one FIFO
+- M2 Increment 3 is complete and verified: one FIFO
   runner claims from SQLite, wakes through `Notify`, polls as a fallback, uses
   an exact validated source handle, verifies source length/SHA-256 again inside
-  the worker, and performs bounded cancellation/shutdown. The last settled
-  checkpoint had 69 passing backend tests; do not treat that as the final M2
-  count because the hardening pass adds tests and is still running.
+  the worker, fails closed on durable-state uncertainty, and performs bounded
+  cancellation/shutdown under the HTTP supervisor's same deadline. The settled
+  gate passed format, check, Clippy, `git diff --check`, and 77 backend tests;
+  the backend-only checkpoint is `f189265`.
 - M2 Increment 4 startup reconciliation and Increment 5
   readiness/capabilities/OpenAPI/Compose work are not implemented yet.
 - The service remains loopback-only. No LAN, Caddy, AnyDoc, or Datalab

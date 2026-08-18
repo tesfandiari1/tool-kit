@@ -6,6 +6,7 @@
 **Estimated implementation shape:** One baseline increment plus six bounded
 implementation increments, each independently testable
 **Last updated:** 2026-08-17
+**Session handoff:** [`HANDOFF.md`](HANDOFF.md)
 
 ## Objective
 
@@ -47,6 +48,22 @@ Excluded from this unit:
   integration;
 - multiple converter replicas or distributed locks; and
 - GPU, OCR, transcription, or summarization work.
+
+## Live progress snapshot
+
+| Increment | Status | Notes |
+|---|---|---|
+| 0 — Contract freeze | Complete | Baseline and generated-client parity recorded |
+| 1 — Persistence foundation | Complete | SQLite repository, migration, transactions, recovery queries |
+| 2 — Durable ingest/artifacts | Complete | Persistent source/artifact ownership and restart-visible API reads |
+| 3 — Single durable worker | Complete | One FIFO runner; adversarial lifecycle and integrity fixes verified |
+| 4 — Startup reconciliation | Next | Not implemented yet |
+| 5 — Runtime and Compose | Pending | Readiness, capabilities/OpenAPI, `/data` mount |
+| 6 — Adversarial/release gates | Pending | Image build and graceful/forced restart smokes |
+
+The settled Increment 3 checkpoint passed format, check, Clippy, `git diff
+--check`, and 77 backend tests. This is not the final M2 result; recovery,
+runtime-contract, Compose, and image restart gates remain.
 
 ## Requirements and acceptance rules
 
@@ -205,21 +222,24 @@ change will be visible.
 
 Related: CVR-020, CVR-021, CVR-022.
 
-- [ ] Add SQLx 0.9 with default features disabled and exactly the
+Implementation note (2026-08-17): this increment is complete. Re-read the live
+files and [`HANDOFF.md`](HANDOFF.md) before changing its invariants.
+
+- [x] Add SQLx 0.9 with default features disabled and exactly the
   `runtime-tokio`, `sqlite`, `migrate`, and `macros` features; regenerate only
   `backend/Cargo.lock`.
-- [ ] Add `TOOLKIT_CONVERTER_DATA_DIR`, polling interval, and local
+- [x] Add `TOOLKIT_CONVERTER_DATA_DIR`, polling interval, and local
   recovery-limit settings with bounded validation. Always resolve the database
   as `converter.sqlite` beneath the configured data directory.
-- [ ] Add `backend/build.rs` to track changes under `backend/migrations/` for
+- [x] Add `backend/build.rs` to track changes under `backend/migrations/` for
   embedded migration rebuilds.
-- [ ] Add `backend/migrations/0001_conversion_jobs.sql` and migration tests.
-- [ ] Add `persistence/` with a small repository interface and SQLite
+- [x] Add `backend/migrations/0001_conversion_jobs.sql` and migration tests.
+- [x] Add `persistence/` with a small repository interface and SQLite
   implementation.
-- [ ] Implement create-or-replay, lookup, capacity check, state transition,
+- [x] Implement create-or-replay, lookup, capacity check, state transition,
   claim-next, attempt creation, artifact commit, and recovery queries.
-- [ ] Keep timestamps and public views compatible with the current API.
-- [ ] Prove unique idempotency and fingerprint-conflict behavior under
+- [x] Keep timestamps and public views compatible with the current API.
+- [x] Prove unique idempotency and fingerprint-conflict behavior under
   concurrent requests.
 
 Likely files:
@@ -244,28 +264,28 @@ claim tests against a file-backed temporary SQLite database.
 
 Related: CVR-021, CVR-023, CVR-025.
 
-- [ ] Replace `TempDir` ownership with a configured persistent `ArtifactStore`.
-- [ ] Stream incoming PDFs to a generated source staging path under the job
+- [x] Replace `TempDir` ownership with a configured persistent `ArtifactStore`.
+- [x] Stream incoming PDFs to a generated source staging path under the job
   directory, retaining the current size/time/signature/hash checks.
-- [ ] Flush/sync and atomically place the immutable source before committing
+- [x] Flush/sync and atomically place the immutable source before committing
   the accepted database record; sync its parent directory where supported.
-- [ ] Insert conversion, first attempt, and idempotency decision in one
+- [x] Insert conversion, first attempt, and idempotency decision in one
   transaction.
-- [ ] Immediately remove the newly staged job/source tree on idempotency
+- [x] Immediately remove the newly staged job/source tree on idempotency
   replay, fingerprint conflict, active-capacity rejection, or database
   transaction failure. A replay must still succeed when active capacity is
   full.
-- [ ] Add an artifact-store operation that moves a pre-acceptance job tree under
+- [x] Add an artifact-store operation that moves a pre-acceptance job tree under
   `/data/quarantine/pre-acceptance/{job-id}/` without following symlinks. The
   startup reconciler invokes it in Increment 4; M2 never auto-deletes the
   quarantined document data.
-- [ ] Make staging and publication attempt-scoped and preserve the current
+- [x] Make staging and publication attempt-scoped and preserve the current
   symlink, size, hash, and non-empty-output checks.
-- [ ] Sync validated artifacts before publication rename so a committed
+- [x] Sync validated artifacts before publication rename so a committed
   `succeeded` state does not depend only on buffered writes.
-- [ ] Persist only generated relative paths and resolve them through one
+- [x] Persist only generated relative paths and resolve them through one
   containment-checked path helper.
-- [ ] Test that replay, conflict, capacity rejection, and transaction failure
+- [x] Test that replay, conflict, capacity rejection, and transaction failure
   leave no unowned document bytes or job directory.
 
 Likely files:
@@ -285,21 +305,22 @@ database and `/data` tree; a failed submission leaves no accepted job.
 
 Related: CVR-024, CVR-025.
 
-- [ ] Add one `JobRunner` started during application bootstrap.
-- [ ] Replace `ConversionService::submit`'s per-job `tokio::spawn` with a
+- [x] Add one `JobRunner` started during application bootstrap.
+- [x] Replace `ConversionService::submit`'s per-job `tokio::spawn` with a
   repository commit followed by `Notify`.
-- [ ] Claim one queued job transactionally and preserve parser concurrency one.
-- [ ] Add a test-only deterministic fault barrier after transactional claim and
+- [x] Claim one queued job transactionally and preserve parser concurrency one.
+- [x] Add a test-only deterministic fault barrier after transactional claim and
   before engine execution so claim-recovery tests do not depend on timing.
-- [ ] Before every initial or recovered execution, require the immutable source
+- [x] Before every initial or recovered execution, require the immutable source
   to be contained under the job root, a regular non-symlink file, and an exact
   match for its stored byte count and SHA-256.
-- [ ] Persist state before and after engine execution, finalization, and
+- [x] Persist state before and after engine execution, finalization, and
   terminal outcome.
-- [ ] Keep engine invocation and validation behavior unchanged.
-- [ ] Stop claiming on shutdown; allow a bounded drain, terminate safely at the
+- [x] Keep the engine's public outcome behavior while hardening its source
+  binding to the validated open handle, stored byte length, and stored SHA-256.
+- [x] Stop claiming on shutdown; allow a bounded drain, terminate safely at the
   deadline, and leave recoverable state when interrupted.
-- [ ] Ensure a panic or parser crash cannot silently remove the durable row.
+- [x] Ensure a panic or parser crash cannot silently remove the durable row.
 
 Likely files:
 
@@ -482,7 +503,7 @@ deployment and supply-chain gate.
 
 ### Dirty shared worktree
 
-Limit edits to backend-owned paths recorded in `BACKEND_BASELINE.md`, reread
+Limit edits to backend-owned paths recorded in `docs/BACKEND_BASELINE.md`, reread
 overlapping files before every patch, and stage explicit paths only. Never use
 `git add .` or modify concurrent desktop work during M2.
 
@@ -526,6 +547,6 @@ M2 is complete only when all of the following are true:
 
 ## Execution boundary
 
-M2 is approved and implementation is in progress. Start with Increment 0 and
-Increment 1 only, report their evidence, and then continue through the remaining
-increments without adding AnyDoc or other scope.
+M2 is approved. Increments 0-3 are complete and verified. Execute Increment 4
+startup reconciliation next; do not add AnyDoc or other scope. Parallel
+sessions start at [`HANDOFF.md`](HANDOFF.md).

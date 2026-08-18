@@ -1,10 +1,11 @@
 # Epic: Rust conversion backend
 
-**Status:** In progress
+**Status:** In progress — M2 Increments 0-3 verified; Increment 4 next
 **Current milestone:** M2 — durable SQLite jobs and artifacts
 **Target:** CPU-only Rust/Axum modular monolith
 **Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)
 **Immediate plan:** [`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)
+**Session handoff:** [`HANDOFF.md`](HANDOFF.md)
 **Last updated:** 2026-08-17
 
 ## Outcome
@@ -109,24 +110,36 @@ wiring are not implemented. M1 is not approved for LAN deployment.
 
 ## M2 — Durable SQLite jobs and artifacts
 
-- [ ] **CVR-020:** Add SQLx 0.9 with default features disabled and only
+Current implementation snapshot:
+
+| Area | State | Evidence / remaining work |
+|---|---|---|
+| Contract freeze | Complete | Backend OpenAPI and generated-client baseline recorded without modifying desktop schema |
+| SQLite repository | Complete | File-backed migration, WAL/FULL/FK checks, transactional idempotency/capacity, FIFO claims, and recovery primitives |
+| Durable ingest/artifacts | Complete | Persistent source and attempt layout, atomic publication, hashes, cleanup, quarantine primitives, and restart-visible reads |
+| Single worker | Complete | One FIFO runner, Notify plus polling, validated-handle parser input, fail-closed execution, and bounded cancellation/shutdown |
+| Startup reconciliation | Next | State-specific recovery, manifest validation, recovered attempts, and orphan quarantine |
+| Runtime/OpenAPI/Compose | Pending | Live readiness, persistent capability response, `/data` mount, and temporary generated-schema diff |
+| Release gates | Pending | Container build plus graceful and forced-kill restart smokes |
+
+- [x] **CVR-020:** Add SQLx 0.9 with default features disabled and only
   `runtime-tokio`, `sqlite`, `migrate`, and `macros`; add embedded migrations,
   `build.rs` migration tracking, foreign keys, WAL mode, full synchronous
   durability, busy timeout, and migration/startup tests.
-- [ ] **CVR-021:** Add fail-fast `/data` configuration and a persistent layout
+- [x] **CVR-021:** Add fail-fast `/data` configuration and a persistent layout
   for the fixed `converter.sqlite` database filename, immutable job sources,
   attempt staging, artifacts, and pre-acceptance quarantine.
-- [ ] **CVR-022:** Replace the in-memory `JobRegistry` with a repository for
+- [x] **CVR-022:** Replace the in-memory `JobRegistry` with a repository for
   conversions, attempts, artifacts, and durable idempotency using the literal
   M2 authentication scope `bootstrap`.
-- [ ] **CVR-023:** Make submission durable: publish the validated source and
+- [x] **CVR-023:** Make submission durable: publish the validated source and
   commit the conversion, first attempt, and idempotency decision before
   returning `202 Accepted`; remove the newly staged source on replay, conflict,
   capacity rejection, or transaction failure.
-- [ ] **CVR-024:** Replace per-job task spawning with one bounded worker loop
+- [x] **CVR-024:** Replace per-job task spawning with one bounded worker loop
   that transactionally claims queued work. Use a notification for wake-up and
   SQLite polling for restart recovery.
-- [ ] **CVR-025:** Persist every state transition, active attempt, route,
+- [x] **CVR-025:** Persist every state transition, active attempt, route,
   classification, warning, stable failure, engine version, artifact path, and
   hash.
 - [ ] **CVR-026:** Reconcile `queued`, `converting_local`, `finalizing`, and
@@ -332,8 +345,10 @@ Execute M2 only. Do not combine persistence with AnyDoc.
    marking M2 complete.
 
 The detailed file and test plan is in
-[`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md). The plan is approved;
-execution starts with its bounded Increment 0 and Increment 1 scope.
+[`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md). Increments 0-3 are
+complete and verified. Increment 4 startup reconciliation is next. See
+[`HANDOFF.md`](HANDOFF.md)
+before touching files.
 
 ## Verification log
 
@@ -372,3 +387,40 @@ execution starts with its bounded Increment 0 and Increment 1 scope.
   status/profile characterization. The full backend suite now contains 30
   passing tests.
 - Format, check, Clippy with warnings denied, and Compose validation passed.
+
+### 2026-08-17 — Repo hygiene and latest-stable deps
+
+- Planning docs moved to `docs/`. Session state lives in `docs/HANDOFF.md`.
+- Added root `LICENSE` (MIT), CI, Dependabot, `rust-toolchain.toml` (1.97.1),
+  `.node-version` (24), and `packageManager` / `engines` in `package.json`.
+- Catch-up to latest stable except TypeScript 7, `keyring` 4, `libc` 1.0-alpha,
+  and the exact `pdf-inspector =1.15.0` pin. Those exceptions are load-bearing;
+  do not "finish" them in an M2 session.
+- Shared repo files are not backend-owned. Do not revert them in an M2 patch.
+
+### 2026-08-17 — M2 Increments 1-3 implementation checkpoint
+
+- Replaced the in-memory registry with a file-backed SQLite repository and
+  embedded migration. Durable idempotency, capacity precedence, FIFO claims,
+  exact state transitions, restart-visible reads, and bounded recovery-attempt
+  primitives are implemented.
+- Replaced temporary artifact ownership with a persistent `/data` layout for
+  immutable sources, attempt staging, published Markdown/manifests, and
+  collision-safe pre-acceptance quarantine.
+- Submission now commits the durable job before returning `202`; replay,
+  conflict, and capacity paths clean their alternate staged trees.
+- Replaced per-request conversion tasks with one FIFO runner using SQLite as
+  the queue, `Notify` for low-latency wake-up, and polling for missed signals.
+- The parser receives the already-open validated source through stdin. The
+  worker independently verifies its stored byte length and SHA-256 before
+  parsing, so path replacement or in-place mutation cannot change the input.
+- The settled post-hardening gate passed format, check, Clippy, `git diff
+  --check`, and 77 backend tests. Coverage includes concurrent FIFO claims,
+  missed notifications, source path and in-place mutation, persistence
+  invariant propagation, stop/claim races, stubborn task cancellation, and a
+  shared HTTP/job shutdown deadline.
+- Committed the backend-only durable-runner checkpoint as `f189265`; concurrent
+  frontend, Tauri, dependency, Docker, and unrelated documentation changes were
+  not staged with it.
+- Startup reconciliation, live readiness, the M2 capabilities/OpenAPI delta,
+  Compose persistence, and container restart smokes remain pending.
