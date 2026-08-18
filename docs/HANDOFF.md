@@ -1,20 +1,16 @@
 # Session handoff
 
 **Last updated:** 2026-08-18
-**Branch:** `main`. Backend code checkpoint `01f1bf1`; later commits are
-docs-only. `codex/backend-m2` (PR #1, PR #3) and
+**Branch:** `main`. Backend code checkpoint `61fbe40`; later commits may be
+docs-only or M6 desktop work. `codex/backend-m2` (PR #1, PR #3) and
 `backend/m2-increment-5` (PR #4) are merged and deleted. Branch fresh off
 `main` for the next milestone.
-**Backend checkpoint:** `5c626e1` — M3 Increments 0-3 committed on `main`;
-AnyDoc converts DOCX and XLSX in-process, and capabilities tell the truth at
-contract 0.4.0.
-**Recorded code state:** Increment 6 is committed as `01f1bf1` and the working
-tree is clean. It added `backend/src/faults.rs`,
-`backend/tests/{crash_recovery,integrity_matrix,failure_modes}.rs`,
-`backend/scripts/container-smoke.sh`, and `docs/DESKTOP_EXECUTION_PLAN.md`, and
-touched `backend/src/{app,lib}.rs`, `backend/src/conversion/service.rs`,
-`backend/tests/support/mod.rs`, `backend/compose.yaml`, `backend/.dockerignore`,
-`package.json`, `CLAUDE.md`, and three `docs/` files.
+**Backend checkpoint:** `61fbe40` — M3 Increments 0-4 committed on `main`.
+AnyDoc converts the desktop seven (doc, docx, ppt, pptx, xls, xlsx, epub)
+in-process with a hard timeout; contract is 0.4.0; the container smoke passes
+with AnyDoc linked in.
+**Recorded code state:** the tree is clean. `3b99686` landed the shared clippy
+deny-set and docs sweep from the parallel session.
 **Read this first** in any parallel session, then re-read the live worktree.
 This file goes stale the moment someone lands a commit.
 
@@ -26,11 +22,12 @@ This file goes stale the moment someone lands a commit.
    M6 from `docs/DESKTOP_EXECUTION_PLAN.md` at the same time. The one
    coordination point is `pnpm generate:api` after the M2/CVR-027 and M3
    deltas; the M3 session never writes `src/app/api/schema.ts`.
-   Increments 0-3 are complete: spike (go, `anydoc =0.1.9`), engine seam,
-   in-process AnyDoc adapter (owner decision: no second worker binary),
-   admission table, capabilities/OpenAPI 0.4.0. Next: Increment 4 — the
-   per-family fixture matrix (CVR-036), engine diagnostics evidence
-   (CVR-035), and the container gates (CVR-037). M2 is closed.
+   Increments 0-4 are complete except one batch: **rtf, odt, ods, odp, and
+   csv** remain for CVR-036 — five admission rows, migration 0003 for the
+   five media types, five fixtures, five contract tests. The adapter's CSV
+   extension hint is already in and unit-tested. Then the M3 gate review
+   closes M3. CVR-039 (skip redundant parse re-read) is optional M3.5 after
+   the gate. M2 is closed.
 
    **Run the container smokes with a CPU-capped builder.** The image build is
    the only part that saturates the machine, and the default builder lives
