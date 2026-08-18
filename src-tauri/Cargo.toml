@@ -35,3 +35,28 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
+# Keep in sync with backend/Cargo.toml [lints]. No root workspace.
+# Default Clippy groups stay warn; CI and pnpm verify pass -D warnings.
+# This table is the extra deny-set for LLM/vibe-code failure modes.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+undocumented_unsafe_blocks = "deny"
+mem_forget = "deny"
+empty_drop = "deny"
+fn_to_numeric_cast_any = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+unused_async = "deny"
+cloned_instead_of_copied = "deny"
+implicit_clone = "deny"
+let_underscore_future = "deny"
+manual_async_fn = "deny"
+lossy_float_literal = "deny"
+string_slice = "deny"
+match_wildcard_for_single_variants = "deny"
+

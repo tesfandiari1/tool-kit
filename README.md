@@ -31,7 +31,7 @@ pnpm tauri dev     # first run compiles the Rust desktop crate, so it is slow
 pnpm lint          # type-aware ESLint
 pnpm build         # frontend only: tsc + vite build
 
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings
 ```
 

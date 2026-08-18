@@ -2,7 +2,7 @@
 
 **Status:** In progress — M2 closed, M3 AnyDoc next; M6 may run in parallel
 **Current milestone:** M3 — AnyDoc and local format routing
-**Latest verified checkpoint:** `01f1bf1` — M2 Increments 0-6, M2 closed
+**Latest verified checkpoint:** `5c626e1` — M3 Increments 0-3, contract 0.4.0
 **Target:** CPU-only Rust/Axum modular monolith
 **Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)
 **Immediate plan:** [`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)

@@ -27,10 +27,12 @@ async fn datalab_convert_live() {
     let submitted = providers::datalab_submit(&client, &key, &path, "markdown", true)
         .await
         .expect("datalab submit");
-    let check_url = submitted
-        .check_url
-        .clone()
-        .unwrap_or_else(|| format!("https://www.datalab.to/api/v1/convert/{}", submitted.remote_id));
+    let check_url = submitted.check_url.clone().unwrap_or_else(|| {
+        format!(
+            "https://www.datalab.to/api/v1/convert/{}",
+            submitted.remote_id
+        )
+    });
 
     let mut markdown = None;
     for _ in 0..60 {
@@ -83,5 +85,8 @@ async fn revai_transcribe_live() {
 
     let transcript = transcript.expect("revai timed out");
     println!("\n===== REV.AI TRANSCRIPT ({} chars) =====\n{transcript}\n=========================================\n", transcript.len());
-    assert!(!transcript.trim().is_empty(), "transcript should not be empty");
+    assert!(
+        !transcript.trim().is_empty(),
+        "transcript should not be empty"
+    );
 }

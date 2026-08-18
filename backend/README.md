@@ -191,6 +191,7 @@ cargo fmt --manifest-path backend/Cargo.toml --all -- --check
 cargo check --locked --offline --manifest-path backend/Cargo.toml --all-targets
 cargo test --locked --offline --manifest-path backend/Cargo.toml
 cargo clippy --locked --offline --manifest-path backend/Cargo.toml --all-targets -- -D warnings
+# Extra deny-set lives in Cargo.toml [lints]; keep in sync with src-tauri.
 docker compose -f backend/compose.yaml config --quiet
 docker build -t tool-kit-converter:m2 backend
 ```

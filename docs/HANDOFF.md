@@ -5,8 +5,9 @@
 docs-only. `codex/backend-m2` (PR #1, PR #3) and
 `backend/m2-increment-5` (PR #4) are merged and deleted. Branch fresh off
 `main` for the next milestone.
-**Backend checkpoint:** `01f1bf1` — M2 Increments 0-6 verified and committed on
-`main`; M2 is closed.
+**Backend checkpoint:** `5c626e1` — M3 Increments 0-3 committed on `main`;
+AnyDoc converts DOCX and XLSX in-process, and capabilities tell the truth at
+contract 0.4.0.
 **Recorded code state:** Increment 6 is committed as `01f1bf1` and the working
 tree is clean. It added `backend/src/faults.rs`,
 `backend/tests/{crash_recovery,integrity_matrix,failure_modes}.rs`,
@@ -19,16 +20,17 @@ This file goes stale the moment someone lands a commit.
 
 ## Do this next
 
-1. **Run M3 (AnyDoc) in the backend session; M6 may run in parallel.**
+1. **Run M3 Increment 4 in the backend session; M6 may run in parallel.**
    Sequencing decided 2026-08-18: the backend session takes M3 per the
    increment table in `docs/BACKEND_EPIC.md`, and a desktop session may run
    M6 from `docs/DESKTOP_EXECUTION_PLAN.md` at the same time. The one
-   coordination point is `pnpm generate:api` after CVR-033 widens
-   `inputFormats`; the M3 session never writes `src/app/api/schema.ts`.
-   The AnyDoc spike (Increment 0) is complete: verdict **go**, containment is
-   a bounded child worker, evidence in the epic's verification log. Next:
-   Increment 1, the engine seam. M2 is closed and committed as `01f1bf1`:
-   119 backend tests pass and both container smokes pass.
+   coordination point is `pnpm generate:api` after the M2/CVR-027 and M3
+   deltas; the M3 session never writes `src/app/api/schema.ts`.
+   Increments 0-3 are complete: spike (go, `anydoc =0.1.9`), engine seam,
+   in-process AnyDoc adapter (owner decision: no second worker binary),
+   admission table, capabilities/OpenAPI 0.4.0. Next: Increment 4 — the
+   per-family fixture matrix (CVR-036), engine diagnostics evidence
+   (CVR-035), and the container gates (CVR-037). M2 is closed.
 
    **Run the container smokes with a CPU-capped builder.** The image build is
    the only part that saturates the machine, and the default builder lives
@@ -395,6 +397,7 @@ The Increment 6 run was `20260818T060016Z` against image `sha256:7ce986e7…`.
 | `docs/BACKEND_SERVICE_PLAN.md` | Approved architecture |
 | `docs/BACKEND_EXECUTION_PLAN.md` | M2 increment checklist |
 | `docs/DESKTOP_EXECUTION_PLAN.md` | M6 desktop integration plan and milestone ordering |
+| `docs/MONITORING_AND_PROGRESS.md` | Job UX poll vs operator logs/metrics; not a ticket |
 | `docs/BACKEND_BASELINE.md` | Scaffold ownership / staging paths |
 | `docs/YAAK_ARCHITECTURE_REFERENCE.md` | Yaak patterns to steal, not fork |
 | `backend/README.md` | Converter setup and env vars |

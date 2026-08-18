@@ -50,7 +50,7 @@ pub async fn ready(State(state): State<AppState>) -> (StatusCode, Json<Readiness
     let (database, data_root, worker) = tokio::join!(
         bounded("database", state.service().health_check()),
         bounded("dataRoot", state.service().probe_data_root()),
-        bounded("worker", worker_health(&state)),
+        bounded("worker", std::future::ready(worker_health(&state))),
     );
 
     let ready = database && data_root && worker;
@@ -74,7 +74,7 @@ pub async fn ready(State(state): State<AppState>) -> (StatusCode, Json<Readiness
     )
 }
 
-async fn worker_health(state: &AppState) -> Result<(), &'static str> {
+fn worker_health(state: &AppState) -> Result<(), &'static str> {
     if state.job_runner_failed() {
         return Err("the job runner exited unexpectedly");
     }

@@ -31,9 +31,14 @@ pnpm lint             # ESLint, type-aware (recommended + stylistic + react-hook
 pnpm lint:fix
 
 cargo check  --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets   # kept warning-clean
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings
 ```
+
+Clippy is the Rust linter. Both crates deny a small extra set in
+`Cargo.toml` `[lints.clippy]` (todo/dbg/unwrap in non-test code, unused
+async, non-exhaustive single-variant matches). Policy knobs live in each
+crate’s `clippy.toml`. Do not enable `clippy::pedantic` as a group.
 
 ### Live API smoke tests
 
@@ -131,6 +136,7 @@ Type is three families with non-overlapping jobs: **Instrument Serif** for displ
 - [`docs/BACKEND_EPIC.md`](docs/BACKEND_EPIC.md) — conversion-backend milestones
 - [`docs/BACKEND_EXECUTION_PLAN.md`](docs/BACKEND_EXECUTION_PLAN.md) — M2 increments
 - [`docs/DESKTOP_EXECUTION_PLAN.md`](docs/DESKTOP_EXECUTION_PLAN.md) — M6 desktop integration and the order of the remaining milestones
+- [`docs/MONITORING_AND_PROGRESS.md`](docs/MONITORING_AND_PROGRESS.md) — job UX poll vs operator logs/metrics
 - [`docs/YAAK_ARCHITECTURE_REFERENCE.md`](docs/YAAK_ARCHITECTURE_REFERENCE.md) — Yaak files to steal (host, RPC, blobs, Keychain); do not fork the product
 - Local Tauri v2 docs: `/Users/tristin/code/tauri-skills/knowledgebase/tauri-v2`.
 

@@ -1,0 +1,12 @@
+# Clippy policy for this crate. Keep in sync with backend/clippy.toml.
+# There is no root Cargo workspace to share this from.
+#
+# These flags only affect lints enabled in Cargo.toml [lints.clippy].
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+# std::sync::Mutex::lock().unwrap() is the documented poison policy.
+allow-unwrap-types = ["std::sync::LockResult"]
