@@ -2,6 +2,8 @@
 
 **Last updated:** 2026-08-17  
 **Branch:** `codex/backend-m2`  
+**Backend checkpoint:** `449d7cb` — M2 Increments 0-4 verified
+**Recorded code state:** no uncommitted backend implementation changes
 **Read this first** in any parallel session, then re-read the live worktree.
 This file goes stale the moment someone lands a commit.
 
@@ -23,10 +25,10 @@ This file goes stale the moment someone lands a commit.
    in sync with `backend/openapi/openapi.yaml`, not rewritten; still
    regenerate it via `pnpm generate:api` only when M2's OpenAPI delta lands
    (CVR-027).
-4. **The desktop frontend slice is committed** (see "Recent desktop commit").
-   Still uncommitted and not owned by it: `backend/**`, `docs/BACKEND_*.md`,
-   `src-tauri/**` (including untracked `src/history.rs`), and the dependency
-   lockfiles. Keep staging explicit paths.
+4. **The desktop frontend slice and backend Increment 4 are committed.** The
+   backend checkpoint is `449d7cb`; no backend implementation changes remain
+   uncommitted. Re-check live status before editing and keep future staging to
+   explicit owned paths.
 5. **Do not** create a root Cargo workspace, bump TypeScript 7, migrate
    `keyring` 4, unpin `pdf-inspector`, or take `libc` 1.0 (still alpha).
 
@@ -143,7 +145,7 @@ the root is the required layout, not clutter.
   successes closed while retaining audit data, and quarantines only canonical
   unowned job trees. The settled gate passed format, check, Clippy,
   `git diff --check`, and 90 backend tests (54 library, 1 server, 3 worker, 32
-  HTTP contract) on the default test stack.
+  HTTP contract) on the default test stack. The checkpoint is `449d7cb`.
 - M2 Increment 5 readiness/capabilities/OpenAPI/Compose work and Increment 6
   built-container restart gates remain pending.
 - The service remains loopback-only. No LAN, Caddy, AnyDoc, or Datalab

@@ -2,6 +2,7 @@
 
 **Status:** Approved — implementation in progress
 **Epic tickets:** CVR-020 through CVR-029
+**Latest verified checkpoint:** `449d7cb` — Increments 0-4 complete
 **Complexity:** Medium-high
 **Estimated implementation shape:** One baseline increment plus six bounded
 implementation increments, each independently testable
@@ -63,7 +64,8 @@ Excluded from this unit:
 
 The settled Increment 4 checkpoint passed format, check, Clippy, `git diff
 --check`, and 90 backend tests. This is not the final M2 result;
-runtime-contract, Compose, and image restart gates remain.
+runtime-contract, Compose, and image restart gates remain. The checkpoint is
+committed as `449d7cb`.
 
 ## Requirements and acceptance rules
 

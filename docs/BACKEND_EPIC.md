@@ -2,6 +2,7 @@
 
 **Status:** In progress — M2 Increments 0-4 verified; Increment 5 next
 **Current milestone:** M2 — durable SQLite jobs and artifacts
+**Latest verified checkpoint:** `449d7cb` — M2 Increment 4 startup recovery
 **Target:** CPU-only Rust/Axum modular monolith
 **Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)
 **Immediate plan:** [`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)
@@ -447,5 +448,8 @@ before touching files.
   `git diff --check`, and 90 backend tests: 54 library, 1 server, 3 parser
   worker, and 32 HTTP-contract tests. The restart suite runs on the default
   test stack.
+- The backend code, recovery tests, and this checkpoint record were committed
+  together as `449d7cb`; no Increment 4 code remains uncommitted at this
+  handoff.
 - Live readiness, the persistent capabilities/OpenAPI delta, Compose `/data`
   wiring, and built-container restart smokes remain for Increments 5-6.

@@ -3,6 +3,7 @@
 **Status:** Approved direction; implementation in progress
 **Target:** CPU-only Rust/Axum service in Docker Compose
 **Current milestone:** M2 — durable SQLite jobs and artifacts
+**Latest verified checkpoint:** `449d7cb` — M2 Increment 4 startup recovery
 **Session handoff:** [`HANDOFF.md`](HANDOFF.md)
 **Last updated:** 2026-08-17
 
