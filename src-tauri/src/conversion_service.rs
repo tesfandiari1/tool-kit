@@ -197,6 +197,7 @@ pub(crate) async fn submit_conversion(
     )
     .await?;
     let envelope: ConversionJobEnvelope = parse_success(response, Some(token), "submission")?;
+    validate_uuid(&envelope.data.id, "conversion id returned by submission")?;
     Ok(envelope.data)
 }
 
@@ -219,6 +220,12 @@ pub(crate) async fn poll_conversion(
     )
     .await?;
     let envelope: ConversionJobEnvelope = parse_success(response, Some(token), "poll")?;
+    validate_uuid(&envelope.data.id, "conversion id returned by poll")?;
+    if envelope.data.id != conversion_id {
+        return Err(
+            "Conversion service poll returned a different conversion id than requested".into(),
+        );
+    }
     Ok(envelope.data)
 }
 
@@ -1041,7 +1048,7 @@ mod tests {
             status: "200 OK",
             content_type: "application/json",
             body: format!(
-                r#"{{"data":{{"id":"{UUID}","status":"paused_by_future_backend","warnings":["still safe"]}}}}"#
+                r#"{{"data":{{"id":"{UUID}","status":"paused_by_future_backend","route":{{"kind":"future_engine","reasonCodes":["future_reason"]}},"warnings":["still safe"]}}}}"#
             )
             .into_bytes(),
             declared_length: None,
@@ -1054,9 +1061,78 @@ mod tests {
             .unwrap();
         assert_eq!(parsed.status, "paused_by_future_backend");
         assert_eq!(parsed.warnings, ["still safe"]);
+        let route = parsed.route.unwrap();
+        assert_eq!(route.kind, "future_engine");
+        assert_eq!(route.reason_codes, ["future_reason"]);
         let request = String::from_utf8(poll.request.await.unwrap()).unwrap();
         assert!(request.starts_with(&format!("GET /api/v1/conversions/{UUID} HTTP/1.1\r\n")));
         poll.task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn submit_rejects_an_invalid_response_conversion_id_without_leaking_token() {
+        let dir = TestDir::new();
+        let source = dir.0.join("source.pdf");
+        tokio::fs::write(&source, b"%PDF-invalid-response-id")
+            .await
+            .unwrap();
+        let server = mock_server(MockResponse {
+            status: "202 Accepted",
+            content_type: "application/json",
+            body: br#"{"data":{"id":"not-a-uuid","status":"queued","warnings":[]}}"#.to_vec(),
+            declared_length: None,
+            split_body: false,
+            chunked: false,
+        })
+        .await;
+        let token = "private-submit-token";
+
+        let error = submit_conversion(
+            &server.base_url,
+            token,
+            &source.to_string_lossy(),
+            UUID,
+            "standard",
+            "stable-invalid-id-key",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Invalid conversion id returned by submission");
+        assert!(!error.contains(token));
+        let _ = server.request.await.unwrap();
+        server.task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn poll_rejects_a_different_response_conversion_id_without_leaking_token() {
+        const OTHER_UUID: &str = "22222222-2222-4222-8222-222222222222";
+        let server = mock_server(MockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: format!(
+                r#"{{"data":{{"id":"{OTHER_UUID}","status":"paused_by_future_backend","route":{{"kind":"future_engine","reasonCodes":["future_reason"]}},"warnings":[]}}}}"#
+            )
+            .into_bytes(),
+            declared_length: None,
+            split_body: false,
+            chunked: false,
+        })
+        .await;
+        let token = "private-poll-token";
+
+        let error = poll_conversion(&server.base_url, token, UUID)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Conversion service poll returned a different conversion id than requested"
+        );
+        assert!(!error.contains(token));
+        let request = String::from_utf8(server.request.await.unwrap()).unwrap();
+        assert!(request.starts_with(&format!("GET /api/v1/conversions/{UUID} HTTP/1.1\r\n")));
+        server.task.await.unwrap();
     }
 
     #[tokio::test]
