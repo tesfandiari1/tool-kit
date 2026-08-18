@@ -131,6 +131,8 @@ Type is three families with non-overlapping jobs: **Instrument Serif** for displ
 - [`docs/BACKEND_EPIC.md`](docs/BACKEND_EPIC.md) — conversion-backend milestones
 - [`docs/BACKEND_EXECUTION_PLAN.md`](docs/BACKEND_EXECUTION_PLAN.md) — M2 increments
 - [`docs/DESKTOP_EXECUTION_PLAN.md`](docs/DESKTOP_EXECUTION_PLAN.md) — M6 desktop integration and the order of the remaining milestones
+- [`docs/WORKSPACE_HANDOFF.md`](docs/WORKSPACE_HANDOFF.md) — M7 dual-pane workspace: wiring the document pane into the shell
+- [`.impeccable.md`](.impeccable.md) — design context (users, brand, aesthetic direction, principles); every `/impeccable` skill reads it
 - [`docs/YAAK_ARCHITECTURE_REFERENCE.md`](docs/YAAK_ARCHITECTURE_REFERENCE.md) — Yaak files to steal (host, RPC, blobs, Keychain); do not fork the product
 - Local Tauri v2 docs: `/Users/tristin/code/tauri-skills/knowledgebase/tauri-v2`.
 
