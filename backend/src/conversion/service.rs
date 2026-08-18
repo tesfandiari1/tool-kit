@@ -18,13 +18,16 @@ use crate::{
         artifact_relative_path, source_relative_path, ArtifactError, ArtifactStore, AttemptPaths,
         PreparedSubmission, PublishedArtifact,
     },
-    engines::{EngineFailure, EngineOutcome, PdfInspectorEngine},
+    engines::{
+        is_complete_native_inspection, EngineAnalysis, EngineFailure, EngineOutcome,
+        PdfInspectorEngine,
+    },
     faults::{FaultBarrier, FaultPoint},
     persistence::{
         hash_idempotency_key, ArtifactKind as StoredArtifactKind, ConversionState, CreateOutcome,
-        DocumentClassification, EngineRecord, FailedResult, FailureStage, LocalAnalysis,
-        LocalStart, NeedsRemoteResult, NewArtifact, NewConversion, NewSource, RepositoryError,
-        SqliteRepository, StoredArtifact, StoredConversion, StoredFailure, SuccessfulArtifacts,
+        EngineRecord, FailedResult, FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult,
+        NewArtifact, NewConversion, NewSource, RepositoryError, SqliteRepository, StoredArtifact,
+        StoredConversion, StoredFailure, SuccessfulArtifacts,
     },
     worker_protocol::{Inspection, PdfTypeLabel, PDF_INSPECTOR_VERSION},
 };
@@ -411,33 +414,19 @@ impl ConversionService {
 
         match self.engine.convert(&paths, source, permit, shutdown).await {
             Ok(EngineOutcome::Converted {
-                inspection,
+                analysis,
                 byte_length,
                 sha256,
             }) => {
-                self.finalize_success(job, paths, inspection, byte_length, sha256)
+                self.finalize_success(job, paths, analysis, byte_length, sha256)
                     .await?;
             }
             Ok(EngineOutcome::NeedsRemote {
-                inspection,
+                analysis,
                 reason_code,
             }) => {
                 let reason = reason_code.as_str().to_owned();
-                let analysis = match local_analysis(&inspection, vec![reason.clone()]) {
-                    Ok(analysis) => analysis,
-                    Err(_) => {
-                        self.finish_failure(
-                            job_id,
-                            attempt_id,
-                            FailureStage::ConvertingLocal,
-                            "inspection_encoding_failed",
-                            "The service could not persist document inspection metadata.",
-                            true,
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                };
+                let analysis = local_analysis(&analysis, vec![reason.clone()]);
                 self.repository
                     .finish_needs_remote(
                         job_id,
@@ -507,28 +496,14 @@ impl ConversionService {
         &self,
         job: StoredConversion,
         paths: AttemptPaths,
-        inspection: Inspection,
+        engine_analysis: EngineAnalysis,
         markdown_bytes: u64,
         markdown_sha256: String,
     ) -> Result<(), ConversionExecutionError> {
         let job_id = job.id;
         let attempt_id = job.active_attempt.id;
         let request_id = job.origin_request_id.clone();
-        let analysis = match local_analysis(&inspection, vec![NATIVE_TEXT_REASON.to_owned()]) {
-            Ok(analysis) => analysis,
-            Err(_) => {
-                self.finish_failure(
-                    job_id,
-                    attempt_id,
-                    FailureStage::ConvertingLocal,
-                    "inspection_encoding_failed",
-                    "The service could not persist document inspection metadata.",
-                    true,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
+        let analysis = local_analysis(&engine_analysis, vec![NATIVE_TEXT_REASON.to_owned()]);
         let finalizing = self
             .repository
             .mark_finalizing(job_id, attempt_id, analysis)
@@ -556,7 +531,7 @@ impl ConversionService {
                 kind: LOCAL_ROUTE.to_owned(),
                 reason_codes: vec![NATIVE_TEXT_REASON.to_owned()],
             },
-            document: inspection,
+            document: engine_analysis.diagnostics,
             warnings: Vec::new(),
             output: ManifestOutput {
                 media_type: MARKDOWN_MEDIA_TYPE.to_owned(),
@@ -976,22 +951,13 @@ fn local_start() -> LocalStart {
     }
 }
 
-fn local_analysis(
-    inspection: &Inspection,
-    reason_codes: Vec<String>,
-) -> Result<LocalAnalysis, serde_json::Error> {
-    let classification = match inspection.pdf_type {
-        PdfTypeLabel::TextBased => DocumentClassification::TextBased,
-        PdfTypeLabel::Scanned => DocumentClassification::Scanned,
-        PdfTypeLabel::ImageBased => DocumentClassification::ImageBased,
-        PdfTypeLabel::Mixed => DocumentClassification::Mixed,
-    };
-    Ok(LocalAnalysis {
-        classification,
-        inspection: serde_json::to_value(inspection)?,
+fn local_analysis(analysis: &EngineAnalysis, reason_codes: Vec<String>) -> LocalAnalysis {
+    LocalAnalysis {
+        classification: analysis.classification,
+        inspection: analysis.diagnostics.clone(),
         reason_codes,
         warnings: Vec::new(),
-    })
+    }
 }
 
 fn artifact_pair(job: &StoredConversion) -> Option<(&StoredArtifact, &StoredArtifact)> {
@@ -1068,9 +1034,13 @@ fn validate_manifest(
     let Some(started_at) = attempt.started_at.as_deref() else {
         return Err(ArtifactReadFailure::Integrity);
     };
-    let manifest_inspection =
-        serde_json::to_value(&manifest.document).map_err(|_| ArtifactReadFailure::Integrity)?;
-    let manifest_classification = match manifest.document.pdf_type {
+    // The document detail is engine-specific JSON. Only the pdf-inspector
+    // shape exists today; a second engine extends this branch keyed on
+    // `engine.name`.
+    let document_inspection: Inspection = serde_json::from_value(manifest.document.clone())
+        .map_err(|_| ArtifactReadFailure::Integrity)?;
+    let manifest_inspection = manifest.document.clone();
+    let manifest_classification = match document_inspection.pdf_type {
         PdfTypeLabel::TextBased => "text_based",
         PdfTypeLabel::Scanned => "scanned",
         PdfTypeLabel::ImageBased => "image_based",
@@ -1114,7 +1084,7 @@ fn validate_manifest(
         || manifest.warnings != job.warnings
         || manifest_inspection != *inspection
         || classification != manifest_classification
-        || !is_complete_native_inspection(&manifest.document)
+        || !is_complete_native_inspection(&document_inspection)
         || manifest.output.media_type != MARKDOWN_MEDIA_TYPE
         || markdown_byte_length == 0
         || manifest.output.byte_length != markdown_byte_length
@@ -1195,13 +1165,6 @@ fn markdown_read_limit(
 
 fn manifest_bytes_match(bytes: &[u8], byte_length: u64, sha256: &str) -> bool {
     bytes.len() as u64 == byte_length && hex::encode(Sha256::digest(bytes)) == sha256
-}
-
-fn is_complete_native_inspection(inspection: &Inspection) -> bool {
-    inspection.pdf_type == PdfTypeLabel::TextBased
-        && inspection.page_count > 0
-        && inspection.pages_needing_ocr.is_empty()
-        && !inspection.has_encoding_issues
 }
 
 fn require_exact_object_keys(
@@ -1291,12 +1254,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        classify_artifact_error, is_complete_native_inspection, manifest_bytes_match,
-        markdown_read_limit, validate_manifest_shape, ArtifactError, ArtifactReadFailure,
-        ManifestOutput,
+        classify_artifact_error, manifest_bytes_match, markdown_read_limit,
+        validate_manifest_shape, ArtifactError, ArtifactReadFailure, ManifestOutput,
     };
     use crate::persistence::{ArtifactKind as StoredArtifactKind, StoredArtifact};
-    use crate::worker_protocol::{Inspection, PageReasons, PdfTypeLabel};
 
     #[test]
     fn artifact_read_errors_distinguish_integrity_from_transient_io() {
@@ -1469,28 +1430,5 @@ mod tests {
             bytes.len() as u64,
             &sha256
         ));
-    }
-
-    #[test]
-    fn completed_native_inspection_allows_historical_ocr_reason_details() {
-        let mut inspection = Inspection {
-            pdf_type: PdfTypeLabel::TextBased,
-            confidence: 1.0,
-            page_count: 1,
-            pages_needing_ocr: Vec::new(),
-            ocr_reasons_by_page: vec![PageReasons {
-                page: 1,
-                reasons: vec!["diagnostic_only".to_owned()],
-            }],
-            has_encoding_issues: false,
-            is_complex: false,
-            pages_with_tables: Vec::new(),
-            pages_with_columns: Vec::new(),
-            processing_time_ms: 1,
-        };
-        assert!(is_complete_native_inspection(&inspection));
-
-        inspection.pages_needing_ocr.push(1);
-        assert!(!is_complete_native_inspection(&inspection));
     }
 }

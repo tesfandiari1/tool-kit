@@ -1,16 +1,13 @@
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::fs::File;
 use uuid::Uuid;
 
-use crate::{
-    persistence::{
-        ArtifactKind as StoredArtifactKind, ConversionState, Profile, StoredArtifact,
-        StoredConversion,
-    },
-    worker_protocol::Inspection,
+use crate::persistence::{
+    ArtifactKind as StoredArtifactKind, ConversionState, Profile, StoredArtifact, StoredConversion,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -233,7 +230,7 @@ pub(crate) struct ConversionManifest {
     pub(crate) source: ManifestSource,
     pub(crate) engine: ManifestEngine,
     pub(crate) route: ManifestRoute,
-    pub(crate) document: Inspection,
+    pub(crate) document: Value,
     pub(crate) warnings: Vec<String>,
     pub(crate) output: ManifestOutput,
     pub(crate) started_at: String,

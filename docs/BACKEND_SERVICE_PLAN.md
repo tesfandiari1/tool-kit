@@ -2,15 +2,18 @@
 
 **Status:** Approved direction; implementation in progress
 **Target:** CPU-only Rust/Axum service in Docker Compose
-**Current milestone:** M2 — durable SQLite jobs and artifacts
-**Latest verified checkpoint:** `2f3158d` — M2 Increment 5 runtime and Compose
+**Current milestone:** M3 — AnyDoc and local format routing
+**Latest verified checkpoint:** `01f1bf1` — M2 Increments 0-6, M2 closed
 **Session handoff:** [`HANDOFF.md`](HANDOFF.md)
-**Last updated:** 2026-08-17
+**Last updated:** 2026-08-18
 
-**Implementation snapshot:** M2 contract freeze, SQLite persistence, durable
-ingest/artifacts, the single FIFO worker, startup reconciliation, live
-readiness, the capabilities/OpenAPI update, and Compose `/data` persistence are
-implemented and verified. Container restart smokes are the only M2 work left.
+**Implementation snapshot:** M2 is closed and merged on `main`: durable SQLite
+persistence, durable ingest/artifacts, the single FIFO worker, startup
+reconciliation, live readiness, the capabilities/OpenAPI update, Compose
+`/data` persistence, and both container restart smokes are verified. M3 adds
+AnyDoc for proven non-PDF formats; the Increment 0 spike returned go with a
+bounded-child-worker containment decision, recorded in
+[`BACKEND_EPIC.md`](BACKEND_EPIC.md).
 
 ## Goal
 

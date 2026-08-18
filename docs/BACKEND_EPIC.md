@@ -1,7 +1,7 @@
 # Epic: Rust conversion backend
 
-**Status:** In progress — M2 closed, M6 desktop integration next
-**Current milestone:** M6 — desktop integration
+**Status:** In progress — M2 closed, M3 AnyDoc next; M6 may run in parallel
+**Current milestone:** M3 — AnyDoc and local format routing
 **Latest verified checkpoint:** `01f1bf1` — M2 Increments 0-6, M2 closed
 **Target:** CPU-only Rust/Axum modular monolith
 **Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)
@@ -45,11 +45,11 @@ integration boundary at a time.
 |---|---|---|---|
 | M0 | Architecture, ownership boundaries, and scaffold | Complete | — |
 | M1 | Authenticated loopback PDF conversion vertical slice | Complete | M0 |
-| M2 | Durable SQLite jobs, sources, and artifacts | In progress | M1 |
+| M2 | Durable SQLite jobs, sources, and artifacts | Complete | M1 |
 | M3 | AnyDoc and proven non-PDF local conversion | Planned | M2 |
 | M4 | Corpus-calibrated routing and quality policy | Planned | M3 |
 | M5 | Restart-safe Datalab fallback and privacy policy | Planned | M4 |
-| M6 | Desktop app uses the backend | Planned | M2, M5 |
+| M6 | Desktop app uses the backend | Planned | M2 (M5 for one CVR-067 scenario) |
 | M7 | LAN deployment, operations, and recovery | Planned | M6 |
 | M8 | Evaluation, reversible cutover, and cleanup | Planned | M7 |
 
@@ -170,15 +170,40 @@ serves no artifacts.
 
 ## M3 — AnyDoc and local format routing
 
-- [ ] **CVR-030:** Verify and pin a compatible AnyDoc revision, Rust API,
-  licenses, supported formats, and CPU-only container requirements.
-- [ ] **CVR-031:** Add the smallest common engine outcome needed for a second
-  local engine; do not create a universal document AST.
+Execution increments, mirroring the M2 style. Each is independently gated.
+
+| Increment | Content | Exit |
+|---|---|---|
+| 0 — AnyDoc spike | Pin `=0.1.9`; build native and image; convert one file per family; hostile-input tests; `cargo tree` feature check; image-size delta | Done 2026-08-18: go; evidence in the verification log |
+| 1 — Engine seam (CVR-031) | Engine-neutral `EngineOutcome`; de-PDF `EngineFailure` strings | Done 2026-08-18: all 119 tests green, no behavior change |
+| 2 — AnyDoc adapter (CVR-032, CVR-034) | `engines/anydoc.rs` with the error mapping; refuses PDF bytes; containment per the spike | A docx round-trips the durable path; a PDF fed to the adapter fails closed |
+| 3 — Validation and capabilities (CVR-033) | Content-sniff plus the CSV extension hint; proven formats only; OpenAPI and capabilities together | Capabilities tells the truth; nothing unproven is accepted |
+| 4 — Fixtures and gates (CVR-035, CVR-036, CVR-037) | Per-family success and bounded-failure fixtures; diagnostics without content leakage; full gate plus container smoke | M3 gate |
+
+- [x] **CVR-030:** Verify and pin a compatible AnyDoc revision, Rust API,
+  licenses, supported formats, and CPU-only container requirements. Verified
+  2026-08-18: crate `anydoc` 0.1.9, MIT, `rust_version` 1.88, pure-Rust
+  dependency tree, in-process `to_markdown_bytes` API with content-based
+  format detection. Spike evidence is in the verification log; the pin
+  `=0.1.9` is decided and lands in `Cargo.toml` with the adapter in
+  Increment 2.
+- [x] **CVR-031:** Add the smallest common engine outcome needed for a second
+  local engine; do not create a universal document AST. `engines/outcome.rs`
+  carries `EngineAnalysis` (classification plus opaque diagnostics JSON) and
+  the shared `EngineOutcome`/`EngineFailure`; the PDF worker's `Inspection`
+  stays inside the PDF engine.
 - [ ] **CVR-032:** Implement the AnyDoc adapter through its supported Rust
-  integration, using a narrow subprocess only if upstream constraints require
-  it.
+  integration. Default to a bounded child worker reusing the PDF worker's
+  supervision pattern, per the isolated-engine mapping in
+  [`YAAK_ARCHITECTURE_REFERENCE.md`](YAAK_ARCHITECTURE_REFERENCE.md); drop to
+  in-process plus `catch_unwind` only with spike evidence. The adapter must
+  refuse PDF input bytes, so AnyDoc's embedded pdf-inspector path can never
+  bypass the isolated PDF worker.
 - [ ] **CVR-033:** Expand upload validation and capabilities to only the file
-  types proven by fixtures.
+  types proven by fixtures. Detect format from content
+  (`Format::from_bytes`); allow an extension hint only for signature-less CSV.
+  The initial advertised set is the desktop-intersection seven: doc, docx,
+  ppt, pptx, xls, xlsx, epub.
 - [ ] **CVR-034:** Route PDFs exactly once through `pdf-inspector` and supported
   non-PDF documents exactly once through AnyDoc.
 - [ ] **CVR-035:** Persist engine/version, warnings, fallback reason, output
@@ -202,7 +227,8 @@ never silently succeeds.
 - [ ] **CVR-042:** Implement explicit `standard`, `local_only`, and
   `best_quality` routing policy as a pure, table-driven decision boundary.
 - [ ] **CVR-043:** Calibrate dense/complex routing against the corpus and record
-  false-local-success and unnecessary-remote-routing rates.
+  false-local-success and unnecessary-remote-routing rates. Sized as a fixture
+  regression suite first; add rate calibration only when real volume exists.
 - [ ] **CVR-044:** Expose route, reason codes, warnings, and policy decisions in
   status and provenance without exposing document content.
 - [ ] **CVR-045:** Add regression tests that prevent scanned, mixed, damaged,
@@ -330,29 +356,17 @@ work.
 
 ## Next execution sequence
 
-Execute M2 only. Do not combine persistence with AnyDoc.
+Execute M3 in the backend session, in the increment order in the M3 section
+above: spike, engine seam, adapter, validation and capabilities, fixtures and
+gates. M6 desktop integration may run in parallel in a second session under
+the ownership table in [`HANDOFF.md`](HANDOFF.md). The one coordination point
+is `pnpm generate:api` after CVR-033 widens `inputFormats`, run by whichever
+session lands second; the M3 session never writes `src/app/api/schema.ts`.
 
-1. Freeze and rerun the current M1 contract.
-2. Write restart/recovery contract tests around a file-backed temporary SQLite
-   database and persistent temporary artifact root.
-3. Add SQLite configuration, migrations, and the repository.
-4. Move source and artifact ownership from `TempDir` to generated `/data`
-   paths.
-5. Replace per-job task spawning with the single durable worker loop.
-6. Add startup reconciliation across the database/filesystem publication
-   boundary.
-7. Add the Compose data volume and real readiness behavior.
-8. Run all Rust, contract, Compose, image, and restart-smoke gates before
-   marking M2 complete.
-
-The detailed file and test plan is in
-[`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md). Increments 0-5 are
-complete and verified, and M2 is closed. M6 desktop integration is next and may
-run in parallel with M3, because neither M3 nor M4 blocks any M6 ticket. The
-reasoning and the increment order are in
-[`DESKTOP_EXECUTION_PLAN.md`](DESKTOP_EXECUTION_PLAN.md). See
-[`HANDOFF.md`](HANDOFF.md)
-before touching files.
+The M2 plan ([`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)) is
+complete. The M6 plan, its increment order, and the parallel-session reasoning
+are in [`DESKTOP_EXECUTION_PLAN.md`](DESKTOP_EXECUTION_PLAN.md). See
+[`HANDOFF.md`](HANDOFF.md) before touching files.
 
 ## Verification log
 
@@ -588,3 +602,78 @@ The container smoke proves the graceful and forced-kill windows only. The
 holding them from outside the process needs a code seam.
 
 Committed on `main` as `01f1bf1`, closing M2.
+
+### 2026-08-18 — M3 Increment 0 AnyDoc spike
+
+**Go.** AnyDoc 0.1.9 is verified as the non-PDF engine, and the containment
+decision is a bounded child worker. Closes CVR-030's verification half; the
+`Cargo.toml` pin lands with the adapter in Increment 2.
+
+- Crate facts: `anydoc` 0.1.9 on crates.io, MIT, `rust_version` 1.88 against
+  our 1.97.1 toolchain, edition 2024, ~14.2k lines of Rust, no build script.
+  Nine runtime dependencies, all pure Rust: calamine 0.36, cfb 0.14, csv 1.4,
+  encoding_rs 0.8, flate2 1, log 0.4, pdf-inspector `^1.14.2`, quick-xml
+  0.41, zip 8.6. No C toolchain, no network, no ML runtime.
+- **pdf-inspector unification is a non-issue.** AnyDoc requires `^1.14.2` and
+  the backend pins `=1.15.0`, so one copy builds. AnyDoc enables
+  pdf-inspector's `default` feature, which is empty (`default = []`); the
+  heavy features (OCR, pdfium rendering, model download, Python) are all
+  opt-in. The compiled PDF surface is unchanged.
+- Happy path, upstream fixtures (firecrawl/anydoc `tests/fixtures`, MIT):
+  text.docx in 17.9ms, sheet.xlsx in 2.5ms, pres.pptx in 9.4ms, book.epub in
+  2.0ms, text.rtf in 5.6ms, and sheet.csv with an explicit `Format::Csv`
+  hint. `Format::from_bytes` named every signed format correctly.
+- Hostile path: six of six upstream `malformed/` and `abuse/` fixtures fail
+  as typed errors with zero panics under `catch_unwind`. The limits fire
+  before decompression: the 197KB zipbomb dies in 107µs with
+  `ResourceLimit(max_entry_bytes: ... declares 201326759 decompressed bytes)`,
+  the imagebomb likewise, deep XML at `max_xml_depth` 256, the huge table
+  span at `max_expansion`, and truncated or empty inputs fail detection as
+  `Unsupported`.
+- CSV carries no signature: detection returns `None` and conversion asks for
+  an explicit format. The upload path accepts an extension hint for CSV only,
+  as CVR-033 records.
+- `Format::from_bytes` on a PDF header returns `Some(Pdf)` and
+  `to_markdown_bytes` converts PDFs in-process through pdf-inspector. The
+  adapter therefore refuses `Format::Pdf` outright, keeping the isolated PDF
+  worker as the only PDF path.
+- **Containment: bounded child worker** reusing the PDF worker's supervision
+  pattern. In-process looked survivable (typed errors, pre-decompression
+  limits, no panics), which keeps the worker protocol simple. But a
+  stack-overflow-class bug in a 0.1.x parser is not catchable in-process, and
+  the child boundary keeps a parser crash away from the SQLite ledger. The
+  cost is one more binary and tens of milliseconds per job against
+  multi-second end-to-end runs.
+- Image: `docker buildx build --builder toolkit-capped --load -t
+  tool-kit-converter:m3-spike backend` succeeds. Exact sizes 40,229,571 bytes
+  versus 40,203,627 for `m2`: a 25,944-byte floor delta, because AnyDoc is
+  compiled but not yet referenced and LTO strips it. The real delta is
+  Increment 4's measurement.
+- The spike harness (`backend/examples/anydoc_spike.rs`) and the
+  `Cargo.toml`/lockfile change were reverted after evidence capture.
+  Fixtures stayed in a temp directory; curated, license-recorded fixtures
+  enter the repo under Increment 4.
+
+### 2026-08-18 — M3 Increment 1 engine seam
+
+Closes CVR-031. No behavior change; all 119 backend tests pass.
+
+- Added `backend/src/engines/outcome.rs`: `EngineAnalysis` carries a
+  `DocumentClassification` plus an opaque diagnostics `serde_json::Value`, and
+  `EngineOutcome`/`EngineFailure` moved here from `pdf_inspector.rs` as the
+  shared engine vocabulary. `EngineFailure` messages now say "conversion
+  worker" instead of "PDF worker"; the stable codes are unchanged.
+- The PDF worker's `Inspection` stays inside the PDF engine, which maps it to
+  `EngineAnalysis` at the outcome boundary. The serialized diagnostics are
+  byte-identical to the previous `Inspection` JSON, so manifests and attempt
+  rows written before this change still validate.
+- `ConversionManifest.document` is now `serde_json::Value`. Old manifests
+  parse unchanged, and the publication validator deserializes the PDF shape
+  only when checking a pdf-inspector manifest, keyed on `engine.name`. That
+  branch is where Increment 2 plugs the AnyDoc manifest check in.
+- The completeness gate `is_complete_native_inspection` moved into
+  `pdf_inspector.rs` with its test.
+- The `inspection_encoding_failed` failure path collapsed into
+  `EngineFailure::Protocol` inside the engine. No test asserted it, and the
+  serialization cannot fail for the plain data structs involved.
+- Gate: format, check, Clippy with warnings denied, and 119 tests all pass.

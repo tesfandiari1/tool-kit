@@ -1,7 +1,8 @@
 # Session handoff
 
 **Last updated:** 2026-08-18
-**Branch:** `main` at `01f1bf1`. `codex/backend-m2` (PR #1, PR #3) and
+**Branch:** `main`. Backend code checkpoint `01f1bf1`; later commits are
+docs-only. `codex/backend-m2` (PR #1, PR #3) and
 `backend/m2-increment-5` (PR #4) are merged and deleted. Branch fresh off
 `main` for the next milestone.
 **Backend checkpoint:** `01f1bf1` — M2 Increments 0-6 verified and committed on
@@ -18,12 +19,16 @@ This file goes stale the moment someone lands a commit.
 
 ## Do this next
 
-1. **Start M6 desktop integration.** M2 is closed and committed as `01f1bf1`:
-   119 backend tests pass and both container smokes pass. The plan for what
-   comes next is `docs/DESKTOP_EXECUTION_PLAN.md`, which re-sequences M6 ahead
-   of M3, M4, and M5. **None of the eight M6 tickets is blocked by M3 or M4**,
-   and only one sub-scenario of CVR-067 needs M5. M3 can run in parallel in a
-   second session under the ownership table below.
+1. **Run M3 (AnyDoc) in the backend session; M6 may run in parallel.**
+   Sequencing decided 2026-08-18: the backend session takes M3 per the
+   increment table in `docs/BACKEND_EPIC.md`, and a desktop session may run
+   M6 from `docs/DESKTOP_EXECUTION_PLAN.md` at the same time. The one
+   coordination point is `pnpm generate:api` after CVR-033 widens
+   `inputFormats`; the M3 session never writes `src/app/api/schema.ts`.
+   The AnyDoc spike (Increment 0) is complete: verdict **go**, containment is
+   a bounded child worker, evidence in the epic's verification log. Next:
+   Increment 1, the engine seam. M2 is closed and committed as `01f1bf1`:
+   119 backend tests pass and both container smokes pass.
 
    **Run the container smokes with a CPU-capped builder.** The image build is
    the only part that saturates the machine, and the default builder lives

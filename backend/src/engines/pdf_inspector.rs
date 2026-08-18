@@ -17,13 +17,14 @@ use tokio::{
     time::sleep,
 };
 
+use super::{EngineAnalysis, EngineFailure, EngineOutcome};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
+    persistence::DocumentClassification,
     worker_protocol::{
-        FallbackReason, Inspection, PdfTypeLabel, RejectionCode, WorkerOutcome, WorkerReport,
-        MARKDOWN_FILE, PDF_INSPECTOR_VERSION, WORKER_EXPECTED_SOURCE_BYTES_ENV,
-        WORKER_EXPECTED_SOURCE_SHA256_ENV, WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION,
-        WORKER_REPORT_FILE,
+        FallbackReason, Inspection, PdfTypeLabel, WorkerOutcome, WorkerReport, MARKDOWN_FILE,
+        PDF_INSPECTOR_VERSION, WORKER_EXPECTED_SOURCE_BYTES_ENV, WORKER_EXPECTED_SOURCE_SHA256_ENV,
+        WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION, WORKER_REPORT_FILE,
     },
 };
 
@@ -214,7 +215,7 @@ impl PdfInspectorEngine {
                     return Err(EngineFailure::Protocol);
                 }
                 EngineOutcome::Converted {
-                    inspection,
+                    analysis: into_analysis(&inspection)?,
                     byte_length: artifact.byte_length,
                     sha256: digest,
                 }
@@ -231,7 +232,7 @@ impl PdfInspectorEngine {
                     return Err(EngineFailure::Protocol);
                 }
                 EngineOutcome::NeedsRemote {
-                    inspection,
+                    analysis: into_analysis(&inspection)?,
                     reason_code,
                 }
             }
@@ -249,53 +250,6 @@ impl PdfInspectorEngine {
             .await
             .map_err(|_| EngineFailure::Protocol)?;
         Ok(outcome)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum EngineOutcome {
-    Converted {
-        inspection: Inspection,
-        byte_length: u64,
-        sha256: String,
-    },
-    NeedsRemote {
-        inspection: Inspection,
-        reason_code: FallbackReason,
-    },
-    Rejected {
-        code: RejectionCode,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EngineFailure {
-    Unavailable,
-    Timeout,
-    Interrupted,
-    Crashed,
-    Protocol,
-}
-
-impl EngineFailure {
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::Unavailable => "worker_unavailable",
-            Self::Timeout => "worker_timeout",
-            Self::Interrupted => "worker_interrupted",
-            Self::Crashed => "worker_crash",
-            Self::Protocol => "worker_protocol_error",
-        }
-    }
-
-    pub fn message(self) -> &'static str {
-        match self {
-            Self::Unavailable => "The local PDF worker is unavailable.",
-            Self::Timeout => "The local PDF worker exceeded its time limit.",
-            Self::Interrupted => "The local PDF worker was interrupted.",
-            Self::Crashed => "The local PDF worker stopped unexpectedly.",
-            Self::Protocol => "The local PDF worker returned an invalid result.",
-        }
     }
 }
 
@@ -469,6 +423,31 @@ fn validate_complete_inspection(inspection: &Inspection) -> Result<(), EngineFai
     Ok(())
 }
 
+/// Maps the worker's PDF inspection into the engine-neutral analysis. The
+/// serialized diagnostics are byte-identical to the previous `Inspection`
+/// JSON, so manifests and attempt rows written before this change still
+/// validate.
+fn into_analysis(inspection: &Inspection) -> Result<EngineAnalysis, EngineFailure> {
+    Ok(EngineAnalysis {
+        classification: match inspection.pdf_type {
+            PdfTypeLabel::TextBased => DocumentClassification::TextBased,
+            PdfTypeLabel::Scanned => DocumentClassification::Scanned,
+            PdfTypeLabel::ImageBased => DocumentClassification::ImageBased,
+            PdfTypeLabel::Mixed => DocumentClassification::Mixed,
+        },
+        diagnostics: serde_json::to_value(inspection).map_err(|_| EngineFailure::Protocol)?,
+    })
+}
+
+/// The completeness gate for a locally converted PDF: text-based, at least
+/// one page, no OCR-needing pages, and no encoding damage.
+pub(crate) fn is_complete_native_inspection(inspection: &Inspection) -> bool {
+    inspection.pdf_type == PdfTypeLabel::TextBased
+        && inspection.page_count > 0
+        && inspection.pages_needing_ocr.is_empty()
+        && !inspection.has_encoding_issues
+}
+
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -549,10 +528,11 @@ mod tests {
     use tokio::sync::watch;
 
     use super::{
-        validate_cmaps, verify_worker_identity, EngineFailure, EngineStartupError,
-        PdfInspectorEngine,
+        is_complete_native_inspection, validate_cmaps, verify_worker_identity, EngineFailure,
+        EngineStartupError, PdfInspectorEngine,
     };
     use crate::artifacts::{AttemptPaths, ValidatedOpenFile};
+    use crate::worker_protocol::{Inspection, PageReasons, PdfTypeLabel};
 
     #[cfg(unix)]
     fn write_worker(path: &Path, body: &str) {
@@ -754,5 +734,28 @@ mod tests {
             .expect("cancelled worker should be reaped promptly")
             .unwrap();
         assert_eq!(result.unwrap_err(), EngineFailure::Interrupted);
+    }
+
+    #[test]
+    fn completed_native_inspection_allows_historical_ocr_reason_details() {
+        let mut inspection = Inspection {
+            pdf_type: PdfTypeLabel::TextBased,
+            confidence: 1.0,
+            page_count: 1,
+            pages_needing_ocr: Vec::new(),
+            ocr_reasons_by_page: vec![PageReasons {
+                page: 1,
+                reasons: vec!["diagnostic_only".to_owned()],
+            }],
+            has_encoding_issues: false,
+            is_complex: false,
+            pages_with_tables: Vec::new(),
+            pages_with_columns: Vec::new(),
+            processing_time_ms: 1,
+        };
+        assert!(is_complete_native_inspection(&inspection));
+
+        inspection.pages_needing_ocr.push(1);
+        assert!(!is_complete_native_inspection(&inspection));
     }
 }
