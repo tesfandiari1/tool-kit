@@ -1,0 +1,149 @@
+/* Tabs — the strip of open documents.
+
+   The label treatment is the signature of the language: JetBrains Mono,
+   uppercase, .09em tracked, at --t-label. A tab is a button, and every button
+   in this system is set that way. */
+
+.ui-tabs {
+  display: flex;
+  align-items: stretch;
+  min-height: 30px;
+  border-bottom: 1px solid var(--rule);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.ui-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.ui-tabs__tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 190px;
+  border-right: 1px solid var(--rule);
+  transition: background var(--dur-fast) var(--ease);
+}
+.ui-tabs__tab:hover {
+  background: var(--surface-raised);
+}
+
+/* The active tab is the only cobalt in the pane, and it is deliberate: a tab
+   is a control you press, which is exactly what cobalt is reserved for. It
+   also matches every editor the user already has open. The fill stays
+   neutral so the colour is carrying one job, not two. */
+.ui-tabs__tab.is-active {
+  background: var(--surface-raised);
+}
+/* Flush with the strip's inner edge, deliberately not -1px on top of the
+   container's own hairline: the strip is a horizontal scroller, so overflow-y
+   is hidden and a rule one pixel outside it is clipped away entirely. */
+.ui-tabs__tab.is-active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--accent);
+}
+
+.ui-tabs__label {
+  font-family: var(--font-mono);
+  font-size: var(--t-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  font-weight: var(--weight-medium);
+  color: var(--ink-3);
+  background: none;
+  border: 0;
+  cursor: default;
+  padding: var(--s2) var(--s1) var(--s2) var(--s3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease);
+}
+.ui-tabs__tab:hover .ui-tabs__label {
+  color: var(--ink-2);
+}
+.ui-tabs__tab.is-active .ui-tabs__label {
+  color: var(--ink);
+}
+.ui-tabs__label:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+  border-radius: var(--r-control);
+}
+
+/* Rule 2: the slot is held at every state. Clean, dirty and closing all
+   occupy the same 20px, so the strip never reflows. */
+.ui-tabs__mark {
+  position: relative;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-right: var(--s1);
+  display: grid;
+  place-items: center;
+}
+
+.ui-tabs__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease);
+}
+.ui-tabs__dot.is-dirty {
+  background: var(--ink-2);
+}
+
+.ui-tabs__x {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--ink-3);
+  border-radius: var(--r-control);
+  opacity: 0;
+  cursor: default;
+  transition: opacity var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.ui-tabs__tab:hover .ui-tabs__x,
+.ui-tabs__x:focus-visible {
+  opacity: 1;
+}
+.ui-tabs__x:hover {
+  color: var(--ink);
+  background: var(--surface-well);
+}
+.ui-tabs__x:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+/* The close control covers the dot while it is visible, so a dirty document
+   never shows two marks in one slot. */
+.ui-tabs__tab:hover .ui-tabs__dot {
+  background: transparent;
+}
+
+.ui-tabs__end {
+  display: flex;
+  align-items: center;
+  padding: 0 var(--s3);
+  margin-left: auto;
+  flex: none;
+}
+
+/* An inactive window cools its accents, the way macOS does. */
+body.inactive .ui-tabs__tab.is-active::after {
+  background: var(--rule-strong);
+}
