@@ -31,6 +31,7 @@ tokio = { version = "1", features = ["time", "fs", "io-util", "sync"] }
 keyring = { version = "3", features = ["apple-native"] }
 mime_guess = "2"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

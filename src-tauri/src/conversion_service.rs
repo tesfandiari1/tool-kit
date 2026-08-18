@@ -24,6 +24,60 @@ const SMALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const STREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_OUTPUT_COLLISIONS: u32 = 1000;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConversionCapabilities {
+    pub(crate) accepting_jobs: bool,
+    pub(crate) input_formats: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConversionRoute {
+    pub(crate) kind: String,
+    pub(crate) reason_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConversionFailure {
+    pub(crate) code: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConversionJob {
+    pub(crate) id: String,
+    pub(crate) status: String,
+    pub(crate) route: Option<ConversionRoute>,
+    #[serde(default)]
+    pub(crate) warnings: Vec<String>,
+    pub(crate) failure: Option<ConversionFailure>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConversionJobEnvelope {
+    data: ConversionJob,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CapabilitiesEnvelope {
+    data: CapabilitiesData,
+}
+
+#[derive(Debug, Deserialize)]
+struct CapabilitiesData {
+    conversion: ConversionCapabilitiesWire,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConversionCapabilitiesWire {
+    accepting_jobs: bool,
+    input_formats: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ServiceRequestPayload {
@@ -92,6 +146,104 @@ pub(crate) async fn download_conversion_markdown(
     let base_url = current_base_url(&app);
     let token = current_token()?;
     download_markdown(&base_url, &token, &conversion_id, &output_dir, &file_name).await
+}
+
+/// Fetch the live routing contract without authentication. Callers must use
+/// `input_formats`; support is intentionally not duplicated in desktop code.
+pub(crate) async fn fetch_capabilities(base_url: &str) -> Result<ConversionCapabilities, String> {
+    let response = send_service_request(
+        base_url,
+        None,
+        ServiceRequestPayload {
+            method: "GET".into(),
+            path: "/api/v1/capabilities".into(),
+            headers: BTreeMap::new(),
+            body: None,
+        },
+    )
+    .await?;
+    let envelope: CapabilitiesEnvelope = parse_success(response, None, "capabilities")?;
+    Ok(ConversionCapabilities {
+        accepting_jobs: envelope.data.conversion.accepting_jobs,
+        input_formats: envelope.data.conversion.input_formats,
+    })
+}
+
+/// Submit a source path through the host-only multipart door. The webview
+/// never observes the bearer token or the source bytes.
+pub(crate) async fn submit_conversion(
+    base_url: &str,
+    token: &str,
+    source_path: &str,
+    client_run_id: &str,
+    profile: &str,
+    idempotency_key: &str,
+) -> Result<ConversionJob, String> {
+    let body = serde_json::to_string(&serde_json::json!({
+        "source": source_path,
+        "clientRunId": client_run_id,
+        "profile": profile,
+    }))
+    .map_err(|e| format!("Could not prepare conversion submission: {e}"))?;
+    let response = send_service_request(
+        base_url,
+        Some(token),
+        ServiceRequestPayload {
+            method: "POST".into(),
+            path: "/api/v1/conversions".into(),
+            headers: BTreeMap::from([("idempotency-key".into(), idempotency_key.into())]),
+            body: Some(body),
+        },
+    )
+    .await?;
+    let envelope: ConversionJobEnvelope = parse_success(response, Some(token), "submission")?;
+    Ok(envelope.data)
+}
+
+/// Poll an accepted conversion using its original service origin.
+pub(crate) async fn poll_conversion(
+    base_url: &str,
+    token: &str,
+    conversion_id: &str,
+) -> Result<ConversionJob, String> {
+    validate_uuid(conversion_id, "conversion id")?;
+    let response = send_service_request(
+        base_url,
+        Some(token),
+        ServiceRequestPayload {
+            method: "GET".into(),
+            path: format!("/api/v1/conversions/{conversion_id}"),
+            headers: BTreeMap::new(),
+            body: None,
+        },
+    )
+    .await?;
+    let envelope: ConversionJobEnvelope = parse_success(response, Some(token), "poll")?;
+    Ok(envelope.data)
+}
+
+pub(crate) fn validate_base_url(base_url: &str) -> Result<(), String> {
+    endpoint_url(base_url, "/health/live").map(|_| ())
+}
+
+pub(crate) fn validate_conversion_id(conversion_id: &str) -> Result<(), String> {
+    validate_uuid(conversion_id, "conversion id")
+}
+
+fn parse_success<T: for<'de> Deserialize<'de>>(
+    response: ServiceResponsePayload,
+    token: Option<&str>,
+    operation: &str,
+) -> Result<T, String> {
+    if !(200..300).contains(&response.status) {
+        let detail = redact_token(&response.body, token);
+        return Err(format!(
+            "Conversion service {operation} returned HTTP {}: {detail}",
+            response.status
+        ));
+    }
+    serde_json::from_str(&response.body)
+        .map_err(|_| format!("Conversion service returned an invalid {operation} response"))
 }
 
 /// Send one bounded, contract-allowlisted request against an explicit service.
@@ -863,6 +1015,136 @@ mod tests {
         assert!(request.contains("name=\"profile\""));
         assert!(request.contains("standard"));
         server.task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn typed_capabilities_and_unknown_job_status_are_future_safe() {
+        let capabilities = mock_server(MockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: br#"{"data":{"conversion":{"acceptingJobs":true,"inputFormats":["application/pdf","application/epub+zip"]}}}"#.to_vec(),
+            declared_length: None,
+            split_body: false,
+            chunked: false,
+        })
+        .await;
+        let parsed = fetch_capabilities(&capabilities.base_url).await.unwrap();
+        assert!(parsed.accepting_jobs);
+        assert_eq!(
+            parsed.input_formats,
+            ["application/pdf", "application/epub+zip"]
+        );
+        let _ = capabilities.request.await.unwrap();
+        capabilities.task.await.unwrap();
+
+        let poll = mock_server(MockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: format!(
+                r#"{{"data":{{"id":"{UUID}","status":"paused_by_future_backend","warnings":["still safe"]}}}}"#
+            )
+            .into_bytes(),
+            declared_length: None,
+            split_body: false,
+            chunked: false,
+        })
+        .await;
+        let parsed = poll_conversion(&poll.base_url, "poll-token", UUID)
+            .await
+            .unwrap();
+        assert_eq!(parsed.status, "paused_by_future_backend");
+        assert_eq!(parsed.warnings, ["still safe"]);
+        let request = String::from_utf8(poll.request.await.unwrap()).unwrap();
+        assert!(request.starts_with(&format!("GET /api/v1/conversions/{UUID} HTTP/1.1\r\n")));
+        poll.task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn submit_helper_keeps_the_stable_key_and_parses_job_metadata() {
+        let dir = TestDir::new();
+        let source = dir.0.join("source.pdf");
+        tokio::fs::write(&source, b"%PDF-helper").await.unwrap();
+        let server = mock_server(MockResponse {
+            status: "202 Accepted",
+            content_type: "application/json",
+            body: format!(
+                r#"{{"data":{{"id":"{UUID}","status":"queued","route":{{"kind":"local_pdf","reasonCodes":["pdf_supported"]}},"warnings":[]}}}}"#
+            )
+            .into_bytes(),
+            declared_length: None,
+            split_body: false,
+            chunked: false,
+        })
+        .await;
+
+        let job = submit_conversion(
+            &server.base_url,
+            "submit-token",
+            &source.to_string_lossy(),
+            UUID,
+            "standard",
+            "stable-replay-key",
+        )
+        .await
+        .unwrap();
+        assert_eq!(job.id, UUID);
+        assert_eq!(job.route.unwrap().reason_codes, ["pdf_supported"]);
+        let request = String::from_utf8_lossy(&server.request.await.unwrap()).into_owned();
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("idempotency-key: stable-replay-key\r\n"));
+        server.task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn submit_loss_can_replay_the_same_idempotency_key() {
+        let dir = TestDir::new();
+        let source = dir.0.join("replay.pdf");
+        tokio::fs::write(&source, b"%PDF-replay").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (mut lost_socket, _) = listener.accept().await.unwrap();
+            requests_tx
+                .send(read_request(&mut lost_socket).await)
+                .unwrap();
+            drop(lost_socket);
+
+            let (mut replay_socket, _) = listener.accept().await.unwrap();
+            requests_tx
+                .send(read_request(&mut replay_socket).await)
+                .unwrap();
+            let body = format!(r#"{{"data":{{"id":"{UUID}","status":"queued","warnings":[]}}}}"#);
+            let response = format!(
+                "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            replay_socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let base_url = format!("http://{address}");
+        let source_path = source.to_string_lossy().into_owned();
+        let submit = || {
+            submit_conversion(
+                &base_url,
+                "submit-token",
+                &source_path,
+                UUID,
+                "standard",
+                "same-key-after-loss",
+            )
+        };
+
+        assert!(submit().await.is_err());
+        assert_eq!(submit().await.unwrap().id, UUID);
+        let first = String::from_utf8(requests_rx.recv().await.unwrap()).unwrap();
+        let second = String::from_utf8(requests_rx.recv().await.unwrap()).unwrap();
+        for request in [first, second] {
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("idempotency-key: same-key-after-loss\r\n"));
+        }
+        server.await.unwrap();
     }
 
     #[tokio::test]

@@ -383,6 +383,24 @@ pub fn delete_in_flight(app: &AppHandle, idempotency_key: &str) -> bool {
     with_db(app, |conn| delete_in_flight_row(conn, idempotency_key)).unwrap_or(false)
 }
 
+/// Recovery is safe only while the canonical source and its modification time
+/// still identify the exact file that was submitted originally.
+pub fn in_flight_source_is_current(entry: &InFlightEntry) -> bool {
+    source_identity(&entry.source_path)
+        .is_some_and(|identity| identity == (entry.source_path.clone(), entry.source_mtime))
+}
+
+/// `None` means the store is unavailable or the key was not durably written;
+/// callers preserve history's best-effort policy in either case. `Some(false)`
+/// is authoritative and must stop a replay from submitting changed bytes under
+/// the original idempotency key.
+pub fn in_flight_source_for_key_is_current(app: &AppHandle, idempotency_key: &str) -> Option<bool> {
+    list_in_flight(app)?
+        .iter()
+        .find(|entry| entry.idempotency_key == idempotency_key)
+        .map(in_flight_source_is_current)
+}
+
 fn delete_in_flight_row(conn: &Connection, idempotency_key: &str) -> rusqlite::Result<bool> {
     conn.execute(
         "DELETE FROM inflight_conversions WHERE idempotency_key = ?1",
@@ -890,6 +908,9 @@ mod tests {
             fs::canonicalize(&src).unwrap().to_string_lossy()
         );
         assert_eq!(row.source_mtime, mtime_ms(&row.source_path).unwrap());
+        assert!(in_flight_source_is_current(&row));
+        fs::remove_file(&src).unwrap();
+        assert!(!in_flight_source_is_current(&row));
     }
 
     #[test]

@@ -24,6 +24,23 @@ pub enum ConversionProfile {
     LocalOnly,
 }
 
+impl ConversionProfile {
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::LocalOnly => "local_only",
+        }
+    }
+
+    pub(crate) fn from_id(value: &str) -> Option<Self> {
+        match value {
+            "standard" => Some(Self::Standard),
+            "local_only" => Some(Self::LocalOnly),
+            _ => None,
+        }
+    }
+}
+
 /// `#[serde(default)]` on the struct is load-bearing: without it, a settings.json
 /// written before a new field existed fails to parse, and `load()` silently falls
 /// back to defaults — wiping the user's output folder and job choice.

@@ -11,8 +11,50 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Semaphore;
 
+use crate::conversion_service::{self, ConversionFailure, ConversionJob};
 use crate::providers::{self, PollResult, ProviderKind};
 use crate::{history, secrets, settings};
+
+const BACKEND_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const BACKEND_MAX_POLLS: u32 = 720;
+const BACKEND_MAX_CONSECUTIVE_ERRORS: u32 = 12;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackendPhase {
+    SubmitOrPoll,
+    DatalabFallback,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BackendContext {
+    pub(crate) backend_url: String,
+    pub(crate) client_run_id: String,
+    pub(crate) idempotency_key: String,
+    pub(crate) backend_job_id: Option<String>,
+    pub(crate) profile: settings::ConversionProfile,
+    phase: BackendPhase,
+    recovery_blocker: Option<String>,
+}
+
+impl BackendContext {
+    pub(crate) fn new(
+        backend_url: String,
+        client_run_id: String,
+        idempotency_key: String,
+        backend_job_id: Option<String>,
+        profile: settings::ConversionProfile,
+    ) -> Self {
+        Self {
+            backend_url,
+            client_run_id,
+            idempotency_key,
+            backend_job_id,
+            profile,
+            phase: BackendPhase::SubmitOrPoll,
+            recovery_blocker: None,
+        }
+    }
+}
 
 /// The "job to be done" the user picks once for the whole run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -117,11 +159,19 @@ pub struct Job {
     pub output_path: Option<String>,
     pub output_text: Option<String>,
     pub error: Option<String>,
+    /// Backend-provided metadata is intentionally stringly typed: new route,
+    /// warning, failure, and status values must not break an older desktop.
+    pub route: Option<String>,
+    pub reason_codes: Vec<String>,
+    pub warnings: Vec<String>,
+    pub failure: Option<ConversionFailure>,
     pub created_at: u64,
     /// When this job actually left the queue. The elapsed timer counts from
     /// here so a file waiting behind the concurrency cap doesn't appear to
     /// have been processing for the whole wait.
     pub started_at: Option<u64>,
+    #[serde(skip)]
+    pub(crate) backend: Option<BackendContext>,
 }
 
 impl Job {
@@ -143,9 +193,26 @@ impl Job {
             output_path: None,
             output_text: None,
             error: None,
+            route: None,
+            reason_codes: Vec::new(),
+            warnings: Vec::new(),
+            failure: None,
             created_at: now_secs(),
             started_at: None,
+            backend: None,
         }
+    }
+
+    pub(crate) fn new_backend(
+        id: u64,
+        source_path: String,
+        output_dir: String,
+        backend: BackendContext,
+    ) -> Self {
+        let mut job = Self::new(id, source_path, output_dir, JobType::Convert);
+        job.service = "Conversion service".into();
+        job.backend = Some(backend);
+        job
     }
 }
 
@@ -263,6 +330,13 @@ fn log_history(app: &AppHandle, job: &Job, status: &str, error: Option<&str>) {
         return;
     }
     let cfg = app.state::<JobManager>().run_config();
+    let output_format = match job.backend.as_ref().map(|backend| backend.phase) {
+        Some(BackendPhase::SubmitOrPoll) => "backend:markdown".to_string(),
+        Some(BackendPhase::DatalabFallback) => {
+            format!("backend_fallback:{}", output_format_for(job.job_type, &cfg))
+        }
+        None => output_format_for(job.job_type, &cfg),
+    };
     history::record(
         app,
         &history::Finished {
@@ -270,7 +344,7 @@ fn log_history(app: &AppHandle, job: &Job, status: &str, error: Option<&str>) {
             source_path: &job.source_path,
             output_path: job.output_path.as_deref(),
             job_type: job.job_type.id(),
-            output_format: &output_format_for(job.job_type, &cfg),
+            output_format: &output_format,
             status,
             error,
         },
@@ -305,6 +379,57 @@ fn finish(app: &AppHandle, id: u64, text: String, output_path: Option<String>) {
         j.output_path = output_path;
         j.error = None;
     }) {
+        log_history(app, &job, "done", None);
+        emit(app, job);
+    }
+}
+
+fn apply_backend_view(app: &AppHandle, id: u64, view: &ConversionJob) {
+    if let Some(updated) = app.state::<JobManager>().update(id, |job| {
+        job.route = view.route.as_ref().map(|route| route.kind.clone());
+        job.reason_codes = view
+            .route
+            .as_ref()
+            .map(|route| route.reason_codes.clone())
+            .unwrap_or_default();
+        job.warnings = view.warnings.clone();
+        job.failure = view.failure.clone();
+    }) {
+        emit(app, updated);
+    }
+}
+
+fn fail_backend_retryable(app: &AppHandle, id: u64, err: &str) {
+    if let Some(job) = app.state::<JobManager>().update(id, |job| {
+        job.status = "failed".into();
+        job.progress_note = "Retry to continue this conversion".into();
+        job.error = Some(err.to_string());
+    }) {
+        emit(app, job);
+    }
+}
+
+fn fail_backend_terminal(app: &AppHandle, id: u64, err: &str) {
+    if let Some(job) = app.state::<JobManager>().get(id) {
+        if let Some(backend) = &job.backend {
+            history::delete_in_flight(app, &backend.idempotency_key);
+        }
+    }
+    fail(app, id, err);
+}
+
+fn finish_backend(app: &AppHandle, id: u64, output_path: String) {
+    if let Some(job) = app.state::<JobManager>().update(id, |job| {
+        job.status = "done".into();
+        job.progress_note.clear();
+        job.output_text = None;
+        job.output_path = Some(output_path);
+        job.error = None;
+        job.failure = None;
+    }) {
+        if let Some(backend) = &job.backend {
+            history::delete_in_flight(app, &backend.idempotency_key);
+        }
         log_history(app, &job, "done", None);
         emit(app, job);
     }
@@ -395,6 +520,344 @@ pub fn reuse_result(app: &AppHandle, id: u64, existing: &str) -> bool {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum BackendAction {
+    Pending(&'static str),
+    Succeeded,
+    Failed(String),
+    NeedsRemote,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NeedsRemoteDecision {
+    DatalabFallback,
+    RejectLocalOnly,
+}
+
+fn needs_remote_decision(profile: settings::ConversionProfile) -> NeedsRemoteDecision {
+    match profile {
+        settings::ConversionProfile::Standard => NeedsRemoteDecision::DatalabFallback,
+        settings::ConversionProfile::LocalOnly => NeedsRemoteDecision::RejectLocalOnly,
+    }
+}
+
+/// Terminal detection is deliberately an allowlist. A status added by a newer
+/// backend remains pending in this desktop instead of being misclassified.
+fn backend_action(view: &ConversionJob) -> BackendAction {
+    match view.status.as_str() {
+        "succeeded" => BackendAction::Succeeded,
+        "failed" => {
+            let message = view.failure.as_ref().map_or_else(
+                || "Conversion failed without details".to_string(),
+                |failure| format!("{}: {}", failure.code, failure.message),
+            );
+            BackendAction::Failed(message)
+        }
+        "needs_remote" => BackendAction::NeedsRemote,
+        "queued" => BackendAction::Pending("Queued by conversion service…"),
+        "converting_local" => BackendAction::Pending("Converting locally…"),
+        "finalizing" => BackendAction::Pending("Finalizing…"),
+        _ => BackendAction::Pending("Processing…"),
+    }
+}
+
+async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
+    let stale = |app: &AppHandle| app.state::<JobManager>().generation() != generation;
+    let Some(mut backend) = job.backend.clone() else {
+        return;
+    };
+
+    let sem = app.state::<JobManager>().semaphore();
+    let Ok(_permit) = sem.acquire_owned().await else {
+        fail_backend_retryable(&app, id, "The conversion queue is unavailable");
+        return;
+    };
+    if stale(&app) {
+        return;
+    }
+    if let Some(updated) = app.state::<JobManager>().update(id, |current| {
+        current.started_at = Some(now_secs());
+    }) {
+        emit(&app, updated);
+    }
+
+    if let Some(error) = &backend.recovery_blocker {
+        fail_backend_retryable(&app, id, error);
+        return;
+    }
+    if backend.backend_job_id.is_none()
+        && history::in_flight_source_for_key_is_current(&app, &backend.idempotency_key)
+            == Some(false)
+    {
+        fail_backend_retryable(
+            &app,
+            id,
+            "The source changed after this conversion was queued; stop it before starting a new conversion",
+        );
+        return;
+    }
+
+    if backend.phase == BackendPhase::DatalabFallback {
+        run_datalab_fallback(&app, id, generation, &job).await;
+        return;
+    }
+
+    let token = match secrets::get_key("backend") {
+        Some(token) if !token.trim().is_empty() => token,
+        _ => {
+            fail_backend_retryable(
+                &app,
+                id,
+                "Backend token is unavailable. Add it in Settings, then retry.",
+            );
+            return;
+        }
+    };
+
+    let mut view = if let Some(backend_job_id) = backend.backend_job_id.clone() {
+        set_status(&app, id, "processing", "Resuming conversion…");
+        match conversion_service::poll_conversion(&backend.backend_url, &token, &backend_job_id)
+            .await
+        {
+            Ok(view) => view,
+            Err(error) => {
+                fail_backend_retryable(&app, id, &error);
+                return;
+            }
+        }
+    } else {
+        set_status(&app, id, "working", "Uploading to conversion service…");
+        match conversion_service::submit_conversion(
+            &backend.backend_url,
+            &token,
+            &job.source_path,
+            &backend.client_run_id,
+            backend.profile.id(),
+            &backend.idempotency_key,
+        )
+        .await
+        {
+            Ok(view) => {
+                backend.backend_job_id = Some(view.id.clone());
+                history::attach_backend_job(&app, &backend.idempotency_key, &view.id);
+                app.state::<JobManager>().update(id, |current| {
+                    if let Some(context) = &mut current.backend {
+                        context.backend_job_id = Some(view.id.clone());
+                    }
+                });
+                view
+            }
+            Err(error) => {
+                fail_backend_retryable(&app, id, &error);
+                return;
+            }
+        }
+    };
+
+    let mut polls = 0u32;
+    let mut consecutive_errors = 0u32;
+    loop {
+        if stale(&app) {
+            return;
+        }
+        apply_backend_view(&app, id, &view);
+        match backend_action(&view) {
+            BackendAction::Succeeded => {
+                set_status(&app, id, "processing", "Saving Markdown…");
+                match conversion_service::download_markdown(
+                    &backend.backend_url,
+                    &token,
+                    &view.id,
+                    &job.output_dir,
+                    &job.file_name,
+                )
+                .await
+                {
+                    Ok(path) => finish_backend(&app, id, path),
+                    Err(error) => fail_backend_retryable(&app, id, &error),
+                }
+                return;
+            }
+            BackendAction::Failed(error) => {
+                fail_backend_terminal(&app, id, &error);
+                return;
+            }
+            BackendAction::NeedsRemote => {
+                if needs_remote_decision(backend.profile) == NeedsRemoteDecision::RejectLocalOnly {
+                    fail_backend_terminal(
+                        &app,
+                        id,
+                        "Local-only conversion could not finish locally. Choose Standard to allow Datalab fallback.",
+                    );
+                    return;
+                }
+                app.state::<JobManager>().update(id, |current| {
+                    current.service = "Datalab fallback".into();
+                    if let Some(context) = &mut current.backend {
+                        context.phase = BackendPhase::DatalabFallback;
+                    }
+                });
+                run_datalab_fallback(&app, id, generation, &job).await;
+                return;
+            }
+            BackendAction::Pending(note) => set_status(&app, id, "processing", note),
+        }
+
+        polls += 1;
+        if polls > BACKEND_MAX_POLLS {
+            fail_backend_retryable(&app, id, "Timed out waiting for the conversion service");
+            return;
+        }
+        tokio::time::sleep(BACKEND_POLL_INTERVAL).await;
+        if stale(&app) {
+            return;
+        }
+        let Some(backend_job_id) = backend.backend_job_id.as_deref() else {
+            fail_backend_retryable(&app, id, "Conversion service returned no job id");
+            return;
+        };
+        match conversion_service::poll_conversion(&backend.backend_url, &token, backend_job_id)
+            .await
+        {
+            Ok(polled) => {
+                consecutive_errors = 0;
+                view = polled;
+            }
+            Err(error) => {
+                consecutive_errors += 1;
+                if consecutive_errors >= BACKEND_MAX_CONSECUTIVE_ERRORS {
+                    fail_backend_retryable(
+                        &app,
+                        id,
+                        &format!("Lost contact with the conversion service: {error}"),
+                    );
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, original: &Job) {
+    let stale = |app: &AppHandle| app.state::<JobManager>().generation() != generation;
+    let api_key = match secrets::get_key("datalab") {
+        Some(key) if !key.trim().is_empty() => key,
+        _ => {
+            fail_backend_retryable(
+                app,
+                id,
+                "Datalab fallback is required. Add its API key in Settings, then retry.",
+            );
+            return;
+        }
+    };
+    let cfg = app.state::<JobManager>().run_config();
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let pipeline = cfg
+        .datalab_pipeline_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    set_status(app, id, "working", "Uploading to Datalab fallback…");
+    let submitted = match pipeline {
+        Some(pipeline_id) => {
+            providers::datalab_pipeline_submit(
+                &client,
+                &api_key,
+                pipeline_id,
+                &original.source_path,
+                &cfg.datalab_format,
+            )
+            .await
+        }
+        None => {
+            providers::datalab_submit(
+                &client,
+                &api_key,
+                &original.source_path,
+                &cfg.datalab_format,
+                cfg.datalab_high_accuracy,
+            )
+            .await
+        }
+    };
+    let submitted = match submitted {
+        Ok(value) => value,
+        Err(error) => {
+            fail_backend_retryable(app, id, &error);
+            return;
+        }
+    };
+    let check_url = submitted.check_url.clone().unwrap_or_else(|| {
+        format!(
+            "https://www.datalab.to/api/v1/convert/{}",
+            submitted.remote_id
+        )
+    });
+    set_status(app, id, "processing", "Processing with Datalab fallback…");
+
+    let mut attempts = 0u32;
+    let mut consecutive_errors = 0u32;
+    let text = loop {
+        attempts += 1;
+        if attempts > BACKEND_MAX_POLLS {
+            fail_backend_retryable(app, id, "Timed out waiting for Datalab fallback");
+            return;
+        }
+        tokio::time::sleep(BACKEND_POLL_INTERVAL).await;
+        if stale(app) {
+            return;
+        }
+        let result = match pipeline {
+            Some(_) => {
+                providers::datalab_pipeline_poll(&client, &api_key, &submitted.remote_id).await
+            }
+            None => {
+                providers::datalab_poll(&client, &api_key, &check_url, &cfg.datalab_format).await
+            }
+        };
+        match result {
+            Ok(PollResult::Done(text)) => break text,
+            Ok(PollResult::Failed(error)) => {
+                fail_backend_retryable(app, id, &error);
+                return;
+            }
+            Ok(PollResult::Pending) => consecutive_errors = 0,
+            Err(error) => {
+                consecutive_errors += 1;
+                if consecutive_errors >= BACKEND_MAX_CONSECUTIVE_ERRORS {
+                    fail_backend_retryable(
+                        app,
+                        id,
+                        &format!("Lost contact with Datalab fallback: {error}"),
+                    );
+                    return;
+                }
+            }
+        }
+    };
+
+    let extension = match cfg.datalab_format.as_str() {
+        "html" => "html",
+        "json" | "chunks" => "json",
+        _ => "md",
+    };
+    match write_output(
+        &original.output_dir,
+        &original.file_name,
+        extension,
+        "",
+        &text,
+    ) {
+        Ok(path) => finish_backend(app, id, path),
+        Err(error) => fail_backend_retryable(app, id, &error),
+    }
+}
+
 /// Spawn the full lifecycle for one job on the async runtime. `generation` is
 /// the run this job belongs to; if the manager has moved on (a new run started,
 /// or the user hit Stop) the task exits without touching state or spending money.
@@ -406,6 +869,10 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
             Some(j) => j,
             None => return,
         };
+        if job.backend.is_some() {
+            run_backend_job(app, id, generation, job).await;
+            return;
+        }
         let provider = job.job_type.provider();
 
         let api_key = match secrets::get_key(provider.key_name()) {
@@ -606,4 +1073,192 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
             }
         }
     });
+}
+
+fn validate_recovery_entry(
+    entry: &history::InFlightEntry,
+) -> Result<settings::ConversionProfile, String> {
+    conversion_service::validate_base_url(&entry.backend_url)
+        .map_err(|error| format!("Cannot recover conversion: {error}"))?;
+    if let Some(job_id) = entry.backend_job_id.as_deref() {
+        conversion_service::validate_conversion_id(job_id)
+            .map_err(|error| format!("Cannot recover conversion: {error}"))?;
+    }
+    if !history::in_flight_source_is_current(entry) {
+        return Err("Cannot recover conversion because the source changed or is missing".into());
+    }
+    if !Path::new(&entry.output_dir).is_dir() {
+        return Err("Cannot recover conversion because its output folder is missing".into());
+    }
+    settings::ConversionProfile::from_id(&entry.conversion_profile)
+        .ok_or_else(|| "Cannot recover conversion with an unknown profile".into())
+}
+
+/// Recreate durable backend rows after startup. Invalid legacy origins and
+/// changed sources stay visible and stopped, but their durable rows are
+/// removed so they cannot resurrect forever or bind to current settings.
+pub(crate) fn recover_in_flight(app: AppHandle) {
+    let Some(entries) = history::list_in_flight(&app) else {
+        return;
+    };
+    if entries.is_empty() {
+        return;
+    }
+
+    let manager = app.state::<JobManager>();
+    manager.set_run_config(settings::load(&app));
+    let generation = manager.generation();
+    for entry in entries {
+        let validation = validate_recovery_entry(&entry);
+        let profile = validation
+            .as_ref()
+            .copied()
+            .unwrap_or(settings::ConversionProfile::Standard);
+        let recovery_error = validation.err();
+        let durable_key = entry.idempotency_key.clone();
+        let mut context = BackendContext::new(
+            entry.backend_url,
+            entry.client_run_id,
+            entry.idempotency_key,
+            entry.backend_job_id,
+            profile,
+        );
+        context.recovery_blocker.clone_from(&recovery_error);
+        let id = manager.next_id();
+        let mut job = Job::new_backend(id, entry.source_path, entry.output_dir, context);
+        job.file_name = entry.file_name;
+        manager.insert(job.clone());
+        emit(&app, job);
+
+        if let Some(error) = recovery_error {
+            history::delete_in_flight(&app, &durable_key);
+            fail_backend_retryable(&app, id, &error);
+        } else {
+            run_job(app.clone(), id, generation);
+        }
+    }
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::*;
+    use std::time::UNIX_EPOCH;
+
+    fn view(status: &str) -> ConversionJob {
+        ConversionJob {
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            status: status.into(),
+            route: None,
+            warnings: Vec::new(),
+            failure: None,
+        }
+    }
+
+    #[test]
+    fn only_known_backend_terminal_statuses_are_terminal() {
+        assert_eq!(backend_action(&view("succeeded")), BackendAction::Succeeded);
+        assert_eq!(
+            backend_action(&view("needs_remote")),
+            BackendAction::NeedsRemote
+        );
+        assert!(matches!(
+            backend_action(&view("paused_by_future_backend")),
+            BackendAction::Pending("Processing…")
+        ));
+
+        let mut failed = view("failed");
+        failed.failure = Some(ConversionFailure {
+            code: "bad_document".into(),
+            message: "Document cannot be converted".into(),
+        });
+        assert_eq!(
+            backend_action(&failed),
+            BackendAction::Failed("bad_document: Document cannot be converted".into())
+        );
+    }
+
+    #[test]
+    fn needs_remote_falls_back_only_for_standard() {
+        assert_eq!(
+            needs_remote_decision(settings::ConversionProfile::Standard),
+            NeedsRemoteDecision::DatalabFallback
+        );
+        assert_eq!(
+            needs_remote_decision(settings::ConversionProfile::LocalOnly),
+            NeedsRemoteDecision::RejectLocalOnly
+        );
+    }
+
+    #[test]
+    fn recovery_context_keeps_original_url_and_stable_keys_off_ipc() {
+        let context = BackendContext::new(
+            "http://127.0.0.1:9123".into(),
+            "22222222-2222-4222-8222-222222222222".into(),
+            "33333333-3333-4333-8333-333333333333".into(),
+            Some("44444444-4444-4444-8444-444444444444".into()),
+            settings::ConversionProfile::Standard,
+        );
+        let job = Job::new_backend(1, "/tmp/report.pdf".into(), "/tmp".into(), context.clone());
+
+        assert_eq!(
+            job.backend.as_ref().unwrap().backend_url,
+            "http://127.0.0.1:9123"
+        );
+        assert_eq!(
+            job.backend.as_ref().unwrap().idempotency_key,
+            context.idempotency_key
+        );
+        let serialized = serde_json::to_value(&job).unwrap();
+        assert!(serialized.get("backend").is_none());
+        assert_eq!(serialized["outputText"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn invalid_recovery_rows_are_rejected_before_resume_and_cleanup() {
+        let root = std::env::temp_dir().join(format!(
+            "tool-kit-recovery-validation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("report.pdf");
+        std::fs::write(&source, b"pdf").unwrap();
+        let source = std::fs::canonicalize(source).unwrap();
+        let source_mtime = std::fs::metadata(&source)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let mut entry = history::InFlightEntry {
+            source_path: source.to_string_lossy().into_owned(),
+            file_name: "report.pdf".into(),
+            output_dir: root.to_string_lossy().into_owned(),
+            backend_url: "http://127.0.0.1:8080".into(),
+            client_run_id: "11111111-1111-4111-8111-111111111111".into(),
+            idempotency_key: "22222222-2222-4222-8222-222222222222".into(),
+            backend_job_id: Some("33333333-3333-4333-8333-333333333333".into()),
+            conversion_profile: "standard".into(),
+            source_mtime,
+            created_at: 1,
+        };
+        assert!(validate_recovery_entry(&entry).is_ok());
+
+        entry.backend_job_id = Some("not-a-uuid".into());
+        assert!(validate_recovery_entry(&entry)
+            .unwrap_err()
+            .contains("conversion id"));
+        entry.backend_job_id = None;
+        entry.conversion_profile = "future_profile".into();
+        assert!(validate_recovery_entry(&entry)
+            .unwrap_err()
+            .contains("unknown profile"));
+        entry.conversion_profile = "standard".into();
+        std::fs::remove_file(&source).unwrap();
+        assert!(validate_recovery_entry(&entry)
+            .unwrap_err()
+            .contains("source changed or is missing"));
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

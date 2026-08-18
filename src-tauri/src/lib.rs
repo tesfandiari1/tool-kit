@@ -9,7 +9,7 @@ mod settings;
 mod live_smoke;
 
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -77,6 +77,27 @@ fn collect_input_files(inputs: &[String], jt: JobType) -> Vec<std::path::PathBuf
             .map(|e| jt.accepts(&e.to_lowercase()))
             .unwrap_or(false)
     };
+    collect_files_where(inputs, &accepts)
+}
+
+/// Broad discovery only. The live capability MIME set is intersected below;
+/// this function never decides that an arbitrary file is convertible.
+fn collect_backend_candidates(inputs: &[String]) -> Vec<std::path::PathBuf> {
+    let accepts = |path: &Path| {
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase);
+        extension.as_deref() == Some("csv")
+            || !extension.is_some_and(|extension| ALREADY_TEXT.contains(&extension.as_str()))
+    };
+    collect_files_where(inputs, &accepts)
+}
+
+fn collect_files_where(
+    inputs: &[String],
+    accepts: &dyn Fn(&Path) -> bool,
+) -> Vec<std::path::PathBuf> {
     // Skip dotfiles and dot-directories: .git, .DS_Store, and friends are never
     // what the user meant to convert. Only applies while walking *into* a
     // folder — a dot-path dropped explicitly is still honoured.
@@ -138,6 +159,91 @@ const ALREADY_TEXT: &[&str] = &[
     "txt", "md", "markdown", "text", "rst", "org", "csv", "tsv", "json",
 ];
 
+/// These formats have no local engine and intentionally bypass the backend
+/// forever. Every other decision comes from live `capabilities.inputFormats`.
+const PERMANENT_DIRECT_FORMATS: &[&str] = &[
+    "png", "jpg", "jpeg", "webp", "tiff", "tif", "gif", "bmp", "html", "htm",
+];
+
+fn is_permanent_direct(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            PERMANENT_DIRECT_FORMATS.contains(&extension.to_ascii_lowercase().as_str())
+        })
+}
+
+fn media_type(path: &Path) -> String {
+    mime_guess::from_path(path)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_ascii_lowercase()
+}
+
+#[derive(Default)]
+struct NativeConversionPlan {
+    backend: Vec<std::path::PathBuf>,
+    direct: Vec<std::path::PathBuf>,
+}
+
+fn route_conversion_candidates(
+    candidates: Vec<std::path::PathBuf>,
+    supported: &HashSet<String>,
+) -> NativeConversionPlan {
+    let mut plan = NativeConversionPlan::default();
+    for file in candidates {
+        if is_permanent_direct(&file) {
+            plan.direct.push(file);
+        } else if supported.contains(&media_type(&file)) {
+            plan.backend.push(file);
+        } else if JobType::Convert.accepts(
+            file.extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str(),
+        ) {
+            plan.direct.push(file);
+        }
+    }
+    plan
+}
+
+fn require_backend_capacity(
+    plan: NativeConversionPlan,
+    accepting_jobs: bool,
+) -> Result<NativeConversionPlan, String> {
+    if !accepting_jobs && !plan.backend.is_empty() {
+        Err("The local conversion service is not accepting jobs".into())
+    } else {
+        Ok(plan)
+    }
+}
+
+async fn plan_backend_conversion_files(
+    inputs: &[String],
+    backend_url: &str,
+) -> Result<NativeConversionPlan, String> {
+    let candidates = collect_backend_candidates(inputs);
+    if candidates.iter().all(|file| is_permanent_direct(file)) {
+        return Ok(route_conversion_candidates(candidates, &HashSet::new()));
+    }
+
+    let capabilities = conversion_service::fetch_capabilities(backend_url)
+        .await
+        .map_err(|error| format!("The local conversion service is unavailable: {error}"))?;
+    let accepting_jobs = capabilities.accepting_jobs;
+    let supported = capabilities
+        .input_formats
+        .into_iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    require_backend_capacity(
+        route_conversion_candidates(candidates, &supported),
+        accepting_jobs,
+    )
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScannedConversionFile {
@@ -195,10 +301,23 @@ struct Scan {
 /// every drop and walks the tree three times, then canonicalizes and stats
 /// every match — fine on a local SSD, but on a network volume the per-file
 /// round-trips would freeze the window while it ran.
-#[tauri::command(async)]
-fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String> {
+#[tauri::command]
+async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String> {
     let cfg = settings::load(&app);
-    let convert = collect_input_files(&inputs, JobType::Convert);
+    let convert = if cfg.conversion_route == settings::ConversionRoute::Backend {
+        match plan_backend_conversion_files(&inputs, &cfg.backend_url).await {
+            Ok(mut plan) => {
+                plan.direct.append(&mut plan.backend);
+                plan.direct
+            }
+            // The frontend's independent capability probe owns the actionable
+            // outage message. Preserve direct-eligible scan metadata here so
+            // it is not masked by an empty selection.
+            Err(_) => collect_input_files(&inputs, JobType::Convert),
+        }
+    } else {
+        collect_input_files(&inputs, JobType::Convert)
+    };
     let transcribe = collect_input_files(&inputs, JobType::Transcribe);
     let convert_reuse = split_reusable(&app, &convert, JobType::Convert, &cfg);
     let transcribe_reuse = split_reusable(&app, &transcribe, JobType::Transcribe, &cfg);
@@ -358,10 +477,26 @@ struct RunResult {
     copied: usize,
 }
 
+fn backend_inflight_keys(jobs: &[Job]) -> Vec<&str> {
+    jobs.iter()
+        .filter_map(|job| {
+            job.backend
+                .as_ref()
+                .map(|backend| backend.idempotency_key.as_str())
+        })
+        .collect()
+}
+
+fn delete_backend_inflight(app: &AppHandle, jobs: &[Job]) {
+    for key in backend_inflight_keys(jobs) {
+        history::delete_in_flight(app, key);
+    }
+}
+
 #[tauri::command]
-fn run_pipeline(
+async fn run_pipeline(
     app: AppHandle,
-    state: State<JobManager>,
+    state: State<'_, JobManager>,
     inputs: Vec<String>,
     output_dir: String,
     job_type: String,
@@ -373,12 +508,31 @@ fn run_pipeline(
     if !Path::new(&output_dir).is_dir() {
         return Err("Choose an output folder first".into());
     }
-    let provider = jt.provider();
-    if !secrets::has_key(provider.key_name()) {
-        return Err(format!("Add your {} API key in Settings", provider.label()));
-    }
-
-    let mut files = collect_input_files(&inputs, jt);
+    // Loaded once and reused: the same config decides collection, routing,
+    // history reuse, and what the run itself produces.
+    let cfg = settings::load(&app);
+    let mut backend_files = Vec::new();
+    let mut files =
+        if jt == JobType::Convert && cfg.conversion_route == settings::ConversionRoute::Backend {
+            let plan = plan_backend_conversion_files(&inputs, &cfg.backend_url).await?;
+            if cfg.conversion_profile == settings::ConversionProfile::LocalOnly
+                && !plan.direct.is_empty()
+            {
+                let file_name = plan.direct[0]
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("This file");
+                return Err(format!(
+                    "{file_name} requires Datalab and cannot run with the Local-only profile"
+                ));
+            }
+            backend_files = plan.backend;
+            let mut routed = plan.direct;
+            routed.extend(backend_files.iter().cloned());
+            routed
+        } else {
+            collect_input_files(&inputs, jt)
+        };
     if files.is_empty() {
         return Err(format!(
             "No {} files in your selection",
@@ -386,17 +540,15 @@ fn run_pipeline(
         ));
     }
 
-    // Loaded once and reused: the same config decides what gets skipped here
-    // and what the run itself produces, so the two can't disagree.
-    let cfg = settings::load(&app);
-
     // Three buckets. A file whose result is already in the output folder is
     // left alone; one whose result exists elsewhere is copied, because the
     // source is unchanged and the format matches, so paying the provider again
     // would buy bytes we already have; everything else runs.
     let mut to_copy: Vec<(std::path::PathBuf, String)> = Vec::new();
     let mut skipped = 0;
-    if cfg.skip_already_done {
+    if cfg.skip_already_done
+        && !(jt == JobType::Convert && cfg.conversion_route == settings::ConversionRoute::Backend)
+    {
         let found = history::reusable(&app, &files, jt.id(), &jobs::output_format_for(jt, &cfg));
         if !found.is_empty() {
             files.retain(|p| match found.get(p.to_string_lossy().as_ref()) {
@@ -422,12 +574,25 @@ fn run_pipeline(
         ));
     }
 
+    let backend_needed = files.iter().any(|file| backend_files.contains(file));
+    let direct_needed = files.iter().any(|file| !backend_files.contains(file));
+    if backend_needed && !secrets::has_key("backend") {
+        return Err("Add your backend token in Settings".into());
+    }
+    if direct_needed {
+        let provider = jt.provider();
+        if !secrets::has_key(provider.key_name()) {
+            return Err(format!("Add your {} API key in Settings", provider.label()));
+        }
+    }
+
     // Fresh slate per run. Bumping the generation retires any task still alive
     // from a previous run so it can't keep spending credits or writing files.
     let generation = state.new_generation();
+    delete_backend_inflight(&app, &state.list());
     // Set before any copy lands: `finish` reads this config to decide what
     // format to file the new history row under.
-    state.set_run_config(cfg);
+    state.set_run_config(cfg.clone());
     state.clear();
 
     // Copies first, so the free results are on screen before the paid ones
@@ -448,14 +613,44 @@ fn run_pipeline(
         }
     }
 
+    let client_run_id = uuid::Uuid::new_v4().to_string();
     for source in &files {
         let id = state.next_id();
-        let job = Job::new(
-            id,
-            source.to_string_lossy().to_string(),
-            output_dir.clone(),
-            jt,
-        );
+        let source_path = source.to_string_lossy().into_owned();
+        let job = if backend_files.contains(source) {
+            let idempotency_key = uuid::Uuid::new_v4().to_string();
+            let file_name = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("file")
+                .to_string();
+            history::upsert_in_flight(
+                &app,
+                &history::NewInFlight {
+                    source_path: &source_path,
+                    file_name: &file_name,
+                    output_dir: &output_dir,
+                    backend_url: &cfg.backend_url,
+                    client_run_id: &client_run_id,
+                    idempotency_key: &idempotency_key,
+                    conversion_profile: cfg.conversion_profile.id(),
+                },
+            );
+            Job::new_backend(
+                id,
+                source_path,
+                output_dir.clone(),
+                jobs::BackendContext::new(
+                    cfg.backend_url.clone(),
+                    client_run_id.clone(),
+                    idempotency_key,
+                    None,
+                    cfg.conversion_profile,
+                ),
+            )
+        } else {
+            Job::new(id, source_path, output_dir.clone(), jt)
+        };
         state.insert(job.clone());
         let _ = app.emit("job-updated", job);
         jobs::run_job(app.clone(), id, generation);
@@ -474,7 +669,9 @@ fn run_pipeline(
 fn stop_run(app: AppHandle, state: State<JobManager>) -> Result<usize, String> {
     state.new_generation();
     let mut stopped = 0;
-    for job in state.list() {
+    let jobs = state.list();
+    delete_backend_inflight(&app, &jobs);
+    for job in jobs {
         if matches!(job.status.as_str(), "queued" | "working" | "processing") {
             if let Some(updated) = state.update(job.id, |j| {
                 j.status = "failed".into();
@@ -777,6 +974,7 @@ pub fn run() {
             // Opened once and held for the process. A database that can't be
             // opened degrades to "no history" rather than failing startup.
             app.manage(history::init(app.handle()));
+            jobs::recover_in_flight(app.handle().clone());
 
             #[cfg(desktop)]
             {
@@ -958,6 +1156,79 @@ mod scan_tests {
         assert_eq!(
             names(&collect_input_files(&inputs, JobType::Transcribe)),
             vec!["Audio.MP3"]
+        );
+    }
+
+    #[test]
+    fn only_permanent_image_and_html_formats_bypass_capabilities() {
+        for name in [
+            "a.png", "a.jpg", "a.jpeg", "a.webp", "a.tiff", "a.tif", "a.gif", "a.bmp", "a.html",
+            "a.htm", "A.PNG",
+        ] {
+            assert!(is_permanent_direct(Path::new(name)), "{name}");
+        }
+        for name in ["a.pdf", "a.docx", "a.epub", "a.xlsx", "a.pptx"] {
+            assert!(!is_permanent_direct(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn backend_routes_are_the_union_of_live_support_and_direct_convert() {
+        let root = tree(
+            "backend-capabilities-own-formats",
+            &[
+                "table.csv",
+                "document.odt",
+                "legacy.docx",
+                "image.png",
+                "movie.mp4",
+                "program.exe",
+                "already.md",
+            ],
+        );
+        let inputs = [root.to_string_lossy().into_owned()];
+        let candidates = collect_backend_candidates(&inputs);
+        assert!(names(&candidates).contains(&"table.csv".into()));
+        assert!(!names(&candidates).contains(&"already.md".into()));
+
+        let supported = HashSet::from([
+            "text/csv".to_string(),
+            "application/vnd.oasis.opendocument.text".to_string(),
+        ]);
+        let plan = route_conversion_candidates(candidates, &supported);
+        assert_eq!(names(&plan.backend), vec!["document.odt", "table.csv"]);
+        assert_eq!(names(&plan.direct), vec!["image.png", "legacy.docx"]);
+        assert!(!names(&plan.backend).contains(&"movie.mp4".into()));
+        assert!(!names(&plan.direct).contains(&"movie.mp4".into()));
+        assert!(!names(&plan.backend).contains(&"program.exe".into()));
+        assert!(!names(&plan.direct).contains(&"program.exe".into()));
+
+        assert!(require_backend_capacity(plan, false).is_err());
+        let direct_only = route_conversion_candidates(
+            vec![root.join("legacy.docx"), root.join("image.png")],
+            &HashSet::new(),
+        );
+        assert!(require_backend_capacity(direct_only, false).is_ok());
+    }
+
+    #[test]
+    fn a_new_run_identifies_every_retained_backend_context_for_cleanup() {
+        let direct = Job::new(1, "/tmp/image.png".into(), "/tmp".into(), JobType::Convert);
+        let backend = Job::new_backend(
+            2,
+            "/tmp/report.pdf".into(),
+            "/tmp".into(),
+            jobs::BackendContext::new(
+                "http://127.0.0.1:8080".into(),
+                "11111111-1111-4111-8111-111111111111".into(),
+                "22222222-2222-4222-8222-222222222222".into(),
+                None,
+                settings::ConversionProfile::Standard,
+            ),
+        );
+        assert_eq!(
+            backend_inflight_keys(&[direct, backend]),
+            ["22222222-2222-4222-8222-222222222222"]
         );
     }
 
