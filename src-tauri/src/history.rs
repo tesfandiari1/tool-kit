@@ -28,7 +28,7 @@ const MAX_ENTRIES: i64 = 5_000;
 
 /// Bump when the schema changes, and add a matching `if version < N` block in
 /// `migrate` — so a new column is a migration rather than a crash on startup.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// The open database, or `None` if it could not be opened. `None` makes every
 /// operation a silent no-op, which is the whole failure policy in one word.
@@ -72,6 +72,8 @@ pub struct NewInFlight<'a> {
     pub source_path: &'a str,
     pub file_name: &'a str,
     pub output_dir: &'a str,
+    /// Exact service origin used for submit and every recovery request.
+    pub backend_url: &'a str,
     pub client_run_id: &'a str,
     pub idempotency_key: &'a str,
     pub conversion_profile: &'a str,
@@ -84,6 +86,8 @@ pub struct InFlightEntry {
     pub source_path: String,
     pub file_name: String,
     pub output_dir: String,
+    /// Exact service origin this idempotency key belongs to.
+    pub backend_url: String,
     pub client_run_id: String,
     /// The stable per-file key and primary identity of this record.
     pub idempotency_key: String,
@@ -173,7 +177,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                  ON inflight_conversions(created_at, idempotency_key);",
         )?;
     }
-    // Add `if version < 3 { … }` above when the schema changes again, then bump
+    if version < 3 {
+        // Version 2 was never released. Its rows have no trustworthy service
+        // origin, so the empty default makes them non-recoverable rather than
+        // silently binding them to whichever URL is configured on next start.
+        conn.execute_batch(
+            "ALTER TABLE inflight_conversions
+                 ADD COLUMN backend_url TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    // Add `if version < 4 { … }` above when the schema changes again, then bump
     // SCHEMA_VERSION. A file written by a *newer* build is left untouched:
     // extra columns are harmless to read, and rewriting it would lose history.
     if version < SCHEMA_VERSION {
@@ -229,6 +242,7 @@ fn source_identity(path: &str) -> Option<(String, i64)> {
 #[allow(dead_code, reason = "the M6 jobs integration lands in a later patch")]
 pub fn upsert_in_flight(app: &AppHandle, pending: &NewInFlight<'_>) -> bool {
     if pending.idempotency_key.trim().is_empty()
+        || pending.backend_url.trim().is_empty()
         || pending.client_run_id.trim().is_empty()
         || pending.conversion_profile.trim().is_empty()
     {
@@ -243,15 +257,17 @@ fn upsert_in_flight_row(conn: &Connection, pending: &NewInFlight<'_>) -> rusqlit
     };
     let changed = conn.execute(
         "INSERT INTO inflight_conversions
-           (idempotency_key, source_path, file_name, output_dir, client_run_id,
-            backend_job_id, conversion_profile, source_mtime, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8)
+           (idempotency_key, source_path, file_name, output_dir, backend_url,
+            client_run_id, backend_job_id, conversion_profile, source_mtime,
+            created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9)
          ON CONFLICT(idempotency_key) DO NOTHING",
         rusqlite::params![
             pending.idempotency_key,
             source_path,
             pending.file_name,
             pending.output_dir,
+            pending.backend_url,
             pending.client_run_id,
             pending.conversion_profile,
             source_mtime,
@@ -274,15 +290,17 @@ fn in_flight_matches(
                 AND source_path = ?2
                 AND file_name = ?3
                 AND output_dir = ?4
-                AND client_run_id = ?5
-                AND conversion_profile = ?6
-                AND source_mtime = ?7
+                AND backend_url = ?5
+                AND client_run_id = ?6
+                AND conversion_profile = ?7
+                AND source_mtime = ?8
          )",
         rusqlite::params![
             pending.idempotency_key,
             source_path,
             pending.file_name,
             pending.output_dir,
+            pending.backend_url,
             pending.client_run_id,
             pending.conversion_profile,
             source_mtime,
@@ -331,9 +349,9 @@ pub fn list_in_flight(app: &AppHandle) -> Option<Vec<InFlightEntry>> {
 
 fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT source_path, file_name, output_dir, client_run_id,
-                idempotency_key, backend_job_id, conversion_profile,
-                source_mtime, created_at
+        "SELECT source_path, file_name, output_dir, backend_url,
+                client_run_id, idempotency_key, backend_job_id,
+                conversion_profile, source_mtime, created_at
            FROM inflight_conversions
           ORDER BY created_at ASC, idempotency_key ASC",
     )?;
@@ -342,12 +360,13 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
             source_path: row.get(0)?,
             file_name: row.get(1)?,
             output_dir: row.get(2)?,
-            client_run_id: row.get(3)?,
-            idempotency_key: row.get(4)?,
-            backend_job_id: row.get(5)?,
-            conversion_profile: row.get(6)?,
-            source_mtime: row.get(7)?,
-            created_at: row.get(8)?,
+            backend_url: row.get(3)?,
+            client_run_id: row.get(4)?,
+            idempotency_key: row.get(5)?,
+            backend_job_id: row.get(6)?,
+            conversion_profile: row.get(7)?,
+            source_mtime: row.get(8)?,
+            created_at: row.get(9)?,
         })
     })?;
     rows.collect()
@@ -597,6 +616,8 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    const BACKEND_URL: &str = "http://127.0.0.1:8473";
+
     fn db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
@@ -652,6 +673,27 @@ mod tests {
         .unwrap();
     }
 
+    fn create_v2_schema(conn: &Connection) {
+        create_v1_schema(conn);
+        conn.execute_batch(
+            "CREATE TABLE inflight_conversions (
+                 idempotency_key    TEXT    PRIMARY KEY NOT NULL,
+                 source_path       TEXT    NOT NULL,
+                 file_name         TEXT    NOT NULL,
+                 output_dir        TEXT    NOT NULL,
+                 client_run_id     TEXT    NOT NULL,
+                 backend_job_id    TEXT,
+                 conversion_profile TEXT   NOT NULL,
+                 source_mtime      INTEGER NOT NULL,
+                 created_at        INTEGER NOT NULL
+             );
+             CREATE INDEX inflight_created
+                 ON inflight_conversions(created_at, idempotency_key);
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn v1_migrates_without_losing_history() {
         let conn = Connection::open_in_memory().unwrap();
@@ -685,6 +727,66 @@ mod tests {
     }
 
     #[test]
+    fn v2_migrates_without_rebinding_existing_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_v2_schema(&conn);
+        let (src, out) = pair("v2-migration");
+        log_done(&conn, &src, &out);
+        let source_path = fs::canonicalize(&src)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let output_dir = out.parent().unwrap().to_string_lossy().into_owned();
+        let source_mtime = mtime_ms(&source_path).unwrap();
+        conn.execute(
+            "INSERT INTO inflight_conversions
+               (idempotency_key, source_path, file_name, output_dir,
+                client_run_id, backend_job_id, conversion_profile,
+                source_mtime, created_at)
+             VALUES (?1, ?2, 'report.pdf', ?3, ?4, ?5, 'standard', ?6, 42)",
+            rusqlite::params![
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                source_path,
+                output_dir,
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                source_mtime,
+            ],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert_eq!(select(&conn, "", 50).unwrap().len(), 1);
+        let rows = select_in_flight(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_path, source_path);
+        assert_eq!(rows[0].output_dir, output_dir);
+        assert_eq!(rows[0].backend_url, "");
+        assert_eq!(
+            rows[0].backend_job_id.as_deref(),
+            Some("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+        );
+        let pending = NewInFlight {
+            source_path: &source_path,
+            file_name: "report.pdf",
+            output_dir: &output_dir,
+            backend_url: BACKEND_URL,
+            client_run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            idempotency_key: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            conversion_profile: "standard",
+        };
+        assert!(
+            !upsert_in_flight_row(&conn, &pending).unwrap(),
+            "an origin-unknown v2 row must not bind to the current service"
+        );
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
     fn in_flight_record_attach_list_and_delete_round_trip() {
         let conn = db();
         let (src, out) = pair("inflight-roundtrip");
@@ -694,6 +796,7 @@ mod tests {
             source_path: &source_path,
             file_name: "report.pdf",
             output_dir: &output_dir,
+            backend_url: BACKEND_URL,
             client_run_id: "11111111-1111-4111-8111-111111111111",
             idempotency_key: "22222222-2222-4222-8222-222222222222",
             conversion_profile: "standard",
@@ -705,6 +808,7 @@ mod tests {
         let before_attach = select_in_flight(&conn).unwrap();
         assert_eq!(before_attach.len(), 1);
         assert_eq!(before_attach[0].backend_job_id, None);
+        assert_eq!(before_attach[0].backend_url, BACKEND_URL);
         assert_eq!(before_attach[0].client_run_id, pending.client_run_id);
         assert_eq!(before_attach[0].idempotency_key, pending.idempotency_key);
         assert_eq!(before_attach[0].conversion_profile, "standard");
@@ -732,6 +836,33 @@ mod tests {
     }
 
     #[test]
+    fn an_idempotency_key_cannot_move_to_another_backend() {
+        let conn = db();
+        let (src, out) = pair("inflight-backend-binding");
+        let source_path = src.to_string_lossy().into_owned();
+        let output_dir = out.parent().unwrap().to_string_lossy().into_owned();
+        let original = NewInFlight {
+            source_path: &source_path,
+            file_name: "report.pdf",
+            output_dir: &output_dir,
+            backend_url: BACKEND_URL,
+            client_run_id: "12121212-1212-4212-8212-121212121212",
+            idempotency_key: "34343434-3434-4434-8434-343434343434",
+            conversion_profile: "standard",
+        };
+        assert!(upsert_in_flight_row(&conn, &original).unwrap());
+
+        let changed_service = NewInFlight {
+            backend_url: "http://127.0.0.1:9473",
+            ..original
+        };
+        assert!(!upsert_in_flight_row(&conn, &changed_service).unwrap());
+        let rows = select_in_flight(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].backend_url, BACKEND_URL);
+    }
+
+    #[test]
     fn in_flight_identity_is_canonical_and_captures_source_mtime() {
         let conn = db();
         let root = std::env::temp_dir().join("toolkit-hist-inflight-identity");
@@ -746,6 +877,7 @@ mod tests {
             source_path: &alias_path,
             file_name: "report.pdf",
             output_dir: &output_dir,
+            backend_url: BACKEND_URL,
             client_run_id: "55555555-5555-4555-8555-555555555555",
             idempotency_key: "66666666-6666-4666-8666-666666666666",
             conversion_profile: "local_only",
@@ -774,6 +906,7 @@ mod tests {
             source_path: &source_path,
             file_name: "report.pdf",
             output_dir: &output_dir,
+            backend_url: BACKEND_URL,
             client_run_id: "77777777-7777-4777-8777-777777777777",
             idempotency_key: "88888888-8888-4888-8888-888888888888",
             conversion_profile: "standard",
@@ -794,6 +927,7 @@ mod tests {
         let rows = select_in_flight(&conn).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].idempotency_key, pending.idempotency_key);
+        assert_eq!(rows[0].backend_url, BACKEND_URL);
         assert_eq!(
             rows[0].backend_job_id.as_deref(),
             Some("99999999-9999-4999-8999-999999999999")
