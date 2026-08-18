@@ -1,7 +1,8 @@
 # Session handoff
 
-**Last updated:** 2026-08-17  
-**Branch:** `codex/backend-m2`  
+**Last updated:** 2026-08-18  
+**Branch:** `main`. `codex/backend-m2` merged in PR #1 and PR #3 and was
+deleted. Branch fresh off `main` for the next increment.  
 **Backend checkpoint:** `449d7cb` — M2 Increments 0-4 verified
 **Recorded code state:** no uncommitted backend implementation changes
 **Read this first** in any parallel session, then re-read the live worktree.
@@ -25,10 +26,19 @@ This file goes stale the moment someone lands a commit.
    in sync with `backend/openapi/openapi.yaml`, not rewritten; still
    regenerate it via `pnpm generate:api` only when M2's OpenAPI delta lands
    (CVR-027).
-4. **The desktop frontend slice and backend Increment 4 are committed.** The
-   backend checkpoint is `449d7cb`; no backend implementation changes remain
-   uncommitted. Re-check live status before editing and keep future staging to
-   explicit owned paths.
+4. **Everything through Increment 4 is merged to `main` and green.** PR #1
+   (desktop restructure, CI, M1/M2 durability) and PR #3 (Increment 4 startup
+   reconciliation) are merged; `main` is at `1049b96` with CI passing on the
+   push trigger. No backend implementation changes remain uncommitted.
+   Re-check live status before editing and keep staging to explicit owned
+   paths.
+
+   **CI is the only gate that sees Linux-only code.** PR #1 failed on a
+   `needless_return` inside `#[cfg(target_os = "linux")]` in
+   `backend/src/bin/tool-kit-pdf-worker.rs`, which macOS never compiles and so
+   can never lint. Cross-compiling locally does not help: `libsqlite3-sys`
+   needs a Linux C toolchain. Treat a local backend pass as necessary but not
+   sufficient, and open a PR so the ubuntu job runs before merging.
 5. **Do not** create a root Cargo workspace, bump TypeScript 7, migrate
    `keyring` 4, unpin `pdf-inspector`, or take `libc` 1.0 (still alpha).
 
@@ -192,9 +202,15 @@ Indexed as **`tool-kit`**, currently on **1.6.9**. The graph lives in
 after large commits:
 
 ```bash
-gitnexus analyze .   # incremental, ~15s on this repo
-gitnexus status      # indexed commit vs HEAD
+gitnexus analyze . --index-only   # incremental, ~15s on this repo
+gitnexus status                   # indexed commit vs HEAD
 ```
+
+`--index-only` is load-bearing, not decoration. A plain `analyze` rewrites the
+`<!-- gitnexus:start -->` block in `AGENTS.md` and `CLAUDE.md` with the current
+node and edge counts, so every refresh leaves two modified tracked files that
+have nothing to do with the work in hand. The flag skips that injection and
+leaves the committed block alone.
 
 Two traps, both hit on 2026-08-17:
 
