@@ -17,11 +17,14 @@ import {
   Row,
   Segmented,
   Select,
+  SourceEditor,
+  SplitPane,
   Spacer,
   Stack,
   Status,
   StatusDot,
   Switch,
+  Tabs,
   Text,
   TextInput,
   Well,
@@ -34,10 +37,35 @@ import "./Gallery.css";
 ///
 /// Open with `?gallery` in dev, or in the browser preview harness.
 
+/// Real conversion output, not lorem. The gutter has to be checked against
+/// lines that actually wrap, and the ink-only highlighting has to be checked
+/// against every mark markdown can produce.
+const SAMPLE = `# Strategic Partner Agreement
+
+**Parties.** Schild Technologies, a Delaware corporation, and the Partner identified in Exhibit A.
+
+## 4.7 Vesting
+
+Shares vest monthly over 48 months, with a 12-month cliff. **No acceleration on change of control.**
+
+> Repurchase of vested shares is at fair market value as determined by the Company.
+
+| Trigger             | Price             | Window  |
+|---------------------|-------------------|---------|
+| Voluntary departure | Fair market value | 90 days |
+
+Cause is not defined. See \`Exhibit C\` for the notice procedure.
+`;
+
 const THEME_KEY = "toolkit.gallery.theme";
 type Theme = "graphite" | "paper";
 
 export function Gallery() {
+  const [tab, setTab] = useState("agreement");
+  const [closed, setClosed] = useState<string[]>([]);
+  const [mode, setMode] = useState<"read" | "edit">("edit");
+  const [source, setSource] = useState(SAMPLE);
+
   const [theme, setTheme] = useState<Theme>(
     () => (localStorage.getItem(THEME_KEY) as Theme | null) ?? "graphite",
   );
@@ -371,6 +399,91 @@ export function Gallery() {
                 </Well>
               </Panel>
             </div>
+          </Stack>
+        </Section>
+
+        <Section
+          title="Workspace"
+          note="The document pane's parts. Tabs own a panel, so unlike Segmented they are a real tablist."
+        >
+          <Stack gap={5}>
+            <Stack gap={2}>
+              <Label>Tabs</Label>
+              <Panel>
+                <Tabs
+                  label="Open documents"
+                  value={tab}
+                  onChange={setTab}
+                  onClose={(id) => { setClosed((c) => [...c, id]); }}
+                  items={[
+                    { id: "agreement", label: "Schild-Strategic-Partner-Agreement.md", dirty: true },
+                    { id: "crosswalk", label: "NIST-800-171-crosswalk.md" },
+                    { id: "deck", label: "Q3-board-deck.md" },
+                  ].filter((t) => !closed.includes(t.id))}
+                />
+              </Panel>
+              <Text size="xs" tone="faint">
+                Arrows move and activate, Delete closes. The dirty dot and the close
+                control share one slot, so a tab never changes width.
+                {closed.length > 0 ? ` Closed: ${closed.join(", ")}` : ""}
+              </Text>
+            </Stack>
+
+            <Stack gap={2}>
+              <Row gap={3}>
+                <Label>Source editor</Label>
+                <Spacer />
+                <Segmented
+                  label="Document mode"
+                  value={mode}
+                  onChange={setMode}
+                  options={[
+                    { value: "read" as const, label: "Read" },
+                    { value: "edit" as const, label: "Edit" },
+                  ]}
+                />
+              </Row>
+              <Panel>
+                <div style={{ height: 260 }}>
+                  <SourceEditor
+                    value={source}
+                    onChange={setSource}
+                    readOnly={mode === "read"}
+                    label="Sample document source"
+                  />
+                </div>
+              </Panel>
+              <Text size="xs" tone="faint">
+                Line numbers stay aligned under soft wrap, which is the whole reason
+                this is CodeMirror and not a textarea. Highlighting spends no colour:
+                structure is drawn with the ink ramp and weight, so amber, green and
+                red keep meaning exactly one thing each.
+              </Text>
+            </Stack>
+
+            <Stack gap={2}>
+              <Label>Split pane</Label>
+              <Panel>
+                <div style={{ height: 160 }}>
+                  <SplitPane
+                    start={
+                      <div className="gal__splitpane">
+                        <Text size="xs" tone="faint">Run column</Text>
+                      </div>
+                    }
+                    end={
+                      <div className="gal__splitpane">
+                        <Text size="xs" tone="faint">Document</Text>
+                      </div>
+                    }
+                  />
+                </div>
+              </Panel>
+              <Text size="xs" tone="faint">
+                Drag the seam, or focus it and use the arrow keys. The hairline stays
+                a hairline at rest and only brightens under the pointer.
+              </Text>
+            </Stack>
           </Stack>
         </Section>
       </div>

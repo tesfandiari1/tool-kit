@@ -1,0 +1,16 @@
+/* SourceEditor — the host box. Everything inside is themed through
+   EditorView.theme in the component, so the two never disagree about a token. */
+
+.ui-source {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* The editor owns focus styling internally (the caret and active line say
+   where you are), so the container must not draw a second ring around it. */
+.ui-source .cm-editor.cm-focused {
+  outline: none;
+}

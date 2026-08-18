@@ -52,6 +52,15 @@ export type {
   DotTone,
 } from "./primitives/Badge";
 
+export { Tabs } from "./primitives/Tabs";
+export type { TabsProps, TabItem } from "./primitives/Tabs";
+
+export { SourceEditor } from "./primitives/SourceEditor";
+export type { SourceEditorProps } from "./primitives/SourceEditor";
+
+export { SplitPane } from "./primitives/SplitPane";
+export type { SplitPaneProps, SplitLayout } from "./primitives/SplitPane";
+
 export { Segmented } from "./primitives/Segmented";
 export type { SegmentedProps, SegmentedOption } from "./primitives/Segmented";
 
