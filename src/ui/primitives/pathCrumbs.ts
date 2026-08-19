@@ -6,11 +6,13 @@
 ///
 /// Its own module so `Path.tsx` exports only a component and fast refresh keeps
 /// working.
-export function pathCrumbs(path: string, max = 4): string[] {
+const MAX_CRUMBS = 4;
+
+export function pathCrumbs(path: string): string[] {
   const parts = path.split("/").filter(Boolean);
   // A leading slash becomes a crumb, so an absolute path still reads as
   // absolute once the middle is gone.
   if (path.startsWith("/")) parts.unshift("/");
-  if (parts.length <= max) return parts;
-  return [parts[0], "…", ...parts.slice(-(max - 2))];
+  if (parts.length <= MAX_CRUMBS) return parts;
+  return [parts[0], "…", ...parts.slice(-(MAX_CRUMBS - 2))];
 }

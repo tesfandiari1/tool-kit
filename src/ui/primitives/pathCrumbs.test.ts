@@ -22,17 +22,6 @@ describe("pathCrumbs", () => {
     expect(pathCrumbs("/a/b/c/d/e.md")).toHaveLength(4);
   });
 
-  it("honours a wider budget", () => {
-    expect(pathCrumbs("~/Documents/Work/2026/Q3/report.md", 6)).toEqual([
-      "~",
-      "Documents",
-      "Work",
-      "2026",
-      "Q3",
-      "report.md",
-    ]);
-  });
-
   it("survives a bare file name and a trailing slash", () => {
     expect(pathCrumbs("a.md")).toEqual(["a.md"]);
     expect(pathCrumbs("~/Desktop/")).toEqual(["~", "Desktop"]);

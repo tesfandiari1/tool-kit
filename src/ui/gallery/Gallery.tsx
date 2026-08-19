@@ -479,7 +479,6 @@ export function Gallery() {
                 <Stack gap={2}>
                   <Path path="~/Desktop/notes.md" />
                   <Path path="/Users/me/Documents/Work/2026/Q3/quarterly-report.md" />
-                  <Path path="~/Documents/Work/2026/Q3/quarterly-report.md" max={6} />
                   <div style={{ width: 190 }}>
                     <Path path="~/Documents/Work/2026/Q3/quarterly-report.md" />
                   </div>

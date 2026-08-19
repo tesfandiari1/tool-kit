@@ -5,8 +5,6 @@ import "./Path.css";
 
 export interface PathProps {
   path: string;
-  /// Crumbs to show before the middle is elided.
-  max?: number;
   className?: string;
 }
 
@@ -14,8 +12,8 @@ export interface PathProps {
 ///
 /// Mono, because paths are identifiers. The trail is faint and the file is not:
 /// you scan for the file and read the trail only when you need it.
-export function Path({ path, max, className }: PathProps) {
-  const crumbs = pathCrumbs(path, max);
+export function Path({ path, className }: PathProps) {
+  const crumbs = pathCrumbs(path);
   const last = crumbs.length - 1;
 
   return (
