@@ -18,23 +18,27 @@ rewrite code, commands, identifiers, or quotations to match prose rules.
 
 | Item | Value |
 |---|---|
-| Branch | `main` at `a337594` |
+| Branch | `main`. Run `git log --oneline -8` for the tip |
 | OpenAPI contract | **0.4.2** (`backend/openapi/openapi.yaml`) |
 | Backend | M0, M1, M2, M3, M4 complete. M5, M7, M8 unbuilt |
-| Desktop | M6 implementation landed, **gate open** |
+| Desktop | M6 implementation landed, **gate open** (CVR-067, CVR-081) |
 | Exposure | Loopback only. No Caddy, no LAN |
-| Backend Datalab fallback | Not built. Phase 2 |
+| Backend Datalab fallback | Not built. Phase 2, now unblocked |
+| Phase 1 | **Complete 2026-08-19.** All four gates met |
 | Latest container smoke | `20260819T161851Z`, image `sha256:4a0cbdd0…` |
 
-Recent commits on `main`, newest first:
+The sprint that closed Phase 1, newest first. This is a snapshot, not a
+running log. `git log` is the source of truth.
 
 | Commit | Content |
 |---|---|
+| `f38d70a` | Phase 1 gate 3 closed, all six acceptance steps pass |
+| `ceca3f2` | 20 confirmed claim mismatches reconciled against the tree |
+| `40c706d` | The unused `Path` `max` knob removed |
+| `abe5c2a` | Gate scripts assert their own results |
+| `f1fe307` | Transient boot errors contained, dead policy surface dropped |
+| `34c0949` | The remote ledger state a retry rebuilt bare, restored |
 | `a337594` | Consolidation of every planning doc into this file |
-| `b294481` | Desktop window management and page zoom |
-| `c7d704b` | Doc consolidation and the closeout plan |
-| `a7b4976` | Desktop Sprint 0 repairs, including the double-bill fix |
-| `5fe6463` | Backend Sprint 0 repairs plus the M4 routing policy |
 
 **Sprint 0, Sprint 1, and Sprint A are done.** The two desktop fixes that were
 stranded in an uncommitted tree are on `main`. `scanKey` in
