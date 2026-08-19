@@ -204,12 +204,10 @@ field was rejected: `policy.rs` parses the manifest with
 
 ### Acceptance checklist
 
-Manual checks on the same machine. D.1 and D.4 are done and reproducible
-against the running container. D.2, D.3, and D.5 need one `pnpm tauri dev`
-session, because they exercise the thread pane, ⌘S, and restart recovery in the
-window. D.6 needs the same session for its desktop half only. Generate a native
-PDF with `backend/scripts/print-corpus-pdf.sh /tmp/toolkit-native.pdf` if you
-have no sample handy.
+**All six pass as of 2026-08-19.** D.1 and D.4 are reproducible against the
+running container. D.2, D.3, D.5, and D.6 passed in one `pnpm tauri dev`
+session. Generate inputs with `backend/scripts/print-corpus-pdf.sh` if you have
+no sample handy.
 
 | # | Step | Pass when |
 |---|---|---|
@@ -219,6 +217,22 @@ have no sample handy.
 | D.4 | Drop a docx, Run | Job succeeds through the backend |
 | D.5 | Stop the app mid-run, restart | The active job recovers or fails visibly |
 | D.6 | Drop a scanned PDF under `local_only` | Job finishes `needs_remote` with no silent success |
+
+**D.6 evidence, from a real scanned document.** The ledger row recorded
+`output_format` `backend:markdown`, `status` `failed`, an empty `output_path`,
+and the error "Local-only conversion could not finish locally. Choose Standard
+to allow Datalab fallback." No Markdown reached the output folder. That is the
+whole point of the step: a scan the backend will not convert must refuse
+visibly rather than publish partial text or bill Datalab behind the profile.
+
+`needs_remote_decision` is the only gate, `BackendAction::NeedsRemote` is the
+only path into `run_datalab_fallback`, and
+`needs_remote_falls_back_only_for_standard` pins both.
+
+**`standard` will fall back and spend credits, in the same session.** One run
+under `standard` published `backend_fallback:markdown` a minute before the
+`local_only` run refused. Set the profile before the run, not after: the run
+config is snapshotted at start.
 
 ### Running D.2, D.3, D.5, and D.6
 
@@ -283,9 +297,7 @@ through D.3. Not required for this gate.
 1. `pnpm verify` green with Sprint A on `main`. **Done.**
 2. `pnpm verify:local-corpus && pnpm verify:all && pnpm verify:container` all
    green. **Done 2026-08-19.** See the verification log in section 9.
-3. All six acceptance steps pass once. **D.1 and D.4 done.** D.2, D.3, and D.5
-   need one `pnpm tauri dev` session, and D.6 needs the same session to confirm
-   the desktop half. Nothing else blocks them.
+3. All six acceptance steps pass once. **Done 2026-08-19.**
 4. Archive the four superseded docs. No live doc contradicts another on
    milestone status or scope. **Done.** The docs are in `docs/archive/`, the
    `backend/README.md` milestone line reads M4, and `backend/evals/README.md`
@@ -1118,6 +1130,7 @@ DATALAB_API_KEY=… REVAI_API_KEY=… \
 | 2026-08-19 | Smoke `20260819T031914Z`, image `sha256:4a0cbdd0…`. Evidence names commit `d6fc6eb`, taken over a dirty tree |
 | 2026-08-19 | Phase 1 closeout. All three verify gates green at clean tree `a337594` |
 | 2026-08-19 | Smoke `20260819T161851Z`, image `sha256:4a0cbdd0…`, 116 PASS, 0 FAIL. Same image id, so the earlier run did cover M4 |
+| 2026-08-19 | Acceptance D.1 through D.6 all pass. **Phase 1 gates met.** M5 is unblocked |
 
 Per-increment evidence through M6 lives in
 [`archive/BACKEND_VERIFICATION_LOG.md`](archive/BACKEND_VERIFICATION_LOG.md).
