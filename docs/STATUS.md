@@ -40,11 +40,16 @@ running log. `git log` is the source of truth.
 | `34c0949` | The remote ledger state a retry rebuilt bare, restored |
 | `a337594` | Consolidation of every planning doc into this file |
 
-**Sprint 0, Sprint 1, and Sprint A are done.** The two desktop fixes that were
-stranded in an uncommitted tree are on `main`. `scanKey` in
-`src/shell/App.tsx` includes `conversionRoute` and `backendUrl` (S0.7), and the
+**Sprint 0, Sprint 1, Sprint A, and the Phase 1 closeout are done.** `scanKey`
+in `src/shell/App.tsx` includes `conversionRoute` and `backendUrl` (S0.7). The
 capability probe retries on an interval instead of latching Run off for the
 session (S0.8).
+
+The closeout audited every falsifiable claim in this file against the tree. It
+confirmed 20 mismatches and refuted 4. Seven of them were code, not prose, and
+section 9 lists all seven. The lesson to carry into M5: each one was already
+marked done, and no gate caught any of them. Only reading the code against the
+claim did.
 
 **`d6fc6eb` is mistitled.** Its message reads "docs: add comprehensive backend
 and desktop execution plans". It contains six `git mv` renames into
@@ -87,7 +92,11 @@ and desktop execution plans". It contains six `git mv` renames into
 
 ---
 
-## 2. Phase 1: local same-machine use (today)
+## 2. Phase 1: local same-machine use. Complete
+
+**Closed 2026-08-19.** All four gates below are met. Keep this section as the
+record of what Phase 1 covered and how to re-run its checks. Phase 2 is the
+active phase.
 
 **Scope:** macOS desktop plus the converter on `127.0.0.1:8080`. Convert
 approved text-based inputs to Markdown, open them in the thread pane, edit, and
@@ -308,11 +317,12 @@ through D.3. Not required for this gate.
    carries a "Phase 1 local-text cases" section. That section replaced an
    earlier plan to add a `localTextOnly` manifest field, which C.1 rules out.
 
-Do not start backend Datalab work until Phase 1 passes acceptance.
+Phase 1 passed acceptance, so backend Datalab work may start. S2.0 is the
+first sprint.
 
 ---
 
-## 3. Phase 2: M5 Datalab fallback and M6 close
+## 3. Phase 2: M5 Datalab fallback and M6 close. Active
 
 **Highest-complexity milestone.** Uncertain billable submission and
 restart-safe polling are where production bugs live.
@@ -1135,6 +1145,7 @@ DATALAB_API_KEY=… REVAI_API_KEY=… \
 | 2026-08-19 | Phase 1 closeout. All three verify gates green at clean tree `a337594` |
 | 2026-08-19 | Smoke `20260819T161851Z`, image `sha256:4a0cbdd0…`, 116 PASS, 0 FAIL. Same image id, so the earlier run did cover M4 |
 | 2026-08-19 | Acceptance D.1 through D.6 all pass. **Phase 1 gates met.** M5 is unblocked |
+| 2026-08-19 | Closeout merged to `main` and published. `verify:all` green on the merge: 166 backend, 64 desktop, 79 frontend |
 
 Per-increment evidence through M6 lives in
 [`archive/BACKEND_VERIFICATION_LOG.md`](archive/BACKEND_VERIFICATION_LOG.md).
