@@ -9,6 +9,7 @@ use reqwest::{multipart, Client, Method, Response, Url};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::AppHandle;
 use tokio::io::AsyncWriteExt;
@@ -401,12 +402,20 @@ fn current_token() -> Result<String, String> {
         .ok_or_else(|| "Backend token is not configured in Keychain".to_string())
 }
 
+/// One client for the process. A `Client` owns the connection pool, so building
+/// one per request threw the pooled connection away every time and made a ten
+/// minute conversion open roughly 120 of them. Cloning is a refcount bump.
 fn http_client() -> Result<Client, String> {
-    Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Could not initialize conversion-service HTTP: {e}"))
+    static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .map_err(|e| format!("Could not initialize conversion-service HTTP: {e}"))
+        })
+        .clone()
 }
 
 fn valid_token(token: &str) -> Result<&str, String> {

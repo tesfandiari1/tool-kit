@@ -11,9 +11,8 @@ import { activateOrInsert, NO_DOCS, removeDoc } from "./documents";
 /// independent, and one must not close the other.
 ///
 /// Both doors — a finished job row and a history entry — read the file from
-/// disk. `Job.outputText` is the same bytes only until the first edit is saved,
-/// and a pane that opens the stale copy would show the user their own work
-/// missing.
+/// disk, which is the only copy there is: the job row carries a path, not the
+/// converted text.
 export function useDocuments({ showToast }: { showToast: (msg: string) => void }) {
   const [{ docs, activeId }, setList] = useState(NO_DOCS);
   const [mode, setMode] = useState<DocMode>("read");

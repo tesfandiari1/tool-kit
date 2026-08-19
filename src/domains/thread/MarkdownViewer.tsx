@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import { memo, type ComponentProps } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openExternal } from "@/platform/host";
@@ -25,7 +25,12 @@ function MarkdownLink({ href, children }: ComponentProps<"a">) {
   );
 }
 
-export function MarkdownViewer({ text }: { text: string }) {
+/// Memoized because react-markdown does not memoize itself: every render
+/// re-parses the whole document. A run emits a `job-updated` per queued job,
+/// four more per file, and a 1 Hz elapsed-time tick, so an open document was
+/// being re-parsed roughly a thousand times over a 200-file run while its own
+/// text never changed.
+export const MarkdownViewer = memo(function MarkdownViewer({ text }: { text: string }) {
   return (
     <div className="preview-body md">
       <Markdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>
@@ -33,4 +38,4 @@ export function MarkdownViewer({ text }: { text: string }) {
       </Markdown>
     </div>
   );
-}
+});

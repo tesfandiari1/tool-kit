@@ -31,6 +31,9 @@ export const commands = {
   },
   readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
   readDocument: (path: string) => invoke<{ text: string; mtimeMs: number }>("read_document", { path }),
+  /// Copy's reader. Same file, no preview cap: a result too large to open in
+  /// the pane is still worth copying.
+  readDocumentText: (path: string) => invoke<string>("read_document_text", { path }),
   /// Saves only when the file on disk still has `expectedMtimeMs`; otherwise it
   /// rejects rather than overwriting an edit made outside the app. Resolves to
   /// the new mtime, which the caller carries into its next save.

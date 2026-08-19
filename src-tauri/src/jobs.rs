@@ -5,7 +5,7 @@
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -14,6 +14,26 @@ use tokio::sync::Semaphore;
 use crate::conversion_service::{self, ConversionFailure, ConversionJob};
 use crate::providers::{self, PollResult, ProviderKind};
 use crate::{history, secrets, settings};
+
+/// One client for every provider request in the process.
+///
+/// A `Client` owns the connection pool, so one per job meant a fresh TLS
+/// handshake to Datalab or Rev.ai for every file: 200 handshakes on a 200-file
+/// run instead of one per host. Cloning shares the pool.
+///
+/// No global timeout, because submits carry whole files and need far longer
+/// than polls. Each request sets its own (see `providers::*_TIMEOUT`).
+fn provider_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        })
+        .clone()
+}
 
 const BACKEND_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const BACKEND_MAX_POLLS: u32 = 720;
@@ -182,7 +202,6 @@ pub struct Job {
     pub status: String, // queued | working | processing | done | failed
     pub progress_note: String,
     pub output_path: Option<String>,
-    pub output_text: Option<String>,
     pub error: Option<String>,
     /// Backend-provided metadata is intentionally stringly typed: new route,
     /// warning, failure, and status values must not break an older desktop.
@@ -216,7 +235,6 @@ impl Job {
             status: "queued".into(),
             progress_note: "Queued".into(),
             output_path: None,
-            output_text: None,
             error: None,
             route: None,
             reason_codes: Vec::new(),
@@ -428,15 +446,26 @@ fn log_history(app: &AppHandle, job: &Job, status: &str, error: Option<&str>) {
 /// run. Returns false when the run was retired, which every caller treats as
 /// "stop here": a stopped row must not be relabelled, and work must not
 /// continue past a Stop.
+/// Returns whether the run is still current, which is what the callers branch
+/// on. Emitting is separate: the backend poll calls this every 5s with the same
+/// pending note, so an unconditional emit woke every frontend subscriber once a
+/// tick per job with nothing to say. The direct Datalab loop already guarded
+/// this on its own side.
 fn set_status(app: &AppHandle, id: u64, generation: u64, status: &str, note: &str) -> bool {
     let manager = app.state::<JobManager>();
+    let mut changed = false;
     let Some(updated) = manager.update_if_generation(id, generation, |job| {
-        job.status = status.to_string();
-        job.progress_note = note.to_string();
+        changed = job.status != status || job.progress_note != note;
+        if changed {
+            job.status = status.to_string();
+            job.progress_note = note.to_string();
+        }
     }) else {
         return false;
     };
-    updated.emit(app);
+    if changed {
+        updated.emit(app);
+    }
     true
 }
 
@@ -457,12 +486,15 @@ fn fail(app: &AppHandle, id: u64, generation: u64, err: &str) {
     log_history(app, &job, "failed", Some(err));
 }
 
-fn finish(app: &AppHandle, id: u64, generation: u64, text: String, output_path: Option<String>) {
+/// The converted text is already on disk by the time this runs, so the job row
+/// carries only its path. It used to carry the text as well, which shipped
+/// every result across IPC and pinned it in the webview until the next run
+/// cleared the queue. Copy reads the file instead.
+fn finish(app: &AppHandle, id: u64, generation: u64, output_path: Option<String>) {
     let manager = app.state::<JobManager>();
     let Some(updated) = manager.update_if_generation(id, generation, |j| {
         j.status = "done".to_string();
         j.progress_note = String::new();
-        j.output_text = Some(text);
         j.output_path = output_path;
         j.error = None;
     }) else {
@@ -473,21 +505,34 @@ fn finish(app: &AppHandle, id: u64, generation: u64, text: String, output_path: 
     log_history(app, &job, "done", None);
 }
 
+/// Same emit rule as `set_status`: the poll hands back the identical view on
+/// every pass until the backend actually moves.
 fn apply_backend_view(app: &AppHandle, id: u64, generation: u64, view: &ConversionJob) -> bool {
     let manager = app.state::<JobManager>();
+    let kind = view.route.as_ref().map(|route| route.kind.clone());
+    let reason_codes = view
+        .route
+        .as_ref()
+        .map(|route| route.reason_codes.clone())
+        .unwrap_or_default();
+    let mut changed = false;
     let Some(updated) = manager.update_if_generation(id, generation, |job| {
-        job.route = view.route.as_ref().map(|route| route.kind.clone());
-        job.reason_codes = view
-            .route
-            .as_ref()
-            .map(|route| route.reason_codes.clone())
-            .unwrap_or_default();
-        job.warnings = view.warnings.clone();
-        job.failure = view.failure.clone();
+        changed = job.route != kind
+            || job.reason_codes != reason_codes
+            || job.warnings != view.warnings
+            || job.failure != view.failure;
+        if changed {
+            job.route = kind;
+            job.reason_codes = reason_codes;
+            job.warnings = view.warnings.clone();
+            job.failure = view.failure.clone();
+        }
     }) else {
         return false;
     };
-    updated.emit(app);
+    if changed {
+        updated.emit(app);
+    }
     true
 }
 
@@ -529,7 +574,6 @@ fn finish_backend(app: &AppHandle, id: u64, generation: u64, output_path: String
         .update_if_generation(id, generation, |job| {
             job.status = "done".into();
             job.progress_note.clear();
-            job.output_text = None;
             job.output_path = Some(output_path);
             job.error = None;
             job.failure = None;
@@ -643,7 +687,7 @@ pub fn reuse_result(app: &AppHandle, id: u64, generation: u64, existing: &str) -
         .unwrap_or("txt");
     match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
         Ok(path) => {
-            finish(app, id, generation, text, Some(path));
+            finish(app, id, generation, Some(path));
             true
         }
         Err(e) => {
@@ -973,10 +1017,7 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
         }
     };
     let cfg = app.state::<JobManager>().run_config();
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = provider_client();
     let pipeline = cfg
         .datalab_pipeline_id
         .as_deref()
@@ -1334,21 +1375,22 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
             return;
         }
 
-        if let Some(updated) = app.state::<JobManager>().update(id, |j| {
-            j.started_at = Some(now_secs());
-        }) {
-            emit(&app, updated);
-        }
+        // Guarded, like the backend path at the top of `run_backend_job`. Plain
+        // `update` drops the jobs lock before the emit, so a Stop landing in
+        // that window ships a stale "queued" row that `ACTIVE` counts as live,
+        // and `running` sticks on.
+        let manager = app.state::<JobManager>();
+        let Some(updated) = manager.update_if_generation(id, generation, |current| {
+            current.started_at = Some(now_secs());
+        }) else {
+            return;
+        };
+        updated.emit(&app);
 
         // Snapshot taken when the run started, so a Settings change mid-run
         // can't give half the files a different output format.
         let cfg = app.state::<JobManager>().run_config();
-        // No global timeout: submits carry whole files and need far longer
-        // than polls, so each request sets its own (see providers::*_TIMEOUT).
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = provider_client();
 
         {
             if !set_status(&app, id, generation, "working", "Uploading…") {
@@ -1509,7 +1551,7 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
                 return;
             }
             match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
-                Ok(path) => finish(&app, id, generation, text, Some(path)),
+                Ok(path) => finish(&app, id, generation, Some(path)),
                 Err(e) => fail(&app, id, generation, &e),
             }
         }
@@ -1886,7 +1928,7 @@ mod backend_tests {
         );
         let serialized = serde_json::to_value(&job).unwrap();
         assert!(serialized.get("backend").is_none());
-        assert_eq!(serialized["outputText"], serde_json::Value::Null);
+        assert!(serialized.get("outputText").is_none());
     }
 
     #[test]

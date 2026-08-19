@@ -1,0 +1,62 @@
+# Supply-chain gate for the converter, run by `pnpm verify:deps`.
+#
+# The suite is the RustSec advisory database and the crates' own license
+# metadata. Nothing here is an assertion this repo wrote, which is the point:
+# it fails on advisories filed after the file was written, not on the cases
+# someone thought of at the time.
+#
+#   cargo deny --manifest-path backend/Cargo.toml check
+#
+# There is no root workspace, so `src-tauri/deny.toml` is a separate file with
+# its own graph and its own exceptions. Keep the two the same in shape and
+# expect them to differ in content.
+
+[graph]
+# The service ships as a Linux container and is tested on developer macOS.
+# Naming the targets keeps target-only crates out of the graph, so a Windows
+# dependency cannot fail a gate for a binary that never links it.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-apple-darwin",
+]
+all-features = false
+
+[advisories]
+yanked = "deny"
+# A vulnerability always fails. So does an unmaintained crate, until someone
+# writes down why it is tolerated. That is what keeps this list from becoming
+# a blanket `unmaintained = "allow"`: a new one arrives as a failure.
+ignore = [
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser, reached through pdf-inspector and lopdf. It parses fonts out of untrusted PDF bytes, so it matters. There is no safe upgrade and the move to skrifa is upstream work in lopdf. Every call to it runs inside tool-kit-pdf-worker, a separate process with its own timeout, which is the mitigation already in place. Revisit on the next pdf-inspector bump." },
+]
+
+[licenses]
+# Permissive only. Every entry is a license actually present in Cargo.lock, so
+# a new copyleft dependency fails here instead of arriving unnoticed.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Duplicate versions are permanent in a sqlx tree (sha2 0.10 and 0.11, syn 2
+# and 3) and none of them is actionable here. Warning on all seven every run
+# teaches whoever reads this output to skim it, which is how a real error gets
+# missed, so they are off. A wildcard version is a real defect: it makes the
+# lockfile the only record of what was built.
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

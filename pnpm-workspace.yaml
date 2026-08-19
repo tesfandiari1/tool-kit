@@ -1,2 +1,5 @@
 allowBuilds:
+  # Scarf's install script reports installation analytics to a third party.
+  # It arrived with @stoplight/spectral-cli and has no part in linting a file.
+  '@scarf/scarf': false
   esbuild: true

@@ -10,7 +10,6 @@
     "opener:default",
     "dialog:default",
     "core:window:allow-hide",
-    "core:window:allow-destroy",
     "core:window:allow-start-dragging",
     "core:window:allow-inner-size",
     "core:window:allow-set-size",

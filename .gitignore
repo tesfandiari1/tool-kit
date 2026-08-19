@@ -46,6 +46,9 @@ backend/data/
 # Rust (crate gitignores already cover /target/ in each crate)
 /target/
 
+# Python bytecode (the icon generator is the only .py in the tree)
+__pycache__/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -62,3 +65,8 @@ backend/data/
 *.pfx
 *.cer
 *.mobileprovision
+
+# Schemathesis writes an example database beside the working directory when
+# it is not told otherwise. contract-fuzz.sh keeps it in memory; this covers a
+# hand-run `st`.
+.schemathesis/

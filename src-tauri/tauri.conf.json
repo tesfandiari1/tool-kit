@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Tool-Kit",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "ai.uniwise.toolkit",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -34,7 +34,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; form-action 'none'"
     },
     "macOSPrivateApi": true
   },
@@ -49,6 +49,15 @@
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns"
-    ]
+    ],
+    "copyright": "Copyright (c) 2026 Tristin Esfandiari",
+    "category": "Productivity",
+    "resources": {
+      "../src/ui/fonts/OFL.txt": "OFL.txt",
+      "../src/ui/fonts/THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+    },
+    "macOS": {
+      "minimumSystemVersion": "26.0"
+    }
   }
 }

@@ -21,11 +21,6 @@
 .ui-panel--well {
   background: var(--surface-well);
 }
-.ui-panel--bare {
-  background: transparent;
-  border-color: transparent;
-}
-
 .ui-panel__header {
   display: flex;
   align-items: center;

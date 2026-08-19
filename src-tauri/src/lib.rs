@@ -869,6 +869,17 @@ fn read_document(path: String) -> Result<DocumentPayload, String> {
     })
 }
 
+/// Copy reads the result off disk rather than a copy held in the webview, so it
+/// needs a ceiling of its own. `MAX_PREVIEW_BYTES` exists to keep the editor
+/// responsive, and a result too large to edit is still worth copying. This one
+/// matches the backend's output ceiling, the largest result the app produces.
+const MAX_COPY_BYTES: u64 = 50 * 1024 * 1024;
+
+#[tauri::command]
+fn read_document_text(path: String) -> Result<String, String> {
+    Ok(document_io::read(Path::new(&path), MAX_COPY_BYTES)?.text)
+}
+
 #[tauri::command]
 fn write_document(path: String, text: String, expected_mtime_ms: u64) -> Result<u64, String> {
     document_io::write(Path::new(&path), &text, expected_mtime_ms)
@@ -964,6 +975,7 @@ pub fn run() {
             reveal_path,
             read_text_file,
             read_document,
+            read_document_text,
             write_document,
             quit_app,
             retry_failed,

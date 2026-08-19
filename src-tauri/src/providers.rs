@@ -58,10 +58,16 @@ fn pick_string(body: &Value, keys: &[&str]) -> Option<String> {
 
 /// Read a file once into memory, returning (bytes, filename, mime) so a
 /// multipart body can be rebuilt cheaply on each retry attempt.
+///
+/// `Bytes`, not `Vec<u8>`, because `send_retrying` takes `Fn`: the buffer stays
+/// alive in the closure for the whole call, so a `Vec` clone per attempt held
+/// two copies of the file at once. Transcribe accepts video and has no size
+/// cap, and four permits means four uploads in flight, so the doubling was the
+/// largest allocation in the app. A `Bytes` clone is a refcount bump.
 async fn read_file_bytes(
     path: &str,
     default_name: &str,
-) -> Result<(Vec<u8>, String, String), String> {
+) -> Result<(bytes::Bytes, String, String), String> {
     let p = Path::new(path);
     let name = p
         .file_name()
@@ -72,11 +78,17 @@ async fn read_file_bytes(
         .await
         .map_err(|e| format!("Could not read file: {e}"))?;
     let mime = mime_guess::from_path(p).first_or_octet_stream().to_string();
-    Ok((bytes, name, mime))
+    Ok((bytes::Bytes::from(bytes), name, mime))
 }
 
-fn bytes_part(bytes: Vec<u8>, name: &str, mime: &str) -> reqwest::multipart::Part {
-    let part = reqwest::multipart::Part::bytes(bytes).file_name(name.to_string());
+fn bytes_part(bytes: bytes::Bytes, name: &str, mime: &str) -> reqwest::multipart::Part {
+    // `stream_with_length` rather than `Part::bytes`, which would take a
+    // `Cow<'static, [u8]>` and copy the buffer back out of the `Bytes`. The
+    // length is required: without it the body is chunked, and neither provider
+    // accepts a chunked upload.
+    let len = bytes.len() as u64;
+    let part = reqwest::multipart::Part::stream_with_length(reqwest::Body::from(bytes), len)
+        .file_name(name.to_string());
     // A panic here would abort the spawned job task, leaving the row stuck on
     // "Uploading…" forever, so fall back instead of unwrapping.
     part.mime_str(mime)

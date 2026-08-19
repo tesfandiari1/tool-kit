@@ -1,7 +1,7 @@
 {
   "name": "tool-kit",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "license": "MIT",
   "packageManager": "pnpm@11.22.0",
   "engines": {
@@ -15,15 +15,19 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "lint:api": "spectral lint backend/openapi/openapi.yaml --ruleset backend/openapi/.spectral.yaml --fail-severity=warn",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "tsc --noEmit && eslint . && vitest run",
     "verify": "pnpm check && pnpm build && cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --locked --manifest-path src-tauri/Cargo.toml --lib",
-    "verify:backend": "cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings && cargo test --locked --manifest-path backend/Cargo.toml",
+    "verify:backend": "pnpm lint:api && cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings && cargo test --locked --manifest-path backend/Cargo.toml",
     "verify:all": "pnpm verify && pnpm verify:backend",
+    "verify:deps": "cargo deny --manifest-path src-tauri/Cargo.toml check && cargo deny --manifest-path backend/Cargo.toml check",
+    "verify:contract": "backend/scripts/contract-fuzz.sh",
     "verify:container": "backend/scripts/container-smoke.sh",
     "verify:local-corpus": "backend/scripts/verify-local-corpus.sh",
+    "verify:api-drift": "pnpm generate:api && git diff --exit-code src/app/api/schema.ts",
     "generate:api": "openapi-typescript backend/openapi/openapi.yaml -o src/app/api/schema.ts",
     "tauri": "tauri"
   },
@@ -47,6 +51,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@stoplight/spectral-cli": "^6.16.3",
     "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",

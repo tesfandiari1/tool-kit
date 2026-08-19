@@ -17,7 +17,11 @@ async function mount() {
   if (!el) throw new Error("root element missing");
   const root = ReactDOM.createRoot(el);
 
-  if (showGallery) {
+  // `import.meta.env.DEV` is substituted with `false` in a production build,
+  // so Rollup drops this branch and the dynamic import with it. The packaged
+  // webview loads `tauri://localhost` with no query string and has no way to
+  // ask for the gallery, so the chunk was shipping dead.
+  if (import.meta.env.DEV && showGallery) {
     const { Gallery } = await import("@ui/gallery/Gallery");
     root.render(
       <React.StrictMode>

@@ -48,9 +48,22 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 cargo test --locked --manifest-path backend/Cargo.toml
 ```
 
+Three gates come from outside the repo, so they check work nobody here wrote
+the assertions for:
+
+```bash
+pnpm lint:api        # Spectral, ~60 OpenAPI rules over the contract
+pnpm verify:deps     # cargo-deny, the RustSec advisory database and licenses
+pnpm verify:contract # Schemathesis, property-based testing of the live service
+```
+
+`verify:contract` builds the backend, starts it on a throwaway port and data
+root, seeds one conversion, and derives its cases from `openapi.yaml`. It needs
+`uv` and Docker is not involved.
+
 Ignored desktop tests in `src-tauri/src/live_smoke.rs` hit real Datalab and
-Rev.ai endpoints and spend API credits. CI runs the commands above on every
-push and pull request.
+Rev.ai endpoints and spend API credits. CI runs all of the above on every push
+and pull request.
 
 ## Release
 
@@ -59,10 +72,18 @@ will distribute it.
 
 ```bash
 APPLE_SIGNING_IDENTITY="Developer ID Application: …" pnpm tauri build
+src-tauri/scripts/verify-release.sh
 ```
 
 Artifacts land in `src-tauri/target/release/bundle/`. Signing credentials live
 in `.env.local` (gitignored).
+
+Do not skip the verify step. A build with no signing identity still succeeds
+and still produces a working `.app`, but it is ad-hoc signed, and the macOS
+keychain then treats every rebuild as a new app and re-prompts for all three
+API keys on every launch. `verify-release.sh` fails on exactly that, plus the
+Info.plist keys and the bundled font licence. Add `--notarized` after a
+notarized build to also check the stapled ticket and Gatekeeper.
 
 ## Conversion backend
 

@@ -230,7 +230,12 @@ export interface components {
             };
         };
         ConversionSubmission: {
-            /** Format: binary */
+            /**
+             * Format: binary
+             * @description The document bytes. The part must be non-empty and must open with the container signature of the format its extension names, or the service answers 415 `invalid_source_signature`. The signature is checked against the bytes actually received, so a renamed file is rejected at admission rather than at conversion.
+             *
+             *     Two pieces of metadata travel with the bytes and are required as well, a filename and a `Content-Type`. Both are described under `encoding.source`.
+             */
             source: string;
             /** Format: uuid */
             clientRunId: string;

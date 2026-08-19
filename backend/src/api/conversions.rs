@@ -1,4 +1,4 @@
-use std::path::Path as FilePath;
+use std::path::{Path as FilePath, PathBuf};
 
 use axum::{
     body::Body,
@@ -24,6 +24,41 @@ use crate::{
     error::{ApiError, RequestId},
     AppState,
 };
+
+/// Removes a staged job tree if the request that created it is dropped.
+///
+/// The error paths in `create` clean up by awaiting `discard_unaccepted_job`,
+/// which a dropped future never reaches: a client that quits mid-upload leaves
+/// the tree, up to `max_upload_bytes` of it, and nothing deletes it before M7's
+/// reviewed orphan sweep. `ProbeFile` in `artifacts.rs` answers the same
+/// problem the same way. Drop cannot await, and that is exactly what makes the
+/// removal survive cancellation.
+///
+/// Disarmed on every path that already handled the tree, so a failed discard
+/// that fell through to quarantine keeps what it quarantined.
+struct StagedJobGuard {
+    path: Option<PathBuf>,
+}
+
+impl StagedJobGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for StagedJobGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path {
+            // Nothing here can be reported, and a stale tree is the only thing
+            // worth preventing.
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
 
 const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
 const IDEMPOTENCY_REPLAYED: HeaderName = HeaderName::from_static("idempotency-replayed");
@@ -79,6 +114,7 @@ pub async fn create(
                 &request_id,
             )
         })?;
+    let mut staged_guard = StagedJobGuard::new(prepared.paths.job.clone());
     let staged = match timeout(
         state.limits().upload_timeout,
         stage_multipart(
@@ -93,10 +129,12 @@ pub async fn create(
         Ok(Ok(staged)) => staged,
         Ok(Err(api_error)) => {
             state.service().discard_unaccepted_job(job_id).await;
+            staged_guard.disarm();
             return Err(api_error);
         }
         Err(_) => {
             state.service().discard_unaccepted_job(job_id).await;
+            staged_guard.disarm();
             return Err(error(
                 StatusCode::REQUEST_TIMEOUT,
                 "upload_timeout",
@@ -107,6 +145,7 @@ pub async fn create(
     };
     if staged.profile == ConversionProfile::BestQuality {
         state.service().discard_unaccepted_job(job_id).await;
+        staged_guard.disarm();
         return Err(error(
             StatusCode::CONFLICT,
             "profile_unavailable",
@@ -115,6 +154,8 @@ pub async fn create(
         ));
     }
 
+    // The service owns the tree from here, and its own error handling applies.
+    staged_guard.disarm();
     let decision = state
         .service()
         .submit(Submission {

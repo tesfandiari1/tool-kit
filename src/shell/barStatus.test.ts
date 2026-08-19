@@ -16,7 +16,6 @@ function job(status: Status, startedAt: number | null = null): Job {
     warnings: [],
     failure: null,
     outputPath: null,
-    outputText: null,
     error: null,
     createdAt: 0,
     startedAt,

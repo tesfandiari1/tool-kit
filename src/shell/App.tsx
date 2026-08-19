@@ -554,26 +554,26 @@ export default function App() {
     await call(() => commands.stopRun());
   };
 
-  // `Job.outputText` is what the provider returned, which stops being the file
+  // The open document is what is on screen, which stops being the file
   // the moment an edit is saved. A row's Copy has to mean the same thing as the
-  // pane's, so prefer the open document, then the file, and fall back to the
-  // provider's bytes only when there is no path to read.
+  // pane's, so prefer the open document and otherwise read the file.
+  //
+  // There is no third fallback any more. The job row used to carry the
+  // provider's bytes, which meant every result crossed IPC and stayed in the
+  // webview for the session. `readDocumentText` reads the same file the pane
+  // would, without the preview cap, so a result too large to open still copies.
   const copyText = async (j: Job | null) => {
-    if (!j) return;
-    let text = j.outputText;
-    if (j.outputPath) {
-      const open = docs.find((d) => d.id === j.outputPath);
-      if (open) text = open.text;
-      else {
-        try {
-          text = (await commands.readDocument(j.outputPath)).text;
-        } catch {
-          // Unreadable — too large, gone, not text. The provider's copy is
-          // still worth having, so fall through rather than failing the copy.
-        }
+    if (!j?.outputPath) return;
+    const open = docs.find((d) => d.id === j.outputPath);
+    let text = open?.text ?? null;
+    if (text === null) {
+      try {
+        text = await commands.readDocumentText(j.outputPath);
+      } catch {
+        showToast("Copy failed");
+        return;
       }
     }
-    if (!text) return;
     showToast((await copyToClipboard(text)) ? "Copied to clipboard" : "Copy failed");
   };
 

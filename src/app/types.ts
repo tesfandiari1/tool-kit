@@ -66,7 +66,6 @@ export interface Job {
   warnings: string[];
   failure: { code: string; message: string } | null;
   outputPath: string | null;
-  outputText: string | null;
   error: string | null;
   createdAt: number;
   startedAt: number | null;

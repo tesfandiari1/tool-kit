@@ -71,6 +71,26 @@ paths:
             encoding:
               source:
                 contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/msword, application/vnd.openxmlformats-officedocument.presentationml.presentation, application/vnd.ms-powerpoint, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel, application/epub+zip, application/vnd.oasis.opendocument.text, application/vnd.oasis.opendocument.spreadsheet, application/vnd.oasis.opendocument.presentation, application/rtf, text/csv, application/vnd.ms-word.document.macroEnabled.12, application/vnd.ms-excel.sheet.macroEnabled.12, application/vnd.ms-powerpoint.presentation.macroEnabled.12, application/vnd.openxmlformats-officedocument.presentationml.slideshow, application/vnd.ms-powerpoint.slideshow.macroEnabled.12
+                headers:
+                  Content-Disposition:
+                    required: true
+                    description: >-
+                      The source part must carry a filename. The service reads
+                      the format from the filename extension, so a part without
+                      one is rejected with 422 `missing_filename`.
+
+
+                      The extension must also be the one registered for the
+                      `Content-Type` sent with this part. An extension that
+                      names no supported format is 415
+                      `unsupported_source_extension`, and an extension that
+                      disagrees with the type is 415
+                      `invalid_source_media_type`. Requiring both is what stops
+                      a mislabeled upload from reaching an engine that cannot
+                      read it.
+                    schema:
+                      type: string
+                    example: form-data; name="source"; filename="report.pdf"
       responses:
         "202":
           description: Upload completed and the conversion was accepted
@@ -538,6 +558,17 @@ components:
         source:
           type: string
           format: binary
+          description: >-
+            The document bytes. The part must be non-empty and must open with
+            the container signature of the format its extension names, or the
+            service answers 415 `invalid_source_signature`. The signature is
+            checked against the bytes actually received, so a renamed file is
+            rejected at admission rather than at conversion.
+
+
+            Two pieces of metadata travel with the bytes and are required as
+            well, a filename and a `Content-Type`. Both are described under
+            `encoding.source`.
         clientRunId:
           type: string
           format: uuid

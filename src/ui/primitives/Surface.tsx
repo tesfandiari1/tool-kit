@@ -3,7 +3,7 @@ import { cx } from "../cx";
 import { Label } from "./Text";
 import "./Surface.css";
 
-export type PanelTone = "default" | "raised" | "well" | "bare";
+export type PanelTone = "default" | "raised" | "well";
 
 /// `title` is omitted from the DOM attributes because this one is a rendered
 /// header, not a tooltip string.

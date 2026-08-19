@@ -22,9 +22,11 @@ rewrite code, commands, identifiers, or quotations to match prose rules.
 | OpenAPI contract | **0.4.2** (`backend/openapi/openapi.yaml`) |
 | Backend | M0, M1, M2, M3, M4 complete. M5, M7, M8 unbuilt |
 | Desktop | M6 implementation landed, **gate open** (CVR-067, CVR-081) |
-| Exposure | Loopback only. No Caddy, no LAN |
+| Exposure | Loopback only. Tailscale remote access is M7, unbuilt |
 | Backend Datalab fallback | Not built. Phase 2, now unblocked |
 | Phase 1 | **Complete 2026-08-19.** All four gates met |
+| Desktop version | **1.0.0** (`package.json`, `src-tauri/Cargo.toml`, `tauri.conf.json`) |
+| 1.0 bundle | Signed, verified by `src-tauri/scripts/verify-release.sh`. **Not notarized** |
 | Latest container smoke | `20260819T161851Z`, image `sha256:4a0cbdd0…` |
 
 The sprint that closed Phase 1, newest first. This is a snapshot, not a
@@ -366,35 +368,153 @@ after M5 rather than before.
 
 ---
 
-## 4. Phase 3: M7 LAN deployment
+## 4. Phase 3: M7 remote deployment
 
-**v1 LAN cutover subset:** CVR-070 (Caddy), CVR-071 (per-device tokens),
-CVR-073 (data layout off SMB and NFS), CVR-075 (backup and restore proof).
-CVR-072 and CVR-074 ship with them. **Defer CVR-076, CVR-077, CVR-078.** See
-section 11.
+**Revised 2026-08-19. The exposure decision changed.** The service must now be
+reachable from anywhere in the world, not only from the LAN. Caddy with internal
+HTTPS answered the LAN requirement and does not answer this one, so Tailscale
+replaces it. Section 7 records every consequence.
 
-Rate-limit `/health/ready` when Caddy exposes the LAN. The unauthenticated
-readiness flood is an open finding from M2 Increment 5. `/health/ready` opens a
-`BEGIN IMMEDIATE` transaction against a four-connection pool on every request.
-Exposure is loopback-only today, which is the only reason it is not a defect
-now.
+The host is a TrueNAS box treated as a plain Docker host. TrueNAS apps, its
+catalog, and its ZFS tooling are out of scope. Docker and Compose are the
+interface. The one host fact that still binds is the rule in section 7: the live
+SQLite database stays on a host-local filesystem and never on SMB or NFS.
+
+### The exposure decision: Tailscale
+
+Run a `tailscale` sidecar with `tailscale serve` and join the converter to it
+through `network_mode: service:tailscale`. The converter publishes no port. The
+sidecar terminates TLS on a MagicDNS name and carries every request.
+
+| Option | Outcome |
+|---|---|
+| **Tailscale** | **Selected.** No body cap, no proxy read timeout, works behind CGNAT over DERP, no domain, no certificate plumbing |
+| Cloudflare Tunnel plus Access | Runner-up. Same CGNAT immunity, but it imports a 100 MB proxied request body limit on Free and Pro and a fixed origin read timeout near 100 seconds. Neither moves below Enterprise |
+| Public Caddy plus Let's Encrypt | Rejected. CGNAT removes the inbound port, which removes both port forwarding and the HTTP-01 challenge. DNS-01 would issue a certificate for an origin nothing can reach |
+
+Uploads are capped at 25 MB today, so the Cloudflare limits fit. They stop
+fitting the moment the cap rises, a synchronous convert path appears, or
+progress moves off polling. Tailscale removes the numbers instead of fitting
+inside them. Keep Cloudflare Tunnel in reserve for one case: reaching the API
+from a device that cannot run Tailscale.
+
+**Tailscale is transport identity, not API authentication.** The bearer token
+still travels over the tailnet, and the token checks do not relax.
+
+### What Tailscale changes about the ticket order
+
+Only tailnet devices can reach the service at all, so a leaked bearer token is
+exploitable only by someone already inside the tailnet. That moves CVR-071 from
+a prerequisite to hygiene, and it moves CVR-075 to the front. `/data` holds the
+only copy of every converted document, there is no retention or cleanup job by
+design, and no gate has ever proven a restore.
+
+The unauthenticated `/health/ready` flood finding from M2 Increment 5 stays
+open and stays real, because the tailnet is a smaller audience and not an empty
+one. It is no longer a release blocker.
+
+### Tickets
 
 | Ticket | Content |
 |---|---|
-| CVR-070 | Caddy with internal HTTPS, only the proxy on the selected LAN interface |
+| CVR-070 | **Revised.** Tailscale sidecar with `tailscale serve`, converter on `network_mode: service:tailscale`, no published port on the converter |
 | CVR-071 | Rotatable per-device credentials replacing the bootstrap token, with provisioning docs |
-| CVR-072 | Converter on an internal network, non-root, narrow mounts, dropped capabilities, read-only root, resource limits, bounded logs |
-| CVR-073 | SQLite, artifacts, and Caddy state on explicit host-local datasets, live database off SMB and NFS |
+| CVR-072 | **Revised.** Converter unreachable except through the sidecar, non-root, narrow mounts, dropped capabilities, read-only root, resource limits, bounded logs. Do not use `internal: true` |
+| CVR-073 | SQLite, artifacts, and Tailscale state on explicit host-local datasets, live database off SMB and NFS |
 | CVR-074 | Retention, conservative orphan cleanup, disk-space readiness, redacted operational metrics |
 | CVR-075 | Documented and proven coordinated backup and restore for SQLite plus artifacts |
+| CVR-079 | **New.** Image build caching and registry release: cargo-chef, GHCR, sha-pinned production Compose override |
 
-CVR-074's default ops surface is JSON logs plus the Compose healthcheck.
-Optional `GET /metrics` on loopback or the internal network only. No OTel
-sidecar and no Grafana in this Compose file. Keep job UX progress separate from
-operator monitoring.
+### Sequence
 
-**M7 gate:** the target host passes security-boundary, recovery, overload, and
-backup and restore tests, and only Caddy is reachable on the LAN.
+**The sprint-level plan lives in [`M7_EXECUTION.md`](M7_EXECUTION.md).** It holds
+the file-level steps, the verify command for each sprint, and the commit
+boundaries. This table is the summary. Where the two disagree, the execution plan
+is newer.
+
+Two orderings below were revised after the plan read the code. A shell over the
+tailnet on the **host** has to exist before the converter's published port goes
+away, because a crash-looping converter never binds a listener and the sidecar
+answers with a proxy error. And CVR-079 left M7 entirely: its rollback value is
+zero across a migration boundary, which is the only rollback that matters here.
+
+Item 0 comes before anything else touches the host. Items 1, 2, and 4 are
+independent of each other and of the exposure work.
+
+| # | Work | Ticket | Verify |
+|---|---|---|---|
+| 0 | Backup and proven restore | CVR-075 | Restore into a scratch volume, boot the container against it, assert a known job id resolves and its artifact hashes match the manifest |
+| 1 | cargo-chef dependency layer | CVR-079 | Edit one line under `src/`, rebuild, observe the dependency layers cached |
+| 2 | GHCR release and pinned override | CVR-079 | `docker compose -f compose.yaml -f compose.prod.yaml config` resolves to a pinned sha |
+| 3 | Tailscale sidecar | CVR-070, CVR-072 | Reachable from a phone on cellular. `curl` from another LAN host fails |
+| 4 | Config surface and drift test | CVR-074 | Change one knob in `.env`, `docker compose up -d`, observe the new value in the boot config line |
+| 5 | Stats log line, disk readiness, Dozzle | CVR-074 | Fill `/data` past the floor, observe `/health/ready` report not ready |
+| 6 | Per-device credentials | CVR-071 | Issue two, revoke one, observe the revoked one rejected without a restart |
+
+### Decisions inside the tickets
+
+**CVR-075 backup order is forced by the write ordering.** Artifacts land before
+the row is marked `succeeded`, so snapshot the database first with
+`VACUUM INTO` and the artifact tree second. Reversed, a restore holds rows
+claiming success over bytes that were never captured. Orphan files are
+recoverable, dangling rows are not. `cp converter.sqlite` on a live WAL database
+drops every commit still in the `-wal` and can tear pages mid-copy.
+
+**CVR-079 uses cargo-chef, not BuildKit cache mounts.** A cache mount on
+`/usr/local/cargo/registry` exists only during the `RUN` that declares it, and
+the Dockerfile's `find` for the `pdf-inspector-1.15.0` source runs after the
+build to copy out its bcmaps. A cache mount would empty `PDF_INSPECTOR_SOURCE`
+and fail the build. cargo-chef leaves the registry in a real layer, which also
+survives a cold CI runner. Build `linux/amd64` only: the deploy host is x86_64,
+and `codegen-units = 1` with thin LTO under QEMU emulation is untenable.
+
+**CVR-074 exports no `/metrics` endpoint.** One container with one worker does
+not justify a second listener or a time-series database. Emit the operational
+numbers as one JSON log line on an interval from `jobs/`: queue depth, seconds
+since the last successful conversion, outcome counts by status, conversion
+duration, and free bytes on `/data`. Read free space with `statvfs` rather than
+trusting the readiness write transaction, which can stay green while a 25 MB
+upload can no longer land.
+
+**CVR-071 stores `HMAC-SHA256(pepper, secret)`, not Argon2.** A 256-bit CSPRNG
+secret is bounded by entropy, not by hash speed, so a slow KDF buys nothing and
+spends 50 to 100 ms of CPU on the unauthenticated path of a one-worker CPU-only
+box. That is a self-inflicted denial of service. Password hashing needs a slow
+KDF because a password carries 20 to 30 bits and is guessable. A random token
+is not.
+
+**CVR-071 has one open correctness question.** An authentication scope plus
+hashed idempotency key is unique on `conversions`, and the scope is the literal
+`bootstrap` today. Per-device scopes make it vary. Resolve what that uniqueness
+means across a credential rotation before writing the migration, or a rotation
+silently changes replay behavior.
+
+### Traps
+
+- **`internal: true` blocks egress, not only ingress.** The converter will need
+  outbound HTTPS for the M5 Datalab adapter. An internal network fails its DNS
+  and TLS with no clear error. The shared network namespace already denies
+  inbound reach, so no internal network is needed.
+- **`network_mode: service:` forbids `ports:` and `networks:` on that service.**
+  Move the published port to the sidecar or `compose up` fails.
+- **Persist `/var/lib/tailscale`.** Without it each restart registers a new node
+  and the MagicDNS name drifts to a `-1` suffix.
+- **Set `TS_USERSPACE=true`** so the sidecar needs neither `NET_ADMIN` nor
+  `/dev/net/tun`, and cannot rewrite the shared namespace's default route.
+- **Rollback across a migration is not free.** Migrations run forward at startup
+  and `migrations/` holds no down files. SQLx refuses to start when the database
+  records a version the binary does not embed, so rolling the tag back across
+  `0003` requires restoring the pre-deploy snapshot. Inside one migration set,
+  retag and restart is clean.
+- **Dozzle needs the Docker socket, which is root on the host.** Pin 9.0.3 or
+  newer: CVE-2026-24740 lets a label-filtered user open a root shell in an
+  out-of-scope container. Never publish it on `0.0.0.0`.
+- **`env_file:` does not feed Compose interpolation.** Only the project `.env`
+  does. A knob set only in `env_file` silently falls back to its default.
+
+**M7 gate:** a restore has been performed and asserted, the converter has no
+published port and answers only over the tailnet, and the host passes
+security-boundary, recovery, and overload tests.
 
 ---
 
@@ -429,7 +549,7 @@ and legacy code is removed only after a separate approval.
 | M4 | Corpus-calibrated routing and quality policy | Complete, CVR-043 open by design |
 | M5 | Restart-safe Datalab fallback and privacy policy | Planned |
 | M6 | Desktop app uses the backend | Implementation landed, gate open |
-| M7 | LAN deployment, operations, and recovery | Planned |
+| M7 | Remote deployment, operations, and recovery | Planned |
 | M8 | Evaluation, reversible cutover, and cleanup | Planned |
 
 ### M0: architecture and boundaries. Closed
@@ -707,7 +827,7 @@ CPU-only. GPU support, local OCR, and local model serving are excluded.
 Desktop app
     |
     v
-Caddy (only LAN-facing service, M7)
+Tailscale sidecar (the only reachable service, M7)
     |
     v
 Rust/Axum converter
@@ -724,11 +844,12 @@ host-local /data dataset
     `-- jobs/{job-id}/...
 ```
 
-The production Compose stack contains `proxy` (Caddy, internal TLS, the only
-published LAN port) and `converter`. SQLite is embedded in `converter`, not a
-separate container. Development publishes the converter on loopback and omits
-Caddy. **AnyDoc is a Rust crate inside the single converter container, not a
-separate service.**
+The production Compose stack contains `tailscale` (the sidecar that terminates
+TLS and carries every request) and `converter`, which shares the sidecar's
+network namespace and publishes no port of its own. SQLite is embedded in
+`converter`, not a separate container. Development publishes the converter on
+loopback and omits the sidecar. **AnyDoc is a Rust crate inside the single
+converter container, not a separate service.**
 
 ### Fixed decisions
 
@@ -915,10 +1036,12 @@ workflow platform.
 
 ### Security baseline
 
-- Caddy is the only LAN-published service. The converter stays on an internal
-  Compose network, non-root, with a read-only root filesystem, dropped
-  capabilities, `no-new-privileges`, resource limits, and one narrow writable
-  `/data` mount.
+- The Tailscale sidecar is the only reachable service. The converter publishes
+  no port, shares the sidecar's network namespace, and runs non-root with a
+  read-only root filesystem, dropped capabilities, `no-new-privileges`,
+  resource limits, and one narrow writable `/data` mount. It does not sit on an
+  `internal: true` network, which would also block the outbound HTTPS the M5
+  Datalab adapter needs.
 - Parser children receive generated paths, a cleared environment, a hard
   timeout, an output ceiling, and no client-controlled command arguments.
 - Datalab credentials stay backend-only. `local_only` content is never sent
@@ -937,8 +1060,9 @@ FastAPI or a parallel document API. PostgreSQL, Redis, or a message broker at
 initial scale. GPU or accelerator support. Local OCR or model serving. Multiple
 converter replicas or distributed orchestration. A generic job or workflow
 platform. A universal document AST. A workflow dashboard, SSE, or WebSockets.
-Per-page local and remote merging. Public-internet deployment. Transcription or
-summarization implementation in this epic.
+Per-page local and remote merging. Transcription or summarization
+implementation in this epic. Publishing the service on the public internet
+stays a non-goal: M7 reaches it over a private tailnet, not from an open port.
 
 ### Future capability rule
 
@@ -1007,7 +1131,8 @@ hosts must coordinate durable work.
   Do not wire it to anything on the assumption it was forgotten.
 - **`/health/ready` is unauthenticated** and opens a `BEGIN IMMEDIATE`
   transaction against a four-connection pool per request. Loopback-only today.
-  Give it a real rate limit when Caddy and LAN exposure land.
+  Give it a real rate limit when M7 remote access lands. The tailnet is a
+  smaller audience than the LAN, not an empty one.
 
 ### Desktop billing safety
 
@@ -1097,10 +1222,17 @@ means editing `Cargo.toml` ranges, not only `cargo update`.
 ```bash
 pnpm check            # tsc --noEmit + eslint + vitest         (fast inner loop)
 pnpm verify           # check + build + src-tauri clippy/tests (desktop scope)
-pnpm verify:backend   # converter clippy/tests
+pnpm verify:backend   # lint:api + converter clippy/tests
 pnpm verify:all       # both
 pnpm verify:local-corpus # routing_policy plus the AnyDoc sweep, no container
 pnpm verify:container # built image + graceful and SIGKILL restart smokes
+
+pnpm lint:api         # Spectral over the contract          (part of verify:backend)
+pnpm verify:api-drift # schema.ts still matches the contract
+pnpm verify:deps      # cargo-deny over both crates
+pnpm verify:contract  # Schemathesis against a live service
+
+src-tauri/scripts/verify-release.sh  # the built bundle, after pnpm tauri build
 ```
 
 `pnpm verify` is deliberately desktop-scoped, so in-flight backend work cannot
@@ -1111,14 +1243,85 @@ offline cargo, tsc, and eslint runs. The container gate needs a Docker daemon,
 builds an image, and takes minutes, so folding it in would break the everyday
 gate on any machine without Docker running.
 
-CI (`.github/workflows/ci.yml`) runs frontend, backend, and desktop as three
-jobs on push and pull request. Desktop clippy and tests use `macos-latest`
+CI (`.github/workflows/ci.yml`) runs frontend, backend, desktop, and
+dependencies as four jobs on push and pull request. `dependencies` is separate
+because the RustSec database moves without us, so it can go red on a commit
+that changed nothing, and that must not read as a broken build. Desktop clippy and tests use `macos-latest`
 because of `macos-private-api` and `keyring`. **CI does not run the container
 smoke.** It is a local release gate, so re-run it by hand before closing any
 milestone that touches persistence, the worker, the Dockerfile, or Compose.
 Evidence lands in `backend/target/container-smoke/<utc-timestamp>/evidence.md`,
 which is gitignored. Paste the relevant lines into this file rather than linking
 the path.
+
+### Suites written outside this repo
+
+Three gates assert things nobody here wrote the assertions for. Every other
+suite in the tree was written by whoever wrote the code under it, which is the
+blind spot section 9 already recorded once: the billing test asserted literals
+it had just constructed and could not fail.
+
+| Gate | Suite | What it grades |
+|---|---|---|
+| `pnpm lint:api` | Spectral `spectral:oas`, ~60 rules | the contract as a document |
+| `pnpm verify:deps` | RustSec advisory database, via cargo-deny | every crate in both lockfiles |
+| `pnpm verify:contract` | Schemathesis, cases derived from `openapi.yaml` | the running service against its contract |
+
+`verify:contract` builds the converter, starts it on a throwaway port and data
+root, seeds one real conversion from `tests/fixtures/anydoc/text.docx`, and
+then runs the whole derived suite twice: once with the seeded id, once with a
+UUID no conversion has. Roughly 400 cases per pass. It needs `uv` and no
+Docker. Config lives in `backend/openapi/schemathesis.toml` and every check
+turned off there names the reason.
+
+**Its first run found three admission rules the contract never documented**:
+the `source` part must carry a filename, its extension must agree with the
+part's `Content-Type`, and the bytes must open with that format's container
+signature. A client generated from the contract alone could not submit. All
+three are now in `openapi.yaml` and reach `schema.ts` as documentation.
+
+Both `deny.toml` files pin the platforms they grade. `src-tauri` names macOS
+only, which drops Tauri's GTK3 stack and the ten unmaintained advisories that
+come with it, rather than ignoring them by id on a platform we do ship. Every
+remaining exception names its crate and its reason, so a new unmaintained
+dependency still arrives as a failure.
+
+### Release 1.0
+
+Cut from the Phase 1 feature set. M5, M7, and M8 stay unbuilt and are 1.1.
+
+An audit of six lenses (desktop Rust, backend Rust, frontend, call
+aggregation, bloat, release readiness) produced 53 findings; adversarial
+verification refuted 30. **No memory leak, infinite loop, or runaway CPU path
+survived.** The generation-counter design held: exactly one write-back in
+`jobs.rs` was missing its `update_if_generation` guard, and it is now guarded.
+
+Landed for 1.0:
+
+| Change | Where | Why |
+|---|---|---|
+| Upload buffer is `Bytes`, not `Vec<u8>` | `providers.rs` | `send_retrying` takes `Fn`, so a per-attempt `Vec` clone held two copies of the file. Transcribe accepts video with no size cap, times four permits |
+| The last unguarded write-back is guarded | `jobs.rs` | Plain `update` drops the lock before the emit, so a Stop in that window shipped a stale `queued` row and `running` stuck on |
+| `output_text` removed from `Job` | `jobs.rs`, `App.tsx` | Every result crossed IPC and stayed in the webview for the session. Copy reads the file through `read_document_text`, which has its own 50 MiB ceiling because a result too large to edit is still worth copying |
+| `MarkdownViewer` memoized | `MarkdownViewer.tsx` | react-markdown memoizes nothing, so an open document re-parsed on every one of a run's ~1000 events |
+| One `reqwest::Client` per process | `jobs.rs`, `conversion_service.rs` | A client owns the connection pool. One per job meant 200 TLS handshakes on a 200-file run |
+| Poll emits only on change | `jobs.rs` | The backend poll called `set_status` with the same pending note every 5s per job |
+| Staged job tree survives cancellation | `api/conversions.rs` | A dropped request future reaches no `.await`, so a client that quit mid-upload left up to 25 MiB nothing deleted. Mirrors `impl Drop for ProbeFile` |
+| CSP set, `allow-destroy` dropped | `tauri.conf.json`, `capabilities/default.json` | The app renders Markdown converted from confidential documents, so a remote image reference is an outbound request. `style-src 'unsafe-inline'` is load-bearing: CodeMirror injects `<style>` at runtime |
+| OFL text ships in the bundle | `src/ui/fonts/OFL.txt` | Three OFL woff2 files land in `Contents/Resources` and clause 2 requires the licence to accompany them |
+| Copyright, category, min system version | `tauri.conf.json` | `LSMinimumSystemVersion` was defaulting to 10.13. It is now **26.0**, so the DMG will not launch on macOS 15 or earlier |
+| Four dead artifacts deleted | `FileViewer.tsx`, `PanelTone "bare"`, `icons/tray.png`, `icons/icon.png` | Nothing imported or loaded any of them |
+| Gallery chunk kept out of the build | `main.tsx` | `import.meta.env.DEV &&` lets Rollup drop the dynamic import. The packaged webview can never reach `?gallery` |
+
+Deliberately **not** done: the artifact double-hash in `service.rs` threads new
+return values through the code that guards artifact serving to save
+microseconds on 1.4 KB outputs. Not worth the risk.
+
+Not covered by the audit, and worth knowing before 1.0 goes to anyone else:
+first-run states (empty Keychain, no network, revoked key, disk full mid-write),
+the Rev.ai path specifically, npm dependency licences, a `history.db` migration
+across a real version step, and accessibility. Nothing has run the shipped
+`.app` end to end from a quarantined DMG.
 
 ### Live API smoke tests
 
@@ -1187,6 +1390,9 @@ came from one `pnpm verify:all` run, so it is reproducible rather than recalled.
 | **backend total** | **166** |
 | desktop Rust lib | 64, plus 3 `#[ignore]`d live-API tests |
 | frontend Vitest | 79 across 12 files |
+| Spectral | 0 findings at `--fail-severity=warn` |
+| cargo-deny | 0 vulnerabilities in either crate, 6 unmaintained tolerated with reasons |
+| Schemathesis | ~800 cases over two passes, all 8 operations |
 
 `verify:local-corpus` and `verify:container` are green at the same tree. The
 container smoke re-ran because the previous evidence named a commit that
@@ -1302,6 +1508,7 @@ smoke against the real binary.
 | File | Role |
 |---|---|
 | `docs/STATUS.md` | **This file. The single live status document** |
+| `docs/M7_EXECUTION.md` | The M7 sprint plan. Live until the M7 gate closes, then archived |
 | `docs/archive/` | Everything closed, with a note on why |
 | `README.md` | How to run, test, and release |
 | `CLAUDE.md` | Desktop architecture invariants |

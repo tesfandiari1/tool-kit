@@ -24,6 +24,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
+      - run: pnpm lint:api
+      # schema.ts is generated from the contract. Without this the two drift
+      # apart silently and the desktop types a shape the service never sends.
+      - run: pnpm verify:api-drift
       - run: pnpm test
       - run: pnpm build
 
@@ -39,6 +43,11 @@ jobs:
           workspaces: backend
       - run: cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path backend/Cargo.toml
+      - uses: astral-sh/setup-uv@v10
+      # Property-based testing against the running service. It boots its own
+      # copy on a throwaway port and data root, so it shares nothing with the
+      # steps above.
+      - run: backend/scripts/contract-fuzz.sh
 
   desktop:
     runs-on: macos-latest
@@ -52,3 +61,21 @@ jobs:
           workspaces: src-tauri
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+
+  # The RustSec advisory database moves without us, so this job can go red on a
+  # commit that changed nothing. That is the job working. It is separate from
+  # the build jobs so a new advisory never reads as a broken build.
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.97.1
+      # Pinned, and run as the same two commands `pnpm verify:deps` runs.
+      # cargo-deny-action would be shorter, but it defaults to --all-features
+      # and to its own Rust version, so CI would grade a different crate graph
+      # than the one a developer sees.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --manifest-path backend/Cargo.toml check
+      - run: cargo deny --manifest-path src-tauri/Cargo.toml check
