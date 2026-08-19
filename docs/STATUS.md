@@ -18,18 +18,19 @@ rewrite code, commands, identifiers, or quotations to match prose rules.
 
 | Item | Value |
 |---|---|
-| Branch | `main` at `b294481` |
+| Branch | `main` at `a337594` |
 | OpenAPI contract | **0.4.2** (`backend/openapi/openapi.yaml`) |
 | Backend | M0, M1, M2, M3, M4 complete. M5, M7, M8 unbuilt |
 | Desktop | M6 implementation landed, **gate open** |
 | Exposure | Loopback only. No Caddy, no LAN |
 | Backend Datalab fallback | Not built. Phase 2 |
-| Latest container smoke | `20260819T031914Z`, image `sha256:4a0cbdd0…` |
+| Latest container smoke | `20260819T161851Z`, image `sha256:4a0cbdd0…` |
 
 Recent commits on `main`, newest first:
 
 | Commit | Content |
 |---|---|
+| `a337594` | Consolidation of every planning doc into this file |
 | `b294481` | Desktop window management and page zoom |
 | `c7d704b` | Doc consolidation and the closeout plan |
 | `a7b4976` | Desktop Sprint 0 repairs, including the double-bill fix |
@@ -61,11 +62,16 @@ and desktop execution plans". It contains six `git mv` renames into
   recovery replays or resumes against the recorded URL.
 - Submit and poll validate UUID response identity. Poll also requires the
   response ID to equal the requested job before any artifact downloads.
-- **Backend-mode history reuse and copy are disabled.** Terminal backend jobs
-  file under `output_format` `backend:markdown`, but `split_reusable` and
-  `run_pipeline` look up `output_format_for(job_type, cfg)`, which returns the
-  Datalab format string. The lookup never matches a backend row, so every file
-  runs again. Re-running is the safe behavior. S2.3 fixes it.
+- **Backend-mode history reuse and copy are disabled, by two different
+  mechanisms.** Terminal backend jobs file under `output_format`
+  `backend:markdown` (`jobs.rs:407`) or `backend_fallback:{format}`
+  (`jobs.rs:409`). `run_pipeline` skips the lookup outright, behind an explicit
+  `jt == Convert && route == Backend` guard (`lib.rs:549`). `split_reusable`
+  carries no such guard (`lib.rs:351`), and instead never matches, because it
+  passes `output_format_for(job_type, cfg)`, which returns the Datalab format
+  string. Both paths end in "every file runs again", which is safe, so the two
+  shapes only matter to whoever writes S2.3: one call site needs its guard
+  removed, the other needs a provenance-aware format.
 - **No gate rebuilds `Tool-Kit.app`.** `pnpm verify:all` runs `tsc`, ESLint,
   Vitest, `vite build`, and both Clippy and test suites. None produce an app.
   Use `pnpm tauri dev` to exercise current source.
@@ -181,20 +187,29 @@ inside `backend/tests/http_contract.rs`.
 
 | # | Task | State |
 |---|---|---|
-| C.1 | Filter the five in-scope corpus case IDs in `verify-local-corpus.sh` (do not add manifest fields; `policy.rs` uses `deny_unknown_fields`) | Done |
+| C.1 | Name the five case IDs in `verify-local-corpus.sh`, assert the manifest carries them | Done. See the note below |
 | C.2 | `backend/scripts/verify-local-corpus.sh` runs `routing_policy` plus the AnyDoc sweep | Done |
 | C.3 | `pnpm verify:local-corpus` in the root `package.json` | Done |
-| C.4 | Run `pnpm verify:all` and `pnpm verify:container` | `verify:all` done this session. Container smoke optional |
-| C.5 | Record the container smoke timestamp in section 9 | Done (`20260819T031914Z`) |
+| C.4 | Run `pnpm verify:all` and `pnpm verify:container` | Both green 2026-08-19 |
+| C.5 | Record the container smoke timestamp in section 9 | Done (`20260819T161851Z`) |
 | C.6 | `backend/scripts/print-corpus-pdf.sh` plus `write_native_pdf_fixture_to_env` in `corpus.rs` | Done |
+
+**C.1 does not filter, on purpose.** `verify-local-corpus.sh` runs the whole
+`routing_policy` suite, which is a superset of the five, so filtering would buy
+nothing and would hide the other 12 cases. The five are named in the script and
+checked against the manifest before the suites run, because a printed list that
+nothing verifies goes stale the first time a case is renamed. Adding a manifest
+field was rejected: `policy.rs` parses the manifest with
+`deny_unknown_fields`.
 
 ### Acceptance checklist
 
-Manual checks on the same machine. Backend API validation for D.1 and D.4 passed
-this session (native PDF and docx both reached `succeeded` with downloadable
-Markdown). D.2 through D.3 need `pnpm tauri dev` once. Generate a native PDF
-with `backend/scripts/print-corpus-pdf.sh /tmp/toolkit-native.pdf` if you have
-no sample handy.
+Manual checks on the same machine. D.1 and D.4 are done and reproducible
+against the running container. D.2, D.3, and D.5 need one `pnpm tauri dev`
+session, because they exercise the thread pane, ⌘S, and restart recovery in the
+window. D.6 needs the same session for its desktop half only. Generate a native
+PDF with `backend/scripts/print-corpus-pdf.sh /tmp/toolkit-native.pdf` if you
+have no sample handy.
 
 | # | Step | Pass when |
 |---|---|---|
@@ -205,8 +220,60 @@ no sample handy.
 | D.5 | Stop the app mid-run, restart | The active job recovers or fails visibly |
 | D.6 | Drop a scanned PDF under `local_only` | Job finishes `needs_remote` with no silent success |
 
-**Automated this session:** D.1 and D.4 via curl and
-`live_smoke::conversion_service_compatibility_live` against `127.0.0.1:8080`.
+### Running D.2, D.3, D.5, and D.6
+
+One `pnpm tauri dev` session covers all four. Do not use the bundled `.app`.
+No gate rebuilds it.
+
+```bash
+docker compose -f backend/compose.yaml up -d   # skip if already healthy
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/health/ready
+backend/scripts/print-corpus-pdf.sh /tmp/toolkit-native.pdf
+backend/scripts/print-corpus-pdf.sh /tmp/toolkit-scanned.pdf scanned
+pnpm tauri dev
+```
+
+In Settings paste the token from `backend/secrets/bootstrap-token.txt`, set
+route **backend**, URL `http://127.0.0.1:8080`, and profile **`local_only`**.
+
+| # | Do this | Pass when |
+|---|---|---|
+| D.2 | Drop `/tmp/toolkit-native.pdf`, Run, click the finished row | The window grows to workspace phase and Markdown renders as prose |
+| D.3 | Switch to edit, change a word, press ⌘S | That word is in the `.md` on disk |
+| D.5 | Drop both PDFs and a docx, Run, quit from the tray on an amber row, relaunch | Every job reaches a terminal state. Run is not stuck disabled |
+| D.6 | Drop `/tmp/toolkit-scanned.pdf`, Run | The row ends `needs_remote` and says so. No `.md` is written |
+
+**D.5 must quit from the tray.** The close button only hides the window, so it
+never exercises restart recovery.
+
+Read the ledger across a D.5 restart with:
+
+```bash
+sqlite3 ~/Library/Application\ Support/ai.uniwise.toolkit/history.db \
+  'select idempotency_key, fallback_provider, fallback_request_id
+     from inflight_conversions;'
+```
+
+A row with a provider and no request id is the uncertain-fallback state. The
+app must refuse to resubmit it rather than risk a second charge.
+
+**Proven 2026-08-19 against the deployed container on `127.0.0.1:8080`,
+not against a test harness:**
+
+- D.1: native PDF, `202` then `succeeded`, route `local_pdf`, reason codes
+  `[native_text_pdf]`, Markdown `200` at 1478 bytes.
+- D.4: docx, `202` then `succeeded`, route `local_anydoc`, reason codes
+  `[structured_document]`, Markdown `200` at 1316 bytes.
+
+- D.6 backend half: scanned PDF under `local_only`, `202` then
+  `needs_remote`, route `local_pdf`, reason codes `[scanned_pdf]`, no artifact.
+  `routing_policy` pins the same case as `scanned-1-page-local-only`. Only the
+  desktop rendering of that state is unproven.
+
+Submitting by hand takes three multipart fields, `profile`, `clientRunId`, and
+`source`, `clientRunId` must be a UUID, and `source` must carry an explicit
+`type=` that matches the extension. curl's default guess is rejected with
+`invalid_source_media_type`.
 
 Optional: one Vitest or Tauri integration test that mocks the backend for D.1
 through D.3. Not required for this gate.
@@ -215,11 +282,15 @@ through D.3. Not required for this gate.
 
 1. `pnpm verify` green with Sprint A on `main`. **Done.**
 2. `pnpm verify:local-corpus && pnpm verify:all && pnpm verify:container` all
-   green.
-3. All six acceptance steps pass once.
+   green. **Done 2026-08-19.** See the verification log in section 9.
+3. All six acceptance steps pass once. **D.1 and D.4 done.** D.2, D.3, and D.5
+   need one `pnpm tauri dev` session, and D.6 needs the same session to confirm
+   the desktop half. Nothing else blocks them.
 4. Archive the four superseded docs. No live doc contradicts another on
-   milestone status or scope. Fix the stale milestone line in
-   `backend/README.md` and add `localTextOnly` to `backend/evals/README.md`.
+   milestone status or scope. **Done.** The docs are in `docs/archive/`, the
+   `backend/README.md` milestone line reads M4, and `backend/evals/README.md`
+   carries a "Phase 1 local-text cases" section. That section replaced an
+   earlier plan to add a `localTextOnly` manifest field, which C.1 rules out.
 
 Do not start backend Datalab work until Phase 1 passes acceptance.
 
@@ -465,9 +536,10 @@ rate-calibration program.
   PDFs. `tests/support/corpus.rs` generates every case in process, so no binary
   PDF enters the repository.
 - [x] CVR-041: `engines::QualitySignals` is engine-neutral and carries only
-  measurements: `native_text_ratio` (`None` when unmeasurable),
-  `pages_needing_ocr`, `has_tables`, `has_columns`. No filename or page-count
-  heuristic exists.
+  measurements: `native_text_ratio` (`None` when unmeasurable), `has_tables`,
+  `has_columns`. No filename or page-count heuristic exists. A fourth field,
+  `pages_needing_ocr`, was carried and never read, so it is gone. The worker
+  still decides OCR from its own raw page list.
 - [x] CVR-042: `conversion::policy::decide(profile, route, LocalResult) ->
   PolicyDecision` is pure. No IO, no clock, no engine type. `best_quality` stays
   rejected at the API until M5 gives it a remote leg to mean.
@@ -482,9 +554,15 @@ rate-calibration program.
 
 **Gate met 2026-08-19**, with CVR-043 deliberately open.
 
-`standard` and `local_only` stop being behaviorally identical here. A
-partly-scanned document routes remote under `standard` and publishes with
-`pages_without_extractable_text` under `local_only`.
+`standard` and `local_only` stay behaviorally identical, and M4 pins that
+rather than ending it. `policy::decide` takes `_profile` unused on purpose: the
+profile has nothing to choose between until M5 gives `standard` a remote leg.
+The corpus is the proof. `partly-scanned-9-text-pages` and
+`partly-scanned-9-text-pages-local-only` expect the same `succeeded` and the
+same `pages_without_extractable_text` warning, and `scanned-1-page` and
+`scanned-1-page-local-only` both expect `needs_remote` with no artifact.
+`backend/README.md` says the same thing. Do not write a profile split into any
+doc before M5 builds one.
 
 #### The confidence correction
 
@@ -788,6 +866,11 @@ Profiles: `local_only` means no document bytes leave the local network.
 `standard` prefers local conversion, then approved fallback. `best_quality` is
 rejected at the API until M5 gives it a remote leg to mean.
 
+**That table is the M5 target, not today's behavior.** Every Datalab cell in it
+is unbuilt, so today a scanned, mixed, or quality-failed PDF finishes
+`needs_remote` under `standard` exactly as it does under `local_only`. See the
+M4 section for the corpus cases that pin the two profiles together.
+
 ### Internal module boundaries
 
 ```text
@@ -916,7 +999,10 @@ hosts must coordinate durable work.
   the expensive steps. A submit can run for 30 minutes, so a finished upload
   that writes "processing" over a row the user already stopped leaves a job no
   task will ever finish, and `running` sticks on. `set_status` is the guarded
-  setter for both routes. There is no unguarded write-back left in `jobs.rs`.
+  setter for both routes. One direct `JobManager::update` remains, stamping
+  `started_at` at `jobs.rs:1268`. It is safe only because an explicit `stale()`
+  check sits immediately above it with no `await` in between. Keep that pairing
+  intact if you touch it.
 - **Direct-path `fail` and `finish` take a generation**, like their backend
   counterparts. Nothing writes back to a stopped row.
 - **`retry_job` and `retry_failed` re-persist the durable row Stop deleted.**
@@ -1029,7 +1115,9 @@ DATALAB_API_KEY=… REVAI_API_KEY=… \
 | 2026-08-19 | Sprint 0 repairs. Contract 0.4.1 |
 | 2026-08-19 | Smoke `20260819T022230Z`, image `sha256:8bb30ae5…` |
 | 2026-08-19 | Sprint 1 / M4 gate. Contract 0.4.2 |
-| 2026-08-19 | Smoke `20260819T031914Z`, image `sha256:4a0cbdd0…` |
+| 2026-08-19 | Smoke `20260819T031914Z`, image `sha256:4a0cbdd0…`. Evidence names commit `d6fc6eb`, taken over a dirty tree |
+| 2026-08-19 | Phase 1 closeout. All three verify gates green at clean tree `a337594` |
+| 2026-08-19 | Smoke `20260819T161851Z`, image `sha256:4a0cbdd0…`, 116 PASS, 0 FAIL. Same image id, so the earlier run did cover M4 |
 
 Per-increment evidence through M6 lives in
 [`archive/BACKEND_VERIFICATION_LOG.md`](archive/BACKEND_VERIFICATION_LOG.md).
@@ -1047,11 +1135,58 @@ plus the two class follow-ups. The full defect table is in git history at
 **When you add a state or a vocabulary, the question is no longer "did I update
 every layer" but "what does this cost if I did not".**
 
-**Sprint 1 gate.** 160 backend tests, 63 desktop Rust tests, 80 frontend tests,
-both Clippy gates, the production build, and container smoke `20260819T031914Z`
-against image `sha256:4a0cbdd0…`. Graceful and SIGKILL, migrations rebuilding
-fresh in the image, AnyDoc converting a docx in-container, and artifacts
-byte-identical across a restart.
+**Sprint 1 gate.** 160 backend tests, 63 desktop Rust tests, 80 frontend
+tests, both Clippy gates, the production build, and container smoke
+`20260819T031914Z` against image `sha256:4a0cbdd0…`. Graceful and SIGKILL,
+migrations rebuilding fresh in the image, AnyDoc converting a docx
+in-container, and artifacts byte-identical across a restart. The 160 does not
+reproduce and what it counted is not recorded, so use the closeout breakdown
+below instead.
+
+**Phase 1 closeout gate, 2026-08-19, clean tree `a337594`.** Every number below
+came from one `pnpm verify:all` run, so it is reproducible rather than recalled.
+
+| Suite | Passed |
+|---|---|
+| `backend` lib | 79 |
+| `backend` main | 1 |
+| `tool-kit-pdf-worker` | 3 |
+| `crash_recovery` | 9 |
+| `failure_modes` | 7 |
+| `http_contract` | 46 |
+| `integrity_matrix` | 12 |
+| `routing_policy` | 9 |
+| **backend total** | **166** |
+| desktop Rust lib | 64, plus 3 `#[ignore]`d live-API tests |
+| frontend Vitest | 79 across 12 files |
+
+`verify:local-corpus` and `verify:container` are green at the same tree. The
+container smoke re-ran because the previous evidence named a commit that
+predates M4, which made the old gate unprovable from its own record even though
+the identical image id later showed it had been fine.
+
+**Closeout repairs, 2026-08-19.** An audit of every falsifiable claim in this
+file confirmed 20 mismatches and refuted 4. The doc corrections are folded in
+above. Seven were code, and all seven are fixed:
+
+| Fix | Where |
+|---|---|
+| Stop, Retry, then crash resubmitted an already-billed Datalab request. The rebuilt ledger row dropped every remote column | `jobs.rs`, `ledger_replay` |
+| A failed `begin_fallback` left the in-memory claim set, so every later Retry was told a request that never existed may have been charged | `jobs.rs` |
+| The billing test asserted literals it had just constructed and could not fail | `jobs.rs` |
+| A transient database error at boot permanently quarantined a healthy job | `sqlite.rs`, `RepositoryError::is_row_shape` |
+| `NeedsRemote` carried a vector that was always one code, so an empty `fallback_reason` could reach the durable row | `policy.rs`, `service.rs` |
+| `QualitySignals::pages_needing_ocr` was computed and never read, behind an unreachable failure branch | `outcome.rs`, `pdf_inspector.rs` |
+| `Path` took a `max` prop no product caller passed | `Path.tsx`, `pathCrumbs.ts` |
+
+Two gate scripts also claimed success they never checked. `verify-local-corpus.sh`
+printed five case names on trust and printed PASS for an AnyDoc sweep that a
+rename would reduce to zero tests, and `print-corpus-pdf.sh` printed "Wrote" for
+a file cargo never produced. A name filter that matches nothing is `ok. 0
+passed` and exit 0, which `pipefail` cannot see, so each now asserts its own
+result. `container-smoke.sh` records whether the tree was dirty, because the
+build context is the tree and the `commit:` field alone had already made one
+gate unprovable.
 
 ---
 
