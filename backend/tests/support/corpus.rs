@@ -362,4 +362,14 @@ mod tests {
             assert!(bytes.len() > b"%PDF-1.4\n".len(), "{name} has no body");
         }
     }
+
+    /// Writes `native_pdf(1)` when `TOOLKIT_CORPUS_PDF_OUT` is set. Used by
+    /// `backend/scripts/print-corpus-pdf.sh` for manual acceptance runs.
+    #[test]
+    fn write_native_pdf_fixture_to_env() {
+        let Ok(path) = std::env::var("TOOLKIT_CORPUS_PDF_OUT") else {
+            return;
+        };
+        std::fs::write(&path, native_pdf(1)).expect("write native PDF fixture");
+    }
 }

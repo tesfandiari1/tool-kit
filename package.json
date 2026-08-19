@@ -23,6 +23,7 @@
     "verify:backend": "cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings && cargo test --locked --manifest-path backend/Cargo.toml",
     "verify:all": "pnpm verify && pnpm verify:backend",
     "verify:container": "backend/scripts/container-smoke.sh",
+    "verify:local-corpus": "backend/scripts/verify-local-corpus.sh",
     "generate:api": "openapi-typescript backend/openapi/openapi.yaml -o src/app/api/schema.ts",
     "tauri": "tauri"
   },

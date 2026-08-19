@@ -67,16 +67,16 @@ remaining root-document changes without first reconciling them with the user.
 ## Files owned by the scaffold unit
 
 ```text
-docs/BACKEND_BASELINE.md
-docs/BACKEND_EPIC.md
-docs/BACKEND_EXECUTION_PLAN.md
-docs/BACKEND_SERVICE_PLAN.md
+docs/archive/BACKEND_BASELINE.md
+docs/archive/BACKEND_EPIC.md
+docs/archive/BACKEND_EXECUTION_PLAN.md
+docs/archive/BACKEND_SERVICE_PLAN.md
 backend/**
 README.md             # conversion-backend section only
 ```
 
 Planning documents later moved from the repository root into `docs/`. Session
-state is [`docs/HANDOFF.md`](../HANDOFF.md). Shared repo files added after
+state is [`STATUS.md`](../STATUS.md). Shared repo files added after
 scaffold (`.github/`, `LICENSE`, `rust-toolchain.toml`, `.node-version`,
 `.gitignore`, `package.json`) are not backend-owned; do not revert them.
 

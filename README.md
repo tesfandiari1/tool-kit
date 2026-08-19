@@ -3,8 +3,8 @@
 A macOS menu-bar utility that turns files into AI-ready text. Drop files or
 folders, hit Run, get markdown or transcripts back next to the originals.
 
-**Current work** is M3 (AnyDoc, Increment 4 close-out). Parallel sessions start
-at [`docs/HANDOFF.md`](docs/HANDOFF.md).
+**Current work:** local same-machine closeout. Start at
+[`docs/STATUS.md`](docs/STATUS.md).
 
 ## Current desktop implementation
 
@@ -35,7 +35,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings
 ```
 
-See [`docs/HANDOFF.md`](docs/HANDOFF.md) for session state and
+See [`docs/STATUS.md`](docs/STATUS.md) for session state and
 [`CLAUDE.md`](CLAUDE.md) for desktop architecture, live API smokes, and
 signing details. Weekly Dependabot keeps npm, both Cargo crates, and Actions
 current; do not jump to TypeScript 7 or `keyring` 4.
@@ -66,23 +66,13 @@ in `.env.local` (gitignored).
 
 ## Conversion backend
 
-The production conversion service lives in [`backend/`](backend/) and uses
-Rust/Axum. Its authenticated, CPU-only PDF vertical slice is implemented, and
-jobs, sources, and artifacts now live in embedded SQLite and a persistent
-`/data` volume. Restart verification is the last M2 gate. It remains
-loopback-only and is not ready for LAN deployment yet.
+The production conversion service lives in [`backend/`](backend/). It converts
+native-text PDFs and supported office formats on loopback. M4 routing policy and M6 desktop integration are landed. Backend Datalab
+fallback is Phase 2. LAN deploy is Phase 3. See [`docs/STATUS.md`](docs/STATUS.md).
 
-- [`docs/HANDOFF.md`](docs/HANDOFF.md): current branch, next increment, and
-  parallel-session ownership
-- [`docs/BACKEND_SERVICE_PLAN.md`](docs/BACKEND_SERVICE_PLAN.md): approved architecture
-  and routing contract
-- [`docs/BACKEND_EPIC.md`](docs/BACKEND_EPIC.md): milestone tracker, work IDs, and
-  release gates
-- [`docs/archive/BACKEND_EXECUTION_PLAN.md`](docs/archive/BACKEND_EXECUTION_PLAN.md): M2
-  increment checklist
-- [`docs/archive/DESKTOP_EXECUTION_PLAN.md`](docs/archive/DESKTOP_EXECUTION_PLAN.md): M6
-  desktop integration and the order of the remaining milestones
+- [`docs/STATUS.md`](docs/STATUS.md): state, critical path, milestones, traps, verify commands
 - [`backend/README.md`](backend/README.md): backend setup and verification
+- [`docs/archive/`](docs/archive/README.md): closed plans and verification evidence
 
 ## License
 

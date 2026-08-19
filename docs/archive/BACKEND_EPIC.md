@@ -1,3 +1,5 @@
+> **Superseded by [`../STATUS.md`](../STATUS.md) as of 2026-08-19.** Historical copy only.
+
 # Epic: Rust conversion backend
 
 **Status:** M0-M3 closed. M6 implementation landed, gate open. M4, M5, M7, M8

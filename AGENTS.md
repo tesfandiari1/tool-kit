@@ -5,9 +5,9 @@
 - Conversion HTTP and secrets stay in Tauri; never browser-fetch the remote service or put the bearer token in the webview.
 - Prefer type-aware ESLint (`strictTypeChecked`, exhaustive switches, official React hooks) and Vitest on plan/billing math over Biome, Prettier, Playwright, or coverage theater.
 - Threads are opened conversion results (list → inspector), not chat sessions. Audio playback and speaker tags wait on real transcript and diarization payloads.
-- Stage explicit paths only; never `git add .` or `git add -A`. Parallel sessions start from `docs/HANDOFF.md`.
+- Stage explicit paths only; never `git add .` or `git add -A`. Parallel sessions start from `docs/STATUS.md`.
 - Stay on latest stable dependencies except the documented pins; do not bump TypeScript 7 or keyring 4 just to be current.
-- Consolidate backend planning into `docs/BACKEND_EPIC.md` and `docs/BACKEND_SERVICE_PLAN.md`; avoid separate phase execution-plan docs unless they encode critical patterns.
+- One live planning doc: `docs/STATUS.md`. Do not add separate phase execution-plan docs unless they encode critical patterns.
 - Keep job UX progress (Tauri poll → `job-updated`) separate from operator monitoring (logs/metrics at M7). See `docs/archive/MONITORING_AND_PROGRESS.md`.
 - Use Clippy with a small production deny-set and test exceptions in each crate's `clippy.toml`. Do not enable `pedantic` or blanket `unwrap_used`.
 
@@ -15,7 +15,7 @@
 
 - Frontend layout: `src/app` (types, commands, OpenAPI client), `src/platform/host.ts` (only Tauri/host imports), `src/domains/{run,settings,history,thread}`, `src/shell` (App + its hooks), `src/ui` (design system).
 - `pnpm generate:api` writes `src/app/api/schema.ts` from `backend/openapi/openapi.yaml`; import the generated schema only from `src/app/api`.
-- Conversion backend lives in `backend/`. Milestones and CVRs are in `docs/BACKEND_EPIC.md`. Architecture is in `docs/BACKEND_SERVICE_PLAN.md`. Desktop HTTP to that service is M6. Backend sessions own `backend/**` and `docs/BACKEND_*.md`. Desktop sessions own `src/**` and `src-tauri/**`.
+- Conversion backend lives in `backend/`. Milestones, architecture, and session state live in `docs/STATUS.md`. Desktop HTTP to that service is M6. Backend sessions own `backend/**`. Desktop sessions own `src/**` and `src-tauri/**`.
 - AnyDoc is a Rust crate inside the single converter container, not a separate service. PDF stays on the isolated `pdf-inspector` child worker.
 - Toolchain pins live in `rust-toolchain.toml`, `.node-version`, and `package.json` `packageManager`. TypeScript stays on 6.x (7 has no compiler API and breaks typescript-eslint). `keyring` stays on 3.x with `apple-native`. `pdf-inspector` stays `=1.15.0`. Do not take `libc` 1.0. Do not create a root Cargo workspace.
 - CI and weekly Dependabot cover npm, both Cargo crates, and Actions. Desktop clippy/tests run on macOS because of `macos-private-api` and keyring.

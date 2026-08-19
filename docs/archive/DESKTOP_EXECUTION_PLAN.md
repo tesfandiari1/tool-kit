@@ -49,7 +49,7 @@ best-effort for an otherwise valid job.
 ### Increment 0: Settle the transport shape
 
 - [x] Decide the multipart branch and the download command, per the two problems
-  above. Write the decision into `docs/HANDOFF.md` before writing code.
+  above. Write the decision into [`STATUS.md`](../STATUS.md) before writing code.
 - [x] Regenerate the client with `pnpm generate:api`; the committed schema now
   matches backend OpenAPI 0.4.0.
 

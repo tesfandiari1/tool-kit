@@ -1,7 +1,7 @@
 # Backend verification log (archived)
 
 Per-increment evidence for M0 through M6, moved out of
-[`BACKEND_EPIC.md`](../BACKEND_EPIC.md) on 2026-08-18 so the tracker stays
+[`BACKEND_EPIC.md`](BACKEND_EPIC.md) on 2026-08-18 so the tracker stays
 readable. Historical record. Nothing here is a live instruction.
 
 ### 2026-08-18: M6 desktop backend vertical slice
@@ -84,7 +84,7 @@ M5-dependent end-to-end durability scenario for backend-owned Datalab fallback.
 
 ### 2026-08-17: Repo hygiene and latest-stable deps
 
-- Planning docs moved to `docs/`. Session state lives in `docs/HANDOFF.md`.
+- Planning docs moved to `docs/`. Session state lives in [`STATUS.md`](../STATUS.md).
 - Added root `LICENSE` (MIT), CI, Dependabot, `rust-toolchain.toml` (1.97.1),
   `.node-version` (24), and `packageManager` / `engines` in `package.json`.
 - Catch-up to latest stable except TypeScript 7, `keyring` 4, `libc` 1.0-alpha,
@@ -271,7 +271,7 @@ Deferred on purpose, not silently dropped:
 - **A true multi-process restart in Rust.** The container smoke covers it
   better, against the real release binary.
 - **The unauthenticated readiness flood.** Still open, still recorded in
-  `HANDOFF.md`, still belongs with Caddy and LAN exposure in M7.
+  [`STATUS.md`](../STATUS.md), still belongs with Caddy and LAN exposure in M7.
 
 The container smoke proves the graceful and forced-kill windows only. The
 `finalizing` and post-rename barriers are held in the Rust suite, because

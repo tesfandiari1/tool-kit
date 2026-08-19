@@ -1,3 +1,5 @@
+> **Superseded by [`../STATUS.md`](../STATUS.md) as of 2026-08-19.** Historical copy only.
+
 # Tool-Kit conversion backend architecture
 
 **Status:** Approved direction; implementation in progress

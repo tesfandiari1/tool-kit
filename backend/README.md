@@ -12,11 +12,9 @@ artifact tree under the data root, and they survive a service restart. A queued
 or interrupted job is reconciled and resumed on the next start.
 
 The service is still **loopback-only**. Do not expose it to the LAN yet.
-Stronger parser isolation, per-device credentials, TLS, backups, and the TrueNAS
-overlay remain release-gated milestones in
-[`../docs/BACKEND_EPIC.md`](../docs/BACKEND_EPIC.md). M2 is closed. M3 is in
-progress. Parallel sessions start at [`../docs/HANDOFF.md`](../docs/HANDOFF.md).
-Datalab routing is not active yet.
+Stronger parser isolation, per-device credentials, TLS, and backups remain in
+Phase 3 of [`../docs/STATUS.md`](../docs/STATUS.md). M4 is complete. Datalab
+routing inside the backend is Phase 2 and is not active yet.
 
 The service is permanently CPU-only. It contains no local OCR, model-serving,
 PDFium, ONNX, or accelerator runtime. PDFs that are scanned, image-based, mixed,
@@ -205,8 +203,8 @@ in `src/bin/tool-kit-pdf-worker.rs`, so a local pass is necessary and not
 sufficient. CI is the only gate that lints them.
 
 The exact `pdf-inspector` pin, bundled CMap/license requirements, dependency
-exception register, and container-smoke evidence are tracked in the architecture
-and epic documents. This crate remains independent from `src-tauri` and keeps
+exception register, and container-smoke evidence are in
+[`../docs/STATUS.md`](../docs/STATUS.md) sections 7 and 9. This crate remains independent from `src-tauri` and keeps
 its own lockfile; do not create a root Cargo workspace without a separate
 migration decision.
 

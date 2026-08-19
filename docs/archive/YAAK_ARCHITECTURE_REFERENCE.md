@@ -166,7 +166,7 @@ Their web README "slice 2" is the TrueNAS send path in prose: the client posts a
 | [`packages/platform/src/tauri/index.ts`](https://github.com/mountain-loop/yaak/blob/main/packages/platform/src/tauri/index.ts) `ALL_CAPABILITIES` | Desktop: everything true. |
 | [`packages/platform/src/web/README.md`](https://github.com/mountain-loop/yaak/blob/main/packages/platform/src/web/README.md) Capabilities table | Browser: `localFiles`, `encryption`, `plugins`, `git` are false. Declined commands return `UnsupportedCommandError` with a reason. |
 
-**Tool-Kit mapping.** The conversion box already has `GET /api/v1/capabilities` (`docs/BACKEND_SERVICE_PLAN.md`). Desktop should read that through `service_request`, not invent a second list in React. Version skew is a capabilities problem, not a UI problem.
+**Tool-Kit mapping.** The conversion box already has `GET /api/v1/capabilities` ([`STATUS.md`](../STATUS.md) section 7). Desktop should read that through `service_request`, not invent a second list in React. Version skew is a capabilities problem, not a UI problem.
 
 ### 8. macOS chrome (optional, later)
 
@@ -223,7 +223,7 @@ Already in this tree:
 - `src/app/api/{schema,client,transport}.ts`: OpenAPI types + `hostFetch` → `service_request`
 - Keychain in `src-tauri` for Datalab/Rev.ai
 
-Still M6 (`docs/BACKEND_EPIC.md` CVR-060–067):
+Still M6 ([`BACKEND_EPIC.md`](BACKEND_EPIC.md) CVR-060–067):
 
 1. Rust `service_request` handler
 2. Backend URL in settings, device token in Keychain

@@ -2,10 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Read [`docs/HANDOFF.md`](docs/HANDOFF.md) first.** It is the parallel-session
-handoff: current branch, next increment, ownership boundaries, and dependency
-pins. This file is the desktop architecture contract. Conversion-backend plans
-live in `docs/`.
+**Read [`docs/STATUS.md`](docs/STATUS.md) first.** It is the single source of
+truth for session state, the critical path, milestones, traps, and verify
+commands. This file is the desktop architecture contract.
 
 ## What this is
 
@@ -136,17 +135,14 @@ Type is three families with non-overlapping jobs: **Instrument Serif** for displ
 - **TypeScript stays on 6.x.** 7.0 has no compiler API; `typescript-eslint` crashes. `tsconfig.json` must not set `baseUrl` (deprecated in 6).
 - **`keyring` stays on 3.x** with `apple-native`. 4.x dropped that feature and needs a `keyring-core` rewrite.
 - **Do not create a root Cargo workspace.** `src-tauri` and `backend` keep separate lockfiles until a dedicated migration.
-- **Never `git add -A`.** Desktop and backend work share one dirty tree; stage explicit paths. See `docs/archive/BACKEND_BASELINE.md` and `docs/HANDOFF.md`.
+- **Never `git add -A`.** Desktop and backend work share one dirty tree; stage explicit paths. See `docs/archive/BACKEND_BASELINE.md` and `docs/STATUS.md`.
 
 ## Reference
 
-Four live documents. Everything else is closed and lives in
-[`docs/archive/`](docs/archive/README.md).
+One live planning document plus the repo guides. Everything else is closed and
+lives in [`docs/archive/`](docs/archive/README.md).
 
-- [`docs/HANDOFF.md`](docs/HANDOFF.md): current work and parallel-session rules
-- [`docs/CLOSEOUT_EXECUTION_PLAN.md`](docs/CLOSEOUT_EXECUTION_PLAN.md): the active plan for M4 through M8
-- [`docs/BACKEND_EPIC.md`](docs/BACKEND_EPIC.md): milestone tracker and CVR tickets
-- [`docs/BACKEND_SERVICE_PLAN.md`](docs/BACKEND_SERVICE_PLAN.md): approved architecture
+- [`docs/STATUS.md`](docs/STATUS.md): state, critical path, milestones, architecture, traps, verify commands
 - [`.impeccable.md`](.impeccable.md): design context; every `/impeccable` skill reads it
 - Local Tauri v2 docs: `/Users/tristin/code/tauri-skills/knowledgebase/tauri-v2`.
 

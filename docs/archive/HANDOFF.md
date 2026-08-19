@@ -1,3 +1,5 @@
+> **Superseded by [`../STATUS.md`](../STATUS.md) as of 2026-08-19.** Historical copy only.
+
 # Session handoff
 
 **Last updated:** 2026-08-19
@@ -23,9 +25,10 @@ not in either commit above.
 execution plans". It is not. It contains exactly the six `git mv` renames into
 `docs/archive/`, swept up by a concurrent commit. Unpushed, so amend the message
 if you care.
-**Plan:** [`CLOSEOUT_EXECUTION_PLAN.md`](CLOSEOUT_EXECUTION_PLAN.md) is the
-active plan for M4 through M8. Sprint 0 (repairs) and Sprint 1 (M4) are landed.
-Sprint 2 (M5) is next.
+**Plan:** [`CLOSEOUT_EXECUTION_PLAN.md`](CLOSEOUT_EXECUTION_PLAN.md) covers
+local same-machine use: backend on loopback, text-based inputs to Markdown,
+corpus gate, doc prune. Sprint 0 and Sprint 1 are landed. Sprint A (desktop
+remainder) is next. M5 through M8 stay in [`BACKEND_EPIC.md`](BACKEND_EPIC.md).
 **Backend checkpoint:** `4590a9a` closes M3; `322d96e` is the later
 OpenAPI/runtime route-kind correction consumed by the desktop. AnyDoc converts
 19 extensions over 18 media types in-process under a hard timeout, PDF stays on
@@ -115,8 +118,9 @@ This file goes stale the moment someone lands a commit.
 2. **M1, M2, M3, and the M6 implementation are closed. Do not redo them.**
    Evidence is in
    [`archive/BACKEND_VERIFICATION_LOG.md`](archive/BACKEND_VERIFICATION_LOG.md).
-   The remaining milestones and their order are in
+   Local same-machine work is in
    [`CLOSEOUT_EXECUTION_PLAN.md`](CLOSEOUT_EXECUTION_PLAN.md).
+   LAN deploy and cutover stay in [`BACKEND_EPIC.md`](BACKEND_EPIC.md).
 
    Traps from that work that are still live and still easy to reintroduce:
 
@@ -160,44 +164,14 @@ This file goes stale the moment someone lands a commit.
 3. **Do not** create a root Cargo workspace, bump TypeScript 7, migrate
    `keyring` 4, unpin `pdf-inspector`, or take `libc` 1.0 (still alpha).
 
-## Starting Sprint 2 (M5)
+## Starting local same-machine closeout
 
-Read the Sprint 2 section of
-[`CLOSEOUT_EXECUTION_PLAN.md`](CLOSEOUT_EXECUTION_PLAN.md) first. Four things
-are settled before any code, and the first one is not optional.
+Read [`CLOSEOUT_EXECUTION_PLAN.md`](CLOSEOUT_EXECUTION_PLAN.md). Order: Sprint A
+(desktop remainder) → B (Compose stack) → C (corpus gate) → D (manual
+acceptance) → E (doc prune).
 
-**The runner cannot poll a remote job.** `jobs::run()` awaits
-`execute_claimed` before claiming again, and a test pins that. A Datalab job
-polls for minutes, so awaiting one inside that loop freezes every queued local
-job behind it. `accepting_jobs` counts non-terminal rows against
-`TOOLKIT_CONVERTER_MAX_JOBS`, so remote states would also fill capacity with
-jobs that are only waiting on the network. Remote waiting has to be a persisted
-state a reconciler polls, on its own schedule. Build that seam before the
-adapter, or the adapter will be built into the wrong shape.
-
-**Extend `attempts`, do not add a side table.** Artifacts and the manifest are
-already keyed by (job, attempt), and CVR-056 wants the same publication
-boundary. Add `RemoteQueued` and `ConvertingRemote` to both state enums; put
-acceptance on columns (`remote_request_id`, `remote_submitted_at`,
-`remote_acceptance IN ('unknown','accepted')`), not on states. Uncertainty is
-an attribute of one submission, not a lifecycle stage, and encoding it as a
-state doubles every `require_active_state` guard.
-
-**"Port `providers.rs` verbatim" is not sufficient**, whatever CVR-051 says.
-`parse_datalab_submit` returns `Result<Submitted, String>`, which cannot express
-"maybe billed": a timeout after the body was sent and a hard 400 both collapse
-to `Err(String)`. The adapter needs
-`SubmitOutcome::{Accepted, Rejected, Uncertain}` off the same classification
-`send_retrying` uses internally, with `Uncertain` written before anything else.
-The desktop already learned this the expensive way; see `a7b4976`.
-
-**`interrupt_and_requeue` is the wrong seam for a remote attempt.** It accepts
-only `ConvertingLocal`/`Finalizing` and burns the recovery budget, so a third
-remote retry would look like a crash loop. A remote leg needs
-`start_remote_attempt` from `NeedsRemote` that leaves `recovery_count` alone.
-
-When `remoteFallback.available` starts telling the truth, the desktop must stop
-owning fallback for backend-routed files, or both sides will pay.
+M5 through M8 design notes stay in [`BACKEND_EPIC.md`](BACKEND_EPIC.md). Do not
+start backend Datalab work until local same-machine use passes Sprint D.
 
 ## Parallel session ownership
 

@@ -44,11 +44,19 @@ finding, not a manifest edit.
   SHA-256 through an approved local corpus path.
 - Do not include document text, filenames, or extracted content in test logs.
 
+## Phase 1 local-text cases
+
+Five PDF manifest rows cover native and layout cases for same-machine use:
+`native-text-1-page`, `native-text-10-pages`, `sparse-cover-page`,
+`dense-table`, `two-column-text`. Run them with `pnpm verify:local-corpus` from
+the repo root. Current milestone and corpus policy live in
+[`../../docs/STATUS.md`](../../docs/STATUS.md).
+
 ## Still to cover
 
 The manifest is PDF-only, because the PDF worker is the engine whose routing
 decisions the policy reads. AnyDoc formats are covered by the vendored fixtures
 in `../tests/fixtures/anydoc`, which the HTTP contract tests drive one
 extension at a time. Standalone image and HTML cases wait on the remote route.
-M8 freezes the completed corpus and captures old-path baseline outputs for the
-release comparison.
+M8 freezes the completed corpus. See Phase 4 in
+[`../../docs/STATUS.md`](../../docs/STATUS.md).
