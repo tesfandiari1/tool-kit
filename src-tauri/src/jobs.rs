@@ -5,7 +5,7 @@
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -238,6 +238,30 @@ pub struct JobManager {
     run_config: Mutex<settings::Settings>,
 }
 
+/// Keeps the jobs lock through the caller's durable side effects and event
+/// emission, so retirement cannot split a guarded mutation from its signal.
+struct GenerationUpdate<'a> {
+    job: Job,
+    _jobs: MutexGuard<'a, Vec<Job>>,
+}
+
+impl GenerationUpdate<'_> {
+    fn job(&self) -> &Job {
+        &self.job
+    }
+
+    fn commit<R>(self, commit: impl FnOnce(Job) -> R) -> R {
+        let Self { job, _jobs } = self;
+        let result = commit(job);
+        drop(_jobs);
+        result
+    }
+
+    fn emit(self, app: &AppHandle) {
+        self.commit(|job| emit(app, job));
+    }
+}
+
 impl Default for JobManager {
     fn default() -> Self {
         Self {
@@ -286,19 +310,28 @@ impl JobManager {
         id: u64,
         expected_generation: u64,
         f: F,
-    ) -> Option<Job> {
+    ) -> Option<GenerationUpdate<'_>> {
         let mut jobs = self.jobs.lock().unwrap();
         if self.generation() != expected_generation {
             return None;
         }
-        let job = jobs.iter_mut().find(|job| job.id == id)?;
-        f(job);
-        Some(job.clone())
+        let updated = {
+            let job = jobs.iter_mut().find(|job| job.id == id)?;
+            f(job);
+            job.clone()
+        };
+        Some(GenerationUpdate {
+            job: updated,
+            _jobs: jobs,
+        })
     }
 
     /// Retire every in-flight task and return the new generation.
     pub fn new_generation(&self) -> u64 {
-        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+        let jobs = self.jobs.lock().unwrap();
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        drop(jobs);
+        generation
     }
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
@@ -376,16 +409,14 @@ fn set_status(app: &AppHandle, id: u64, status: &str, note: &str) {
 }
 
 fn set_backend_status(app: &AppHandle, id: u64, generation: u64, status: &str, note: &str) -> bool {
-    let Some(job) = app
-        .state::<JobManager>()
-        .update_if_generation(id, generation, |job| {
-            job.status = status.to_string();
-            job.progress_note = note.to_string();
-        })
-    else {
+    let manager = app.state::<JobManager>();
+    let Some(updated) = manager.update_if_generation(id, generation, |job| {
+        job.status = status.to_string();
+        job.progress_note = note.to_string();
+    }) else {
         return false;
     };
-    emit(app, job);
+    updated.emit(app);
     true
 }
 
@@ -414,27 +445,25 @@ fn finish(app: &AppHandle, id: u64, text: String, output_path: Option<String>) {
 }
 
 fn apply_backend_view(app: &AppHandle, id: u64, generation: u64, view: &ConversionJob) -> bool {
-    let Some(updated) = app
-        .state::<JobManager>()
-        .update_if_generation(id, generation, |job| {
-            job.route = view.route.as_ref().map(|route| route.kind.clone());
-            job.reason_codes = view
-                .route
-                .as_ref()
-                .map(|route| route.reason_codes.clone())
-                .unwrap_or_default();
-            job.warnings = view.warnings.clone();
-            job.failure = view.failure.clone();
-        })
-    else {
+    let manager = app.state::<JobManager>();
+    let Some(updated) = manager.update_if_generation(id, generation, |job| {
+        job.route = view.route.as_ref().map(|route| route.kind.clone());
+        job.reason_codes = view
+            .route
+            .as_ref()
+            .map(|route| route.reason_codes.clone())
+            .unwrap_or_default();
+        job.warnings = view.warnings.clone();
+        job.failure = view.failure.clone();
+    }) else {
         return false;
     };
-    emit(app, updated);
+    updated.emit(app);
     true
 }
 
 fn fail_backend_retryable(app: &AppHandle, id: u64, generation: u64, err: &str) {
-    if let Some(job) = app
+    if let Some(updated) = app
         .state::<JobManager>()
         .update_if_generation(id, generation, |job| {
             job.status = "failed".into();
@@ -442,12 +471,12 @@ fn fail_backend_retryable(app: &AppHandle, id: u64, generation: u64, err: &str) 
             job.error = Some(err.to_string());
         })
     {
-        emit(app, job);
+        updated.emit(app);
     }
 }
 
 fn fail_backend_terminal(app: &AppHandle, id: u64, generation: u64, err: &str) {
-    if let Some(job) = app
+    if let Some(updated) = app
         .state::<JobManager>()
         .update_if_generation(id, generation, |job| {
             job.status = "failed".into();
@@ -455,17 +484,18 @@ fn fail_backend_terminal(app: &AppHandle, id: u64, generation: u64, err: &str) {
             job.error = Some(err.to_string());
         })
     {
+        let job = updated.job();
         if let Some(backend) = &job.backend {
             history::delete_in_flight(app, &backend.idempotency_key);
         }
-        log_history(app, &job, "failed", Some(err));
-        emit(app, job);
+        log_history(app, job, "failed", Some(err));
+        updated.emit(app);
     }
 }
 
 fn finish_backend(app: &AppHandle, id: u64, generation: u64, output_path: String) {
     let cleanup_path = output_path.clone();
-    if let Some(job) = app
+    if let Some(updated) = app
         .state::<JobManager>()
         .update_if_generation(id, generation, |job| {
             job.status = "done".into();
@@ -476,11 +506,12 @@ fn finish_backend(app: &AppHandle, id: u64, generation: u64, output_path: String
             job.failure = None;
         })
     {
+        let job = updated.job();
         if let Some(backend) = &job.backend {
             history::delete_in_flight(app, &backend.idempotency_key);
         }
-        log_history(app, &job, "done", None);
-        emit(app, job);
+        log_history(app, job, "done", None);
+        updated.emit(app);
     } else {
         let _ = std::fs::remove_file(cleanup_path);
     }
@@ -644,15 +675,13 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         fail_backend_retryable(&app, id, generation, "The conversion queue is unavailable");
         return;
     };
-    let Some(updated) = app
-        .state::<JobManager>()
-        .update_if_generation(id, generation, |current| {
-            current.started_at = Some(now_secs());
-        })
-    else {
+    let manager = app.state::<JobManager>();
+    let Some(updated) = manager.update_if_generation(id, generation, |current| {
+        current.started_at = Some(now_secs());
+    }) else {
         return;
     };
-    emit(&app, updated);
+    updated.emit(&app);
 
     if let Some(error) = &backend.recovery_blocker {
         fail_backend_retryable(&app, id, generation, error);
@@ -731,16 +760,17 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         match result {
             Ok(view) => {
                 backend.backend_job_id = Some(view.id.clone());
-                let Some(_updated) =
-                    app.state::<JobManager>()
-                        .update_if_generation(id, generation, |current| {
-                            if let Some(context) = &mut current.backend {
-                                context.backend_job_id = Some(view.id.clone());
-                            }
-                        })
-                else {
+                if app
+                    .state::<JobManager>()
+                    .update_if_generation(id, generation, |current| {
+                        if let Some(context) = &mut current.backend {
+                            context.backend_job_id = Some(view.id.clone());
+                        }
+                    })
+                    .is_none()
+                {
                     return;
-                };
+                }
                 history::attach_backend_job(&app, &backend.idempotency_key, &view.id);
                 view
             }
@@ -1319,7 +1349,7 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
 #[cfg(test)]
 mod backend_tests {
     use super::*;
-    use std::time::UNIX_EPOCH;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn view(status: &str) -> ConversionJob {
         ConversionJob {
@@ -1403,8 +1433,8 @@ mod backend_tests {
     }
 
     #[test]
-    fn stale_generation_cannot_mutate_a_stopped_job() {
-        let manager = JobManager::default();
+    fn retirement_waits_for_guarded_commit_and_then_rejects_stale_updates() {
+        let manager = Arc::new(JobManager::default());
         manager.insert(Job::new(
             1,
             "/tmp/report.pdf".into(),
@@ -1412,14 +1442,44 @@ mod backend_tests {
             JobType::Convert,
         ));
         let task_generation = manager.generation();
+        let (guarded_tx, guarded_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
 
-        assert!(manager
-            .update_if_generation(1, task_generation, |job| {
-                job.status = "working".into();
-            })
-            .is_some());
+        let worker_manager = manager.clone();
+        let worker_events = event_tx.clone();
+        let worker = std::thread::spawn(move || {
+            let updated = worker_manager
+                .update_if_generation(1, task_generation, |job| {
+                    job.status = "working".into();
+                })
+                .unwrap();
+            guarded_tx.send(()).unwrap();
+            updated.commit(|_| {
+                release_rx.recv().unwrap();
+                worker_events.send("emitted").unwrap();
+            });
+        });
+        guarded_rx.recv().unwrap();
 
-        manager.new_generation();
+        let retire_manager = manager.clone();
+        let retire_events = event_tx.clone();
+        let (retire_started_tx, retire_started_rx) = std::sync::mpsc::channel();
+        let retire = std::thread::spawn(move || {
+            retire_started_tx.send(()).unwrap();
+            let next_generation = retire_manager.new_generation();
+            retire_events.send("retired").unwrap();
+            next_generation
+        });
+        retire_started_rx.recv().unwrap();
+        assert!(event_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        release_tx.send(()).unwrap();
+        assert_eq!(event_rx.recv().unwrap(), "emitted");
+        assert_eq!(event_rx.recv().unwrap(), "retired");
+        worker.join().unwrap();
+        assert_eq!(retire.join().unwrap(), task_generation + 1);
+
         manager.update(1, |job| {
             job.status = "failed".into();
             job.error = Some("Stopped".into());
