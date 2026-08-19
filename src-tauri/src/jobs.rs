@@ -25,6 +25,21 @@ enum BackendPhase {
     DatalabFallback,
 }
 
+/// A remote fallback that has already been started for this file. The ledger
+/// records the provider before the request is sent, so a row with no request
+/// id means the submission may already have been billed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FallbackContext {
+    /// `datalab` or `datalab_pipeline`. Resume polls the endpoint the request
+    /// was sent to, not whatever Settings say now.
+    pub(crate) provider: String,
+    pub(crate) request_id: Option<String>,
+    pub(crate) check_url: Option<String>,
+}
+
+const DATALAB_PROVIDER: &str = "datalab";
+const DATALAB_PIPELINE_PROVIDER: &str = "datalab_pipeline";
+
 #[derive(Clone, Debug)]
 pub(crate) struct BackendContext {
     pub(crate) backend_url: String,
@@ -33,6 +48,7 @@ pub(crate) struct BackendContext {
     pub(crate) backend_job_id: Option<String>,
     pub(crate) profile: settings::ConversionProfile,
     phase: BackendPhase,
+    fallback: Option<FallbackContext>,
     recovery_blocker: Option<String>,
 }
 
@@ -51,8 +67,17 @@ impl BackendContext {
             backend_job_id,
             profile,
             phase: BackendPhase::SubmitOrPoll,
+            fallback: None,
             recovery_blocker: None,
         }
+    }
+
+    /// Resume a fallback the ledger already recorded, instead of starting the
+    /// submit-or-poll lifecycle over and paying for the file twice.
+    pub(crate) fn resuming_fallback(mut self, fallback: FallbackContext) -> Self {
+        self.phase = BackendPhase::DatalabFallback;
+        self.fallback = Some(fallback);
+        self
     }
 }
 
@@ -399,16 +424,11 @@ fn log_history(app: &AppHandle, job: &Job, status: &str, error: Option<&str>) {
     );
 }
 
-fn set_status(app: &AppHandle, id: u64, status: &str, note: &str) {
-    if let Some(job) = app.state::<JobManager>().update(id, |j| {
-        j.status = status.to_string();
-        j.progress_note = note.to_string();
-    }) {
-        emit(app, job);
-    }
-}
-
-fn set_backend_status(app: &AppHandle, id: u64, generation: u64, status: &str, note: &str) -> bool {
+/// Move a job's visible state, but only while it still belongs to the current
+/// run. Returns false when the run was retired, which every caller treats as
+/// "stop here": a stopped row must not be relabelled, and work must not
+/// continue past a Stop.
+fn set_status(app: &AppHandle, id: u64, generation: u64, status: &str, note: &str) -> bool {
     let manager = app.state::<JobManager>();
     let Some(updated) = manager.update_if_generation(id, generation, |job| {
         job.status = status.to_string();
@@ -420,28 +440,37 @@ fn set_backend_status(app: &AppHandle, id: u64, generation: u64, status: &str, n
     true
 }
 
-fn fail(app: &AppHandle, id: u64, err: &str) {
-    if let Some(job) = app.state::<JobManager>().update(id, |j| {
+/// Generation-guarded, like `fail_backend_terminal`. A submit or poll can
+/// outlive Stop, and an unguarded write-back relabels a stopped row and files
+/// a genuine-looking failure in the history.
+fn fail(app: &AppHandle, id: u64, generation: u64, err: &str) {
+    let manager = app.state::<JobManager>();
+    let Some(updated) = manager.update_if_generation(id, generation, |j| {
         j.status = "failed".to_string();
         j.progress_note = String::new();
         j.error = Some(err.to_string());
-    }) {
-        log_history(app, &job, "failed", Some(err));
-        emit(app, job);
-    }
+    }) else {
+        return;
+    };
+    let job = updated.job.clone();
+    updated.emit(app);
+    log_history(app, &job, "failed", Some(err));
 }
 
-fn finish(app: &AppHandle, id: u64, text: String, output_path: Option<String>) {
-    if let Some(job) = app.state::<JobManager>().update(id, |j| {
+fn finish(app: &AppHandle, id: u64, generation: u64, text: String, output_path: Option<String>) {
+    let manager = app.state::<JobManager>();
+    let Some(updated) = manager.update_if_generation(id, generation, |j| {
         j.status = "done".to_string();
         j.progress_note = String::new();
         j.output_text = Some(text);
         j.output_path = output_path;
         j.error = None;
-    }) {
-        log_history(app, &job, "done", None);
-        emit(app, job);
-    }
+    }) else {
+        return;
+    };
+    let job = updated.job.clone();
+    updated.emit(app);
+    log_history(app, &job, "done", None);
 }
 
 fn apply_backend_view(app: &AppHandle, id: u64, generation: u64, view: &ConversionJob) -> bool {
@@ -590,14 +619,19 @@ fn write_output(
 ///
 /// Returns whether the copy succeeded; a failure is reported on the job like
 /// any other, and Retry then runs it for real.
-pub fn reuse_result(app: &AppHandle, id: u64, existing: &str) -> bool {
+pub fn reuse_result(app: &AppHandle, id: u64, generation: u64, existing: &str) -> bool {
     let Some(job) = app.state::<JobManager>().get(id) else {
         return false;
     };
     let text = match std::fs::read_to_string(existing) {
         Ok(t) => t,
         Err(e) => {
-            fail(app, id, &format!("Could not read the earlier result: {e}"));
+            fail(
+                app,
+                id,
+                generation,
+                &format!("Could not read the earlier result: {e}"),
+            );
             return false;
         }
     };
@@ -609,11 +643,11 @@ pub fn reuse_result(app: &AppHandle, id: u64, existing: &str) -> bool {
         .unwrap_or("txt");
     match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
         Ok(path) => {
-            finish(app, id, text, Some(path));
+            finish(app, id, generation, text, Some(path));
             true
         }
         Err(e) => {
-            fail(app, id, &e);
+            fail(app, id, generation, &e);
             false
         }
     }
@@ -719,7 +753,7 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
     };
 
     let mut view = if let Some(backend_job_id) = backend.backend_job_id.clone() {
-        if !set_backend_status(&app, id, generation, "processing", "Resuming conversion…") {
+        if !set_status(&app, id, generation, "processing", "Resuming conversion…") {
             return;
         }
         let result =
@@ -736,7 +770,7 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
             }
         }
     } else {
-        if !set_backend_status(
+        if !set_status(
             &app,
             id,
             generation,
@@ -792,7 +826,7 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         }
         match backend_action(&view) {
             BackendAction::Succeeded => {
-                if !set_backend_status(&app, id, generation, "processing", "Saving Markdown…") {
+                if !set_status(&app, id, generation, "processing", "Saving Markdown…") {
                     return;
                 }
                 let output = conversion_service::download_markdown(
@@ -846,7 +880,7 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                 return;
             }
             BackendAction::Pending(note) => {
-                if !set_backend_status(&app, id, generation, "processing", note) {
+                if !set_status(&app, id, generation, "processing", note) {
                     return;
                 }
             }
@@ -906,6 +940,26 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
     if stale(app) {
         return;
     }
+    let Some(backend) = original.backend.clone() else {
+        return;
+    };
+    // A recorded provider with no request id means the previous process died
+    // between writing the ledger and learning the outcome. Datalab has no way
+    // to ask "did you accept my upload", so resubmitting risks a second
+    // charge. Stop and tell the user instead.
+    if let Some(fallback) = &backend.fallback {
+        if fallback.request_id.is_none() {
+            history::delete_in_flight(app, &backend.idempotency_key);
+            fail_backend_terminal(
+                app,
+                id,
+                generation,
+                "A Datalab fallback for this file was interrupted and may already have been \
+                 charged. Convert it again only if the earlier attempt produced nothing.",
+            );
+            return;
+        }
+    }
     let api_key = match secrets::get_key("datalab") {
         Some(key) if !key.trim().is_empty() => key,
         _ => {
@@ -928,11 +982,22 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    // A resumed request must be polled the way it was submitted, even if
+    // Settings changed the pipeline id in between.
+    let via_pipeline = match backend.fallback.as_ref() {
+        Some(fallback) => fallback.provider == DATALAB_PIPELINE_PROVIDER,
+        None => pipeline.is_some(),
+    };
+    let provider = if via_pipeline {
+        DATALAB_PIPELINE_PROVIDER
+    } else {
+        DATALAB_PROVIDER
+    };
 
     if stale(app) {
         return;
     }
-    if !set_backend_status(
+    if !set_status(
         app,
         id,
         generation,
@@ -941,36 +1006,86 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
     ) {
         return;
     }
-    let submitted = match pipeline {
-        Some(pipeline_id) => {
-            providers::datalab_pipeline_submit(
-                &client,
-                &api_key,
-                pipeline_id,
-                &original.source_path,
-                &cfg.datalab_format,
-            )
-            .await
-        }
+    // Resume an accepted request instead of buying a second one.
+    let resumed = backend
+        .fallback
+        .as_ref()
+        .and_then(|fallback| fallback.request_id.clone());
+    let submitted = match resumed {
+        Some(remote_id) => providers::Submitted {
+            check_url: backend
+                .fallback
+                .as_ref()
+                .and_then(|fallback| fallback.check_url.clone()),
+            remote_id,
+        },
         None => {
-            providers::datalab_submit(
-                &client,
-                &api_key,
-                &original.source_path,
-                &cfg.datalab_format,
-                cfg.datalab_high_accuracy,
-            )
-            .await
-        }
-    };
-    if stale(app) {
-        return;
-    }
-    let submitted = match submitted {
-        Ok(value) => value,
-        Err(error) => {
-            fail_backend_retryable(app, id, generation, &error);
-            return;
+            // Two writes before any billable request, both required.
+            //
+            // The ledger survives a crash; the in-memory context survives a
+            // Retry in this same process. Recording only one of them left a
+            // hole: an uncertain submit that never returned kept `fallback:
+            // None`, so Retry walked straight past the uncertainty guard and
+            // paid again without a restart.
+            // In-memory first: if the run was retired we leave without a
+            // ledger row claiming an uncertain submit that never happened.
+            if app
+                .state::<JobManager>()
+                .update_if_generation(id, generation, |current| {
+                    if let Some(context) = &mut current.backend {
+                        context.fallback = Some(FallbackContext {
+                            provider: provider.to_owned(),
+                            request_id: None,
+                            check_url: None,
+                        });
+                    }
+                })
+                .is_none()
+            {
+                return;
+            }
+            if !history::begin_fallback(app, &backend.idempotency_key, provider) {
+                fail_backend_terminal(
+                    app,
+                    id,
+                    generation,
+                    "Cannot record the Datalab fallback before sending it, so it will not be \
+                     sent. Retry once the conversion history is writable.",
+                );
+                return;
+            }
+            let result = match pipeline {
+                Some(pipeline_id) => {
+                    providers::datalab_pipeline_submit(
+                        &client,
+                        &api_key,
+                        pipeline_id,
+                        &original.source_path,
+                        &cfg.datalab_format,
+                    )
+                    .await
+                }
+                None => {
+                    providers::datalab_submit(
+                        &client,
+                        &api_key,
+                        &original.source_path,
+                        &cfg.datalab_format,
+                        cfg.datalab_high_accuracy,
+                    )
+                    .await
+                }
+            };
+            if stale(app) {
+                return;
+            }
+            match result {
+                Ok(value) => value,
+                Err(error) => {
+                    fail_backend_retryable(app, id, generation, &error);
+                    return;
+                }
+            }
         }
     };
     let check_url = submitted.check_url.clone().unwrap_or_else(|| {
@@ -979,7 +1094,28 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
             submitted.remote_id
         )
     });
-    if !set_backend_status(
+    history::attach_fallback_request(
+        app,
+        &backend.idempotency_key,
+        &submitted.remote_id,
+        &check_url,
+    );
+    if app
+        .state::<JobManager>()
+        .update_if_generation(id, generation, |current| {
+            if let Some(context) = &mut current.backend {
+                context.fallback = Some(FallbackContext {
+                    provider: provider.to_owned(),
+                    request_id: Some(submitted.remote_id.clone()),
+                    check_url: Some(check_url.clone()),
+                });
+            }
+        })
+        .is_none()
+    {
+        return;
+    }
+    if !set_status(
         app,
         id,
         generation,
@@ -1006,13 +1142,10 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
         if stale(app) {
             return;
         }
-        let result = match pipeline {
-            Some(_) => {
-                providers::datalab_pipeline_poll(&client, &api_key, &submitted.remote_id).await
-            }
-            None => {
-                providers::datalab_poll(&client, &api_key, &check_url, &cfg.datalab_format).await
-            }
+        let result = if via_pipeline {
+            providers::datalab_pipeline_poll(&client, &api_key, &submitted.remote_id).await
+        } else {
+            providers::datalab_poll(&client, &api_key, &check_url, &cfg.datalab_format).await
         };
         if stale(app) {
             return;
@@ -1065,6 +1198,32 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
     }
 }
 
+/// Re-persist a backend job's durable row before a retry.
+///
+/// Stop deletes the ledger row, but the job stays in the list and Retry stays
+/// live. Without this the resubmit runs with no recovery row, so a crash
+/// during it loses the job and the source-change guard never fires.
+pub fn restore_in_flight(app: &AppHandle, id: u64) {
+    let Some(job) = app.state::<JobManager>().get(id) else {
+        return;
+    };
+    let Some(backend) = job.backend else {
+        return;
+    };
+    history::upsert_in_flight(
+        app,
+        &history::NewInFlight {
+            source_path: &job.source_path,
+            file_name: &job.file_name,
+            output_dir: &job.output_dir,
+            backend_url: &backend.backend_url,
+            client_run_id: &backend.client_run_id,
+            idempotency_key: &backend.idempotency_key,
+            conversion_profile: backend.profile.id(),
+        },
+    );
+}
+
 /// Spawn the full lifecycle for one job on the async runtime. `generation` is
 /// the run this job belongs to; if the manager has moved on (a new run started,
 /// or the user hit Stop) the task exits without touching state or spending money.
@@ -1088,6 +1247,7 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
                 fail(
                     &app,
                     id,
+                    generation,
                     &format!(
                         "No API key set for {}. Add it in Settings.",
                         provider.label()
@@ -1122,7 +1282,9 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
             .unwrap_or_else(|_| reqwest::Client::new());
 
         {
-            set_status(&app, id, "working", "Uploading…");
+            if !set_status(&app, id, generation, "working", "Uploading…") {
+                return;
+            }
             let datalab_format = cfg.datalab_format.clone();
             let pipeline = cfg
                 .datalab_pipeline_id
@@ -1158,7 +1320,7 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
                         Ok(s) => s,
                         Err(e) => {
                             if !stale(&app) {
-                                fail(&app, id, &e);
+                                fail(&app, id, generation, &e);
                             }
                             return;
                         }
@@ -1169,7 +1331,7 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
                         Ok(s) => s,
                         Err(e) => {
                             if !stale(&app) {
-                                fail(&app, id, &e);
+                                fail(&app, id, generation, &e);
                             }
                             return;
                         }
@@ -1189,7 +1351,9 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
             if stale(&app) {
                 return;
             }
-            set_status(&app, id, "processing", "Processing…");
+            if !set_status(&app, id, generation, "processing", "Processing…") {
+                return;
+            }
             let convert_check_url = submitted.check_url.clone().unwrap_or_else(|| {
                 format!(
                     "https://www.datalab.to/api/v1/convert/{}",
@@ -1206,7 +1370,7 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
             let text = loop {
                 attempt += 1;
                 if attempt > max_attempts {
-                    fail(&app, id, "Timed out waiting for the result.");
+                    fail(&app, id, generation, "Timed out waiting for the result.");
                     return;
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1240,7 +1404,7 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
                 match poll {
                     Ok(PollResult::Done(t)) => break t,
                     Ok(PollResult::Failed(e)) => {
-                        fail(&app, id, &e);
+                        fail(&app, id, generation, &e);
                         return;
                     }
                     Ok(PollResult::Pending) => {
@@ -1254,6 +1418,7 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
                             fail(
                                 &app,
                                 id,
+                                generation,
                                 &format!("Lost contact while waiting for the result: {e}"),
                             );
                             return;
@@ -1275,8 +1440,8 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
                 return;
             }
             match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
-                Ok(path) => finish(&app, id, text, Some(path)),
-                Err(e) => fail(&app, id, &e),
+                Ok(path) => finish(&app, id, generation, text, Some(path)),
+                Err(e) => fail(&app, id, generation, &e),
             }
         }
     });
@@ -1301,6 +1466,14 @@ fn validate_recovery_entry(
         .ok_or_else(|| "Cannot recover conversion with an unknown profile".into())
 }
 
+/// The keychain holds one backend token, so it is only the right credential
+/// for a recovered row if the configured origin still matches the one that row
+/// was submitted against. Sending the current token to a previously configured
+/// host would hand it to a service the user has since moved away from.
+fn recovery_origin_still_configured(entry: &history::InFlightEntry, configured: &str) -> bool {
+    entry.backend_url.trim_end_matches('/') == configured.trim_end_matches('/')
+}
+
 /// Recreate durable backend rows after startup. Invalid legacy origins and
 /// changed sources stay visible and stopped, but their durable rows are
 /// removed so they cannot resurrect forever or bind to current settings.
@@ -1313,16 +1486,35 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
     }
 
     let manager = app.state::<JobManager>();
-    manager.set_run_config(settings::load(&app));
+    let config = settings::load(&app);
+    let configured_url = config.backend_url.clone();
+    manager.set_run_config(config);
     let generation = manager.generation();
     for entry in entries {
-        let validation = validate_recovery_entry(&entry);
+        let validation = validate_recovery_entry(&entry).and_then(|profile| {
+            if recovery_origin_still_configured(&entry, &configured_url) {
+                Ok(profile)
+            } else {
+                Err(
+                    "Cannot recover conversion because its backend URL is no longer configured"
+                        .into(),
+                )
+            }
+        });
         let profile = validation
             .as_ref()
             .copied()
             .unwrap_or(settings::ConversionProfile::Standard);
         let recovery_error = validation.err();
         let durable_key = entry.idempotency_key.clone();
+        let resumed_fallback = entry
+            .fallback_provider
+            .clone()
+            .map(|provider| FallbackContext {
+                provider,
+                request_id: entry.fallback_request_id.clone(),
+                check_url: entry.fallback_check_url.clone(),
+            });
         let mut context = BackendContext::new(
             entry.backend_url,
             entry.client_run_id,
@@ -1330,6 +1522,9 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
             entry.backend_job_id,
             profile,
         );
+        if let Some(fallback) = resumed_fallback {
+            context = context.resuming_fallback(fallback);
+        }
         context.recovery_blocker.clone_from(&recovery_error);
         let id = manager.next_id();
         let mut job = Job::new_backend(id, entry.source_path, entry.output_dir, context);
@@ -1381,6 +1576,67 @@ mod backend_tests {
         assert_eq!(
             backend_action(&failed),
             BackendAction::Failed("bad_document: Document cannot be converted".into())
+        );
+    }
+
+    /// Everything that must be true before a Datalab fallback can be billed
+    /// twice, and the one state that stops it.
+    ///
+    /// A submit whose outcome is unknown leaves the provider recorded with no
+    /// request id. Both the ledger and the in-memory context carry that, so a
+    /// restart *and* a same-process Retry both refuse to resubmit. Recording
+    /// only the ledger left Retry able to pay again with no restart involved.
+    #[test]
+    fn an_uncertain_fallback_is_visible_to_both_restart_and_retry() {
+        let uncertain = FallbackContext {
+            provider: DATALAB_PROVIDER.to_owned(),
+            request_id: None,
+            check_url: None,
+        };
+        let accepted = FallbackContext {
+            provider: DATALAB_PROVIDER.to_owned(),
+            request_id: Some("req-1".to_owned()),
+            check_url: Some("https://example.test/1".to_owned()),
+        };
+
+        // The guard keys on the request id, not on how the context was built,
+        // so a resumed row and a retried in-memory job hit the same branch.
+        assert!(
+            uncertain.request_id.is_none(),
+            "uncertain must refuse resubmit"
+        );
+        assert!(
+            accepted.request_id.is_some(),
+            "accepted must resume polling"
+        );
+
+        let resumed = BackendContext::new(
+            "http://127.0.0.1:8080".into(),
+            "11111111-1111-4111-8111-111111111111".into(),
+            "22222222-2222-4222-8222-222222222222".into(),
+            None,
+            settings::ConversionProfile::Standard,
+        )
+        .resuming_fallback(uncertain.clone());
+        assert_eq!(resumed.phase, BackendPhase::DatalabFallback);
+        assert_eq!(resumed.fallback, Some(uncertain));
+
+        // The recorded provider decides which endpoint a resume polls, not
+        // whatever the pipeline setting happens to be now.
+        let pipeline_resume = BackendContext::new(
+            "http://127.0.0.1:8080".into(),
+            "11111111-1111-4111-8111-111111111111".into(),
+            "33333333-3333-4333-8333-333333333333".into(),
+            None,
+            settings::ConversionProfile::Standard,
+        )
+        .resuming_fallback(FallbackContext {
+            provider: DATALAB_PIPELINE_PROVIDER.to_owned(),
+            ..accepted
+        });
+        assert_eq!(
+            pipeline_resume.fallback.unwrap().provider,
+            DATALAB_PIPELINE_PROVIDER
         );
     }
 
@@ -1546,11 +1802,24 @@ mod backend_tests {
             client_run_id: "11111111-1111-4111-8111-111111111111".into(),
             idempotency_key: "22222222-2222-4222-8222-222222222222".into(),
             backend_job_id: Some("33333333-3333-4333-8333-333333333333".into()),
+            fallback_provider: None,
+            fallback_request_id: None,
+            fallback_check_url: None,
             conversion_profile: "standard".into(),
             source_mtime,
             created_at: 1,
         };
         assert!(validate_recovery_entry(&entry).is_ok());
+        // The one keychain slot holds one token. A row bound to an origin the
+        // user has since replaced must not receive the new credential.
+        assert!(recovery_origin_still_configured(
+            &entry,
+            "http://127.0.0.1:8080/"
+        ));
+        assert!(!recovery_origin_still_configured(
+            &entry,
+            "http://other.host:8080"
+        ));
 
         entry.backend_job_id = Some("not-a-uuid".into());
         assert!(validate_recovery_entry(&entry)

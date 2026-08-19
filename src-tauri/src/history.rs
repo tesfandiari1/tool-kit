@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension as _};
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
@@ -28,7 +28,7 @@ const MAX_ENTRIES: i64 = 5_000;
 
 /// Bump when the schema changes, and add a matching `if version < N` block in
 /// `migrate` — so a new column is a migration rather than a crash on startup.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// The open database, or `None` if it could not be opened. `None` makes every
 /// operation a silent no-op, which is the whole failure policy in one word.
@@ -93,6 +93,13 @@ pub struct InFlightEntry {
     pub idempotency_key: String,
     /// `None` until the backend accepts or replays the submission.
     pub backend_job_id: Option<String>,
+    /// `Some` once a remote fallback has been started for this file. Written
+    /// before the submit request, so an unknown outcome is still visible.
+    pub fallback_provider: Option<String>,
+    /// `Some` only once the provider accepted. Provider set with this `None`
+    /// means the submission may already have been billed.
+    pub fallback_request_id: Option<String>,
+    pub fallback_check_url: Option<String>,
     pub conversion_profile: String,
     /// Source modification time in Unix milliseconds at submit time.
     pub source_mtime: i64,
@@ -186,7 +193,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                  ADD COLUMN backend_url TEXT NOT NULL DEFAULT '';",
         )?;
     }
-    // Add `if version < 4 { … }` above when the schema changes again, then bump
+    if version < 4 {
+        // Remember the remote fallback before it is paid for. Without these,
+        // a restart mid-fallback resubmitted the file and billed it twice.
+        conn.execute_batch(
+            "ALTER TABLE inflight_conversions ADD COLUMN fallback_provider TEXT;
+             ALTER TABLE inflight_conversions ADD COLUMN fallback_request_id TEXT;
+             ALTER TABLE inflight_conversions ADD COLUMN fallback_check_url TEXT;",
+        )?;
+    }
+    // Add `if version < 5 { … }` above when the schema changes again, then bump
     // SCHEMA_VERSION. A file written by a *newer* build is left untouched:
     // extra columns are harmless to read, and rewriting it would lose history.
     if version < SCHEMA_VERSION {
@@ -351,6 +367,7 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
     let mut stmt = conn.prepare(
         "SELECT source_path, file_name, output_dir, backend_url,
                 client_run_id, idempotency_key, backend_job_id,
+                fallback_provider, fallback_request_id, fallback_check_url,
                 conversion_profile, source_mtime, created_at
            FROM inflight_conversions
           ORDER BY created_at ASC, idempotency_key ASC",
@@ -364,12 +381,55 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
             client_run_id: row.get(4)?,
             idempotency_key: row.get(5)?,
             backend_job_id: row.get(6)?,
-            conversion_profile: row.get(7)?,
-            source_mtime: row.get(8)?,
-            created_at: row.get(9)?,
+            fallback_provider: row.get(7)?,
+            fallback_request_id: row.get(8)?,
+            fallback_check_url: row.get(9)?,
+            conversion_profile: row.get(10)?,
+            source_mtime: row.get(11)?,
+            created_at: row.get(12)?,
         })
     })?;
     rows.collect()
+}
+
+/// Record that a remote fallback is about to start, before the request goes
+/// out. A row with a provider and no request id means the outcome is unknown
+/// and may already have been billed, so recovery must never resubmit it.
+pub fn begin_fallback(app: &AppHandle, idempotency_key: &str, provider: &str) -> bool {
+    if idempotency_key.trim().is_empty() || provider.trim().is_empty() {
+        return false;
+    }
+    with_db(app, |conn| {
+        Ok(conn.execute(
+            "UPDATE inflight_conversions
+                SET fallback_provider = ?2
+              WHERE idempotency_key = ?1",
+            rusqlite::params![idempotency_key, provider],
+        )? == 1)
+    })
+    .unwrap_or(false)
+}
+
+/// Attach the accepted remote request so a restart resumes polling it.
+pub fn attach_fallback_request(
+    app: &AppHandle,
+    idempotency_key: &str,
+    request_id: &str,
+    check_url: &str,
+) -> bool {
+    if idempotency_key.trim().is_empty() || request_id.trim().is_empty() {
+        return false;
+    }
+    with_db(app, |conn| {
+        Ok(conn.execute(
+            "UPDATE inflight_conversions
+                SET fallback_request_id = ?2, fallback_check_url = ?3
+              WHERE idempotency_key = ?1
+                AND (fallback_request_id IS NULL OR fallback_request_id = ?2)",
+            rusqlite::params![idempotency_key, request_id, check_url],
+        )? == 1)
+    })
+    .unwrap_or(false)
 }
 
 /// Delete one terminal or explicitly stopped conversion by its stable key.
@@ -395,10 +455,24 @@ pub fn in_flight_source_is_current(entry: &InFlightEntry) -> bool {
 /// is authoritative and must stop a replay from submitting changed bytes under
 /// the original idempotency key.
 pub fn in_flight_source_for_key_is_current(app: &AppHandle, idempotency_key: &str) -> Option<bool> {
-    list_in_flight(app)?
-        .iter()
-        .find(|entry| entry.idempotency_key == idempotency_key)
-        .map(in_flight_source_is_current)
+    if idempotency_key.trim().is_empty() {
+        return None;
+    }
+    with_db(app, |conn| {
+        conn.query_row(
+            "SELECT source_path, source_mtime
+               FROM inflight_conversions
+              WHERE idempotency_key = ?1",
+            [idempotency_key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+    })
+    .flatten()
+    .map(|(source_path, source_mtime): (String, i64)| {
+        source_identity(&source_path)
+            .is_some_and(|identity| identity == (source_path, source_mtime))
+    })
 }
 
 fn delete_in_flight_row(conn: &Connection, idempotency_key: &str) -> rusqlite::Result<bool> {
@@ -1157,6 +1231,104 @@ mod tests {
         assert!(!is_in_dir(&out_s, &std::env::temp_dir().to_string_lossy()));
         // A subfolder of the result's folder is a different destination.
         assert!(!is_in_dir(&out_s, &format!("{dir}/nested")));
+    }
+
+    /// Written before the request goes out, so the outcome of an interrupted
+    /// submit is recoverable rather than invisible. Without this a restart
+    /// resubmitted the file and billed it twice.
+    #[test]
+    fn a_fallback_is_recorded_before_its_request_is_accepted() {
+        let conn = db();
+        let (src, _out) = pair("fallback-ledger");
+        let source_path = fs::canonicalize(&src)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let output_dir = src.parent().unwrap().to_string_lossy().into_owned();
+        let key = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+        upsert_in_flight_row(
+            &conn,
+            &NewInFlight {
+                source_path: &source_path,
+                file_name: "report.pdf",
+                output_dir: &output_dir,
+                backend_url: "http://127.0.0.1:8080",
+                client_run_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                idempotency_key: key,
+                conversion_profile: "standard",
+            },
+        )
+        .unwrap();
+
+        let row = |conn: &Connection| select_in_flight(conn).unwrap().remove(0);
+        assert_eq!(row(&conn).fallback_provider, None);
+
+        conn.execute(
+            "UPDATE inflight_conversions SET fallback_provider = 'datalab'
+              WHERE idempotency_key = ?1",
+            [key],
+        )
+        .unwrap();
+        let started = row(&conn);
+        assert_eq!(started.fallback_provider.as_deref(), Some("datalab"));
+        assert_eq!(
+            started.fallback_request_id, None,
+            "a provider with no request id is the uncertain state recovery must refuse to resubmit"
+        );
+
+        conn.execute(
+            "UPDATE inflight_conversions
+                SET fallback_request_id = 'req-1', fallback_check_url = 'https://example.test/1'
+              WHERE idempotency_key = ?1",
+            [key],
+        )
+        .unwrap();
+        let accepted = row(&conn);
+        assert_eq!(accepted.fallback_request_id.as_deref(), Some("req-1"));
+        assert_eq!(
+            accepted.fallback_check_url.as_deref(),
+            Some("https://example.test/1")
+        );
+    }
+
+    #[test]
+    fn v3_rows_gain_empty_fallback_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_v2_schema(&conn);
+        conn.execute_batch(
+            "ALTER TABLE inflight_conversions
+                 ADD COLUMN backend_url TEXT NOT NULL DEFAULT '';
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+        let (src, _out) = pair("v3-migration");
+        let source_path = fs::canonicalize(&src)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        conn.execute(
+            "INSERT INTO inflight_conversions
+               (idempotency_key, source_path, file_name, output_dir, backend_url,
+                client_run_id, conversion_profile, source_mtime, created_at)
+             VALUES (?1, ?2, 'report.pdf', ?3, 'http://127.0.0.1:8080', ?4, 'standard', 7, 42)",
+            rusqlite::params![
+                "ffffffff-ffff-4fff-8fff-ffffffffffff",
+                source_path,
+                src.parent().unwrap().to_string_lossy(),
+                "99999999-9999-4999-8999-999999999999",
+            ],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let rows = select_in_flight(&conn).unwrap();
+        assert_eq!(rows.len(), 1, "an existing recovery row must survive");
+        assert_eq!(rows[0].fallback_provider, None);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]

@@ -608,7 +608,7 @@ async fn run_pipeline(
         );
         state.insert(job.clone());
         let _ = app.emit("job-updated", job);
-        if jobs::reuse_result(&app, id, existing) {
+        if jobs::reuse_result(&app, id, generation, existing) {
             copied += 1;
         }
     }
@@ -701,6 +701,7 @@ fn retry_job(app: AppHandle, state: State<JobManager>, id: u64) -> Result<(), St
     // Emit immediately: acquiring a concurrency permit can take minutes, and
     // without this the row keeps its failed state and invites a second click.
     let _ = app.emit("job-updated", updated);
+    jobs::restore_in_flight(&app, id);
     jobs::run_job(app.clone(), id, generation);
     Ok(())
 }
@@ -725,6 +726,7 @@ fn retry_failed(app: AppHandle, state: State<JobManager>) -> Result<usize, Strin
         }
     }
     for id in &ids {
+        jobs::restore_in_flight(&app, *id);
         jobs::run_job(app.clone(), *id, generation);
     }
     Ok(ids.len())
@@ -909,8 +911,8 @@ fn quit_with_confirm(app: &AppHandle) {
     let handle = app.clone();
     app.dialog()
         .message(format!(
-            "{active} file{} still processing. The provider has already been billed for them, \
-             and quitting now writes nothing to disk.",
+            "{active} file{} still processing. The provider has already been billed for them. \
+             Backend conversions resume when you reopen Tool-Kit; direct ones do not.",
             if active == 1 { " is" } else { "s are" }
         ))
         .title("Quit Tool-Kit?")
