@@ -93,24 +93,24 @@ pub(crate) enum PolicyDecision {
     },
     /// Do not publish. The job ends `needs_remote`, and whoever owns the remote
     /// leg decides from there.
-    NeedsRemote {
-        reason_codes: Vec<ReasonCode>,
-        warnings: Vec<Warning>,
-    },
+    ///
+    /// One reason code, never zero, so the durable `fallback_reason` cannot be
+    /// written empty. Warnings ride with published bytes, and there are none.
+    NeedsRemote { reason_code: ReasonCode },
 }
 
 impl PolicyDecision {
     pub(crate) fn reason_codes(&self) -> &[ReasonCode] {
         match self {
-            Self::Publish { reason_codes, .. } | Self::NeedsRemote { reason_codes, .. } => {
-                reason_codes
-            }
+            Self::Publish { reason_codes, .. } => reason_codes,
+            Self::NeedsRemote { reason_code } => std::slice::from_ref(reason_code),
         }
     }
 
     pub(crate) fn warnings(&self) -> &[Warning] {
         match self {
-            Self::Publish { warnings, .. } | Self::NeedsRemote { warnings, .. } => warnings,
+            Self::Publish { warnings, .. } => warnings,
+            Self::NeedsRemote { .. } => &[],
         }
     }
 
@@ -175,8 +175,7 @@ pub(crate) fn decide(
     let signals = match local {
         LocalResult::GaveUp(reason) => {
             return PolicyDecision::NeedsRemote {
-                reason_codes: vec![ReasonCode::Engine(reason)],
-                warnings: Vec::new(),
+                reason_code: ReasonCode::Engine(reason),
             };
         }
         LocalResult::Converted(signals) => signals,
@@ -215,7 +214,6 @@ mod tests {
     fn native() -> QualitySignals {
         QualitySignals {
             native_text_ratio: Some(1.0),
-            pages_needing_ocr: 0,
             has_tables: false,
             has_columns: false,
         }
@@ -297,8 +295,7 @@ mod tests {
                 assert_eq!(
                     decision,
                     PolicyDecision::NeedsRemote {
-                        reason_codes: vec![ReasonCode::Engine(reason)],
-                        warnings: Vec::new(),
+                        reason_code: ReasonCode::Engine(reason),
                     }
                 );
             }

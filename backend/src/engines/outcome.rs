@@ -44,8 +44,6 @@ pub struct QualitySignals {
     /// What it does support is the honest statement that some pages produced
     /// no text, which is why the only thing the policy does with it is warn.
     pub native_text_ratio: Option<f32>,
-    /// Pages the engine believes need OCR it cannot do.
-    pub pages_needing_ocr: u32,
     /// Structural complexity the engine detected in the layout.
     pub has_tables: bool,
     pub has_columns: bool,
@@ -56,7 +54,6 @@ impl QualitySignals {
     pub fn unmeasured() -> Self {
         Self {
             native_text_ratio: None,
-            pages_needing_ocr: 0,
             has_tables: false,
             has_columns: false,
         }

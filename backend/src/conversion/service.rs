@@ -532,11 +532,8 @@ impl ConversionService {
             }
             // The policy refused to publish output the engine did produce, so
             // the staged Markdown is discarded with the attempt.
-            (PolicyDecision::NeedsRemote { .. }, _) => {
-                let reason = decision
-                    .reason_codes()
-                    .first()
-                    .map_or_else(String::new, |code| code.as_str().to_owned());
+            (PolicyDecision::NeedsRemote { reason_code }, _) => {
+                let reason = reason_code.as_str().to_owned();
                 let analysis = local_analysis(&analysis, &decision);
                 self.repository
                     .finish_needs_remote(
@@ -559,8 +556,18 @@ impl ConversionService {
                 );
             }
             // A `Publish` decision with no bytes cannot happen: only the
-            // `Converted` arm produces one, and it always carries them.
+            // `Converted` arm produces one, and it always carries them. Kept
+            // as a closed failure rather than a panic, and logged, because an
+            // impossible state that reaches production silently is worse than
+            // the branch. Deleting it would mean threading byte counts through
+            // `policy::decide`, which is pure on purpose.
             (PolicyDecision::Publish { .. }, None) => {
+                tracing::error!(
+                    %job_id,
+                    %attempt_id,
+                    %request_id,
+                    "publish decision carried no staged bytes"
+                );
                 self.finish_failure(
                     job_id,
                     attempt_id,

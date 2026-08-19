@@ -424,8 +424,6 @@ fn into_analysis(inspection: &Inspection) -> Result<EngineAnalysis, EngineFailur
             PdfTypeLabel::TextBased => Some(inspection.confidence),
             _ => None,
         },
-        pages_needing_ocr: u32::try_from(inspection.pages_needing_ocr.len())
-            .map_err(|_| EngineFailure::Protocol)?,
         has_tables: !inspection.pages_with_tables.is_empty(),
         has_columns: !inspection.pages_with_columns.is_empty(),
     };

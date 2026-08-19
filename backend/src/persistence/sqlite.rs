@@ -793,14 +793,19 @@ impl SqliteRepository {
             };
             match load_required_conversion(&mut transaction, conversion_id).await {
                 Ok(conversion) => candidates.push(RecoveryCandidate::Loaded(Box::new(conversion))),
-                // A decode failure is this row's problem. A pool or IO failure
-                // is everyone's, and `RepositoryError` does not separate them,
-                // so treat the row as undecodable and let the health probe and
-                // the worker surface a genuinely broken database.
-                Err(error) => candidates.push(RecoveryCandidate::Undecodable {
-                    id: raw_id,
-                    reason: error.to_string(),
-                }),
+                // A decode failure is this row's problem, so quarantine it and
+                // keep booting.
+                Err(error) if error.is_row_shape() => {
+                    candidates.push(RecoveryCandidate::Undecodable {
+                        id: raw_id,
+                        reason: error.to_string(),
+                    });
+                }
+                // A busy pool, an IO blip, or a timeout says nothing about this
+                // row. Quarantine is terminal and strands the source and the
+                // artifacts, so stop the boot rather than destroy a healthy job
+                // over a database that was briefly unreadable.
+                Err(error) => return Err(error),
             }
         }
         transaction.commit().await?;
@@ -1609,6 +1614,31 @@ fn now_rfc3339() -> Result<String, RepositoryError> {
         .map_err(RepositoryError::Timestamp)
 }
 
+impl RepositoryError {
+    /// True when the error describes one row's stored shape, not the health of
+    /// the database.
+    ///
+    /// Startup recovery quarantines a row it cannot decode, and quarantine is
+    /// terminal: the job never becomes a candidate again and its source and
+    /// artifacts are stranded. So only a shape problem may take that path. A
+    /// busy pool, an IO error, or a timeout is "unreadable now", which is not
+    /// proof the row is wrong.
+    pub fn is_row_shape(&self) -> bool {
+        match self {
+            Self::CorruptData(_) | Self::ConversionNotFound { .. } => true,
+            Self::Database(error) => matches!(
+                error,
+                sqlx::Error::ColumnDecode { .. }
+                    | sqlx::Error::ColumnNotFound(_)
+                    | sqlx::Error::ColumnIndexOutOfBounds { .. }
+                    | sqlx::Error::Decode(_)
+                    | sqlx::Error::RowNotFound
+            ),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RepositoryError {
     #[error("data directory must be an absolute path")]
@@ -1712,6 +1742,36 @@ mod tests {
     };
 
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Startup quarantine is terminal, so this split decides whether a healthy
+    /// job survives a database blip. Getting it backwards either strands good
+    /// jobs or resurrects the boot crash loop, so pin both directions.
+    #[test]
+    fn only_a_row_shape_error_may_be_quarantined_at_startup() {
+        // This row is wrong. Quarantine is correct.
+        assert!(RepositoryError::CorruptData("conversions.state").is_row_shape());
+        assert!(
+            RepositoryError::ConversionNotFound {
+                conversion_id: Uuid::nil(),
+            }
+            .is_row_shape()
+        );
+        assert!(RepositoryError::Database(sqlx::Error::RowNotFound).is_row_shape());
+        assert!(
+            RepositoryError::Database(sqlx::Error::ColumnNotFound("source_media_type".into()))
+                .is_row_shape()
+        );
+
+        // The database is unhappy. This says nothing about the row, so the boot
+        // must stop instead of failing a job that may be perfectly fine.
+        assert!(!RepositoryError::Database(sqlx::Error::PoolTimedOut).is_row_shape());
+        assert!(!RepositoryError::Database(sqlx::Error::PoolClosed).is_row_shape());
+        assert!(
+            !RepositoryError::Database(sqlx::Error::Io(std::io::Error::other("disk"))).is_row_shape()
+        );
+        assert!(!RepositoryError::MissingCommittedConversion.is_row_shape());
+    }
+
 
     /// `-- no-transaction` runs the file in autocommit, so a rebuild that
     /// drops before it renames has a window where neither table exists under
