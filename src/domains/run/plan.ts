@@ -55,7 +55,7 @@ export function canStartRun({
 export function runButtonLabel(verb: string, toRun: number, copying: number): string {
   if (toRun > 0) return `${verb} ${toRun} file${toRun > 1 ? "s" : ""}`;
   if (copying > 0) return `Copy ${copying} result${copying > 1 ? "s" : ""}`;
-  return "Run pipeline";
+  return "Run";
 }
 
 /// The native backend route deliberately does not reuse direct-provider

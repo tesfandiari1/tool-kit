@@ -1,5 +1,6 @@
 import { CodeIcon, CopyIcon, EyeIcon, FolderOpenIcon, XIcon } from "@phosphor-icons/react";
-import { Button, Display, Row, Segmented, Spacer, SourceEditor, StatusDot, Tabs, Text } from "@ui";
+import { Button, Path, Row, Segmented, Spacer, SourceEditor, StatusDot, Tabs, Text } from "@ui";
+import { tildePath } from "@/app/format";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { isDirty, saveNote, saveTone, type DocMode, type OpenDoc } from "./model";
 
@@ -66,11 +67,19 @@ export function DocumentPane({
       <header className="doc-head">
         <Row gap={2}>
           {/* Rule 2: the dot holds this slot at every save state, so a
-              document going dirty never nudges the title beside it. */}
+              document going dirty never nudges the controls beside it. */}
           <StatusDot tone={saveTone(doc.save)} label={note ?? undefined} />
-          <Display as="h2" size="lg" className="ui-truncate" title={doc.title}>
-            {doc.title}
-          </Display>
+          {/* The path and the save note share one slot, and the note wins: what
+              just happened to the file outranks where it came from. */}
+          <div className="doc-id">
+            {note !== null || doc.subtitle === null ? (
+              <Text size="xs" tone={doc.save === "error" ? "fault" : "faint"} truncate title={note ?? undefined}>
+                {note}
+              </Text>
+            ) : (
+              <Path path={tildePath(doc.subtitle)} />
+            )}
+          </div>
           <Spacer />
           {allowEdit && (
             <Segmented
@@ -122,17 +131,6 @@ export function DocumentPane({
             onClick={() => { onClose(doc.id); }}
           />
         </Row>
-        {/* The subtitle and the save note share one line. The note wins when
-            there is one, because what just happened to the file matters more
-            than where it came from. */}
-        <Text
-          size="xs"
-          tone={doc.save === "error" ? "fault" : "faint"}
-          truncate
-          title={note ?? doc.subtitle ?? undefined}
-        >
-          {note ?? doc.subtitle}
-        </Text>
       </header>
 
       {/* Keyed on the document, so switching tabs unmounts the surface rather

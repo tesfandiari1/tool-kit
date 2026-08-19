@@ -1,10 +1,17 @@
+import { useEffect, useMemo, useRef } from "react";
 import type { ReactNode } from "react";
-import { Group, Panel, Separator } from "react-resizable-panels";
+import { Group, Panel, Separator, useGroupRef } from "react-resizable-panels";
+import { paneLayout, type SplitLayout } from "./splitLayout";
 import { cx } from "../cx";
 import "./SplitPane.css";
 
-/// Pane widths as percentages, keyed by pane id: `{ start: 38, end: 62 }`.
-export type SplitLayout = Record<string, number>;
+export type { SplitLayout };
+
+/// Frame budget for the restore below. Roughly 1.5s, because it waits out a
+/// native window resize, not just a render.
+const RESTORE_FRAMES = 90;
+/// Percentage points within which a restored layout counts as applied.
+const RESTORE_EPSILON = 0.5;
 
 export interface SplitPaneProps {
   start: ReactNode;
@@ -18,8 +25,8 @@ export interface SplitPaneProps {
   /// whose width is a fact about their content, so its floor is in pixels and
   /// does not move when the window does — a percentage floor is only wide
   /// enough at some window sizes, and silently clips at the rest. The end pane
-  /// holds prose, which wants a share of whatever room there is, so it is a
-  /// percentage.
+  /// holds the document, so its floor is a share of the window: half is the
+  /// least worth opening a reading pane for.
   minStart?: string;
   minEnd?: string;
   /// A previously saved layout, to restore where the user left the divider.
@@ -52,19 +59,74 @@ export interface SplitPaneProps {
 export function SplitPane({
   start,
   end,
-  defaultStart = 38,
-  minStart = "280px",
-  minEnd = "34%",
+  // These three repeat `SPLIT` in src/shell/geometry.ts by hand, because
+  // nothing under src/ui may import from the app. App.tsx passes the canonical
+  // values, so these only cover a caller that passes none. Change one, change
+  // the other.
+  defaultStart = 33,
+  minStart = "300px",
+  minEnd = "50%",
   layout,
   onLayoutChanged,
   collapsed = false,
   className,
 }: SplitPaneProps) {
+  const groupRef = useGroupRef();
+  const wasCollapsed = useRef(collapsed);
+  const owedRestore = useRef(false);
+  // Never spread from `layout`: `setLayout` is positional, so key order picks
+  // which pane gets which width. See `paneLayout`.
+  const intended = useMemo(() => paneLayout(layout, defaultStart), [layout, defaultStart]);
+
+  /* Restore the seam when the split opens. `defaultLayout` is only honored when
+     its ids match the panels present at mount, and collapsed there is one, so
+     `end` arrives to an even split instead of the saved layout.
+
+     It retries because two things arrive late: the group registers its second
+     panel a render after this runs, and the window is still growing from
+     launcher width, where 33% falls under `minStart` and gets clamped there for
+     good. So it re-applies until it reads back what it asked for.
+
+     Only on the collapsed -> expanded edge, or it would pull the seam out from
+     under a drag. Nothing here persists: the library marks imperative layouts
+     `isUserInteraction: false` and the callback below drops those. */
+  useEffect(() => {
+    if (wasCollapsed.current && !collapsed) owedRestore.current = true;
+    wasCollapsed.current = collapsed;
+    if (collapsed || !owedRestore.current) return;
+
+    let left = RESTORE_FRAMES;
+    let frame = 0;
+    const settled = (applied: SplitLayout) =>
+      Object.keys(intended).every(
+        (id) => Math.abs((applied[id] ?? 0) - (intended[id] ?? 0)) < RESTORE_EPSILON,
+      );
+
+    const restore = () => {
+      const group = groupRef.current;
+      const applied = group?.getLayout() ?? {};
+      if (group && Object.keys(applied).length === Object.keys(intended).length) {
+        if (settled(applied)) {
+          owedRestore.current = false;
+          return;
+        }
+        group.setLayout(intended);
+      }
+      if (--left > 0) frame = requestAnimationFrame(restore);
+      else owedRestore.current = false;
+    };
+    frame = requestAnimationFrame(restore);
+    return () => {
+      cancelAnimationFrame(frame);
+    };
+  }, [collapsed, intended, groupRef]);
+
   return (
     <Group
       orientation="horizontal"
+      groupRef={groupRef}
       className={cx("ui-split", collapsed && "ui-split--collapsed", className)}
-      defaultLayout={layout ?? { start: defaultStart, end: 100 - defaultStart }}
+      defaultLayout={intended}
       /* Only a real drag or a keyboard resize. The library also fires this on
          mount, on a constraint recompute and after any imperative call, all
          with `isUserInteraction: false` — forwarding those lets a layout the

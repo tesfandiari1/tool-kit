@@ -80,9 +80,16 @@ const chrome = EditorView.theme({
     color: "var(--ink-3)",
   },
   ".cm-activeLine": { backgroundColor: "var(--surface-well)" },
-  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
-    backgroundColor: "var(--accent-wash)",
-  },
+  /* `drawSelection` paints its own layer, and CodeMirror's base theme targets
+     it as `.cm-selectionLayer .cm-selectionBackground`. Matching that
+     specificity is the point: the single-class rule this replaces lost to the
+     base theme, so a select-all came out in WebKit's default lavender. The
+     native `::selection` is here too, for the unfocused editor and for the
+     read surface beside it. */
+  ".cm-selectionLayer .cm-selectionBackground, &.cm-focused .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection, ::selection":
+    {
+      backgroundColor: "var(--select)",
+    },
   ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent-hover)" },
 });
 /// Deliberately no `{ dark: true }`. That flag is baked in at module load, and

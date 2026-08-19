@@ -1,6 +1,6 @@
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm as confirmDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -58,6 +58,41 @@ export async function resizeWindow(width: number, height: number): Promise<void>
 
 export async function setWindowMinSize(width: number, height: number): Promise<void> {
   await getCurrentWindow().setMinSize(new LogicalSize(width, height));
+}
+
+/// The launcher sizes itself to its content, so it stays fixed. A document
+/// pane has to be growable.
+export async function setWindowResizable(resizable: boolean): Promise<void> {
+  await getCurrentWindow().setResizable(resizable);
+}
+
+export async function setWindowMaxSize(width: number, height: number): Promise<void> {
+  await getCurrentWindow().setMaxSize(new LogicalSize(width, height));
+}
+
+/// macOS clamps `setSize` to the bounds in force at the time, so the launcher
+/// phase has to drop the workspace ceiling before it can shrink back down.
+export async function clearWindowMaxSize(): Promise<void> {
+  await getCurrentWindow().setMaxSize(null);
+}
+
+/// The screen area left after the menu bar and the Dock, in logical pixels:
+/// `workArea` answers in physical ones, and every caller compares this against
+/// a logical window size. `currentMonitor()` also reports the display the
+/// window is on, which `window.screen` does not.
+export async function workArea(): Promise<WindowSize> {
+  const monitor = await currentMonitor();
+  // Null off a real host (the gallery runs in a plain browser tab), where the
+  // screen object is the only answer available.
+  if (!monitor) return { width: window.screen.availWidth, height: window.screen.availHeight };
+  const { width, height } = monitor.workArea.size.toLogical(monitor.scaleFactor);
+  return { width, height };
+}
+
+/// Page zoom scales the whole app, chrome included: in a Tauri window the page
+/// is the app. The webview's own zoom hotkeys stay off so nothing competes.
+export async function setWebviewZoom(factor: number): Promise<void> {
+  await getCurrentWebview().setZoom(factor);
 }
 
 function normalizePaths(sel: string | string[] | null): string[] {

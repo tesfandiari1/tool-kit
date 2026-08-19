@@ -89,6 +89,12 @@
 
   --focus: #7d8cff;
 
+  /* Selected text. The one wash the accent is allowed outside a control,
+     because macOS tints selection with the system accent and matching it is
+     what makes the app feel native. Alpha rather than a solid, so the ink
+     under it keeps its own tone and stays readable. */
+  --select: color-mix(in srgb, var(--accent) 34%, transparent);
+
   color-scheme: dark;
 }
 
@@ -126,6 +132,10 @@
 
   /* The graphite ring is tuned for a dark ground and washes out on cream. */
   --focus: #3923c7;
+
+  /* Cream needs less of the accent: the ink over it is dark, so the same
+     strength that reads on charcoal buries it here. */
+  --select: color-mix(in srgb, var(--accent) 20%, transparent);
 
   color-scheme: light;
 }

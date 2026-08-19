@@ -53,6 +53,10 @@ export type {
 } from "./primitives/Badge";
 
 export { Tabs } from "./primitives/Tabs";
+
+/// A file path as crumbs.
+export { Path } from "./primitives/Path";
+export type { PathProps } from "./primitives/Path";
 export type { TabsProps, TabItem } from "./primitives/Tabs";
 
 export { SourceEditor } from "./primitives/SourceEditor";

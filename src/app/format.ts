@@ -3,6 +3,14 @@ export function basename(p: string) {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
 }
 
+/// `/Users/me/Desktop/a.md` -> `~/Desktop/a.md`.
+///
+/// macOS only, so the home directory is `/Users/<name>` and a regex beats a
+/// host call. Worst case it does not match and the full path shows.
+export function tildePath(p: string) {
+  return p.replace(/^\/Users\/[^/]+/, "~");
+}
+
 export function fmtElapsed(nowMs: number, startedSec: number) {
   const s = Math.max(0, Math.floor(nowMs / 1000) - startedSec);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;

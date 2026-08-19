@@ -14,6 +14,7 @@ import {
   Meter,
   Mono,
   Panel,
+  Path,
   Row,
   Segmented,
   Select,
@@ -29,6 +30,7 @@ import {
   TextInput,
   Well,
 } from "../index";
+import type { SplitLayout } from "../index";
 import "./Gallery.css";
 
 /// Every primitive in every state, in both themes. This is the review surface
@@ -472,13 +474,38 @@ export function Gallery() {
             </Stack>
 
             <Stack gap={2}>
+              <Label>Path</Label>
+              <Panel>
+                <Stack gap={2}>
+                  <Path path="~/Desktop/notes.md" />
+                  <Path path="/Users/me/Documents/Work/2026/Q3/quarterly-report.md" />
+                  <Path path="~/Documents/Work/2026/Q3/quarterly-report.md" max={6} />
+                  <div style={{ width: 190 }}>
+                    <Path path="~/Documents/Work/2026/Q3/quarterly-report.md" />
+                  </div>
+                </Stack>
+              </Panel>
+              <Text size="xs" tone="faint">
+                The middle elides, never the ends: you scan for the file and read the
+                trail only when you need it, so the file is the crumb that must
+                survive. The last row is the same path in 190px, where the trail
+                gives way first because it shrinks a hundred times faster. Hover for
+                the full path.
+              </Text>
+            </Stack>
+
+            <Stack gap={2}>
               <Label>Split pane</Label>
               <SplitPaneSpecimen />
               <Text size="xs" tone="faint">
                 Drag the seam, or focus it and use the arrow keys. The hairline stays
                 a hairline at rest and only brightens under the pointer. Collapsed
                 drops the seam and the end pane; the start pane keeps its instance
-                across the toggle, so the counter below it does not reset.
+                across the toggle, so the counter below it does not reset. The
+                document takes two thirds by default and never less than half. In a
+                specimen this narrow the start pane's 300px floor wins over that
+                share, which is the floor doing its job, and the ratio beside the
+                button is what the last drag reported.
               </Text>
             </Stack>
           </Stack>
@@ -493,14 +520,21 @@ export function Gallery() {
 /// the start pane, and it has to survive the toggle. Rendering `start` outside
 /// the split when collapsed moves it in the tree, React remounts it, and the
 /// count goes back to zero — which in the app was a half-typed API key.
+///
+/// The layout is held here the way `App.tsx` holds it in `settings.json`, so
+/// the readout also shows the restore: drag the seam, collapse, open again, and
+/// the pair comes back rather than resetting to an even split.
 function SplitPaneSpecimen() {
   const [collapsed, setCollapsed] = useState(false);
+  const [layout, setLayout] = useState<SplitLayout>();
   return (
     <Stack gap={2}>
       <Panel>
         <div style={{ height: 160 }}>
           <SplitPane
             collapsed={collapsed}
+            layout={layout}
+            onLayoutChanged={setLayout}
             start={
               <div className="gal__splitpane">
                 <StatefulPaneBody label="Run column" />
@@ -518,6 +552,9 @@ function SplitPaneSpecimen() {
         <Button size="sm" onClick={() => { setCollapsed((c) => !c); }}>
           {collapsed ? "Open the seam" : "Collapse"}
         </Button>
+        <Mono size="sm" tone={layout ? "default" : "ghost"}>
+          {layout ? `${layout.start.toFixed(0)} / ${layout.end.toFixed(0)}` : "-- / --"}
+        </Mono>
       </Row>
     </Stack>
   );

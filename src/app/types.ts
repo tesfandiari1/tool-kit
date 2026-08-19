@@ -88,6 +88,9 @@ export interface Settings {
   /// Inner size while the document pane is open. Null until the first expand.
   expandedWidth: number | null;
   expandedHeight: number | null;
+  /// Webview page-zoom factor, not a font size: it scales the whole app,
+  /// chrome included. 1 is 100%.
+  zoom: number;
 }
 
 export type SecretStatus = Record<SecretId, boolean>;
@@ -108,6 +111,7 @@ export const DEFAULT_SETTINGS: Settings = {
   splitLayout: null,
   expandedWidth: null,
   expandedHeight: null,
+  zoom: 1,
 };
 
 export const ACTIVE: Status[] = ["queued", "working", "processing"];

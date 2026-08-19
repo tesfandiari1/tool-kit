@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ClockCounterClockwiseIcon, GearSixIcon, SparkleIcon } from "@phosphor-icons/react";
-import { Button, Display, SplitPane } from "@ui";
+import { ClockCounterClockwiseIcon, GearSixIcon } from "@phosphor-icons/react";
+import { Button, Label, Mono, SplitPane, StatusDot } from "@ui";
+import { fmtElapsed } from "@/app/format";
+import { barStatus, runCounter } from "./barStatus";
 import { conversionClient } from "@/app/api";
 import { commands } from "@/app/commands";
 import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
@@ -24,34 +26,39 @@ import { SettingsPanel } from "@/domains/settings/SettingsPanel";
 import { DocumentPane } from "@/domains/thread/DocumentPane";
 import { isDirty, type OpenDoc } from "@/domains/thread/model";
 import {
+  clearWindowMaxSize,
   confirm,
   copyToClipboard,
   pickDirectory,
   pickFiles,
   pickFolders,
   resizeWindow,
+  setWindowMaxSize,
   setWindowMinSize,
+  setWindowResizable,
   windowSize,
+  workArea,
   type WindowSize,
 } from "@/platform/host";
+import { LAUNCHER, SPLIT, WORKSPACE, ZOOM } from "./geometry";
 import { useToast } from "./useToast";
 import { useDocuments } from "./useDocuments";
 import { useDocumentSave } from "./useDocumentSave";
 import { useCloseConfirm, useDragDrop, useWindowFocusClass } from "./useHostWindow";
 import { useFitWindow } from "./useFitWindow";
+import { useZoom, zoomLabel } from "./useZoom";
 import "./App.css";
 
-/// The window is two applications at two widths. A launcher fits in 420px; a
-/// split with a readable document does not, so the floor moves with the pane
-/// rather than being one compromise that serves neither.
-const COMPACT_MIN = { width: 420, height: 460 };
-const EXPANDED_MIN = { width: 900, height: 460 };
-/// Ultimate fallback, reached only when the launch-size read failed and no
-/// compact size was ever measured. `tauri.conf.json` is the source of truth
-/// for the first-run default; keep these numbers in sync with its
-/// width/height so a collapse can never leave the window at a size the app
-/// has no opinion about.
-const COMPACT_FALLBACK = { width: 560, height: 560 };
+/// How often to re-ask the conversion service what it can do while the backend
+/// route is selected.
+const CAPABILITY_PROBE_INTERVAL_MS = 15_000;
+
+/// The persisted factor is not trusted. A hand-edited settings.json can hold
+/// anything, and handing that to the webview scales the app to nothing.
+function clampZoom(factor: number): number {
+  if (!Number.isFinite(factor) || factor <= 0) return ZOOM.default;
+  return Math.min(ZOOM.max, Math.max(ZOOM.min, factor));
+}
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -84,6 +91,10 @@ export default function App() {
     settings.datalabFormat,
     settings.datalabPipelineId,
     settings.outputDir,
+    // The route decides which extensions `scan_inputs` counts, so leaving
+    // these out lets the Run button promise a count from the other route.
+    settings.conversionRoute,
+    settings.backendUrl,
     runsFinished,
   ]);
   const scanCurrent = scanResult.key === scanKey;
@@ -187,25 +198,33 @@ export default function App() {
     const probe = { cancelled: false };
     const pendingSave = settingsSave.current;
     setCapabilities({ state: "loading" });
-    void (async () => {
+    const ask = async () => {
       try {
         await pendingSave;
         const { data } = await conversionClient.GET("/api/v1/capabilities");
         if (!data) throw new Error("Conversion service capabilities were unavailable");
-        if (probe.cancelled) return;
+        if (probe.cancelled) return true;
         setCapabilities({
           state: "ready",
           acceptingJobs: data.data.conversion.acceptingJobs,
           inputFormats: data.data.conversion.inputFormats,
         });
+        return true;
       } catch {
         if (!probe.cancelled) setCapabilities({ state: "unavailable" });
+        return false;
       }
-    })();
+    };
+    // Keep asking. A one-shot probe latches Run off for the whole session when
+    // the app starts before the service. `acceptingJobs` also goes stale, so
+    // re-ask after a success.
+    void ask();
+    const retry = window.setInterval(() => void ask(), CAPABILITY_PROBE_INTERVAL_MS);
     return () => {
       probe.cancelled = true;
+      window.clearInterval(retry);
     };
-  }, [settings.backendUrl, settings.conversionRoute]);
+  }, [settings.backendUrl, settings.conversionRoute, runsFinished]);
 
   const persist = useCallback((patch: Partial<Settings>) => {
     applySettings({ ...settingsRef.current, ...patch });
@@ -279,6 +298,14 @@ export default function App() {
 
   const activeCount = jobs.filter((j) => ACTIVE.includes(j.status)).length;
 
+  /// What the title bar says: the live run while one is in flight, otherwise
+  /// the surface you are looking at.
+  const status = barStatus({
+    view,
+    jobs,
+    documentName: docs.find((d) => d.id === activeId)?.title ?? null,
+  });
+
   useEffect(() => {
     if (!running) return;
     const t = window.setInterval(() => setNow(Date.now()), 1000);
@@ -292,16 +319,33 @@ export default function App() {
   const dirtyCount = docs.filter((d) => isDirty(d.save)).length;
   useCloseConfirm(running, activeCount, dirtyCount);
 
+  /// Zoom belongs to the app rather than to the document, and it outlives the
+  /// session.
+  const zoom = clampZoom(settings.zoom);
+  const onZoom = useCallback(
+    (next: number) => {
+      // The ladder clamps at both ends, so Cmd+ at 200% asks for the factor
+      // already in force. No toast for a step that changes nothing.
+      if (next === zoom) return;
+      persist({ zoom: next });
+      showToast(`Zoom ${zoomLabel(next)}`);
+    },
+    [persist, showToast, zoom],
+  );
+  useZoom(zoom, onZoom);
+
   const expanded = docs.length > 0;
-  useFitWindow(!expanded);
+  // Zoom decides how many logical pixels the launcher's content wants, so the
+  // fit has to know it.
+  useFitWindow(!expanded, zoom);
   const wasExpanded = useRef(false);
-  /// The launcher's size, taken the moment before it grows, so collapsing
-  /// puts the window back where the user had it rather than at a default.
+  /// The launcher's size, read the moment before it grows. Only ever
+  /// `LAUNCHER.width` now that the launcher is fixed, but measured rather than
+  /// assumed, so a collapse cannot disagree with the window on screen.
   const compactSize = useRef<WindowSize | null>(null);
   /// The size the window launched at, read once on mount below. Covers a
-  /// collapse that fires before the first compact measurement lands — a
-  /// document opened and closed inside its await — so even that returns to a
-  /// real size rather than the hardcoded fallback.
+  /// collapse that fires before the first launcher measurement lands (a
+  /// document opened and closed inside its await).
   const launchSize = useRef<WindowSize | null>(null);
   const sizesRef = useRef(settings);
 
@@ -309,9 +353,9 @@ export default function App() {
     sizesRef.current = settings;
   }, [settings]);
 
-  // Window defaults live in tauri.conf.json; this read is how JS learns them
-  // instead of hardcoding the config's numbers. A failure just leaves the
-  // hardcoded fallback in charge.
+  // The first-run size comes from tauri.conf.json, which agrees with
+  // `LAUNCHER`. This read is how JS learns what the window took. A failure
+  // leaves the constant in charge.
   useEffect(() => {
     void windowSize()
       .then((size) => {
@@ -320,9 +364,13 @@ export default function App() {
       .catch(() => undefined);
   }, []);
 
-  // The window follows the document. Each mode remembers its own size, so
-  // widening the workspace never leaves the launcher stretched, and a compact
-  // window the user shrank by hand is what comes back.
+  // The window follows the document. Each phase remembers its own size, so
+  // widening the workspace never leaves the launcher stretched, and the
+  // workspace opens where the user last left it rather than at a default.
+  //
+  // The order inside each branch is load-bearing: macOS clamps `setSize` to the
+  // bounds in force at that instant. Widen the bounds before growing, tighten
+  // them before shrinking, or the window lands at the other phase's size.
   //
   // Native resizing is the OS animating a real window: there is nothing here
   // to match in CSS, and trying would fight it.
@@ -330,24 +378,36 @@ export default function App() {
     if (expanded === wasExpanded.current) return;
     wasExpanded.current = expanded;
     void (async () => {
-      const current = await windowSize();
+      // Both reads at once. The split restores its saved ratio a frame after
+      // this effect starts and clamps that percentage against the width in
+      // force right then, so every round trip before the resize costs it.
+      const [current, area] = await Promise.all([
+        windowSize(),
+        expanded ? workArea().catch(() => null) : Promise.resolve(null),
+      ]);
       if (expanded) {
         compactSize.current = current;
-        await setWindowMinSize(EXPANDED_MIN.width, EXPANDED_MIN.height);
+        await setWindowResizable(true);
+        await setWindowMinSize(WORKSPACE.minWidth, WORKSPACE.minHeight);
+        // A ceiling, so a size restored from a larger display cannot open a
+        // window bigger than the screen it is opening on.
+        if (area) await setWindowMaxSize(area.width, area.height);
         const { expandedWidth, expandedHeight } = sizesRef.current;
-        await resizeWindow(
-          expandedWidth ?? Math.max(current.width, EXPANDED_MIN.width),
-          expandedHeight ?? current.height,
-        );
+        await resizeWindow(expandedWidth ?? WORKSPACE.width, expandedHeight ?? WORKSPACE.height);
       } else {
         // Record the workspace size before shrinking, or the next expand
         // reads back the launcher's.
         persist({ expandedWidth: current.width, expandedHeight: current.height });
-        await setWindowMinSize(COMPACT_MIN.width, COMPACT_MIN.height);
-        const w =
-          compactSize.current?.width ?? launchSize.current?.width ?? COMPACT_FALLBACK.width;
-        // Height is set by `useFitWindow` once the compact layout paints.
-        await resizeWindow(w, COMPACT_MIN.height);
+        await setWindowMinSize(LAUNCHER.minWidth, LAUNCHER.minHeight);
+        // The workspace ceiling was one display's work area. Carrying it into
+        // a fixed launcher would cap it on the next display for no reason.
+        await clearWindowMaxSize();
+        const w = compactSize.current?.width ?? launchSize.current?.width ?? LAUNCHER.width;
+        // Height is set by `useFitWindow` once the launcher layout paints.
+        await resizeWindow(w, LAUNCHER.minHeight);
+        // Last, because macOS can refuse the shrink above on a window it has
+        // already pinned as non-resizable.
+        await setWindowResizable(false);
       }
     })();
   }, [expanded, persist]);
@@ -716,6 +776,11 @@ export default function App() {
           }}
         />
       }
+      // Passed rather than left to the primitive's defaults. The split is a
+      // window measurement, so it lives with the rest of them in geometry.ts.
+      defaultStart={SPLIT.start}
+      minStart={SPLIT.minStart}
+      minEnd={SPLIT.minEnd}
       layout={settings.splitLayout ?? undefined}
       onLayoutChanged={(layout) => {
         persist({ splitLayout: layout });
@@ -730,13 +795,30 @@ export default function App() {
           WebKit ignores -webkit-app-region. "deep" so the brand text drags
           too; Tauri's handler already exempts buttons. */}
       <header className="bar" data-tauri-drag-region="deep">
-        <div className="bar-brand">
-          <span className="mark" aria-hidden>
-            <SparkleIcon weight="fill" />
-          </span>
-          <Display as="span" size="lg">
-            Tool-Kit
-          </Display>
+        <div className="bar-lights" aria-hidden />
+        <div className="bar-status">
+          {status.kind === "run" ? (
+            <>
+              <StatusDot tone="live" />
+              <Mono size="sm">{runCounter(status.done, status.total)}</Mono>
+              {status.since !== null && (
+                <>
+                  <Mono size="sm" tone="ghost" aria-hidden>
+                    ·
+                  </Mono>
+                  <Mono size="sm" tone="ghost">
+                    {fmtElapsed(now, status.since)}
+                  </Mono>
+                </>
+              )}
+            </>
+          ) : status.variant === "document" ? (
+            <Mono size="sm" tone="ink" truncate>
+              {status.text}
+            </Mono>
+          ) : (
+            <Label>{status.text}</Label>
+          )}
         </div>
         <div className="bar-actions">
           <Button

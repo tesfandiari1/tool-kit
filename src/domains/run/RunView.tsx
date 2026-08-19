@@ -254,86 +254,95 @@ function JobPanel({
   onHint: () => void;
 }) {
   return (
-    <Panel title="Job">
-      <Stack gap={3}>
-        <Segmented
-          label="Job"
-          value={settings.jobType}
-          onChange={(jobType: JobId) => {
-            persist({ jobType });
-          }}
-          options={JOBS.map((j) => {
-            const JIcon = j.icon;
-            return {
-              value: j.id,
-              label: j.label,
-              icon: (selected: boolean) => <JIcon weight={selected ? "fill" : "regular"} />,
-              count: j.id === "transcribe" ? scan.transcribe : scan.convert,
-            };
-          })}
-        />
-        <Text size="xs" tone="faint" className="run-desc">
-          {runServiceDescription({
-            description: job.desc,
-            provider: job.service,
-            jobType: settings.jobType,
-            conversionRoute: settings.conversionRoute,
-            profile: settings.conversionProfile,
-          })}
-        </Text>
-        <Row gap={2} align="stretch">
-          {/* `lg` is the launcher's single actuator. With a document open the
-              queue is what the column is for, so Run steps down a size rather
-              than staying the loudest thing on screen. */}
-          <Button
-            variant="primary"
-            size={expanded ? "md" : "lg"}
-            block
-            busy={running}
-            disabled={!canRun}
-            onClick={onRun}
-            icon={running ? <CircleNotchIcon className="spin" weight="bold" /> : <PlayIcon weight="fill" />}
-          >
-            {running ? `Working… ${String(finished)} of ${String(total)}` : runLabel}
-          </Button>
-          {running && (
-            <Button
-              variant="quiet"
-              size={expanded ? "md" : "lg"}
-              onClick={onStop}
-              title="Stop this run"
-              icon={<StopIcon weight="fill" />}
-            >
-              Stop
-            </Button>
-          )}
-        </Row>
-        <div className="job-msg">
-          {running && <Meter value={total ? finished / total : 0} label="Run progress" />}
-          {!running && hint && hintActionable && (
-            <button type="button" className="hint" onClick={onHint}>
-              <WarningCircleIcon weight="fill" />
-              {hint}
-            </button>
-          )}
-          {!running && hint && !hintActionable && (
-            <Text size="xs" tone="faint">
-              {hint}
+    /* The message slot sits outside the Panel: it holds two lines open whether
+       or not it has anything to say, and that reservation reads as a failure
+       inside a border. See `.job-msg` in App.css. */
+    <>
+      <Panel title="Job">
+        <Stack gap={3}>
+          <Stack gap={2}>
+            <Segmented
+              label="Job"
+              value={settings.jobType}
+              onChange={(jobType: JobId) => {
+                persist({ jobType });
+              }}
+              options={JOBS.map((j) => {
+                const JIcon = j.icon;
+                return {
+                  value: j.id,
+                  label: j.label,
+                  icon: (selected: boolean) => <JIcon weight={selected ? "fill" : "regular"} />,
+                  count: j.id === "transcribe" ? scan.transcribe : scan.convert,
+                };
+              })}
+            />
+            {/* The line belongs to the control above it, so it sits closer to
+                the segmented than the segmented sits to Run. */}
+            <Text size="xs" tone="faint" className="run-desc">
+              {runServiceDescription({
+                description: job.desc,
+                provider: job.service,
+                jobType: settings.jobType,
+                conversionRoute: settings.conversionRoute,
+                profile: settings.conversionProfile,
+              })}
             </Text>
-          )}
-          {!running && !hint && note && (
-            <Row gap={2}>
-              <Text as="span" size="xs" tone="ghost">
-                <ClockCounterClockwiseIcon />
-              </Text>
-              <Text as="span" size="xs" tone="faint">
-                {note}
-              </Text>
-            </Row>
-          )}
-        </div>
-      </Stack>
-    </Panel>
+          </Stack>
+          <Row gap={2} align="stretch" className="job-run">
+            {/* `lg` is the launcher's single actuator. With a document open the
+                queue is what the column is for, so Run steps down a size rather
+                than staying the loudest thing on screen. */}
+            <Button
+              variant="primary"
+              size={expanded ? "md" : "lg"}
+              block
+              busy={running}
+              disabled={!canRun}
+              onClick={onRun}
+              icon={running ? <CircleNotchIcon className="spin" weight="bold" /> : <PlayIcon weight="fill" />}
+            >
+              {running ? `Working… ${String(finished)} of ${String(total)}` : runLabel}
+            </Button>
+            {running && (
+              <Button
+                variant="quiet"
+                size={expanded ? "md" : "lg"}
+                onClick={onStop}
+                title="Stop this run"
+                icon={<StopIcon weight="fill" />}
+              >
+                Stop
+              </Button>
+            )}
+          </Row>
+        </Stack>
+      </Panel>
+      <div className="job-msg">
+        {running && <Meter value={total ? finished / total : 0} label="Run progress" />}
+        {!running && hint && hintActionable && (
+          <button type="button" className="hint" onClick={onHint}>
+            <WarningCircleIcon weight="fill" />
+            {hint}
+          </button>
+        )}
+        {!running && hint && !hintActionable && (
+          <Text size="xs" tone="faint">
+            {hint}
+          </Text>
+        )}
+        {!running && !hint && note && (
+          <Row gap={2}>
+            <Text as="span" size="xs" tone="ghost">
+              <ClockCounterClockwiseIcon />
+            </Text>
+            <Text as="span" size="xs" tone="faint">
+              {note}
+            </Text>
+          </Row>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -356,7 +365,7 @@ function FolderField({
       }
     >
       <button type="button" className="folder-hit" onClick={onPick} title={path ?? placeholder}>
-        <Row gap={3}>
+        <Row gap={2}>
           {path ? <FolderOpenIcon weight="fill" /> : <FolderIcon />}
           <Mono truncate>{path ? (path.split(/[\\/]/).filter(Boolean).pop() ?? path) : placeholder}</Mono>
         </Row>
@@ -396,14 +405,14 @@ function InputPicker({
               <Text size="sm" tone="faint">
                 Drop files or folders here
               </Text>
-              <Text size="xs" tone="ghost">
+              <Text size="xs" tone="ghost" className="drop-hint">
                 The job is matched to what you drop
               </Text>
             </div>
           ) : (
-            <Stack gap={1}>
+            <Stack gap={3}>
               {inputs.map((p) => (
-                <Row key={p} gap={3} className="drop-item" title={p}>
+                <Row key={p} gap={2} className="drop-item" title={p}>
                   {isFile(p) ? <FileTextIcon /> : <FolderOpenIcon weight="fill" />}
                   <Mono size="xs" truncate>
                     {basename(p)}
@@ -425,7 +434,9 @@ function InputPicker({
             </Stack>
           )}
         </Well>
-        <Row gap={2}>
+        {/* Wraps because the column can be a third of the window: Clear drops
+            to its own line there rather than pushing past the panel. */}
+        <Row gap={2} wrap>
           <Button size="sm" icon={<FileTextIcon />} onClick={onAddFiles}>
             Files
           </Button>

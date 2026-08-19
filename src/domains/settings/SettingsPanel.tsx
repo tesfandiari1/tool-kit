@@ -4,13 +4,13 @@ import {
   Badge,
   Button,
   Disclosure,
-  Display,
   Field,
   Input,
   Label,
   Row,
   Select,
   Spacer,
+  Stack,
   Switch,
   TextInput,
 } from "@ui";
@@ -48,71 +48,79 @@ export function SettingsPanel({
   return (
     <FlowLayout
       head={
-        <Row gap={3}>
-          <Display size="lg">Settings</Display>
+        <Row gap={2}>
           <Spacer />
           <Button variant="ghost" size="sm" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close settings" />
         </Row>
       }
     >
-      <Select
-        label="Conversion route"
-        hint="Direct keeps today's Datalab path. Backend will route each supported file through the local conversion service."
-        value={settings.conversionRoute}
-        onChange={(e) => {
-          onPersist({ conversionRoute: e.target.value === "backend" ? "backend" : "direct" });
-        }}
-        options={[
-          { value: "direct", label: "Direct provider" },
-          { value: "backend", label: "Conversion backend" },
-        ]}
-      />
+      {/* Grouped, so the fields the route reveals read as belonging to it.
+          --s2 attaches them to the control, --s3 separates them from each
+          other, and the column's own --s4 keeps the group apart from what
+          follows. */}
+      <Stack gap={2}>
+        <Select
+          label="Conversion route"
+          hint="Direct keeps today's Datalab path. Backend will route each supported file through the local conversion service."
+          value={settings.conversionRoute}
+          onChange={(e) => {
+            onPersist({ conversionRoute: e.target.value === "backend" ? "backend" : "direct" });
+          }}
+          options={[
+            { value: "direct", label: "Direct provider" },
+            { value: "backend", label: "Conversion backend" },
+          ]}
+        />
 
-      {settings.conversionRoute === "backend" && (
-        <>
-          <BackendUrlField
-            value={settings.backendUrl}
-            onCommit={(backendUrl) => {
-              onPersist({ backendUrl });
-            }}
-          />
-          <Select
-            label="Conversion profile"
-            hint="Standard may use the configured fallback. Local only keeps document bytes on this machine."
-            value={settings.conversionProfile}
-            onChange={(e) => {
-              onPersist({
-                conversionProfile: e.target.value === "local_only" ? "local_only" : "standard",
-              });
-            }}
-            options={[
-              { value: "standard", label: "Standard" },
-              { value: "local_only", label: "Local only" },
-            ]}
+        {settings.conversionRoute === "backend" && (
+          <Stack gap={3}>
+            <BackendUrlField
+              value={settings.backendUrl}
+              onCommit={(backendUrl) => {
+                onPersist({ backendUrl });
+              }}
+            />
+            <Select
+              label="Conversion profile"
+              hint="Standard may use the configured fallback. Local only keeps document bytes on this machine."
+              value={settings.conversionProfile}
+              onChange={(e) => {
+                onPersist({
+                  conversionProfile: e.target.value === "local_only" ? "local_only" : "standard",
+                });
+              }}
+              options={[
+                { value: "standard", label: "Standard" },
+                { value: "local_only", label: "Local only" },
+              ]}
+            />
+            <KeyField
+              label="Backend token"
+              hint="Bearer token"
+              saved={secrets.backend}
+              onSave={(v) => void saveKey("backend", v)}
+            />
+          </Stack>
+        )}
+      </Stack>
+
+      <Stack gap={2}>
+        <Label tone="strong">Provider keys</Label>
+        <Stack gap={3}>
+          <KeyField
+            label="Datalab"
+            hint="X-API-Key"
+            saved={secrets.datalab}
+            onSave={(v) => void saveKey("datalab", v)}
           />
           <KeyField
-            label="Backend token"
-            hint="Bearer token"
-            saved={secrets.backend}
-            onSave={(v) => void saveKey("backend", v)}
+            label="Rev.ai"
+            hint="Access token"
+            saved={secrets.revai}
+            onSave={(v) => void saveKey("revai", v)}
           />
-        </>
-      )}
-
-      <Label tone="strong">Provider keys</Label>
-
-      <KeyField
-        label="Datalab"
-        hint="X-API-Key"
-        saved={secrets.datalab}
-        onSave={(v) => void saveKey("datalab", v)}
-      />
-      <KeyField
-        label="Rev.ai"
-        hint="Access token"
-        saved={secrets.revai}
-        onSave={(v) => void saveKey("revai", v)}
-      />
+        </Stack>
+      </Stack>
 
       <Switch
         label="Skip files already done"
@@ -132,31 +140,33 @@ export function SettingsPanel({
         }}
       />
 
-      <Disclosure open={advanced} onToggle={setAdvanced}>
-        Advanced
-      </Disclosure>
-      {advanced && (
-        <>
-          <Select
-            label="Convert output format"
-            value={settings.datalabFormat}
-            onChange={(e) => {
-              onPersist({ datalabFormat: e.target.value });
-            }}
-            options={[
-              { value: "markdown", label: "Markdown (.md)" },
-              { value: "html", label: "HTML (.html)" },
-              { value: "json", label: "JSON (.json)" },
-            ]}
-          />
-          <PipelineField
-            value={settings.datalabPipelineId}
-            onCommit={(datalabPipelineId) => {
-              onPersist({ datalabPipelineId });
-            }}
-          />
-        </>
-      )}
+      <Stack gap={2}>
+        <Disclosure open={advanced} onToggle={setAdvanced}>
+          Advanced
+        </Disclosure>
+        {advanced && (
+          <Stack gap={3}>
+            <Select
+              label="Convert output format"
+              value={settings.datalabFormat}
+              onChange={(e) => {
+                onPersist({ datalabFormat: e.target.value });
+              }}
+              options={[
+                { value: "markdown", label: "Markdown (.md)" },
+                { value: "html", label: "HTML (.html)" },
+                { value: "json", label: "JSON (.json)" },
+              ]}
+            />
+            <PipelineField
+              value={settings.datalabPipelineId}
+              onCommit={(datalabPipelineId) => {
+                onPersist({ datalabPipelineId });
+              }}
+            />
+          </Stack>
+        )}
+      </Stack>
     </FlowLayout>
   );
 }
@@ -258,7 +268,7 @@ function KeyField({
         </>
       }
     >
-      <Row gap={2} align="center">
+      <Row gap={2} align="center" className="key-row">
         <Input
           id={inputId}
           type="password"

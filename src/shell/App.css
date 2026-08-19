@@ -53,19 +53,30 @@ svg {
 /* Compact launcher: the content sets the height and the native window follows
    it (`useFitWindow`). Two states, and the hook picks between them:
 
-   - growing: nothing scrolls internally, the frame grows instead;
-   - `.is-capped`: the content is taller than the screen, so the frame stops at
-     `--shell-max` and the flow scrolls inside it.
+   - below the ceiling: the frame grows and nothing scrolls
+   - at the ceiling: the frame stops and the page scrolls under a stuck title
+     bar
 
-   Clipping is not a third option. */
+   Clipping is not a third option, and neither is an inner box that caps its own
+   height. See the sticky-bar note below. */
 html.fit-window,
 html.fit-window body,
 html.fit-window #root {
   height: auto;
-  /* Deliberately not `hidden`. A measurement that goes wrong should cost a
-     scrollbar, not the entire interface: `overflow: hidden` here is what turned
-     one 8px container into a blank window. */
-  overflow: visible;
+}
+/* The window is exactly as tall as its content, so there is nothing to scroll
+   to. Without this macOS still rubber-bands the whole interface on a two-finger
+   flick. `overscroll-behavior` stops the bounce reaching the window even at the
+   ceiling. */
+html.fit-window {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+/* The one case that earns a scrollbar: content taller than the screen. This is
+   the viewport's overflow, not a height on any box, so it cannot change what
+   `#root` measures. */
+html.fit-window.is-capped {
+  overflow-y: auto;
 }
 html.fit-window .app {
   height: auto;
@@ -93,23 +104,22 @@ html.fit-window .ui-split__pane {
   overflow: visible;
 }
 
-/* Ceiling reached. The frame stops growing and the flow scrolls inside it, so a
-   queue of two hundred files cannot push the Run button past the screen. */
-html.fit-window.is-capped .app {
-  height: var(--shell-max);
+/* Ceiling reached: the window stops growing and the page scrolls. The page and
+   not an inner box, because a box capped at the ceiling reports the ceiling as
+   its own height and stops resizing, so nothing releases it again. See
+   `useFitWindow`.
+
+   The title bar sticks instead, and takes the material a macOS toolbar shows
+   once content passes under it. Transparent until then, so the window keeps its
+   vibrancy at rest. */
+html.fit-window .bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
-html.fit-window.is-capped .flow:not(.flow--workspace) {
-  flex: 1;
-  min-height: 0;
-}
-html.fit-window.is-capped .flow-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-/* The fade returns with the scroll it belongs to. */
-html.fit-window.is-capped .flow-scroll::after {
-  display: block;
+html.fit-window.is-scrolled .bar {
+  background: var(--surface-scrim);
+  border-bottom: 1px solid var(--rule);
 }
 
 /* --- Title bar ------------------------------------------------------------
@@ -123,46 +133,88 @@ html.fit-window.is-capped .flow-scroll::after {
    alignment with them and leave dead, undraggable strips at either side as
    the window widens. */
 .bar {
-  display: flex;
+  /* Three columns, because macOS centers a window title and the eye reads a
+     centered string as the title of the window it sits in.
+
+     `1fr auto 1fr` centers the middle column on the window rather than on the
+     space left over: the two flanking columns stay equal however wide the
+     actions get. */
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
   gap: var(--s3);
-  padding: var(--s3) var(--s4) var(--s2) 82px;
+  /* Side inset matches the column's, so the actions line up with the panels
+     below them. Symmetric on purpose: a lopsided inset would slide the title
+     off the window's center.
+
+     The top inset divides by `--zoom` for the same reason `.bar-lights` below
+     does: it is measured against `trafficLightPosition`. Undivided, this row
+     sits 24 logical px down at zoom 2, well below the lights. */
+  padding: calc(var(--s3) / var(--zoom, 1)) var(--s5) var(--s2);
   width: 100%;
   flex-shrink: 0;
 }
-/* Layout only. The name itself is a <Display>, which is the one place in the
-   chrome the serif earns its keep. */
-.bar-brand {
+/* macOS draws the traffic lights over this strip at a fixed offset, so the
+   first column is a reservation rather than content. Without it a narrow window
+   slides the title under the lights.
+
+   64 logical pixels, not 64 CSS ones, which is why this is the one width in the
+   app that is not a token: the lights do not zoom with the page. `--zoom`
+   (published on :root by `useZoom`) converts. The fallback keeps the gallery,
+   which has no zoom hook, at 1. */
+.bar-lights {
+  min-width: calc(64px / var(--zoom, 1));
+}
+/* The strip reports rather than brands: see `barStatus.ts`. Mono uppercase is
+   the language's signature and the one type that belongs in chrome. Instrument
+   Serif is drawn for display sizes and muddies at 15px, which is what the old
+   wordmark asked of it. */
+.bar-status {
   display: flex;
   align-items: center;
+  justify-content: center;
+  justify-self: center;
   gap: var(--s2);
+  min-width: 0;
+  /* The row holds its height across every state: the window is sized to its
+     content, so a bar that grew between "Run" and a live counter would resize
+     the window. --s5 is the first rung that clears the tallest state, the 12px
+     mono counter. */
+  min-height: var(--s5);
 }
-/* The mark is a monochrome glyph, not a coloured badge: amber is reserved
-   for reporting state. */
-.bar-brand .mark {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  color: var(--ink-3);
+/* View names wear the label treatment, document names stay in mixed case. */
+.bar-status .ui-label,
+.bar-status .ui-mono {
+  max-width: min(480px, 55vw);
 }
-.bar-brand .mark svg {
-  font-size: 15px;
+/* `white-space: pre` preserves the space `runCounter` pads with. That plus
+   tabular numerals is what stops the timer sliding sideways when the tenth file
+   of twelve lands. */
+.bar-status .ui-mono {
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
 }
 
 .bar-actions {
   display: flex;
   align-items: center;
-  gap: var(--s1);
+  gap: var(--s2);
+  justify-self: end;
 }
 
-/* --- Vertical flow -------------------------------------------------------- */
+/* --- Vertical flow --------------------------------------------------------
+   The column's frame is wider than anything inside it: --s5 against a --s4
+   inter-panel gap reads as a column set into the window, where matching the two
+   read as content spilling to the glass. Nested containers step down from here,
+   never up.
+
+   The top is the exception. It pairs with the title bar's own --s2 to make one
+   --s4 between chrome and the first panel. */
 .flow {
   flex: 1;
   min-height: 0;
   width: 100%;
-  padding: var(--s2) var(--s4) var(--s5);
+  padding: var(--s2) var(--s5) var(--s5);
   display: flex;
   flex-direction: column;
   gap: var(--s4);
@@ -182,11 +234,13 @@ html.fit-window.is-capped .flow-scroll::after {
   gap: 0;
   padding-bottom: 0;
 }
+/* One band, so its parts sit closer to each other than the band sits to the
+   panels under it: --s3 inside, --s4 down to the hairline. */
 .flow-head {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--s4);
+  gap: var(--s3);
   padding-bottom: var(--s4);
   border-bottom: 1px solid var(--rule);
 }
@@ -211,16 +265,43 @@ html.fit-window.is-capped .flow-scroll::after {
   position: sticky;
   bottom: 0;
   display: block;
-  height: 20px;
-  margin-top: -20px;
+  height: var(--s5);
+  margin-top: calc(-1 * var(--s5));
   pointer-events: none;
   opacity: 0.6;
   background: linear-gradient(to bottom, transparent, var(--surface-scrim));
 }
+/* A stack, because the Job panel is followed by its message slot. --s3 keeps
+   that slot reading as attached to the panel above it rather than as a second
+   panel. */
 .flow-foot {
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
   padding: var(--s4) 0 var(--s5);
   border-top: 1px solid var(--rule);
+}
+
+/* A narrow run column sheds detail rather than clipping. `SPLIT.minStart` keeps
+   the seam above the width its controls need, so this is the margin either side
+   of that: a zoom step, a font that loads wide, a future control. Order matters,
+   the least useful thing goes first. */
+@container flow (max-width: 360px) {
+  /* Orientation for a first drop, not something to keep reading. */
+  .drop-hint {
+    display: none;
+  }
+  /* Two tracked mono labels will not sit side by side here, and a segmented
+     control that overflows its panel reads as broken. Stacked, both stay
+     legible and the choice is still visible, which is the whole reason this is
+     a segmented control and not a Select. */
+  .ui-seg {
+    flex-wrap: wrap;
+  }
+  .ui-seg__item {
+    flex: 1 0 100%;
+  }
 }
 
 /* Short windows compress the drop well before they scroll the inputs. */
@@ -262,9 +343,12 @@ html.fit-window.is-capped .flow-scroll::after {
      size-contained column computes 8px tall and clips every child. */
   container-type: size;
   container-name: flow;
-  overflow: hidden;
+  /* The queue absorbs the slack, so this normally never scrolls. It does when
+     there is no queue (a document opened straight from History), and a column
+     that clipped its own controls would be worse than a scrollbar nobody
+     usually sees. The bottom inset stays the column's --s5. */
+  overflow: hidden auto;
   gap: var(--s3);
-  padding-bottom: var(--s3);
   min-height: 0;
 }
 /* Everything above the queue holds its content height; only the queue grows,
@@ -308,10 +392,28 @@ html.fit-window.is-capped .flow-scroll::after {
   max-height: 88px;
   overflow-y: auto;
 }
+/* With a document open the empty state is a reminder of where to drop, not the
+   launcher's hero target. The smaller padding keeps it inside the well's cap
+   without scrolling. */
+.flow--workspace .drop-empty {
+  padding: var(--s3) var(--s2);
+}
 /* Which service a job goes to is orientation for the first drop, not a line
    to keep reading while you work. */
 .flow--workspace .run-desc {
   display: none;
+}
+/* A third of the window cannot hold both segment labels at full advance. The
+   count goes first: the Input panel's badge already carries that number for the
+   job you picked. */
+.flow--workspace .ui-seg__count {
+  display: none;
+}
+/* Run keeps its whole label while a queue drains ("Working… 12 of 200"), so at
+   this width Stop takes the next line rather than pushing that count out past
+   the panel edge. */
+.flow--workspace .job-run {
+  flex-wrap: wrap;
 }
 /* The document you are reading is the one row at full strength and the rest
    step back, so the selection reads without spending a colour on it. */
@@ -373,6 +475,14 @@ html.fit-window.is-capped .flow-scroll::after {
   flex-shrink: 0;
 }
 
+/* --- Key field ------------------------------------------------------------
+   The box shares its row with Save and Remove in a column that can be a third
+   of the window. A native input carries an intrinsic min-width, so without this
+   the box refuses to shrink and pushes both buttons past the column. */
+.key-row .ui-input {
+  min-width: 0;
+}
+
 /* --- Blocking hint --------------------------------------------------------
    Deliberately NOT a <Button>. Every Button wears the mono uppercase label
    treatment with `white-space: nowrap`, which is right for "SAVE" and wrong
@@ -403,8 +513,12 @@ html.fit-window.is-capped .flow-scroll::after {
   margin-top: 1px;
 }
 
-/* Reserved height for the Job panel's message slot so a scan resolving or a
-   hint appearing does not jump the scroll region above the pinned foot. */
+/* Two lines held open so a scan resolving, or a hint arriving, cannot jump the
+   scroll region above the pinned foot or resize the window.
+
+   It sits in the column below the Job panel rather than inside it: 30px of
+   nothing inside a border reads as something that failed to load, and out here
+   it is just the gap between panels. */
 .job-msg {
   min-height: calc(2 * var(--lh-snug) * var(--t-xs));
 }
@@ -416,11 +530,12 @@ html.fit-window.is-capped .flow-scroll::after {
   border-color: var(--accent);
   background: color-mix(in oklch, var(--accent) 14%, var(--surface-well));
 }
+/* The launcher's hero target. Padding rather than a min-height, so the well
+   reads as somewhere to aim a file at. */
 .drop-empty {
   display: grid;
   place-items: center;
-  min-height: 72px;
-  padding: var(--s3) var(--s2);
+  padding: var(--s6) var(--s4);
   text-align: center;
   gap: var(--s1);
 }
@@ -510,7 +625,7 @@ html.fit-window.is-capped .flow-scroll::after {
 /* Actions occupy their slot always, so revealing them never shifts the row. */
 .job-actions {
   display: flex;
-  gap: var(--s1);
+  gap: var(--s2);
   opacity: 0;
   transition: opacity var(--dur-fast) var(--ease);
 }
@@ -531,7 +646,7 @@ html.fit-window.is-capped .flow-scroll::after {
   display: grid;
   place-items: center;
   gap: var(--s1);
-  padding: var(--s5) var(--s4);
+  padding: var(--s6);
   text-align: center;
 }
 /* The preview is the one place the app is a reading surface, so it gets prose
@@ -638,7 +753,9 @@ html.fit-window.is-capped .flow-scroll::after {
   padding: var(--s2) var(--s4);
   border-radius: var(--r-panel);
   font-size: var(--t-sm);
-  max-width: min(460px, calc(100% - var(--s7)));
+  /* Never wider than the column it floats over, so it clears the same window
+     margin every panel keeps. */
+  max-width: min(460px, calc(100% - 2 * var(--s5)));
   box-shadow: 0 8px 24px color-mix(in srgb, var(--warm-950) 55%, transparent);
   z-index: 60;
   animation: toast-in var(--dur-fast) var(--ease-out);
@@ -710,29 +827,33 @@ html.fit-window.is-capped .flow-scroll::after {
   min-height: 0;
   height: 100%;
   background: var(--surface-well);
+  /* So the prose below sizes itself against the pane rather than the window.
+     `inline-size`, never `size`: containing the block axis collapses `.flow`
+     to 8px and blanks the app. */
+  container-type: inline-size;
+  container-name: doc;
 }
 
-/* Title and subtitle are one group (4px). The tab strip already drew the
-   rule above, so the head is tight to it and airs into the body. */
+/* The tab strip already drew the rule above, so the head stays tighter to it
+   than it is to the body. The side inset is the reading column's. */
+/* One row: the document's identity on the left, its controls on the right. The
+   name is already in the title bar and the tab, so what is left to say is where
+   the file lives. */
 .doc-head {
   display: flex;
-  flex-direction: column;
-  gap: var(--s1);
-  padding: var(--s2) var(--s4) var(--s3);
+  padding: var(--s3) var(--s5);
   border-bottom: 1px solid var(--rule);
   flex: none;
 }
-
-/* The title is the one place in the pane that uses the display face, and it
-   sits on the same baseline as the mono labels in the toggle beside it. */
-.doc-head h2 {
+.doc-head > * {
+  flex: 1;
   min-width: 0;
 }
-
-/* Align the subtitle with the title, not the ghost save-dot that holds the
-   slot beside it. The 4px grid nearest the dot-plus-gap is --s4. */
-.doc-head > :last-child {
-  padding-left: var(--s4);
+/* Gives way before the controls do. */
+.doc-id {
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
 }
 
 .doc-body {
@@ -748,21 +869,29 @@ html.fit-window.is-capped .flow-scroll::after {
 .doc-empty {
   align-items: center;
   justify-content: center;
-  gap: var(--s2);
+  gap: var(--s1);
   text-align: center;
-  padding: var(--s8) var(--s5);
+  padding: var(--s6);
 }
 
-/* A real measure. Without this the prose ran the full width of the pane at
-   1180px, which is roughly 130 characters — about twice what an eye tracks. */
+/* The measure has to answer the window. Unbounded, the prose runs the full pane
+   at about 130 characters, roughly twice what an eye tracks back to the start
+   of a line. Fixed at 68ch, every pixel past ~480px becomes margin and widening
+   the window does nothing you can see. So it fills the pane and stops at
+   90ch. */
 .doc .preview-body {
   width: 100%;
-  max-width: 68ch;
+  max-width: clamp(52ch, 100%, 90ch);
   margin: 0 auto;
   flex: 1;
+  /* The measure is in `ch`, so growing the type grows the column with it.
+     `cqi` is a percent of the pane, so this answers the seam as well as the
+     window. */
+  font-size: clamp(var(--t-base), 1.6cqi, var(--t-lg));
 }
+/* Editing is not reading, and no editor centers its text. The gutter belongs
+   against the left edge, with the lines running the width they are given. */
 .doc .ui-source {
   width: 100%;
-  max-width: 76ch;
-  margin: 0 auto;
+  margin: 0;
 }

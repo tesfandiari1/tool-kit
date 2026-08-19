@@ -104,7 +104,7 @@ describe("runButtonLabel", () => {
     expect(runButtonLabel("Convert", 1, 0)).toBe("Convert 1 file");
     expect(runButtonLabel("Convert", 3, 2)).toBe("Convert 3 files");
     expect(runButtonLabel("Convert", 0, 2)).toBe("Copy 2 results");
-    expect(runButtonLabel("Convert", 0, 0)).toBe("Run pipeline");
+    expect(runButtonLabel("Convert", 0, 0)).toBe("Run");
   });
 });
 

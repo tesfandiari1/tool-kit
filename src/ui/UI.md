@@ -31,7 +31,7 @@ you find out months later.
 ## The design language
 
 Derived from AssemblyAI's published theme, retuned for a macOS instrument
-panel. Three rules decide every question:
+panel. Four rules decide every question:
 
 **1. Colour is signal, never decoration.** Amber is live, green is passed, red
 is failed, cobalt is the control you press. Icons, brand marks, and folder
@@ -47,6 +47,34 @@ must never reflow.
 rings, tabular numerals wherever a number ticks, and native `<select>` and
 `<input type=checkbox>` underneath the restyled shells so the platform's
 keyboard and VoiceOver behaviour survives.
+
+**4. Whitespace is a grammar, not a feel.** The 4px scale is in `tokens.css`.
+Which step means what is here, and a wrong step reads as a bug rather than as a
+taste difference. The gap is inversely proportional to the relationship:
+
+| Step | px | Used for |
+|---|---|---|
+| `--s1` | 4 | atoms of one object: title to subtitle, dot to count |
+| `--s2` | 8 | parts of one control: icon to label, two adjacent buttons |
+| `--s3` | 12 | items in a list: queue rows, drop-well items, groups in a panel |
+| `--s4` | 16 | panel body padding, panel to panel |
+| `--s5` | 24 | column to window edge |
+| `--s6` | 32 | empty-state optical padding only |
+| `--s7` `--s8` | 40 48 | not used in chrome at all |
+
+**The outer margin is the largest gap on screen.** A column whose edge inset
+equals its internal gaps has no frame and reads as content spilling to the
+glass, so nested containers step *down* the ladder, never up. `.flow` insets at
+`--s5` and gaps at `--s4`, and matching the two was the single biggest reason
+the window used to read as cramped.
+
+**Air is content-driven, never leftover.** Exactly one element per scroll column
+may absorb slack, which in the run column is the queue. Anything else that
+stretches manufactures a void, and a void inside a panel border reads as
+"something failed to load" rather than as air. A reserved slot is not a void,
+but it belongs between panels: `.job-msg` holds two lines open below the Job
+panel, where the space a resolving scan will fill is indistinguishable from
+column air. Inside the border the same 30px is a bug report.
 
 ### Typography
 
@@ -82,6 +110,7 @@ src/ui/
   index.ts            the entire public surface
   primitives/         grouped by concept, not one file per component
     Text              Label · Display · Text · Mono
+    Path              Path (a file path as crumbs)
     Button            Button
     Surface           Panel · CellGrid · Cell · Well · Divider
     Badge             Badge · Status · StatusDot
@@ -126,7 +155,12 @@ That means `App.tsx` must import `@ui` **before** `./App.css`, so the library's
    `gallery/Gallery.tsx` cannot be reviewed, so it does not exist.
 3. **Check both themes** before calling it done. The toggle is in the gallery's
    top bar.
-4. **Spacing comes from `--s1`..`--s8` only.** The 4px grid has no exceptions.
+4. **Spacing comes from `--s1`..`--s8` only**, on the grammar above. The 4px
+   grid has one exception, and it is not a spacing value: chrome measured
+   against something macOS draws itself. The traffic lights sit at a fixed
+   logical offset and do not zoom with the page, so `.bar-lights` reserves
+   `calc(64px / var(--zoom, 1))` and `.bar` divides its top inset the same way.
+   `useZoom` publishes `--zoom` on `:root`. Nothing else may hold a literal.
 5. **Keep native elements underneath.** A restyled `<select>` keeps type-ahead
    and VoiceOver for free. A div pretending to be one does not.
 

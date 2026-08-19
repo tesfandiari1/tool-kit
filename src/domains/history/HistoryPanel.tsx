@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { EyeIcon, FolderOpenIcon, XIcon } from "@phosphor-icons/react";
-import { Badge, Button, Display, Input, Mono, Row, Spacer, StatusDot, Text } from "@ui";
+import { Badge, Button, Input, Mono, Row, Spacer, StatusDot, Text } from "@ui";
 import { commands } from "@/app/commands";
 import { basename, fmtWhen } from "@/app/format";
 import { HISTORY_LIMIT, type HistoryEntry } from "@/app/types";
@@ -78,8 +78,7 @@ export function HistoryPanel({
     <FlowLayout
       head={
         <>
-          <Row gap={3}>
-            <Display size="lg">History</Display>
+          <Row gap={2}>
             <Spacer />
             <Badge square>
               {rows === null

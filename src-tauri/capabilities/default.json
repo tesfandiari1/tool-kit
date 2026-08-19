@@ -14,6 +14,10 @@
     "core:window:allow-start-dragging",
     "core:window:allow-inner-size",
     "core:window:allow-set-size",
-    "core:window:allow-set-min-size"
+    "core:window:allow-set-min-size",
+    "core:window:allow-set-max-size",
+    "core:window:allow-set-resizable",
+    "core:window:allow-current-monitor",
+    "core:webview:allow-set-webview-zoom"
   ]
 }

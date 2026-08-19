@@ -35,6 +35,13 @@ body {
   cursor: default;
 }
 
+/* Selection. WebKit's default is a near-opaque lavender that swamps the ink on
+   a dark ground, so every surface sets its own. Background only: leaving the
+   colour alone keeps the ink ramp intact under the wash. */
+::selection {
+  background: var(--select);
+}
+
 .ui-selectable {
   -webkit-user-select: text;
   user-select: text;

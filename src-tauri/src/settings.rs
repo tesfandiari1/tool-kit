@@ -79,6 +79,10 @@ pub struct Settings {
     /// Inner window size while the document pane is open.
     pub expanded_width: Option<u32>,
     pub expanded_height: Option<u32>,
+    /// Webview page-zoom factor, not a font size. `#[serde(default)]` on the
+    /// struct fills a missing field from the `Default` impl below, so an
+    /// existing settings.json loads at 1.0 rather than at 0.0.
+    pub zoom: f64,
 }
 
 impl Default for Settings {
@@ -97,6 +101,7 @@ impl Default for Settings {
             split_layout: None,
             expanded_width: None,
             expanded_height: None,
+            zoom: 1.0,
         }
     }
 }
@@ -175,5 +180,7 @@ mod tests {
         assert_eq!(settings.conversion_route, ConversionRoute::Direct);
         assert_eq!(settings.backend_url, "http://127.0.0.1:8080");
         assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
+        // A file written before `zoom` existed must load at 100%, not at 0.0.
+        assert_eq!(settings.zoom, 1.0);
     }
 }

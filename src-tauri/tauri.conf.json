@@ -15,7 +15,7 @@
         "title": "Tool-Kit",
         "width": 560,
         "height": 560,
-        "minWidth": 420,
+        "minWidth": 480,
         "minHeight": 460,
         "resizable": false,
         "titleBarStyle": "Overlay",
