@@ -1045,6 +1045,16 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
                 return;
             }
             if !history::begin_fallback(app, &backend.idempotency_key, provider) {
+                // Nothing was sent, so drop the in-memory claim before failing.
+                // Left set, the next Retry hits the uncertainty guard, is told
+                // a request that never existed may have been billed, and fails
+                // terminally again. The file could never be converted.
+                app.state::<JobManager>()
+                    .update_if_generation(id, generation, |current| {
+                        if let Some(context) = &mut current.backend {
+                            context.fallback = None;
+                        }
+                    });
                 fail_backend_terminal(
                     app,
                     id,
@@ -1210,7 +1220,7 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
     let Some(backend) = job.backend else {
         return;
     };
-    history::upsert_in_flight(
+    if !history::upsert_in_flight(
         app,
         &history::NewInFlight {
             source_path: &job.source_path,
@@ -1221,7 +1231,66 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
             idempotency_key: &backend.idempotency_key,
             conversion_profile: backend.profile.id(),
         },
-    );
+    ) {
+        return;
+    }
+    for step in ledger_replay(&backend) {
+        match step {
+            LedgerReplay::AttachBackendJob(job_id) => {
+                history::attach_backend_job(app, &backend.idempotency_key, &job_id);
+            }
+            LedgerReplay::BeginFallback(provider) => {
+                history::begin_fallback(app, &backend.idempotency_key, &provider);
+            }
+            LedgerReplay::AttachFallbackRequest {
+                request_id,
+                check_url,
+            } => {
+                history::attach_fallback_request(
+                    app,
+                    &backend.idempotency_key,
+                    &request_id,
+                    &check_url,
+                );
+            }
+        }
+    }
+}
+
+/// One ledger write needed to rebuild the remote state Stop deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LedgerReplay {
+    AttachBackendJob(String),
+    BeginFallback(String),
+    AttachFallbackRequest { request_id: String, check_url: String },
+}
+
+/// The writes that put a rebuilt in-flight row back where the deleted one was.
+///
+/// `upsert_in_flight` inserts a bare row: no backend job id, no fallback
+/// columns. Without this replay a Stop, then Retry, then crash reads "no
+/// fallback in flight" on restart and resubmits a request Datalab already
+/// billed, which is the hole the ledger exists to close.
+///
+/// Pure, and separate from the writes, because the app handle a real ledger
+/// needs cannot be built in a unit test.
+fn ledger_replay(backend: &BackendContext) -> Vec<LedgerReplay> {
+    let mut steps = Vec::new();
+    if let Some(job_id) = &backend.backend_job_id {
+        steps.push(LedgerReplay::AttachBackendJob(job_id.clone()));
+    }
+    if let Some(fallback) = &backend.fallback {
+        // The provider goes back first even when the request id is unknown.
+        // An uncertain fallback must stay uncertain, not vanish.
+        steps.push(LedgerReplay::BeginFallback(fallback.provider.clone()));
+        if let (Some(request_id), Some(check_url)) = (&fallback.request_id, &fallback.check_url) {
+            steps.push(LedgerReplay::AttachFallbackRequest {
+                request_id: request_id.clone(),
+                check_url: check_url.clone(),
+            });
+        }
+    }
+    steps
 }
 
 /// Spawn the full lifecycle for one job on the async runtime. `generation` is
@@ -1585,6 +1654,60 @@ mod backend_tests {
     /// A submit whose outcome is unknown leaves the provider recorded with no
     /// request id. Both the ledger and the in-memory context carry that, so a
     /// restart *and* a same-process Retry both refuse to resubmit. Recording
+    /// Stop deletes the ledger row and Retry rebuilds it. The rebuild used to
+    /// drop every remote column, so Stop, Retry, then a crash read "no fallback
+    /// in flight" on restart and resubmitted a request Datalab had already
+    /// billed. That is the exact hole the ledger exists to close.
+    #[test]
+    fn a_rebuilt_ledger_row_replays_the_remote_state_stop_deleted() {
+        let context = |job_id: Option<&str>| {
+            BackendContext::new(
+                "http://127.0.0.1:8080".into(),
+                "11111111-1111-4111-8111-111111111111".into(),
+                "22222222-2222-4222-8222-222222222222".into(),
+                job_id.map(str::to_owned),
+                settings::ConversionProfile::Standard,
+            )
+        };
+
+        // An accepted fallback replays provider and request, so a restart
+        // resumes polling instead of paying again.
+        assert_eq!(
+            ledger_replay(&context(None).resuming_fallback(FallbackContext {
+                provider: DATALAB_PROVIDER.to_owned(),
+                request_id: Some("req-1".to_owned()),
+                check_url: Some("https://example.test/1".to_owned()),
+            })),
+            vec![
+                LedgerReplay::BeginFallback(DATALAB_PROVIDER.to_owned()),
+                LedgerReplay::AttachFallbackRequest {
+                    request_id: "req-1".to_owned(),
+                    check_url: "https://example.test/1".to_owned(),
+                },
+            ],
+        );
+
+        // An uncertain fallback replays the provider alone. Dropping it would
+        // silently downgrade "may have been billed" to "never started".
+        assert_eq!(
+            ledger_replay(&context(None).resuming_fallback(FallbackContext {
+                provider: DATALAB_PROVIDER.to_owned(),
+                request_id: None,
+                check_url: None,
+            })),
+            vec![LedgerReplay::BeginFallback(DATALAB_PROVIDER.to_owned())],
+        );
+
+        // No fallback, but a known backend job still has to come back.
+        assert_eq!(
+            ledger_replay(&context(Some("job-9"))),
+            vec![LedgerReplay::AttachBackendJob("job-9".to_owned())],
+        );
+
+        // A plain submit has nothing to replay beyond the base row.
+        assert!(ledger_replay(&context(None)).is_empty());
+    }
+
     /// only the ledger left Retry able to pay again with no restart involved.
     #[test]
     fn an_uncertain_fallback_is_visible_to_both_restart_and_retry() {
@@ -1599,16 +1722,6 @@ mod backend_tests {
             check_url: Some("https://example.test/1".to_owned()),
         };
 
-        // The guard keys on the request id, not on how the context was built,
-        // so a resumed row and a retried in-memory job hit the same branch.
-        assert!(
-            uncertain.request_id.is_none(),
-            "uncertain must refuse resubmit"
-        );
-        assert!(
-            accepted.request_id.is_some(),
-            "accepted must resume polling"
-        );
 
         let resumed = BackendContext::new(
             "http://127.0.0.1:8080".into(),
