@@ -7,6 +7,10 @@
 
 PRAGMA foreign_keys = OFF;
 
+-- The rebuild is one transaction. sqlx runs this file in autocommit, so
+-- without it a kill between DROP and RENAME leaves an unbootable schema.
+BEGIN;
+
 CREATE TABLE conversions_new (
     id                    TEXT PRIMARY KEY NOT NULL
                                   CHECK(length(id) = 36 AND id = lower(id)),
@@ -173,5 +177,7 @@ CREATE INDEX idx_conversions_active
 CREATE INDEX idx_attempts_fifo
     ON attempts(queue_seq)
     WHERE state = 'queued';
+
+COMMIT;
 
 PRAGMA foreign_keys = ON;

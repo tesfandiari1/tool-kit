@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use sha2::{Digest, Sha256};
@@ -37,16 +38,13 @@ use super::{
         now, source_format_by_media_type, LocalEngineKind, ManifestEngine, ManifestOutput,
         ManifestRoute, ManifestSource,
     },
+    policy::{self, LocalResult, PolicyDecision, RouteKind},
     ArtifactKind, ArtifactRecord, ArtifactView, ConversionManifest, ConversionProfile, JobStatus,
     JobView, SourceMetadata,
 };
 
 const MARKDOWN_MEDIA_TYPE: &str = "text/markdown; charset=utf-8";
 const MANIFEST_MEDIA_TYPE: &str = "application/json";
-const LOCAL_ROUTE: &str = "local_pdf";
-const NATIVE_TEXT_REASON: &str = "native_text_pdf";
-const LOCAL_ANYDOC_ROUTE: &str = "local_anydoc";
-const STRUCTURED_DOCUMENT_REASON: &str = "structured_document";
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -56,6 +54,9 @@ pub struct ConversionService {
     pdf_engine: PdfInspectorEngine,
     anydoc_engine: AnyDocEngine,
     max_output_bytes: u64,
+    /// How long a claimed job may wait for its engine's parser permit before
+    /// the runner gives up and lets startup recovery requeue it.
+    permit_wait_limit: Duration,
     work_notification: Arc<Notify>,
     faults: Arc<FaultBarrier>,
 }
@@ -67,6 +68,7 @@ impl ConversionService {
         pdf_engine: PdfInspectorEngine,
         anydoc_engine: AnyDocEngine,
         max_output_bytes: u64,
+        permit_wait_limit: Duration,
     ) -> Self {
         Self {
             repository,
@@ -74,6 +76,7 @@ impl ConversionService {
             pdf_engine,
             anydoc_engine,
             max_output_bytes,
+            permit_wait_limit,
             work_notification: Arc::new(Notify::new()),
             faults: Arc::new(FaultBarrier::default()),
         }
@@ -341,13 +344,14 @@ impl ConversionService {
             return Ok(());
         }
 
+        // Not corruption: the bytes are intact, no engine claims the type.
         let Some(source_format) = source_format_by_media_type(&job.source.media_type) else {
             self.finish_failure(
                 job_id,
                 attempt_id,
                 FailureStage::ConvertingLocal,
-                "source_integrity_failed",
-                "The immutable source failed integrity validation.",
+                "unsupported_source_media_type",
+                "No local engine handles this source media type.",
                 true,
             )
             .await?;
@@ -396,9 +400,25 @@ impl ConversionService {
             },
         };
 
-        let permit = match source_format.engine {
-            LocalEngineKind::Pdf => self.pdf_engine.acquire().await,
-            LocalEngineKind::AnyDoc => self.anydoc_engine.acquire().await,
+        // A timed-out AnyDoc parse detaches still holding its permit, so this
+        // wait is not always short. Unbounded and cancellation-blind, it froze
+        // the single runner for every engine and outlasted graceful shutdown.
+        let acquire = async {
+            match source_format.engine {
+                LocalEngineKind::Pdf => self.pdf_engine.acquire().await,
+                LocalEngineKind::AnyDoc => self.anydoc_engine.acquire().await,
+            }
+        };
+        let mut cancellation = shutdown.clone();
+        let permit = tokio::select! {
+            permit = acquire => permit,
+            () = wait_for_cancellation(&mut cancellation) => {
+                tracing::info!(%job_id, %attempt_id, "shutdown interrupted an engine permit wait; preserving claim");
+                return Ok(());
+            }
+            () = tokio::time::sleep(self.permit_wait_limit) => {
+                return Err(ConversionExecutionError::EnginePermitStalled { job_id, attempt_id });
+            }
         };
         let permit = match permit {
             Ok(permit) => permit,
@@ -445,21 +465,79 @@ impl ConversionService {
                     .await
             }
         };
-        match conversion {
+        // Everything below this line is the routing policy's call, not the
+        // engine's. The engine reports what it measured; `policy::decide` says
+        // whether that is publishable under this profile.
+        let route = match source_format.engine {
+            LocalEngineKind::Pdf => RouteKind::LocalPdf,
+            LocalEngineKind::AnyDoc => RouteKind::LocalAnyDoc,
+        };
+        let (analysis, local_result, published_bytes) = match conversion {
             Ok(EngineOutcome::Converted {
                 analysis,
                 byte_length,
                 sha256,
             }) => {
-                self.finalize_success(job, paths, analysis, byte_length, sha256)
-                    .await?;
+                let signals = analysis.quality;
+                (
+                    analysis,
+                    LocalResult::Converted(signals),
+                    Some((byte_length, sha256)),
+                )
             }
             Ok(EngineOutcome::NeedsRemote {
                 analysis,
                 reason_code,
-            }) => {
-                let reason = reason_code.as_str().to_owned();
-                let analysis = local_analysis(&analysis, vec![reason.clone()]);
+            }) => (analysis, LocalResult::GaveUp(reason_code), None),
+            Ok(EngineOutcome::Rejected { rejection }) => {
+                self.finish_failure(
+                    job_id,
+                    attempt_id,
+                    FailureStage::ConvertingLocal,
+                    rejection.code,
+                    rejection.message,
+                    true,
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(EngineFailure::Interrupted) => {
+                tracing::info!(
+                    %job_id,
+                    %attempt_id,
+                    %request_id,
+                    "conversion interrupted for shutdown; preserving recoverable state"
+                );
+                return Ok(());
+            }
+            Err(failure) => {
+                self.finish_failure(
+                    job_id,
+                    attempt_id,
+                    FailureStage::ConvertingLocal,
+                    failure.code(),
+                    failure.message(),
+                    true,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+
+        let decision = policy::decide(job.profile.into(), route, local_result);
+        match (&decision, published_bytes) {
+            (PolicyDecision::Publish { .. }, Some((byte_length, sha256))) => {
+                self.finalize_success(job, paths, analysis, decision, byte_length, sha256)
+                    .await?;
+            }
+            // The policy refused to publish output the engine did produce, so
+            // the staged Markdown is discarded with the attempt.
+            (PolicyDecision::NeedsRemote { .. }, _) => {
+                let reason = decision
+                    .reason_codes()
+                    .first()
+                    .map_or_else(String::new, |code| code.as_str().to_owned());
+                let analysis = local_analysis(&analysis, &decision);
                 self.repository
                     .finish_needs_remote(
                         job_id,
@@ -480,32 +558,15 @@ impl ConversionService {
                     "conversion attempt completed"
                 );
             }
-            Ok(EngineOutcome::Rejected { rejection }) => {
+            // A `Publish` decision with no bytes cannot happen: only the
+            // `Converted` arm produces one, and it always carries them.
+            (PolicyDecision::Publish { .. }, None) => {
                 self.finish_failure(
                     job_id,
                     attempt_id,
                     FailureStage::ConvertingLocal,
-                    rejection.code,
-                    rejection.message,
-                    true,
-                )
-                .await?;
-            }
-            Err(EngineFailure::Interrupted) => {
-                tracing::info!(
-                    %job_id,
-                    %attempt_id,
-                    %request_id,
-                    "conversion interrupted for shutdown; preserving recoverable state"
-                );
-            }
-            Err(failure) => {
-                self.finish_failure(
-                    job_id,
-                    attempt_id,
-                    FailureStage::ConvertingLocal,
-                    failure.code(),
-                    failure.message(),
+                    EngineFailure::Protocol.code(),
+                    EngineFailure::Protocol.message(),
                     true,
                 )
                 .await?;
@@ -519,18 +580,14 @@ impl ConversionService {
         job: StoredConversion,
         paths: AttemptPaths,
         engine_analysis: EngineAnalysis,
+        decision: PolicyDecision,
         markdown_bytes: u64,
         markdown_sha256: String,
     ) -> Result<(), ConversionExecutionError> {
         let job_id = job.id;
         let attempt_id = job.active_attempt.id;
         let request_id = job.origin_request_id.clone();
-        let reason_code =
-            match source_format_by_media_type(&job.source.media_type).map(|format| format.engine) {
-                Some(LocalEngineKind::AnyDoc) => STRUCTURED_DOCUMENT_REASON,
-                _ => NATIVE_TEXT_REASON,
-            };
-        let analysis = local_analysis(&engine_analysis, vec![reason_code.to_owned()]);
+        let analysis = local_analysis(&engine_analysis, &decision);
         let finalizing = self
             .repository
             .mark_finalizing(job_id, attempt_id, analysis)
@@ -570,17 +627,19 @@ impl ConversionService {
                 kind: match source_format_by_media_type(&finalizing.source.media_type)
                     .map(|format| format.engine)
                 {
-                    Some(LocalEngineKind::AnyDoc) => LOCAL_ANYDOC_ROUTE.to_owned(),
+                    Some(LocalEngineKind::AnyDoc) => RouteKind::LocalAnyDoc,
                     // `None` is unreachable: the claim fails an engine-less
                     // media type closed. Spelled out rather than wildcarded so
                     // a third engine is a compile error, not a job silently
                     // labelled `local_pdf`.
-                    Some(LocalEngineKind::Pdf) | None => LOCAL_ROUTE.to_owned(),
-                },
-                reason_codes: vec![reason_code.to_owned()],
+                    Some(LocalEngineKind::Pdf) | None => RouteKind::LocalPdf,
+                }
+                .as_str()
+                .to_owned(),
+                reason_codes: decision.reason_strings(),
             },
             document: engine_analysis.diagnostics,
-            warnings: Vec::new(),
+            warnings: decision.warning_strings(),
             output: ManifestOutput {
                 media_type: MARKDOWN_MEDIA_TYPE.to_owned(),
                 byte_length: markdown_bytes,
@@ -968,10 +1027,23 @@ pub(crate) enum ConversionExecutionError {
         attempt_id: Uuid,
         state: ConversionState,
     },
+    #[error(
+        "conversion {job_id} attempt {attempt_id} waited past the engine permit limit; recovery is required"
+    )]
+    EnginePermitStalled { job_id: Uuid, attempt_id: Uuid },
     #[error(transparent)]
     Artifacts(#[from] ArtifactError),
     #[error(transparent)]
     Persistence(#[from] RepositoryError),
+}
+
+/// Resolves once `shutdown` turns true, including when it already is.
+async fn wait_for_cancellation(shutdown: &mut watch::Receiver<bool>) {
+    while !*shutdown.borrow_and_update() {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 pub(crate) fn submission_fingerprint(
@@ -997,25 +1069,25 @@ fn local_start(media_type: &str) -> Option<LocalStart> {
                 name: "pdf-inspector".to_owned(),
                 version: PDF_INSPECTOR_VERSION.to_owned(),
             },
-            route: LOCAL_ROUTE.to_owned(),
+            route: RouteKind::LocalPdf.as_str().to_owned(),
         },
         LocalEngineKind::AnyDoc => LocalStart {
             engine: EngineRecord {
                 name: ANYDOC_ENGINE_NAME.to_owned(),
                 version: ANYDOC_VERSION.to_owned(),
             },
-            route: LOCAL_ANYDOC_ROUTE.to_owned(),
+            route: RouteKind::LocalAnyDoc.as_str().to_owned(),
         },
     };
     Some(start)
 }
 
-fn local_analysis(analysis: &EngineAnalysis, reason_codes: Vec<String>) -> LocalAnalysis {
+fn local_analysis(analysis: &EngineAnalysis, decision: &PolicyDecision) -> LocalAnalysis {
     LocalAnalysis {
         classification: analysis.classification,
         inspection: analysis.diagnostics.clone(),
-        reason_codes,
-        warnings: Vec::new(),
+        reason_codes: decision.reason_strings(),
+        warnings: decision.warning_strings(),
     }
 }
 
@@ -1344,9 +1416,42 @@ mod tests {
 
     use super::{
         classify_artifact_error, manifest_bytes_match, markdown_read_limit,
-        validate_manifest_shape, ArtifactError, ArtifactReadFailure, ManifestOutput,
+        validate_manifest_shape, wait_for_cancellation, ArtifactError, ArtifactReadFailure,
+        ManifestOutput,
     };
     use crate::persistence::{ArtifactKind as StoredArtifactKind, StoredArtifact};
+
+    /// The permit wait selects on this, so it has to fire for a receiver that
+    /// was already cancelled as well as one cancelled later.
+    #[tokio::test]
+    async fn cancellation_resolves_whether_it_arrives_before_or_during_the_wait() {
+        let (already, mut already_rx) = tokio::sync::watch::channel(true);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            wait_for_cancellation(&mut already_rx),
+        )
+        .await
+        .expect("an already-cancelled receiver must resolve immediately");
+        drop(already);
+
+        let (later, mut later_rx) = tokio::sync::watch::channel(false);
+        let waiter = tokio::spawn(async move { wait_for_cancellation(&mut later_rx).await });
+        later.send_replace(true);
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("a later cancellation must wake the wait")
+            .unwrap();
+
+        // A dropped sender must not hang the runner either.
+        let (dropped, mut dropped_rx) = tokio::sync::watch::channel(false);
+        drop(dropped);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            wait_for_cancellation(&mut dropped_rx),
+        )
+        .await
+        .expect("a closed channel must resolve");
+    }
 
     #[test]
     fn artifact_read_errors_distinguish_integrity_from_transient_io() {

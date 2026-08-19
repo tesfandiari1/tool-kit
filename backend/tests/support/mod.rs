@@ -33,6 +33,8 @@ use tool_kit_converter::{
     router, AppState,
 };
 
+pub(crate) mod corpus;
+
 pub(crate) const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 #[derive(Clone, Debug)]
@@ -280,6 +282,43 @@ impl TestHarness {
         .unwrap();
         assert_eq!(conversion.rows_affected(), 1);
         transaction.commit().await.unwrap();
+    }
+
+    /// Break one succeeded attempt's metadata invariant without breaking a
+    /// CHECK: startup recovery requires a classification it recognises.
+    pub(crate) async fn clear_stored_classification(&self, seeded: SeededJob) {
+        let mut connection = self.database_connection().await;
+        let updated = sqlx::query(
+            "UPDATE attempts
+             SET classification = NULL
+             WHERE conversion_id = ?1 AND id = ?2 AND state = 'succeeded'",
+        )
+        .bind(seeded.job_id.hyphenated().to_string())
+        .bind(seeded.attempt_id.hyphenated().to_string())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
+    }
+
+    /// Make one succeeded row undecodable without breaking a CHECK. The reason
+    /// codes column only has to be a JSON array, so an array of numbers is a
+    /// legal row that will not decode as `Vec<String>`. That is a row-level
+    /// decode failure, which is a different bug from a row that decodes and
+    /// then fails invariant validation.
+    pub(crate) async fn corrupt_stored_reason_codes(&self, seeded: SeededJob) {
+        let mut connection = self.database_connection().await;
+        let updated = sqlx::query(
+            "UPDATE attempts
+             SET reason_codes_json = json_array(1, 2)
+             WHERE conversion_id = ?1 AND id = ?2 AND state = 'succeeded'",
+        )
+        .bind(seeded.job_id.hyphenated().to_string())
+        .bind(seeded.attempt_id.hyphenated().to_string())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
     }
 
     pub(crate) async fn attempt_count(&self, job_id: Uuid) -> i64 {

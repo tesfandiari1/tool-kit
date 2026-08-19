@@ -13,6 +13,7 @@ use serde_json::Value;
 use serde_yaml_ng::Value as YamlValue;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use tool_kit_converter::worker_protocol::FallbackReason;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -278,8 +279,15 @@ fn conversion_profile_job_status_and_route_json_values_are_stable() {
         .iter()
         .map(|value| value.as_str().unwrap())
         .collect::<Vec<_>>();
-    let route_values = document["components"]["schemas"]["ConversionJob"]["properties"]["route"]
-        ["properties"]["kind"]["enum"]
+    // Status and manifest share one Route schema, so the kinds cannot diverge.
+    for holder in ["ConversionJob", "ConversionManifest"] {
+        assert_eq!(
+            document["components"]["schemas"][holder]["properties"]["route"]["$ref"].as_str(),
+            Some("#/components/schemas/Route"),
+            "{holder} must reuse the shared Route schema"
+        );
+    }
+    let route_values = document["components"]["schemas"]["Route"]["properties"]["kind"]["enum"]
         .as_sequence()
         .unwrap()
         .iter()
@@ -299,6 +307,94 @@ fn conversion_profile_job_status_and_route_json_values_are_stable() {
         ]
     );
     assert_eq!(route_values, ["local_pdf", "local_anydoc"]);
+}
+
+/// Pull the published strings out of one `as_str` match in policy.rs. The
+/// policy types are crate-private, so the source is the only place an
+/// integration test can read the vocabulary from.
+fn policy_strings(type_name: &str) -> Vec<&'static str> {
+    let source = include_str!("../src/conversion/policy.rs");
+    let (_, after) = source
+        .split_once(&format!("impl {type_name} {{"))
+        .unwrap_or_else(|| panic!("policy.rs must have an impl block for {type_name}"));
+    let (block, _) = after
+        .split_once("\n}\n")
+        .unwrap_or_else(|| panic!("impl {type_name} must end at column zero"));
+    block
+        .split("=> \"")
+        .skip(1)
+        .filter_map(|arm| arm.split_once('"').map(|(value, _)| value))
+        .collect()
+}
+
+fn vocabulary(schema: &YamlValue) -> Vec<&str> {
+    schema["x-vocabulary"]
+        .as_sequence()
+        .expect("x-vocabulary must be a sequence")
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect()
+}
+
+/// The routing vocabulary is documented, not enumerated: the remote route adds
+/// reason codes later, and a closed enum makes that a breaking change for every
+/// generated client. `x-vocabulary` is what keeps "documented" from meaning
+/// "free to drift".
+#[test]
+fn the_documented_routing_vocabulary_is_everything_the_policy_can_emit() {
+    let document: YamlValue = serde_yaml_ng::from_str(include_str!("../openapi/openapi.yaml"))
+        .expect("OpenAPI must be valid YAML");
+    let schemas = &document["components"]["schemas"];
+
+    let reason_codes = &schemas["Route"]["properties"]["reasonCodes"]["items"];
+    assert!(
+        reason_codes["enum"].is_null() && schemas["Warning"]["enum"].is_null(),
+        "closing either vocabulary breaks every client the day a remote code lands"
+    );
+
+    let mut documented_reasons = vocabulary(reason_codes);
+    let mut emitted_reasons = policy_strings("ReasonCode");
+    // ReasonCode::Engine delegates, so the engine's own reasons are published
+    // through the same array. The match makes a new variant a compile error.
+    emitted_reasons.extend(
+        [
+            FallbackReason::ScannedPdf,
+            FallbackReason::ImageBasedPdf,
+            FallbackReason::MixedPdf,
+            FallbackReason::GarbledText,
+            FallbackReason::OcrRequired,
+            FallbackReason::LocalQualityFailed,
+            FallbackReason::OutputTooLarge,
+        ]
+        .map(|reason| match reason {
+            FallbackReason::ScannedPdf => "scanned_pdf",
+            FallbackReason::ImageBasedPdf => "image_based_pdf",
+            FallbackReason::MixedPdf => "mixed_pdf",
+            FallbackReason::GarbledText => "garbled_text",
+            FallbackReason::OcrRequired => "ocr_required",
+            FallbackReason::LocalQualityFailed => "local_quality_failed",
+            FallbackReason::OutputTooLarge => "output_too_large",
+        }),
+    );
+    documented_reasons.sort_unstable();
+    emitted_reasons.sort_unstable();
+    assert_eq!(documented_reasons, emitted_reasons);
+
+    let mut documented_warnings = vocabulary(&schemas["Warning"]);
+    let mut emitted_warnings = policy_strings("Warning");
+    documented_warnings.sort_unstable();
+    emitted_warnings.sort_unstable();
+    assert_eq!(documented_warnings, emitted_warnings);
+
+    // Status and manifest share one Warning schema, so the two lists of
+    // caveats cannot diverge.
+    for holder in ["ConversionJob", "ConversionManifest"] {
+        assert_eq!(
+            schemas[holder]["properties"]["warnings"]["items"]["$ref"].as_str(),
+            Some("#/components/schemas/Warning"),
+            "{holder} must reuse the shared Warning schema"
+        );
+    }
 }
 
 #[tokio::test]

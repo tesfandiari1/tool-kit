@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Tool-Kit Conversion Service
-  version: 0.4.0
+  version: 0.4.2
   description: >-
     CPU-only contract for durable, authenticated document conversion.
     Accepted conversions, idempotency records, and published artifacts are
@@ -70,7 +70,7 @@ paths:
               $ref: "#/components/schemas/ConversionSubmission"
             encoding:
               source:
-                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/msword, application/vnd.openxmlformats-officedocument.presentationml.presentation, application/vnd.ms-powerpoint, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel, application/epub+zip
+                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/msword, application/vnd.openxmlformats-officedocument.presentationml.presentation, application/vnd.ms-powerpoint, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel, application/epub+zip, application/vnd.oasis.opendocument.text, application/vnd.oasis.opendocument.spreadsheet, application/vnd.oasis.opendocument.presentation, application/rtf, text/csv, application/vnd.ms-word.document.macroEnabled.12, application/vnd.ms-excel.sheet.macroEnabled.12, application/vnd.ms-powerpoint.presentation.macroEnabled.12, application/vnd.openxmlformats-officedocument.presentationml.slideshow, application/vnd.ms-powerpoint.slideshow.macroEnabled.12
       responses:
         "202":
           description: Upload completed and the conversion was accepted
@@ -579,20 +579,11 @@ components:
           type: string
           enum: [queued, converting_local, finalizing, succeeded, failed, needs_remote]
         route:
-          type: object
-          required: [kind, reasonCodes]
-          properties:
-            kind:
-              type: string
-              enum: [local_pdf, local_anydoc]
-            reasonCodes:
-              type: array
-              items:
-                type: string
+          $ref: "#/components/schemas/Route"
         warnings:
           type: array
           items:
-            type: string
+            $ref: "#/components/schemas/Warning"
         failure:
           type: object
           required: [code, message]
@@ -673,35 +664,27 @@ components:
           properties:
             name:
               type: string
-              const: pdf-inspector
+              enum: [pdf-inspector, anydoc]
             version:
               type: string
-              const: 1.15.0
             features:
               type: array
               maxItems: 0
               items:
                 type: string
         route:
-          type: object
-          required: [kind, reasonCodes]
-          properties:
-            kind:
-              type: string
-              const: local_pdf
-            reasonCodes:
-              type: array
-              prefixItems:
-                - type: string
-                  const: native_text_pdf
-              minItems: 1
-              maxItems: 1
+          $ref: "#/components/schemas/Route"
         document:
-          $ref: "#/components/schemas/Inspection"
+          description: >-
+            Engine diagnostics. Inspection when engine.name is pdf-inspector,
+            AnyDocDiagnostics when it is anydoc.
+          oneOf:
+            - $ref: "#/components/schemas/Inspection"
+            - $ref: "#/components/schemas/AnyDocDiagnostics"
         warnings:
           type: array
           items:
-            type: string
+            $ref: "#/components/schemas/Warning"
         output:
           $ref: "#/components/schemas/ManifestArtifact"
         startedAt:
@@ -767,6 +750,63 @@ components:
           type: array
           items:
             type: integer
+        processingTimeMs:
+          type: integer
+          minimum: 0
+    Route:
+      type: object
+      required: [kind, reasonCodes]
+      properties:
+        kind:
+          type: string
+          enum: [local_pdf, local_anydoc]
+        reasonCodes:
+          description: >-
+            Why the conversion routed the way it did, in decision order.
+            native_text_pdf, structured_document, and incomplete_local_text are
+            the policy's own codes. The rest are the reason an engine gave for
+            producing no Markdown, which always ends the job needs_remote.
+
+
+            Open vocabulary, deliberately not an enum: the remote route adds
+            codes, and a closed enum would make that a breaking change for
+            every generated client. Render an unknown code verbatim.
+          type: array
+          items:
+            type: string
+            x-vocabulary:
+              - native_text_pdf
+              - structured_document
+              - scanned_pdf
+              - image_based_pdf
+              - mixed_pdf
+              - garbled_text
+              - ocr_required
+              - local_quality_failed
+              - output_too_large
+    Warning:
+      description: >-
+        A caveat about output that was published anyway. Warnings never change
+        the route, they exist so a degraded success stops being a silent one.
+        pages_without_extractable_text means some pages produced no text; the
+        engine cannot say whether those pages were blank or a scan whose
+        content is now missing, so treat it as a prompt to check rather than as
+        proof of loss. dense_tables and multi_column_layout mean local
+        reconstruction of that layout is weaker than the remote route's.
+
+
+        Open vocabulary on the same terms as Route.reasonCodes.
+      type: string
+      x-vocabulary:
+        - pages_without_extractable_text
+        - dense_tables
+        - multi_column_layout
+    AnyDocDiagnostics:
+      type: object
+      required: [format, processingTimeMs]
+      properties:
+        format:
+          type: string
         processingTimeMs:
           type: integer
           minimum: 0

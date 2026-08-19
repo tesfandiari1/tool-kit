@@ -4,7 +4,7 @@ mod outcome;
 mod pdf_inspector;
 
 pub use anydoc::AnyDocEngine;
-pub use outcome::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection};
+pub use outcome::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 pub use pdf_inspector::{EngineStartupError, PdfInspectorEngine};
 
 pub(crate) use anydoc::{AnyDocDiagnostics, ANYDOC_ENGINE_NAME, ANYDOC_VERSION};

@@ -22,7 +22,7 @@ use tokio::{
     sync::{watch, OwnedSemaphorePermit, Semaphore},
 };
 
-use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection};
+use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
     persistence::DocumentClassification,
@@ -186,6 +186,10 @@ impl AnyDocEngine {
         Ok(EngineOutcome::Converted {
             analysis: EngineAnalysis {
                 classification: DocumentClassification::StructuredDocument,
+                // AnyDoc reports no completeness measure. Its own part-level
+                // "skip a broken piece and continue" recovery is silent, so
+                // claiming a measurement here would be inventing one.
+                quality: QualitySignals::unmeasured(),
                 diagnostics: serde_json::to_value(AnyDocDiagnostics {
                     format: format_label(format).to_owned(),
                     processing_time_ms: u64::try_from(elapsed.as_millis())
@@ -367,16 +371,34 @@ mod tests {
         assert!(markdown.contains("Hello from AnyDoc."));
     }
 
+    /// The timeout frees the runner, not the engine. `convert` holds the
+    /// permit inside the blocking closure, so a detached parse keeps it and
+    /// two parses still cannot overlap. That is why `execute_claimed` bounds
+    /// its own permit wait rather than blocking forever.
     #[tokio::test]
-    async fn a_hanging_conversion_times_out_and_the_engine_serves_again() {
+    async fn a_timed_out_parse_keeps_its_permit_until_it_finishes() {
         let engine = AnyDocEngine::new(1024, 1, Duration::from_millis(50));
+        let permit = engine.acquire().await.unwrap();
         let hung = engine
-            .run_bounded(|| std::thread::sleep(Duration::from_secs(2)))
+            .run_bounded(move || {
+                let _permit = permit;
+                std::thread::sleep(Duration::from_millis(400));
+            })
             .await;
         assert_eq!(hung.unwrap_err(), EngineFailure::Timeout);
-        // The detached sleeper expires on its own; the loop is not wedged.
-        let next = engine.run_bounded(|| 42).await.unwrap();
-        assert_eq!(next, 42);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), engine.acquire())
+                .await
+                .is_err(),
+            "a detached parse must still hold the only permit"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), engine.acquire())
+                .await
+                .is_ok(),
+            "the permit must come back when the parse ends"
+        );
     }
 
     #[tokio::test]

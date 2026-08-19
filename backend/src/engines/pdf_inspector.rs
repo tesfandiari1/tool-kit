@@ -17,7 +17,7 @@ use tokio::{
 };
 
 use super::child::wait_for_child;
-use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection};
+use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
     persistence::DocumentClassification,
@@ -415,6 +415,20 @@ fn rejection(code: RejectionCode) -> EngineRejection {
 /// JSON, so manifests and attempt rows written before this change still
 /// validate.
 fn into_analysis(inspection: &Inspection) -> Result<EngineAnalysis, EngineFailure> {
+    let quality = QualitySignals {
+        // pdf-inspector's confidence on a text-based document is exactly the
+        // share of pages it read as native text: 1.0 for an all-native file at
+        // any page count, 0.9 for nine native pages and one scan. Only claim it
+        // as a completeness measure for the classification where that holds.
+        native_text_ratio: match inspection.pdf_type {
+            PdfTypeLabel::TextBased => Some(inspection.confidence),
+            _ => None,
+        },
+        pages_needing_ocr: u32::try_from(inspection.pages_needing_ocr.len())
+            .map_err(|_| EngineFailure::Protocol)?,
+        has_tables: !inspection.pages_with_tables.is_empty(),
+        has_columns: !inspection.pages_with_columns.is_empty(),
+    };
     Ok(EngineAnalysis {
         classification: match inspection.pdf_type {
             PdfTypeLabel::TextBased => DocumentClassification::TextBased,
@@ -422,6 +436,7 @@ fn into_analysis(inspection: &Inspection) -> Result<EngineAnalysis, EngineFailur
             PdfTypeLabel::ImageBased => DocumentClassification::ImageBased,
             PdfTypeLabel::Mixed => DocumentClassification::Mixed,
         },
+        quality,
         diagnostics: serde_json::to_value(inspection).map_err(|_| EngineFailure::Protocol)?,
     })
 }

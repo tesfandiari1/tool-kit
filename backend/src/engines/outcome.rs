@@ -15,9 +15,61 @@ use crate::worker_protocol::FallbackReason;
 pub struct EngineAnalysis {
     /// Routing and provenance classification stored on the attempt.
     pub classification: DocumentClassification,
+    /// Measurements the routing policy reads. Engine-neutral on purpose: the
+    /// policy must not learn what a PDF page is.
+    pub quality: QualitySignals,
     /// Engine-specific detail persisted as attempt diagnostics and embedded in
     /// the manifest. Opaque to the service.
     pub diagnostics: Value,
+}
+
+/// What an engine measured about the output it produced.
+///
+/// An engine that cannot measure something reports `None`, and the policy reads
+/// that as "no claim made", never as "measured and fine". What it does with a
+/// missing claim is the policy's decision, recorded in `policy::decide`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QualitySignals {
+    /// Share of pages the engine counted as carrying extractable text,
+    /// `0.0..=1.0`. `None` when the engine cannot measure it.
+    ///
+    /// **This is not a completeness measure, and must never be used as one.**
+    /// Measured against the real worker, it is wrong in both directions:
+    ///
+    /// - A ten-page report whose cover page holds one title line, with no
+    ///   images anywhere, reports `0.9`. Nothing is missing from the Markdown.
+    /// - A page carrying both text and a full-page scan counts as a text page,
+    ///   so a document can report `1.0` with a whole scan's content absent.
+    ///
+    /// What it does support is the honest statement that some pages produced
+    /// no text, which is why the only thing the policy does with it is warn.
+    pub native_text_ratio: Option<f32>,
+    /// Pages the engine believes need OCR it cannot do.
+    pub pages_needing_ocr: u32,
+    /// Structural complexity the engine detected in the layout.
+    pub has_tables: bool,
+    pub has_columns: bool,
+}
+
+impl QualitySignals {
+    /// For an engine that reports no measurements at all.
+    pub fn unmeasured() -> Self {
+        Self {
+            native_text_ratio: None,
+            pages_needing_ocr: 0,
+            has_tables: false,
+            has_columns: false,
+        }
+    }
+
+    /// True when the engine measured the document and some pages carried no
+    /// extractable text. Says nothing about whether content was lost. Floating
+    /// point comes straight from the engine, so compare with a tolerance
+    /// rather than against exactly 1.0.
+    pub fn has_pages_without_text(self) -> bool {
+        self.native_text_ratio
+            .is_some_and(|ratio| ratio < 1.0 - f32::EPSILON)
+    }
 }
 
 #[derive(Clone, Debug)]

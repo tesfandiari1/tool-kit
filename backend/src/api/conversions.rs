@@ -403,10 +403,16 @@ async fn stream_source(
             request_id,
         ));
     };
-    if field
-        .content_type()
-        .is_none_or(|content_type| !content_type.eq_ignore_ascii_case(format.media_type))
-    {
+    // Compare the essence. A client that sends `text/csv; charset=utf-8` is
+    // sending the admitted type with a parameter, not a different type.
+    if field.content_type().is_none_or(|content_type| {
+        !content_type
+            .split(';')
+            .next()
+            .unwrap_or(content_type)
+            .trim()
+            .eq_ignore_ascii_case(format.media_type)
+    }) {
         return Err(error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "invalid_source_media_type",

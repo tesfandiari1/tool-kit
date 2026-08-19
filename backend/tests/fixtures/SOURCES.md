@@ -40,8 +40,11 @@ with, the adapter is broken.
 | `anydoc/deck.pot` | copy of `handmade-multimaster.ppt`; `pot` is the same OLE container | MIT |
 | `anydoc/truncated.epub` | derived: first 2000 bytes of `book.epub` | MIT |
 
-Every advertised extension has both a round-trip fixture and a bounded-failure
-fixture here, asserted by `every_advertised_anydoc_family_converts` and
+Every advertised extension has a round-trip fixture, and every parser family
+has a bounded-failure fixture. The seven extension variants (`docm`, `xlsm`,
+`pptm`, `ppsx`, `ppsm`, `pps`, `pot`) run through their base family's parser, so
+that family's failure fixture covers them. Asserted by
+`every_advertised_anydoc_family_converts` and
 `broken_and_hostile_anydoc_inputs_fail_closed_without_artifacts`.
 
 The macro-enabled fixtures are derived rather than vendored because the upstream

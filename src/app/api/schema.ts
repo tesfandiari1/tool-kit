@@ -251,12 +251,8 @@ export interface components {
             profile: components["schemas"]["ConversionProfile"];
             /** @enum {string} */
             status: "queued" | "converting_local" | "finalizing" | "succeeded" | "failed" | "needs_remote";
-            route?: {
-                /** @enum {string} */
-                kind: "local_pdf" | "local_anydoc";
-                reasonCodes: string[];
-            };
-            warnings: string[];
+            route?: components["schemas"]["Route"];
+            warnings: components["schemas"]["Warning"][];
             failure?: {
                 code: string;
                 message: string;
@@ -291,21 +287,15 @@ export interface components {
             profile: components["schemas"]["ConversionProfile"];
             source: components["schemas"]["ManifestArtifact"];
             engine: {
-                /** @constant */
-                name: "pdf-inspector";
-                /** @constant */
-                version: "1.15.0";
+                /** @enum {string} */
+                name: "pdf-inspector" | "anydoc";
+                version: string;
                 features: string[];
             };
-            route: {
-                /** @constant */
-                kind: "local_pdf";
-                reasonCodes: [
-                    "native_text_pdf"
-                ];
-            };
-            document: components["schemas"]["Inspection"];
-            warnings: string[];
+            route: components["schemas"]["Route"];
+            /** @description Engine diagnostics. Inspection when engine.name is pdf-inspector, AnyDocDiagnostics when it is anydoc. */
+            document: components["schemas"]["Inspection"] | components["schemas"]["AnyDocDiagnostics"];
+            warnings: components["schemas"]["Warning"][];
             output: components["schemas"]["ManifestArtifact"];
             /** Format: date-time */
             startedAt: string;
@@ -329,6 +319,26 @@ export interface components {
             isComplex: boolean;
             pagesWithTables: number[];
             pagesWithColumns: number[];
+            processingTimeMs: number;
+        };
+        Route: {
+            /** @enum {string} */
+            kind: "local_pdf" | "local_anydoc";
+            /**
+             * @description Why the conversion routed the way it did, in decision order. native_text_pdf, structured_document, and incomplete_local_text are the policy's own codes. The rest are the reason an engine gave for producing no Markdown, which always ends the job needs_remote.
+             *
+             *     Open vocabulary, deliberately not an enum: the remote route adds codes, and a closed enum would make that a breaking change for every generated client. Render an unknown code verbatim.
+             */
+            reasonCodes: string[];
+        };
+        /**
+         * @description A caveat about output that was published anyway. Warnings never change the route, they exist so a degraded success stops being a silent one. pages_without_extractable_text means some pages produced no text; the engine cannot say whether those pages were blank or a scan whose content is now missing, so treat it as a prompt to check rather than as proof of loss. dense_tables and multi_column_layout mean local reconstruction of that layout is weaker than the remote route's.
+         *
+         *     Open vocabulary on the same terms as Route.reasonCodes.
+         */
+        Warning: string;
+        AnyDocDiagnostics: {
+            format: string;
             processingTimeMs: number;
         };
         Sha256: string;

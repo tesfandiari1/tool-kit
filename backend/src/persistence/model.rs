@@ -230,7 +230,20 @@ pub enum CommitOperation {
     FinishFailed,
     FinishSucceeded,
     MarkArtifactIntegrityFailed,
+    QuarantineUnrecoverable,
     InterruptAndRequeue,
+}
+
+/// One row startup recovery must look at. Decoding is per row on purpose: a
+/// listing that fails wholesale puts every job behind the worst row in it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecoveryCandidate {
+    Loaded(Box<StoredConversion>),
+    /// The row exists and cannot be read as a conversion.
+    Undecodable {
+        id: String,
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

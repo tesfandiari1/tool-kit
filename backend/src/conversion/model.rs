@@ -516,6 +516,25 @@ mod tests {
         );
     }
 
+    /// The upload contract and the admission table are the same list. When
+    /// they drifted, OpenAPI advertised 8 media types while the service
+    /// accepted 18.
+    #[test]
+    fn advertised_media_types_match_the_openapi_upload_contract() {
+        let spec = include_str!("../../openapi/openapi.yaml");
+        let declared = spec
+            .split_once(
+                "            encoding:\n              source:\n                contentType: ",
+            )
+            .expect("the multipart source encoding must exist")
+            .1
+            .split_once('\n')
+            .expect("the contentType line must end")
+            .0;
+        let declared: Vec<&str> = declared.split(", ").map(str::trim).collect();
+        assert_eq!(declared, advertised_media_types());
+    }
+
     #[test]
     fn every_extension_is_unique_and_lowercase() {
         let mut seen = Vec::new();

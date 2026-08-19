@@ -6,7 +6,7 @@ use crate::{
     conversion::{ArtifactReadFailure, ConversionService},
     persistence::{
         AttemptState, ConversionState, DocumentClassification, FailedResult, FailureStage,
-        RepositoryError, RequeueOutcome, StoredConversion, StoredFailure,
+        RecoveryCandidate, RepositoryError, RequeueOutcome, StoredConversion, StoredFailure,
     },
 };
 
@@ -17,6 +17,9 @@ const ARTIFACT_INTEGRITY_MESSAGE: &str = "A published artifact failed integrity 
 const RECOVERY_LIMIT_CODE: &str = "recovery_limit_exceeded";
 const RECOVERY_LIMIT_MESSAGE: &str =
     "The conversion exceeded the configured startup recovery limit.";
+const UNRECOVERABLE_CODE: &str = "recovery_state_unrecoverable";
+const UNRECOVERABLE_MESSAGE: &str =
+    "The conversion could not be reconciled at startup and was quarantined.";
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StartupRecovery {
@@ -28,16 +31,79 @@ impl StartupRecovery {
         Self { recovery_limit }
     }
 
+    /// **One bad row must never stop the service from booting.** Only a
+    /// repository failure aborts startup, because then nothing works anyway.
+    /// See [`Containment`]. Returning on the first error turned one unreadable
+    /// artifact into a crash loop under `restart: unless-stopped`.
     pub(crate) async fn run(self, service: &ConversionService) -> Result<(), StartupRecoveryError> {
         self.quarantine_orphans(service).await?;
         let candidates = service
             .recovery_repository()
             .list_recovery_candidates()
             .await?;
-        for job in candidates {
-            Box::pin(self.reconcile_job(service, job)).await?;
+        for candidate in candidates {
+            let job = match candidate {
+                RecoveryCandidate::Loaded(job) => *job,
+                // The row will not decode at all. Nothing downstream could
+                // read it either, so fail it and keep booting.
+                RecoveryCandidate::Undecodable { id, reason } => {
+                    tracing::error!(
+                        conversion_id = %id,
+                        %reason,
+                        failure_code = UNRECOVERABLE_CODE,
+                        "startup recovery quarantined an unreadable conversion row"
+                    );
+                    self.quarantine(service, &id).await?;
+                    continue;
+                }
+            };
+            let job_id = job.id;
+            let attempt_id = job.active_attempt.id;
+            let Err(error) = Box::pin(self.reconcile_job(service, job)).await else {
+                continue;
+            };
+            match error.containment() {
+                Containment::AbortStartup => return Err(error),
+                Containment::LeaveStored => {
+                    tracing::error!(
+                        %job_id,
+                        %attempt_id,
+                        %error,
+                        "startup recovery could not read a conversion's files; leaving it stored for revalidation"
+                    );
+                }
+                Containment::QuarantineJob => {
+                    tracing::error!(
+                        %job_id,
+                        %attempt_id,
+                        %error,
+                        failure_code = UNRECOVERABLE_CODE,
+                        "startup recovery quarantined a conversion it cannot reconcile"
+                    );
+                    self.quarantine(service, &job_id.hyphenated().to_string())
+                        .await?;
+                }
+            }
         }
         Ok(())
+    }
+
+    async fn quarantine(
+        self,
+        service: &ConversionService,
+        conversion_id: &str,
+    ) -> Result<(), StartupRecoveryError> {
+        service
+            .recovery_repository()
+            .quarantine_unrecoverable(
+                conversion_id,
+                StoredFailure {
+                    code: UNRECOVERABLE_CODE.to_owned(),
+                    message: UNRECOVERABLE_MESSAGE.to_owned(),
+                },
+            )
+            .await
+            .map_err(StartupRecoveryError::from)
     }
 
     async fn quarantine_orphans(
@@ -376,6 +442,32 @@ async fn fail_source_integrity(
         "startup recovery failed a conversion with a corrupted source"
     );
     Ok(())
+}
+
+/// What one job's reconciliation failure costs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Containment {
+    /// The database is unusable.
+    AbortStartup,
+    /// This job's stored metadata cannot be trusted. Fail it, keep booting.
+    QuarantineJob,
+    /// Unreadable now is not proof of wrong. Leave the row; the request path
+    /// revalidates before serving.
+    LeaveStored,
+}
+
+impl StartupRecoveryError {
+    fn containment(&self) -> Containment {
+        match self {
+            Self::Persistence(_) => Containment::AbortStartup,
+            Self::Artifacts(_) => Containment::LeaveStored,
+            Self::UnexpectedCandidateState { .. }
+            | Self::RecoveryLimitStateChanged { .. }
+            | Self::AttemptStateMismatch { .. }
+            | Self::UnexpectedArtifactRows { .. }
+            | Self::PersistedMetadataInvariant { .. } => Containment::QuarantineJob,
+        }
+    }
 }
 
 #[derive(Debug, Error)]

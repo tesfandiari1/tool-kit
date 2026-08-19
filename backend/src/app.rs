@@ -59,6 +59,10 @@ impl AppState {
             pdf_engine,
             anydoc_engine,
             settings.limits.max_output_bytes,
+            // A parse that outlives its own hard timeout keeps the permit while
+            // it detaches. Give the next claim one more timeout to wait, then
+            // exit so startup recovery requeues instead of the runner freezing.
+            settings.limits.pdf_timeout,
         );
         StartupRecovery::new(settings.recovery_limit)
             .run(&service)

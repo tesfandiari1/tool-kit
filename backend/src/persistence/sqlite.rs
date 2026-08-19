@@ -16,8 +16,8 @@ use uuid::Uuid;
 use super::model::{
     ArtifactKind, AttemptState, CommitOperation, ConversionState, CreateOutcome, EngineRecord,
     FailedResult, LocalAnalysis, LocalStart, NeedsRemoteResult, NewArtifact, NewConversion,
-    Profile, RequeueOutcome, StoredArtifact, StoredAttempt, StoredConversion, StoredFailure,
-    StoredSource, SuccessfulArtifacts,
+    Profile, RecoveryCandidate, RequeueOutcome, StoredArtifact, StoredAttempt, StoredConversion,
+    StoredFailure, StoredSource, SuccessfulArtifacts,
 };
 
 pub const DATABASE_FILENAME: &str = "converter.sqlite";
@@ -603,6 +603,41 @@ impl SqliteRepository {
         Ok(conversion)
     }
 
+    /// Fail one conversion whose stored state startup recovery cannot trust.
+    /// No state precondition on purpose: the stored state is the thing that
+    /// does not make sense. Attempt rows are left for audit, as
+    /// `mark_artifact_integrity_failed` leaves them.
+    pub async fn quarantine_unrecoverable(
+        &self,
+        conversion_id: &str,
+        failure: StoredFailure,
+    ) -> Result<(), RepositoryError> {
+        validate_failure(&failure)?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let updated_at = now_rfc3339()?;
+        let conversion = sqlx::query(
+            "UPDATE conversions
+             SET status = 'failed', failure_code = ?1, failure_message = ?2,
+                 updated_at = ?3
+             WHERE id = ?4 AND auth_scope = ?5 AND status <> 'failed'",
+        )
+        .bind(&failure.code)
+        .bind(&failure.message)
+        .bind(&updated_at)
+        .bind(conversion_id)
+        .bind(AUTH_SCOPE)
+        .execute(&mut *transaction)
+        .await?;
+        require_one_transition_row(conversion.rows_affected(), "conversions.status")?;
+        transaction
+            .commit()
+            .await
+            .map_err(|source| RepositoryError::QuarantineCommitFailed {
+                conversion_id: conversion_id.to_owned(),
+                source,
+            })
+    }
+
     pub async fn interrupt_and_requeue(
         &self,
         conversion_id: Uuid,
@@ -714,7 +749,15 @@ impl SqliteRepository {
         Ok(RequeueOutcome::Requeued(conversion))
     }
 
-    pub async fn list_recovery_candidates(&self) -> Result<Vec<StoredConversion>, RepositoryError> {
+    /// List what startup recovery must reconcile.
+    ///
+    /// **Each row decodes independently.** A row whose id, JSON, or enum will
+    /// not parse comes back as `Undecodable` rather than aborting the listing.
+    /// Containing per-job reconciliation errors is worthless if one malformed
+    /// column can still stop the boot before reconciliation begins.
+    pub async fn list_recovery_candidates(
+        &self,
+    ) -> Result<Vec<RecoveryCandidate>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let rows = sqlx::query(
             "SELECT c.id
@@ -730,23 +773,54 @@ impl SqliteRepository {
         .bind(AUTH_SCOPE)
         .fetch_all(&mut *transaction)
         .await?;
-        let mut conversions = Vec::with_capacity(rows.len());
+        let mut candidates = Vec::with_capacity(rows.len());
         for row in rows {
-            let conversion_id = parse_uuid(row.try_get("id")?, "conversions.id")?;
-            conversions.push(load_required_conversion(&mut transaction, conversion_id).await?);
+            let raw_id: String = match row.try_get("id") {
+                Ok(value) => value,
+                Err(error) => {
+                    // No id means no way to name the row. Nothing can claim it
+                    // either, so record it and move on.
+                    tracing::error!(%error, "a conversion row has no readable id");
+                    continue;
+                }
+            };
+            let Ok(conversion_id) = Uuid::parse_str(&raw_id) else {
+                candidates.push(RecoveryCandidate::Undecodable {
+                    id: raw_id,
+                    reason: "conversions.id is not a UUID".to_owned(),
+                });
+                continue;
+            };
+            match load_required_conversion(&mut transaction, conversion_id).await {
+                Ok(conversion) => candidates.push(RecoveryCandidate::Loaded(Box::new(conversion))),
+                // A decode failure is this row's problem. A pool or IO failure
+                // is everyone's, and `RepositoryError` does not separate them,
+                // so treat the row as undecodable and let the health probe and
+                // the worker surface a genuinely broken database.
+                Err(error) => candidates.push(RecoveryCandidate::Undecodable {
+                    id: raw_id,
+                    reason: error.to_string(),
+                }),
+            }
         }
         transaction.commit().await?;
-        Ok(conversions)
+        Ok(candidates)
     }
 
+    /// Ids that own storage. An unparseable id names no directory, so it is
+    /// skipped rather than aborting orphan quarantine.
     pub async fn list_conversion_ids(&self) -> Result<HashSet<Uuid>, RepositoryError> {
         let rows = sqlx::query("SELECT id FROM conversions WHERE auth_scope = ?1")
             .bind(AUTH_SCOPE)
             .fetch_all(&self.pool)
             .await?;
-        rows.into_iter()
-            .map(|row| parse_uuid(row.try_get("id")?, "conversions.id"))
-            .collect()
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let raw: String = row.try_get("id").ok()?;
+                Uuid::parse_str(&raw).ok()
+            })
+            .collect())
     }
 
     pub async fn health_check(&self) -> Result<(), RepositoryError> {
@@ -813,8 +887,8 @@ async fn fail_unclaimable_source(
     let attempt_id = attempt_id.hyphenated().to_string();
     let attempt = sqlx::query(
         "UPDATE attempts
-         SET state = 'failed', failure_code = 'source_integrity_failed',
-             failure_message = 'The immutable source failed integrity validation.',
+         SET state = 'failed', failure_code = 'unsupported_source_media_type',
+             failure_message = 'No local engine handles this source media type.',
              updated_at = ?1, finished_at = ?1
          WHERE conversion_id = ?2 AND id = ?3 AND state = 'queued'",
     )
@@ -827,8 +901,8 @@ async fn fail_unclaimable_source(
 
     let conversion = sqlx::query(
         "UPDATE conversions
-         SET status = 'failed', failure_code = 'source_integrity_failed',
-             failure_message = 'The immutable source failed integrity validation.',
+         SET status = 'failed', failure_code = 'unsupported_source_media_type',
+             failure_message = 'No local engine handles this source media type.',
              updated_at = ?1
          WHERE id = ?2 AND auth_scope = ?3 AND active_attempt_id = ?4
            AND status = 'queued'",
@@ -1609,6 +1683,12 @@ pub enum RepositoryError {
     Migration(#[from] MigrateError),
     #[error("cannot create a timestamp")]
     Timestamp(#[source] time::error::Format),
+    #[error("quarantine of conversion {conversion_id} did not commit")]
+    QuarantineCommitFailed {
+        conversion_id: String,
+        #[source]
+        source: sqlx::Error,
+    },
 }
 
 #[cfg(test)]
@@ -1627,11 +1707,66 @@ mod tests {
     use crate::persistence::{
         ArtifactKind, AttemptState, ConversionState, CreateOutcome, DocumentClassification,
         EngineRecord, FailedResult, FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult,
-        NewArtifact, NewConversion, NewSource, Profile, RequeueOutcome, StoredFailure,
-        SuccessfulArtifacts,
+        NewArtifact, NewConversion, NewSource, Profile, RecoveryCandidate, RequeueOutcome,
+        StoredFailure, SuccessfulArtifacts,
     };
 
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// `-- no-transaction` runs the file in autocommit, so a rebuild that
+    /// drops before it renames has a window where neither table exists under
+    /// the real name and `_sqlx_migrations` is unwritten. The next boot
+    /// re-runs the file and dies on "table already exists". The pragma stays
+    /// outside the pair, where it is not a no-op.
+    #[test]
+    fn every_no_transaction_migration_wraps_its_rebuild_in_one_transaction() {
+        let mut checked = 0;
+        for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).unwrap()
+        {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+            if path.extension().and_then(|value| value.to_str()) != Some("sql") {
+                continue;
+            }
+            let sql = std::fs::read_to_string(&path).unwrap();
+            if !sql.starts_with("-- no-transaction") {
+                continue;
+            }
+            checked += 1;
+            // Comments quote these keywords, so judge statements only.
+            let statements: String = sql
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                statements.matches("\nBEGIN;").count(),
+                1,
+                "{name} runs outside a sqlx transaction and must open exactly one of its own"
+            );
+            assert_eq!(
+                statements.matches("\nCOMMIT;").count(),
+                1,
+                "{name} opens a transaction it never commits"
+            );
+            let begin = statements.find("\nBEGIN;").unwrap();
+            let commit = statements.find("\nCOMMIT;").unwrap();
+            assert!(begin < commit, "{name} commits before it begins");
+            for (index, _) in statements.match_indices("DROP TABLE") {
+                assert!(
+                    index > begin && index < commit,
+                    "{name} drops a table outside its transaction"
+                );
+            }
+            assert!(
+                statements
+                    .find("PRAGMA foreign_keys = OFF")
+                    .is_none_or(|pragma| pragma < begin),
+                "{name} disables foreign keys inside a transaction, where the pragma is a no-op"
+            );
+        }
+        assert!(checked >= 2, "migrations were not read");
+    }
 
     #[tokio::test]
     async fn migrations_upgrade_a_populated_m2_database() {
@@ -2944,7 +3079,16 @@ mod tests {
             .unwrap();
 
         let candidates = repository.list_recovery_candidates().await.unwrap();
-        let candidate_ids = candidates
+        let loaded = candidates
+            .iter()
+            .map(|candidate| match candidate {
+                RecoveryCandidate::Loaded(conversion) => conversion.as_ref(),
+                RecoveryCandidate::Undecodable { id, reason } => {
+                    panic!("row {id} should decode: {reason}")
+                }
+            })
+            .collect::<Vec<_>>();
+        let candidate_ids = loaded
             .iter()
             .map(|conversion| conversion.id)
             .collect::<HashSet<_>>();
@@ -2953,7 +3097,7 @@ mod tests {
             HashSet::from([queued.id, converting.id, finalizing.id, succeeded.id])
         );
         assert_eq!(
-            candidates
+            loaded
                 .iter()
                 .find(|conversion| conversion.id == succeeded.id)
                 .unwrap()

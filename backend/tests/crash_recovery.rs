@@ -45,6 +45,27 @@ async fn park_at(app: &TestApp, point: FaultPoint, idempotency_key: &str) -> See
     seeded
 }
 
+/// Submits one clean PDF and returns once it has succeeded.
+async fn submit_succeeded_job(app: &TestApp, idempotency_key: &str) -> SeededJob {
+    let response = app
+        .submit(
+            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "fixture.pdf"),
+            idempotency_key,
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let submitted = json_body(response).await;
+    let seeded = SeededJob {
+        job_id: Uuid::parse_str(submitted["data"]["id"].as_str().unwrap()).unwrap(),
+        attempt_id: Uuid::parse_str(submitted["data"]["activeAttemptId"].as_str().unwrap())
+            .unwrap(),
+    };
+    let completed = app.wait_for_terminal(&seeded.job_id.to_string()).await;
+    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+    seeded
+}
+
 /// One attempt's durable directories, read from the data root instead of from
 /// the service that wrote them.
 struct AttemptFiles {
@@ -318,4 +339,91 @@ async fn queued_job_survives_restart_on_its_original_attempt() {
     assert_eq!(harness.attempt_states(job_id).await, ["succeeded"]);
     assert_artifacts_download(&restarted, job_id).await;
     assert!(!restarted.job_runner_failed());
+}
+
+/// One unreadable row used to abort startup for the whole service, which
+/// `restart: unless-stopped` turns into a crash loop.
+#[tokio::test]
+async fn an_unreadable_conversion_is_quarantined_instead_of_stopping_the_boot() {
+    let harness = TestHarness::new();
+    let app = harness.app().await;
+    let healthy = submit_succeeded_job(&app, "quarantine-healthy").await;
+    let poisoned = submit_succeeded_job(&app, "quarantine-poisoned").await;
+    app.shutdown(Duration::from_secs(5)).await;
+    drop(app);
+
+    harness.clear_stored_classification(poisoned).await;
+
+    // This call used to panic: initialize returned the bad row's error.
+    let restarted = harness.app().await;
+
+    let quarantined = restarted
+        .authorized_get(&format!("/api/v1/conversions/{}", poisoned.job_id))
+        .await;
+    assert_eq!(quarantined.status(), StatusCode::OK);
+    let quarantined = json_body(quarantined).await;
+    assert_eq!(quarantined["data"]["status"], "failed", "{quarantined:#}");
+    assert_eq!(
+        quarantined["data"]["failure"]["code"], "recovery_state_unrecoverable",
+        "{quarantined:#}"
+    );
+
+    // Audit rows survive, and the healthy neighbour is untouched.
+    assert_eq!(harness.artifact_row_count(poisoned.attempt_id).await, 2);
+    let survivor = restarted
+        .authorized_get(&format!("/api/v1/conversions/{}", healthy.job_id))
+        .await;
+    assert_eq!(json_body(survivor).await["data"]["status"], "succeeded");
+    assert_artifacts_download(&restarted, healthy.job_id).await;
+    assert!(!restarted.job_runner_failed());
+
+    // The quarantined row is terminal, so a second boot never revisits it.
+    restarted.shutdown(Duration::from_secs(5)).await;
+    drop(restarted);
+    let third = harness.app().await;
+    assert!(!third.job_runner_failed());
+    assert_artifacts_download(&third, healthy.job_id).await;
+}
+
+/// The other half of the same class. A row that will not decode at all used to
+/// abort `list_recovery_candidates` before any per-job containment ran, so
+/// containing reconciliation errors alone did not stop the boot loop.
+#[tokio::test]
+async fn a_row_that_cannot_be_decoded_is_quarantined_instead_of_stopping_the_boot() {
+    let harness = TestHarness::new();
+    let app = harness.app().await;
+    let healthy = submit_succeeded_job(&app, "decode-healthy").await;
+    let corrupt = submit_succeeded_job(&app, "decode-corrupt").await;
+    app.shutdown(Duration::from_secs(5)).await;
+    drop(app);
+
+    harness.corrupt_stored_reason_codes(corrupt).await;
+
+    // Used to panic here: the listing decoded rows with `?`, so this row took
+    // the whole boot down before any per-job containment ran.
+    let restarted = harness.app().await;
+
+    // The row is terminal, so nothing will claim it or revisit it. Read it from
+    // SQL, because the row is genuinely unreadable: its own GET answers with a
+    // bounded error rather than a status, which is the truth about it.
+    let (status, _) = harness.stored_status(corrupt.job_id).await;
+    assert_eq!(status, "failed");
+    let unreadable = restarted
+        .authorized_get(&format!("/api/v1/conversions/{}", corrupt.job_id))
+        .await;
+    assert_eq!(unreadable.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let survivor = restarted
+        .authorized_get(&format!("/api/v1/conversions/{}", healthy.job_id))
+        .await;
+    assert_eq!(json_body(survivor).await["data"]["status"], "succeeded");
+    assert_artifacts_download(&restarted, healthy.job_id).await;
+    assert!(!restarted.job_runner_failed());
+
+    // And the next boot is clean too, rather than re-quarantining forever.
+    restarted.shutdown(Duration::from_secs(5)).await;
+    drop(restarted);
+    let third = harness.app().await;
+    assert!(!third.job_runner_failed());
+    assert_artifacts_download(&third, healthy.job_id).await;
 }
