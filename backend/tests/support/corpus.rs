@@ -363,13 +363,19 @@ mod tests {
         }
     }
 
-    /// Writes `native_pdf(1)` when `TOOLKIT_CORPUS_PDF_OUT` is set. Used by
-    /// `backend/scripts/print-corpus-pdf.sh` for manual acceptance runs.
+    /// Writes a one-page corpus PDF when `TOOLKIT_CORPUS_PDF_OUT` is set.
+    /// `TOOLKIT_CORPUS_PDF_KIND` picks `native` (default) or `scanned`, because
+    /// acceptance step D.6 needs a scanned input and nothing else produces one.
+    /// Used by `backend/scripts/print-corpus-pdf.sh`.
     #[test]
     fn write_native_pdf_fixture_to_env() {
         let Ok(path) = std::env::var("TOOLKIT_CORPUS_PDF_OUT") else {
             return;
         };
-        std::fs::write(&path, native_pdf(1)).expect("write native PDF fixture");
+        let bytes = match std::env::var("TOOLKIT_CORPUS_PDF_KIND").as_deref() {
+            Ok("scanned") => image_only_pdf(1),
+            _ => native_pdf(1),
+        };
+        std::fs::write(&path, bytes).expect("write corpus PDF fixture");
     }
 }

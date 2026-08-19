@@ -362,6 +362,11 @@ verify_bundle() {
   printf '# Container smoke evidence\n\n'
   printf -- '- date (UTC): `%s`\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf -- '- commit: `%s`\n' "$(git -C "$BACKEND_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+  # The build context is the working tree, not the commit. Say so, or evidence
+  # taken over a dirty tree reads as if it covered the commit it names.
+  printf -- '- tree: `%s`\n' \
+    "$(test -n "$(git -C "$BACKEND_DIR" status --porcelain -- "$BACKEND_DIR" 2>/dev/null)" \
+       && echo 'dirty (image built from uncommitted working tree)' || echo clean)"
   printf -- '- docker: `%s`\n' "$(docker version --format '{{.Server.Version}}')"
   printf -- '- compose: `%s`\n' "$(docker compose version --short)"
   printf -- '- phase: `%s`\n\n' "$PHASE"

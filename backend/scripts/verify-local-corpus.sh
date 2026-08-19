@@ -37,7 +37,25 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
 need cargo
 
 [ -f "${BACKEND_DIR}/Cargo.toml" ] || fail "missing ${BACKEND_DIR}/Cargo.toml"
-[ -f "${BACKEND_DIR}/evals/corpus-manifest.yaml" ] || fail "missing corpus manifest"
+MANIFEST="${BACKEND_DIR}/evals/corpus-manifest.yaml"
+[ -f "${MANIFEST}" ] || fail "missing corpus manifest"
+
+# The five Phase 1 local-text cases. routing_policy below runs the whole
+# corpus, which is a superset, so these names are what the summary cites
+# rather than what it filters. Assert the manifest still carries them, or the
+# summary would keep naming cases that had been renamed away.
+PHASE1_CASES=(
+  native-text-1-page
+  native-text-10-pages
+  sparse-cover-page
+  dense-table
+  two-column-text
+)
+
+for case_id in "${PHASE1_CASES[@]}"; do
+  grep -qE "^[[:space:]]*-[[:space:]]+id:[[:space:]]+${case_id}[[:space:]]*$" "${MANIFEST}" \
+    || fail "corpus manifest no longer carries the Phase 1 case: ${case_id}"
+done
 
 # --------------------------------------------------------------------- suites
 
@@ -45,8 +63,14 @@ log "Routing-policy corpus (tests/routing_policy.rs)"
 cargo test --locked --manifest-path "${BACKEND_DIR}/Cargo.toml" --test routing_policy
 
 log "AnyDoc advertised families (tests/http_contract.rs)"
+# A name filter that matches nothing is "ok. 0 passed" and exit 0, which
+# pipefail cannot see, so assert the sweep actually ran.
+ANYDOC_LOG="$(mktemp)"
+trap 'rm -f "${ANYDOC_LOG}"' EXIT
 cargo test --locked --manifest-path "${BACKEND_DIR}/Cargo.toml" \
-  --test http_contract every_advertised_anydoc_family_converts
+  --test http_contract every_advertised_anydoc_family_converts 2>&1 | tee "${ANYDOC_LOG}"
+grep -qE '^test result: ok\. [1-9][0-9]* passed' "${ANYDOC_LOG}" \
+  || fail "the AnyDoc sweep matched no test: every_advertised_anydoc_family_converts"
 
 # -------------------------------------------------------------------- summary
 
@@ -54,10 +78,6 @@ log "Local corpus summary"
 note "routing_policy: all corpus cases passed"
 note "every_advertised_anydoc_family_converts: passed"
 note "local-text PDF cases covered:"
-note "  native-text-1-page"
-note "  native-text-10-pages"
-note "  sparse-cover-page"
-note "  dense-table"
-note "  two-column-text"
+for case_id in "${PHASE1_CASES[@]}"; do note "  ${case_id}"; done
 
 printf '\nRESULT: PASS\n'
