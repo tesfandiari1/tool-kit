@@ -171,7 +171,7 @@ desktop run without replacing server-generated job and attempt IDs. Polling is
 the initial progress mechanism; server-sent events and WebSockets are not
 needed for the expected volume. How the Mac maps that poll onto the existing
 `job-updated` UI, and what operator metrics wait until M7, is
-[`MONITORING_AND_PROGRESS.md`](MONITORING_AND_PROGRESS.md).
+[`MONITORING_AND_PROGRESS.md`](archive/MONITORING_AND_PROGRESS.md).
 
 M2 moved capabilities from ephemeral
 durability and ephemeral-job capacity to persistent durability and active-job
@@ -393,4 +393,4 @@ The conversion backend is ready to become the desktop default when:
 - the labeled evaluation corpus passes before cutover.
 
 Work is tracked in [`BACKEND_EPIC.md`](BACKEND_EPIC.md). The next bounded unit
-is [`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md).
+is [`BACKEND_EXECUTION_PLAN.md`](archive/BACKEND_EXECUTION_PLAN.md).

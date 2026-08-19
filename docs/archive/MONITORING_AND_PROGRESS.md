@@ -9,15 +9,15 @@ Two problems that look similar and must stay separate:
 | Track | Audience | Channel | Milestone |
 |---|---|---|---|
 | Job UX | the person watching a file row | `GET /api/v1/conversions/{id}` from Tauri, then `job-updated` | M6 Increment 4 ([`DESKTOP_EXECUTION_PLAN.md`](DESKTOP_EXECUTION_PLAN.md)) |
-| Operator monitoring | you, on the host | JSON stdout, `/health/*`, later an internal scrape | M7 CVR-074 ([`BACKEND_EPIC.md`](BACKEND_EPIC.md)) |
+| Operator monitoring | you, on the host | JSON stdout, `/health/*`, later an internal scrape | M7 CVR-074 ([`BACKEND_EPIC.md`](../BACKEND_EPIC.md)) |
 
 A Prometheus scrape is not how the Run view learns a PDF is converting. A
 `job-updated` event is not how you learn `/data` is full.
 
 The architecture already chose polling as the progress mechanism and listed
 SSE, WebSockets, and a workflow dashboard as non-goals
-([`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md) “Public API”,
-[`BACKEND_EPIC.md`](BACKEND_EPIC.md) “Explicit non-goals”). This note records
+([`BACKEND_SERVICE_PLAN.md`](../BACKEND_SERVICE_PLAN.md) “Public API”,
+[`BACKEND_EPIC.md`](../BACKEND_EPIC.md) “Explicit non-goals”). This note records
 how to use that choice, and which files already implement the pieces.
 
 ## Track A: job UX
@@ -109,15 +109,15 @@ Do not:
 | Liveness | [`backend/src/api/health.rs`](../backend/src/api/health.rs) `live` | No dependencies. Process is up. |
 | Readiness | same file, `ready` | SQLite write, data-root probe, worker not failed. Compose healthcheck hits this ([`backend/compose.yaml`](../backend/compose.yaml)). |
 | Log volume | [`backend/compose.yaml`](../backend/compose.yaml) `logging` | `json-file`, 10 MB × 3. |
-| Filter | [`backend/.env.example`](../backend/.env.example), [`backend/README.md`](../backend/README.md) | `RUST_LOG=tool_kit_converter=info`. |
+| Filter | [`backend/.env.example`](../backend/.env.example), [`backend/README.md`](../../backend/README.md) | `RUST_LOG=tool_kit_converter=info`. |
 
 Day-one operations is `docker compose logs` and the healthcheck. Do not add
 OpenTelemetry, Grafana, or a metrics container to this Compose file. The
 stack is one converter, later Caddy
-([`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md) “Deployment shape”).
+([`BACKEND_SERVICE_PLAN.md`](../BACKEND_SERVICE_PLAN.md) “Deployment shape”).
 
 Do not scrape `/health/ready` as a metric. It opens a `BEGIN IMMEDIATE` on a
-four-connection pool; [`HANDOFF.md`](HANDOFF.md) already records that an
+four-connection pool; [`HANDOFF.md`](../HANDOFF.md) already records that an
 unauthenticated flood can contend the SQLite write lock. Live is the process
 check. Ready is for Compose at 30s.
 

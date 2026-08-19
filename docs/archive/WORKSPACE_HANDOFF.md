@@ -11,8 +11,8 @@ This is **not** backend M7 (LAN / ops in `BACKEND_EPIC.md`). It is the desktop
 shell weave that used to live as a wiring guide. The next desktop session is
 M6 (`service_request`), not another workspace pass.
 
-Read [`HANDOFF.md`](HANDOFF.md) first. Design brief:
-[`.impeccable.md`](../.impeccable.md). System: [`src/ui/UI.md`](../src/ui/UI.md).
+Read [`HANDOFF.md`](../HANDOFF.md) first. Design brief:
+[`.impeccable.md`](../../.impeccable.md). System: [`src/ui/UI.md`](../../src/ui/UI.md).
 
 ## What shipped
 

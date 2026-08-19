@@ -76,7 +76,7 @@ README.md             # conversion-backend section only
 ```
 
 Planning documents later moved from the repository root into `docs/`. Session
-state is [`docs/HANDOFF.md`](HANDOFF.md). Shared repo files added after
+state is [`docs/HANDOFF.md`](../HANDOFF.md). Shared repo files added after
 scaffold (`.github/`, `LICENSE`, `rust-toolchain.toml`, `.node-version`,
 `.gitignore`, `package.json`) are not backend-owned; do not revert them.
 

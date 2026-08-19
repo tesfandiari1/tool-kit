@@ -8,7 +8,7 @@ committed on `main`; M2 is closed.
 **Estimated implementation shape:** One baseline increment plus six bounded
 implementation increments, each independently testable
 **Last updated:** 2026-08-18
-**Session handoff:** [`HANDOFF.md`](HANDOFF.md)
+**Session handoff:** [`HANDOFF.md`](../HANDOFF.md)
 
 ## Objective
 
@@ -243,7 +243,7 @@ change will be visible.
 Related: CVR-020, CVR-021, CVR-022.
 
 Implementation note (2026-08-17): this increment is complete. Re-read the live
-files and [`HANDOFF.md`](HANDOFF.md) before changing its invariants.
+files and [`HANDOFF.md`](../HANDOFF.md) before changing its invariants.
 
 - [x] Add SQLx 0.9 with default features disabled and exactly the
   `runtime-tokio`, `sqlite`, `migrate`, and `macros` features; regenerate only
@@ -594,4 +594,4 @@ M2 is complete only when all of the following are true:
 
 M2 is complete. Increments 0-6 are verified and committed on `main`; the
 closing checkpoint is `01f1bf1`. Do not add AnyDoc or other scope here.
-Parallel sessions start at [`HANDOFF.md`](HANDOFF.md).
+Parallel sessions start at [`HANDOFF.md`](../HANDOFF.md).

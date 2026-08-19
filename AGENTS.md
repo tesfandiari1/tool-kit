@@ -8,7 +8,7 @@
 - Stage explicit paths only; never `git add .` or `git add -A`. Parallel sessions start from `docs/HANDOFF.md`.
 - Stay on latest stable dependencies except the documented pins; do not bump TypeScript 7 or keyring 4 just to be current.
 - Consolidate backend planning into `docs/BACKEND_EPIC.md` and `docs/BACKEND_SERVICE_PLAN.md`; avoid separate phase execution-plan docs unless they encode critical patterns.
-- Keep job UX progress (Tauri poll → `job-updated`) separate from operator monitoring (logs/metrics at M7). See `docs/MONITORING_AND_PROGRESS.md`.
+- Keep job UX progress (Tauri poll → `job-updated`) separate from operator monitoring (logs/metrics at M7). See `docs/archive/MONITORING_AND_PROGRESS.md`.
 - Use Clippy with a small production deny-set and test exceptions in each crate's `clippy.toml`. Do not enable `pedantic` or blanket `unwrap_used`.
 
 ## Learned Workspace Facts

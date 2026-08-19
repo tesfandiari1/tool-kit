@@ -91,7 +91,7 @@ Add a `JobType` variant and a `ProviderKind`, implement submit/poll in `provider
 
 ### Frontend (`src/`)
 
-`src/shell/App.tsx` owns all state and hands it to view components in `src/domains/{run,history,settings,thread}`. The shell's non-run concerns are extracted as hooks beside it: `useToast` (the one channel for errors that never reach a job row), `useThread` (opening a result from a job row or a history entry, and the return path Escape uses), and `useHostWindow` (`useDragDrop`, `useWindowFocusClass`, `useCloseConfirm`). Local state mirrors `Settings` and is persisted via `save_settings` on change; the job list is authoritative from `job-updated` events. Inputs are a list of paths added by drag-drop (`getCurrentWebview().onDragDropEvent`) or the Files/Folder pickers.
+`src/shell/App.tsx` owns all state and hands it to view components in `src/domains/{run,history,settings,thread}`. The shell's non-run concerns are extracted as hooks beside it: `useToast` (the one channel for errors that never reach a job row), `useDocuments` (which results are open and which one the pane shows) with `useDocumentSave` (the debounced write, ⌘S, and the write before a close), `useHostWindow` (`useDragDrop`, `useWindowFocusClass`, `useCloseConfirm`), `useFitWindow` (the launcher's height follows its content), and `useZoom` (⌘+/-/0). Local state mirrors `Settings` and is persisted via `save_settings` on change; the job list is authoritative from `job-updated` events. Inputs are a list of paths added by drag-drop (`getCurrentWebview().onDragDropEvent`) or the Files/Folder pickers.
 
 `src/platform/host.ts` is the only module allowed to import `@tauri-apps/*` for dialogs, window, and drag-drop. `src/app/commands.ts` is the typed IPC boundary.
 
@@ -100,15 +100,18 @@ Add a `JobType` variant and a `ProviderKind`, implement submit/poll in `provider
 - **Autodetect.** `scan_inputs` returns a per-job match count, a per-job already-done count, and a suggested output folder. An effect picks the job with more matches and defaults the output folder. It depends on **`scan.convert` / `scan.transcribe` / `scan.suggestedOutput`, never the whole `scan` object and never `settings.jobType`**: either would re-fire the effect on an unrelated refresh and undo a manual job click instantly. That is also why both jobs' already-done counts come back in one scan: switching job reads a number that is already in hand rather than triggering a new scan.
 - **Already done.** The Run button promises `inputCount - skipping`, not the raw match count, and `run_pipeline` does the authoritative filtering at run time from the same `Settings` load it snapshots as the run config. `runsFinished` is bumped **once** when a run ends, to refresh the counts and an open History panel: a 200-file run emits hundreds of `job-updated` events, so reacting to those would re-scan the disk hundreds of times.
 - **`starting` guards double-runs.** `running` is derived from the job list, which stays empty until the first event lands, so without the guard a double-click fires two runs.
+- **Two window phases.** `src/shell/geometry.ts` names every window size and both phases read from it. **Launcher** (no document open) is one fixed width at the height of its content, set by `useFitWindow` from `#root`'s `scrollHeight`, with the ceiling from `currentMonitor().workArea` rather than `screen.availHeight`, which means nothing definite under page zoom and only ever describes one display. **Workspace** (a document open) is resizable inside `WORKSPACE`'s bounds and the work area, at the size the user last left it (`settings.expandedWidth/Height`). See Gotchas for the ordering rule.
+- **Zoom is the whole app, not the document.** ⌘+/-/0 step `webview.setZoom` along a fixed ladder (`ZOOM`, 10 points a step) and persist as `settings.zoom`. Stepping moves an index rather than adding to the factor: `1 + 0.1 - 0.1` is not 1 in binary floating point, so ⌘+ then ⌘- would never come home. `useZoom` publishes the factor as `--zoom` on `:root` for the chrome that has to divide by it.
 - Inputs auto-clear after a run only when that run was started by `run()` *and* something succeeded, so a Retry or a wholly failed run leaves the selection alone.
 
 ### Design system (`src/ui`, docs in `src/ui/UI.md`)
 
-The design language lives in a self-contained library imported as `@ui`. **Read `src/ui/UI.md` before touching any UI.** Its three rules are the reason to reject a change:
+The design language lives in a self-contained library imported as `@ui`. **Read `src/ui/UI.md` before touching any UI.** Its four rules are the reason to reject a change:
 
 1. **Colour is signal, never decoration.** Amber = live, green = passed, red = failed, cobalt = the control you press. Icons, the brand mark, and folder glyphs are never coloured.
 2. **Values light up, they don't appear.** Counts and timers hold their slot as dim ghost glyphs so the window never reflows while jobs finish out of order.
 3. **macOS first.** Real vibrancy under a scrim, SF metrics, key/inactive window states (`body.inactive`), HIG focus rings, tabular numerals, and native `<select>`/`<input type=checkbox>` under restyled shells.
+4. **Whitespace is a grammar, not a feel.** `--s1`..`--s8` step from atoms of one object up to the window edge, and the gap is inversely proportional to the relationship. The outer margin is the largest gap on screen, and one element per scroll column absorbs the slack. UI.md holds the ladder.
 
 Type is three families with non-overlapping jobs: **Instrument Serif** for display, **SF Pro** for prose, **JetBrains Mono** for every label, tab, and button (uppercase, `0.09em` tracked. the signature of the language). Both faces are self-hosted OFL; see `src/ui/fonts/THIRD_PARTY_NOTICES.md`.
 
@@ -120,7 +123,12 @@ Type is three families with non-overlapping jobs: **Instrument Serif** for displ
 ## Gotchas
 
 - **Keychain prompts in dev are fixed by code identity, not by fewer reads.** macOS authorises a keychain item against the reader's *designated requirement*, and an ad-hoc `cargo run` binary's requirement is its own cdhash, so every rebuild used to arrive as a new app and re-prompt. `src-tauri/.cargo/config.toml` sends `cargo run` through `scripts/dev-run.sh`, which signs the binary with the Developer ID and `--identifier ai.uniwise.toolkit`: the same requirement the installed app has, so dev inherits its already-trusted items and an "Always Allow" survives rebuilds. Every failure path still runs the binary, as cargo left it, and says why on stderr: a dev loop that died over an expired certificate would be worse than the prompts. `secrets.rs` memoises each read for the life of the process, which is what keeps a 200-file run from asking 200 times. Still let the app create the items: don't seed them with the `security` CLI.
-- **Capabilities.** Custom Tauri commands need no capability entries, but **core commands do**: `core:window:default` does *not* include `hide`/`destroy`, so the close-confirm handler needs them listed explicitly in `capabilities/default.json`. A missing one fails silently at runtime.
+- **Capabilities.** Custom Tauri commands need no capability entries, but **core commands do**: `core:window:default` does *not* include `hide`/`destroy`, so the close-confirm handler needs them listed explicitly in `capabilities/default.json`. A missing one fails silently at runtime. The window-phase and zoom work added `set-max-size`, `set-resizable`, `current-monitor`, and `webview:set-webview-zoom` for the same reason.
+- **Window geometry lives in `src/shell/geometry.ts` and nowhere else.** `App.tsx`, `useFitWindow.ts`, `useZoom.ts` and `tauri.conf.json` all read those names, so the config that opens the window and the code that resizes it cannot drift apart. `SplitPane`'s defaults repeat `SPLIT` by hand only because nothing under `src/ui` may import from the app. `SPLIT.minStart` must stay under `SPLIT.start`% of `WORKSPACE.minWidth`, or the pixel floor beats the ratio at every width and the seam sits at its minimum forever.
+- **macOS clamps `setSize` to the min and max in force at that instant**, so the bounds move before the size in both directions. Growing into the workspace: `setResizable(true)` → `setMinSize` → `setMaxSize` → `setSize`. Shrinking back: record the current size → `setMinSize(launcher)` → `clearMaxSize` → `setSize` → `setResizable(false)`. Backwards, the window lands at the other phase's size and stays there, with no error to say so.
+- **⌘+/- is webview page zoom, and it does not move the traffic lights.** macOS draws them in logical pixels, so a 64px CSS reservation is 32 logical px at zoom 0.5 and the lights land on top of whatever sits beside them. Any chrome measured against an OS-drawn element divides by the factor instead: `calc(64px / var(--zoom, 1))`, with `--zoom` published on `:root` by `useZoom`. A CSS pixel handed to the window is the same problem the other way round, which is why `useFitWindow` multiplies `scrollHeight` by the factor before asking for a height.
+- **`react-resizable-panels` has two layout paths that disagree about what a key means.** `defaultLayout` is read by panel id. `setLayout` reads `Object.values(layout)` and re-keys the result by panel order, so it is an array wearing an object's clothes and key order decides which pane gets which width. Our layout arrives from a Rust `BTreeMap`, which serialises alphabetically, so `{end, start}` came back and opened the split inverted: two thirds on the launcher, one third on the document, and every drag saved the inversion back. `paneLayout` in `src/ui/primitives/splitLayout.ts` rebuilds the object in panel order and is the only thing allowed to construct one.
+- **`defaultLayout` is also validated against the panels present at mount**, and the document pane renders only once a document is open. So the group starts with one panel, drops the two-id layout whole, and hands out an even split when the second pane appears. `SplitPane` re-applies imperatively on the collapsed→expanded edge, retrying: the group registers its second panel a render later, and the window is still growing from launcher width, where the intended share falls under `minStart` and gets clamped there for good.
 - **Icons.** The app icon is the original artwork. `icons/tray.png` / `tray@2x.png` are derived from its alpha channel as **template images** (black + alpha, used with `icon_as_template(true)`) so macOS tints them for light and dark menu bars: putting the colour app icon in the tray is a visible native-correctness bug.
 - **Global shortcut is ⌥⌘V**, not ⌘⇧V: that one is macOS "Paste and Match Style" and registering it hijacks the combination system-wide.
 - **Datalab pipeline mode**: a `pl_…` id in Settings switches Convert from `/api/v1/convert` to `/api/v1/pipelines/{id}/run` (run → poll execution → fetch the last step's result).
@@ -128,18 +136,18 @@ Type is three families with non-overlapping jobs: **Instrument Serif** for displ
 - **TypeScript stays on 6.x.** 7.0 has no compiler API; `typescript-eslint` crashes. `tsconfig.json` must not set `baseUrl` (deprecated in 6).
 - **`keyring` stays on 3.x** with `apple-native`. 4.x dropped that feature and needs a `keyring-core` rewrite.
 - **Do not create a root Cargo workspace.** `src-tauri` and `backend` keep separate lockfiles until a dedicated migration.
-- **Never `git add -A`.** Desktop and backend work share one dirty tree; stage explicit paths. See `docs/BACKEND_BASELINE.md` and `docs/HANDOFF.md`.
+- **Never `git add -A`.** Desktop and backend work share one dirty tree; stage explicit paths. See `docs/archive/BACKEND_BASELINE.md` and `docs/HANDOFF.md`.
 
 ## Reference
 
+Four live documents. Everything else is closed and lives in
+[`docs/archive/`](docs/archive/README.md).
+
 - [`docs/HANDOFF.md`](docs/HANDOFF.md): current work and parallel-session rules
-- [`docs/BACKEND_EPIC.md`](docs/BACKEND_EPIC.md): conversion-backend milestones
-- [`docs/BACKEND_EXECUTION_PLAN.md`](docs/BACKEND_EXECUTION_PLAN.md): M2 increments
-- [`docs/DESKTOP_EXECUTION_PLAN.md`](docs/DESKTOP_EXECUTION_PLAN.md): M6 desktop integration and the order of the remaining milestones
-- [`docs/MONITORING_AND_PROGRESS.md`](docs/MONITORING_AND_PROGRESS.md): job UX poll vs operator logs/metrics
-- [`docs/WORKSPACE_HANDOFF.md`](docs/WORKSPACE_HANDOFF.md): desktop dual-pane workspace (closed; not backend M7)
-- [`.impeccable.md`](.impeccable.md): design context (users, brand, aesthetic direction, principles); every `/impeccable` skill reads it
-- [`docs/YAAK_ARCHITECTURE_REFERENCE.md`](docs/YAAK_ARCHITECTURE_REFERENCE.md): Yaak files to steal (host, RPC, blobs, Keychain); do not fork the product
+- [`docs/CLOSEOUT_EXECUTION_PLAN.md`](docs/CLOSEOUT_EXECUTION_PLAN.md): the active plan for M4 through M8
+- [`docs/BACKEND_EPIC.md`](docs/BACKEND_EPIC.md): milestone tracker and CVR tickets
+- [`docs/BACKEND_SERVICE_PLAN.md`](docs/BACKEND_SERVICE_PLAN.md): approved architecture
+- [`.impeccable.md`](.impeccable.md): design context; every `/impeccable` skill reads it
 - Local Tauri v2 docs: `/Users/tristin/code/tauri-skills/knowledgebase/tauri-v2`.
 
 <!-- gitnexus:start -->
