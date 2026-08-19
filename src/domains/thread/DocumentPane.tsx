@@ -75,6 +75,7 @@ export function DocumentPane({
           {allowEdit && (
             <Segmented
               label="Document mode"
+              size="sm"
               value={mode}
               onChange={onModeChange}
               options={[

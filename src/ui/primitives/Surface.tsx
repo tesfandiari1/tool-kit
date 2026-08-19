@@ -90,12 +90,16 @@ export function Cell({ interactive = false, dense = false, className, ...rest }:
   );
 }
 
-export type WellProps = HTMLAttributes<HTMLDivElement>;
+export interface WellProps extends HTMLAttributes<HTMLDivElement> {
+  /// Text selection is for output you read. Drop targets and logs that you
+  /// operate on should pass false so the well does not show an I-beam.
+  selectable?: boolean;
+}
 
 /// A recessed area for output the user reads rather than operates: transcripts,
-/// markdown, logs. Text selection is granted back here.
-export function Well({ className, ...rest }: WellProps) {
-  return <div className={cx("ui-well", "ui-selectable", className)} {...rest} />;
+/// markdown, logs. Text selection is granted back here when `selectable`.
+export function Well({ className, selectable = true, ...rest }: WellProps) {
+  return <div className={cx("ui-well", selectable && "ui-selectable", className)} {...rest} />;
 }
 
 export interface DividerProps extends HTMLAttributes<HTMLHRElement> {

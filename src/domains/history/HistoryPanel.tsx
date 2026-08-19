@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { EyeIcon, FolderOpenIcon, XIcon } from "@phosphor-icons/react";
-import { Button, Input, Label, Mono, Row, Spacer, StatusDot, Text } from "@ui";
+import { Badge, Button, Display, Input, Mono, Row, Spacer, StatusDot, Text } from "@ui";
 import { commands } from "@/app/commands";
 import { basename, fmtWhen } from "@/app/format";
 import { HISTORY_LIMIT, type HistoryEntry } from "@/app/types";
 import { confirm } from "@/platform/host";
+import { FlowLayout } from "@/shell/FlowLayout";
 
 /// Every finished job, newest first. Reveal-only on purpose: the extracted
 /// text is not stored, so the database stays small and the files stay the
@@ -74,49 +75,64 @@ export function HistoryPanel({
   };
 
   return (
-    <main className="flow">
-      <Row gap={3}>
-        {/* A full page is "400+", not "400": the count is what we fetched, and
-            claiming it is the whole archive would be a lie the user can't see. */}
-        <Label tone="strong">
-          History
-          {rows && rows.length > 0
-            ? ` · ${String(rows.length)}${rows.length >= HISTORY_LIMIT ? "+" : ""}`
-            : ""}
-        </Label>
-        <Spacer />
-        {rows && rows.length > 0 && (
-          <Button variant="link" onClick={() => void clear()}>
-            Clear history
-          </Button>
-        )}
-        <Button variant="ghost" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close history" />
-      </Row>
+    <FlowLayout
+      head={
+        <>
+          <Row gap={3}>
+            <Display size="lg">History</Display>
+            <Spacer />
+            <Badge square>
+              {rows === null
+                ? ""
+                : rows.length >= HISTORY_LIMIT
+                  ? `${String(rows.length)}+`
+                  : String(rows.length)}
+            </Badge>
+            <Button
+              variant="link"
+              disabled={!rows || rows.length === 0}
+              onClick={() => void clear()}
+            >
+              Clear history
+            </Button>
+            <Button variant="ghost" size="sm" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close history" />
+          </Row>
 
-      {/* aria-label rather than a visible Label: the placeholder carries the
-          meaning visually, but a placeholder disappears on first keystroke and
-          is not a reliable accessible name. */}
-      <Input
-        type="search"
-        aria-label="Search history by file or folder"
-        placeholder="Search by file or folder"
-        value={query}
-        onChange={(e) => {
-          setQuery(e.target.value);
-        }}
-      />
-
+          {/* aria-label rather than a visible Label: the placeholder carries the
+              meaning visually, but a placeholder disappears on first keystroke and
+              is not a reliable accessible name. */}
+          <Input
+            type="search"
+            aria-label="Search history by file or folder"
+            placeholder="Search by file or folder"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+            }}
+          />
+        </>
+      }
+    >
       {rows === null ? (
-        <div className="hist-empty">Reading…</div>
+        <div className="hist-empty">
+          <Text size="sm" tone="faint">
+            Reading…
+          </Text>
+        </div>
       ) : rows.length === 0 ? (
         <div className="hist-empty">
           {query ? (
-            `Nothing matches “${query}”`
+            <Text size="sm" tone="faint">
+              Nothing matches “{query}”
+            </Text>
           ) : (
             <>
-              Nothing here yet
-              <br />
-              Every finished file is logged automatically
+              <Text size="sm" tone="faint">
+                Nothing here yet
+              </Text>
+              <Text size="xs" tone="ghost">
+                Every finished file is logged automatically
+              </Text>
             </>
           )}
         </div>
@@ -174,6 +190,6 @@ export function HistoryPanel({
           ))}
         </div>
       )}
-    </main>
+    </FlowLayout>
   );
 }

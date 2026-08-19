@@ -74,6 +74,9 @@
   background: var(--accent-wash);
   border-color: var(--accent-hover);
 }
+.ui-btn--secondary:active:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-wash) 70%, transparent);
+}
 
 /* --- ghost: chrome-level actions that must not compete ---------------- */
 .ui-btn--ghost {
@@ -83,6 +86,9 @@
 .ui-btn--ghost:hover:not(:disabled) {
   background: var(--rule);
   color: var(--ink);
+}
+.ui-btn--ghost:active:not(:disabled) {
+  background: var(--rule-lit);
 }
 
 /* --- quiet: outlined but neutral, for Stop / Clear / secondary chrome -- */
@@ -94,6 +100,10 @@
   background: var(--rule);
   border-color: var(--rule-strong);
   color: var(--ink);
+}
+.ui-btn--quiet:active:not(:disabled) {
+  background: var(--rule-lit);
+  border-color: var(--rule-strong);
 }
 
 /* --- link: a text action with no box ----------------------------------
@@ -108,6 +118,9 @@
 .ui-btn--link:hover:not(:disabled) {
   color: var(--accent-quiet);
 }
+.ui-btn--link:active:not(:disabled) {
+  color: var(--accent);
+}
 
 /* --- danger ----------------------------------------------------------- */
 .ui-btn--danger {
@@ -116,6 +129,10 @@
 }
 .ui-btn--danger:hover:not(:disabled) {
   background: var(--fault);
+  color: var(--accent-ink);
+}
+.ui-btn--danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--fault) 85%, transparent);
   color: var(--accent-ink);
 }
 

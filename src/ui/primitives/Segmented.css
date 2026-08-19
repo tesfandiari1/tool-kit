@@ -54,5 +54,9 @@
 }
 
 .ui-seg__item[aria-checked="true"] .ui-seg__count {
-  color: var(--accent-quiet);
+  color: var(--ink-2);
+}
+
+.ui-seg--sm .ui-seg__item {
+  height: 24px;
 }

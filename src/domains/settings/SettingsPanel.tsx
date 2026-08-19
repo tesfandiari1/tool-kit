@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   Disclosure,
+  Display,
   Field,
   Input,
   Label,
@@ -15,6 +16,7 @@ import {
 } from "@ui";
 import { commands } from "@/app/commands";
 import { DEFAULT_BACKEND_URL, type SecretId, type SecretStatus, type Settings } from "@/app/types";
+import { FlowLayout } from "@/shell/FlowLayout";
 
 export function SettingsPanel({
   settings,
@@ -44,13 +46,15 @@ export function SettingsPanel({
   };
 
   return (
-    <main className="flow">
-      <Row gap={3}>
-        <Label tone="strong">Settings</Label>
-        <Spacer />
-        <Button variant="ghost" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close settings" />
-      </Row>
-
+    <FlowLayout
+      head={
+        <Row gap={3}>
+          <Display size="lg">Settings</Display>
+          <Spacer />
+          <Button variant="ghost" size="sm" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close settings" />
+        </Row>
+      }
+    >
       <Select
         label="Conversion route"
         hint="Direct keeps today's Datalab path. Backend will route each supported file through the local conversion service."
@@ -153,7 +157,7 @@ export function SettingsPanel({
           />
         </>
       )}
-    </main>
+    </FlowLayout>
   );
 }
 

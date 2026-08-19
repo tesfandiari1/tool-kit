@@ -20,6 +20,7 @@ export interface SegmentedProps<T extends string> {
   onChange: (value: T) => void;
   /// Names the group for assistive technology.
   label?: string;
+  size?: "sm" | "md";
   className?: string;
 }
 
@@ -38,6 +39,7 @@ export function Segmented<T extends string>({
   value,
   onChange,
   label,
+  size = "md",
   className,
 }: SegmentedProps<T>) {
   const ref = useRef<HTMLDivElement>(null);
@@ -53,7 +55,7 @@ export function Segmented<T extends string>({
   return (
     <div
       ref={ref}
-      className={cx("ui-seg", className)}
+      className={cx("ui-seg", size === "sm" && "ui-seg--sm", className)}
       role="radiogroup"
       aria-label={label}
       onKeyDown={(e) => {

@@ -32,11 +32,13 @@ import {
   resizeWindow,
   setWindowMinSize,
   windowSize,
+  type WindowSize,
 } from "@/platform/host";
 import { useToast } from "./useToast";
 import { useDocuments } from "./useDocuments";
 import { useDocumentSave } from "./useDocumentSave";
 import { useCloseConfirm, useDragDrop, useWindowFocusClass } from "./useHostWindow";
+import { useFitWindow } from "./useFitWindow";
 import "./App.css";
 
 /// The window is two applications at two widths. A launcher fits in 420px; a
@@ -44,9 +46,11 @@ import "./App.css";
 /// rather than being one compromise that serves neither.
 const COMPACT_MIN = { width: 420, height: 460 };
 const EXPANDED_MIN = { width: 900, height: 460 };
-/// Only reached if the compact size was never measured. Matches the size in
-/// `tauri.conf.json`, so a collapse can never leave the window at a size the
-/// app has no opinion about.
+/// Ultimate fallback, reached only when the launch-size read failed and no
+/// compact size was ever measured. `tauri.conf.json` is the source of truth
+/// for the first-run default; keep these numbers in sync with its
+/// width/height so a collapse can never leave the window at a size the app
+/// has no opinion about.
 const COMPACT_FALLBACK = { width: 560, height: 560 };
 
 export default function App() {
@@ -289,15 +293,32 @@ export default function App() {
   useCloseConfirm(running, activeCount, dirtyCount);
 
   const expanded = docs.length > 0;
+  useFitWindow(!expanded);
   const wasExpanded = useRef(false);
   /// The launcher's size, taken the moment before it grows, so collapsing
   /// puts the window back where the user had it rather than at a default.
-  const compactSize = useRef<{ width: number; height: number } | null>(null);
+  const compactSize = useRef<WindowSize | null>(null);
+  /// The size the window launched at, read once on mount below. Covers a
+  /// collapse that fires before the first compact measurement lands — a
+  /// document opened and closed inside its await — so even that returns to a
+  /// real size rather than the hardcoded fallback.
+  const launchSize = useRef<WindowSize | null>(null);
   const sizesRef = useRef(settings);
 
   useEffect(() => {
     sizesRef.current = settings;
   }, [settings]);
+
+  // Window defaults live in tauri.conf.json; this read is how JS learns them
+  // instead of hardcoding the config's numbers. A failure just leaves the
+  // hardcoded fallback in charge.
+  useEffect(() => {
+    void windowSize()
+      .then((size) => {
+        launchSize.current = size;
+      })
+      .catch(() => undefined);
+  }, []);
 
   // The window follows the document. Each mode remembers its own size, so
   // widening the workspace never leaves the launcher stretched, and a compact
@@ -323,8 +344,10 @@ export default function App() {
         // reads back the launcher's.
         persist({ expandedWidth: current.width, expandedHeight: current.height });
         await setWindowMinSize(COMPACT_MIN.width, COMPACT_MIN.height);
-        const back = compactSize.current ?? COMPACT_FALLBACK;
-        await resizeWindow(back.width, back.height);
+        const w =
+          compactSize.current?.width ?? launchSize.current?.width ?? COMPACT_FALLBACK.width;
+        // Height is set by `useFitWindow` once the compact layout paints.
+        await resizeWindow(w, COMPACT_MIN.height);
       }
     })();
   }, [expanded, persist]);
@@ -551,6 +574,12 @@ export default function App() {
     hint = "Choose an output folder for the results";
   }
 
+  /// Cobalt and a warning glyph promise a press. Only the hints `onHint` acts
+  /// on get that treatment; the rest are status prose.
+  const hintActionable =
+    hint !== null &&
+    (hintOpensSettings || hint === "Choose an output folder for the results");
+
   // What the run does besides the billable work. Copies are only mentioned
   // when the button isn't already announcing them.
   const noteParts: string[] = [];
@@ -614,6 +643,7 @@ export default function App() {
           canRun={canRun}
           runLabel={runLabel}
           hint={hint}
+          hintActionable={hintActionable}
           note={note}
           finished={finished}
           total={total}

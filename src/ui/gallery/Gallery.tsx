@@ -330,6 +330,16 @@ export function Gallery() {
                   { value: "transcribe", label: "Transcribe", count: 0 },
                 ]}
               />
+              <Segmented
+                label="Document mode"
+                size="sm"
+                value={job}
+                onChange={setJob}
+                options={[
+                  { value: "convert", label: "Read" },
+                  { value: "transcribe", label: "Edit" },
+                ]}
+              />
               <Divider />
               <Disclosure open={advanced} onToggle={setAdvanced}>
                 Advanced

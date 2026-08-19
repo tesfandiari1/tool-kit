@@ -2,6 +2,7 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm as confirmDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 /// Host primitives (dialogs, window, drag-drop). Domain views should not import
 /// `@tauri-apps/*` directly — swap this module later if a second host appears.
@@ -35,11 +36,16 @@ export function currentWindow() {
   return getCurrentWindow();
 }
 
+export interface WindowSize {
+  width: number;
+  height: number;
+}
+
 /// Window sizing is logical pixels on both sides of this boundary: the sizes in
 /// `tauri.conf.json` and the persisted expanded size are logical, but
 /// `innerSize()` answers in physical pixels, so on a retina display a window
 /// reads back at twice the size it was just set to unless it is converted here.
-export async function windowSize(): Promise<{ width: number; height: number }> {
+export async function windowSize(): Promise<WindowSize> {
   const win = getCurrentWindow();
   const [size, scale] = await Promise.all([win.innerSize(), win.scaleFactor()]);
   const { width, height } = size.toLogical(scale);
@@ -58,6 +64,12 @@ function normalizePaths(sel: string | string[] | null): string[] {
   if (Array.isArray(sel)) return sel;
   if (typeof sel === "string") return [sel];
   return [];
+}
+
+/// Open a http(s) link in the system browser. Markdown in the document pane
+/// is full of links; letting the webview navigate would lose the open queue.
+export async function openExternal(url: string): Promise<void> {
+  await openUrl(url);
 }
 
 /// Copy to the clipboard, reporting success rather than throwing. Both callers

@@ -10,34 +10,9 @@
    16KB token layer into two separate chunks with two competing `:root` blocks.
 
    That makes this file depend on load order: App.tsx imports `@ui` before
-   `./App.css`, so the library's `:root` lands first and the bridge below can
-   alias it. Keep that order.
+   `./App.css`, so the library's tokens land first and app overrides win.
+   Keep that order.
    =========================================================================== */
-
-/* ---------------------------------------------------------------------------
-   Bridge: the app's older token names, re-pointed at the library.
-
-   These are aliases, not values. Nothing here invents a colour. The names
-   survive so that ~800 lines of working component CSS did not have to be
-   rewritten in the same change that swapped the palette, which would have made
-   a visual regression impossible to attribute.
-
-   This layer is transitional. Every component that moves to an `@ui` primitive
-   drops rules from this file, and the day the last one goes, so does this
-   block. Do not add new names to it.
-   --------------------------------------------------------------------------- */
-:root {
-  --panel: var(--surface);
-  --panel-hi: var(--surface-raised);
-  --well: var(--surface-well);
-  --ghost: var(--ink-ghost);
-
-  --sans: var(--font-body);
-  --mono: var(--font-mono);
-
-  --r-sm: var(--r-control);
-  --r-md: var(--r-panel);
-}
 
 /* macOS dims an inactive window's accents. Mirror that: everything cools to
    graphite. Live indicators and the primary action are deliberately absent
@@ -48,6 +23,9 @@ body.inactive {
   --ink: var(--warm-300);
   --ink-2: var(--warm-500);
   --ink-3: var(--warm-600);
+  /* Ghost must cool with the ramp it subordinates to: left unmapped it stays
+     warm-500 at 60%, which is *brighter* than the dimmed --ink-3 above it. */
+  --ink-ghost: #4a494599;
   --rule: #ecebe514;
 }
 /* The exceptions to inactive dimming (the primary action, and live run
@@ -70,6 +48,68 @@ svg {
   display: flex;
   flex-direction: column;
   height: 100vh;
+}
+
+/* Compact launcher: the content sets the height and the native window follows
+   it (`useFitWindow`). Two states, and the hook picks between them:
+
+   - growing: nothing scrolls internally, the frame grows instead;
+   - `.is-capped`: the content is taller than the screen, so the frame stops at
+     `--shell-max` and the flow scrolls inside it.
+
+   Clipping is not a third option. */
+html.fit-window,
+html.fit-window body,
+html.fit-window #root {
+  height: auto;
+  /* Deliberately not `hidden`. A measurement that goes wrong should cost a
+     scrollbar, not the entire interface: `overflow: hidden` here is what turned
+     one 8px container into a blank window. */
+  overflow: visible;
+}
+html.fit-window .app {
+  height: auto;
+  min-height: 0;
+}
+html.fit-window .workspace {
+  flex: none;
+}
+html.fit-window .flow:not(.flow--workspace) {
+  overflow: visible;
+  flex: none;
+}
+html.fit-window .flow-scroll {
+  flex: none;
+  min-height: auto;
+  overflow: visible;
+}
+html.fit-window .flow-scroll::after {
+  display: none;
+}
+html.fit-window .ui-split {
+  height: auto;
+}
+html.fit-window .ui-split__pane {
+  overflow: visible;
+}
+
+/* Ceiling reached. The frame stops growing and the flow scrolls inside it, so a
+   queue of two hundred files cannot push the Run button past the screen. */
+html.fit-window.is-capped .app {
+  height: var(--shell-max);
+}
+html.fit-window.is-capped .flow:not(.flow--workspace) {
+  flex: 1;
+  min-height: 0;
+}
+html.fit-window.is-capped .flow-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* The fade returns with the scroll it belongs to. */
+html.fit-window.is-capped .flow-scroll::after {
+  display: block;
 }
 
 /* --- Title bar ------------------------------------------------------------
@@ -114,20 +154,87 @@ svg {
 .bar-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--s1);
 }
 
 /* --- Vertical flow -------------------------------------------------------- */
 .flow {
   flex: 1;
-  overflow-y: auto;
+  min-height: 0;
   width: 100%;
-  max-width: 620px;
-  margin: 0 auto;
-  padding: var(--s1) var(--s4) var(--s5);
+  padding: var(--s2) var(--s4) var(--s5);
   display: flex;
   flex-direction: column;
   gap: var(--s4);
+}
+/* The 620px measure is the compact launcher's answer to a wide screen. It
+   applies only when the split is collapsed; inside an open pane the column
+   is the pane and must not centre itself away from the seam. */
+.ui-split--collapsed .flow {
+  max-width: 620px;
+  margin: 0 auto;
+}
+
+/* Compact launcher: natural column stack. When `html.fit-window` is active the
+   native window grows to fit; workspace mode keeps 100vh and pane scroll. */
+.flow:not(.flow--workspace) {
+  overflow: hidden;
+  gap: 0;
+  padding-bottom: 0;
+}
+.flow-head {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  padding-bottom: var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+.flow-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  /* Top air matches the foot's: the first child never kisses the head's
+     hairline, and a headless stack (the compact launcher) gets the same
+     rhythm instead of starting flush under the title bar. */
+  padding: var(--s4) 0;
+}
+/* Sticky scrim at the scroll bottom: macOS hides scrollbars until you
+   scroll, so this is the only hint that more content sits below. Kept
+   translucent so a panel whose content already fits doesn't insist on a
+   scroll that isn't there. */
+.flow-scroll::after {
+  content: "";
+  position: sticky;
+  bottom: 0;
+  display: block;
+  height: 20px;
+  margin-top: -20px;
+  pointer-events: none;
+  opacity: 0.6;
+  background: linear-gradient(to bottom, transparent, var(--surface-scrim));
+}
+.flow-foot {
+  flex-shrink: 0;
+  padding: var(--s4) 0 var(--s5);
+  border-top: 1px solid var(--rule);
+}
+
+/* Short windows compress the drop well before they scroll the inputs. */
+@container flow (max-height: 480px) {
+  .flow:not(.flow--workspace) .drop-empty {
+    min-height: 48px;
+    padding: var(--s2);
+  }
+  .flow:not(.flow--workspace) .flow-foot {
+    padding: var(--s3) 0 var(--s4);
+  }
+  .flow:not(.flow--workspace) .flow-scroll {
+    gap: var(--s3);
+  }
 }
 
 /* --- Workspace split ------------------------------------------------------
@@ -149,18 +256,15 @@ svg {
    Compact is untouched. Every rule here is behind `.flow--workspace`, which
    the run column only wears while something is open. */
 .flow--workspace {
+  /* Size containment lives here and only here. It makes an element's own size
+     ignore its contents, which is what the fixed workspace frame wants and
+     what the compact launcher must never have: with `flex: 1` gone, a
+     size-contained column computes 8px tall and clips every child. */
+  container-type: size;
+  container-name: flow;
   overflow: hidden;
   gap: var(--s3);
   padding-bottom: var(--s3);
-  /* The 620px measure is the compact window's answer to a wide screen. In a
-     pane it is the wrong one: drag the seam out and the run column starts
-     centring itself in its own half, drifting away from the seam it was just
-     sized against. Inside the split the column is the pane. The split itself
-     is always mounted now, so this hangs off the expanded class rather than
-     off `.workspace`, which would flatten the launcher too. */
-  width: 100%;
-  max-width: none;
-  margin: 0;
   min-height: 0;
 }
 /* Everything above the queue holds its content height; only the queue grows,
@@ -184,6 +288,17 @@ svg {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+.flow--workspace .job-list::after {
+  content: "";
+  position: sticky;
+  bottom: 0;
+  display: block;
+  height: var(--s5);
+  margin-top: calc(-1 * var(--s5));
+  pointer-events: none;
+  opacity: 0.6;
+  background: linear-gradient(to bottom, transparent, var(--surface-scrim));
 }
 /* The well keeps its shape but stops reserving room for a drop that already
    happened. A long selection scrolls inside it rather than pushing the queue
@@ -234,15 +349,24 @@ svg {
    A hit target inside a Panel, not a second control chrome. The header already
    has Choose/Change; this row is the same action with a larger surface. */
 .folder-hit {
-  display: block;
-  width: 100%;
-  margin: 0;
-  padding: 0;
+  display: flex;
+  align-items: center;
+  /* Same min-height as a queue row, and the same hover answer: a step up in
+     surface, never a colour. The wash bleeds halfway into the Panel body's
+     padding so the row reads as the clickable surface it is; the padding here
+     exactly undoes the negative margin, so the content doesn't move. */
+  min-height: 40px;
+  margin: 0 calc(-1 * var(--s2));
+  padding: 0 var(--s2);
   border: 0;
+  border-radius: var(--r-control);
   background: none;
   color: inherit;
   text-align: left;
-  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+.folder-hit:hover {
+  background: var(--surface-raised);
 }
 .folder-hit svg {
   color: var(--ink-3);
@@ -273,9 +397,16 @@ svg {
 .hint:hover {
   color: var(--accent-hover);
 }
-.hint svg {
+.hint svg,
+.job-msg svg {
   font-size: 13px;
   margin-top: 1px;
+}
+
+/* Reserved height for the Job panel's message slot so a scan resolving or a
+   hint appearing does not jump the scroll region above the pinned foot. */
+.job-msg {
+  min-height: calc(2 * var(--lh-snug) * var(--t-xs));
 }
 
 /* --- Input well -----------------------------------------------------------
@@ -320,8 +451,8 @@ svg {
 .job:last-child {
   border-bottom: 0;
 }
-.job:hover {
-  background: var(--surface-raised);
+.job:hover:not(.is-selected) {
+  background: color-mix(in oklch, var(--ink) 4%, transparent);
 }
 /* The row you are reading. Deliberately not cobalt and deliberately not a
    side stripe: cobalt is the control you press, and this is a statement of
@@ -329,26 +460,11 @@ svg {
 .job.is-selected {
   background: var(--surface-raised);
 }
-/* One-shot flash when a row lands, so a finish is visible even if you were
-   looking somewhere else a second ago. */
-.job.done {
-  animation: settle 900ms ease-out;
-}
-/* Green, not amber: the flash announces a row that just *finished*, so tinting
-   it with the live colour would contradict the state the row has moved to. */
-@keyframes settle {
-  from {
-    background: color-mix(in oklch, var(--pass) 18%, transparent);
-  }
-  to {
-    background: transparent;
-  }
-}
 .job-body {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--s2);
 }
 /* The row's primary control, and bare on purpose: the row is already the
@@ -365,7 +481,7 @@ svg {
 }
 .job-open:focus-visible {
   outline: 2px solid var(--focus);
-  outline-offset: 2px;
+  outline-offset: -2px;
   border-radius: var(--r-control);
 }
 /* Blockified because it no longer is a flex item: it sits inside `.job-open`,
@@ -394,11 +510,12 @@ svg {
 /* Actions occupy their slot always, so revealing them never shifts the row. */
 .job-actions {
   display: flex;
-  gap: 1px;
+  gap: var(--s1);
   opacity: 0;
   transition: opacity var(--dur-fast) var(--ease);
 }
 .job:hover .job-actions,
+.job:focus-within .job-actions,
 .job-actions:focus-within {
   opacity: 1;
 }
@@ -407,14 +524,15 @@ svg {
   display: flex;
   flex-direction: column;
 }
+/* Layout only. Type and tone come from the <Text> at each call site, and
+   because this file loads after the library a colour set here would beat
+   it — the same trap the queue's `.job-sub` documents. */
 .hist-empty {
   display: grid;
   place-items: center;
+  gap: var(--s1);
   padding: var(--s5) var(--s4);
   text-align: center;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ghost);
 }
 /* The preview is the one place the app is a reading surface, so it gets prose
    type and a real measure instead of the log's monospace. */
@@ -422,25 +540,33 @@ svg {
   margin: 0;
   padding: var(--s5);
   overflow: auto;
-  font-family: var(--sans);
-  font-size: 14px;
+  font-family: var(--font-body);
+  font-size: var(--t-base);
   line-height: 1.62;
   word-break: break-word;
-  color: var(--ink-2);
+  color: var(--ink);
   -webkit-user-select: text;
   user-select: text;
 }
 .md h1,
 .md h2,
-.md h3 {
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
   color: var(--ink);
-  font-weight: 600;
+  font-weight: var(--weight-medium);
   line-height: 1.3;
   margin: 1.15em 0 0.4em;
 }
 .md h1 { font-size: 1.28em; }
 .md h2 { font-size: 1.12em; }
 .md h3 { font-size: 1em; }
+.md h4,
+.md h5,
+.md h6 {
+  font-size: 1em;
+}
 .md p,
 .md ul,
 .md ol,
@@ -451,24 +577,33 @@ svg {
 .md ol {
   padding-left: 1.2em;
 }
+.md blockquote {
+  padding-left: var(--s3);
+  border-left: 2px solid var(--rule-lit);
+  color: var(--ink-2);
+}
+.md img {
+  max-width: 100%;
+  height: auto;
+}
 .md a {
   color: var(--ink);
   text-decoration: underline;
 }
 .md code {
-  font-family: var(--mono);
+  font-family: var(--font-mono);
   font-size: 0.88em;
 }
 .md pre {
-  font-family: var(--mono);
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
   line-height: 1.45;
   overflow: auto;
   padding: var(--s3);
   margin: 0 0 0.8em;
-  background: var(--panel-hi);
+  background: var(--surface-raised);
   border: 1px solid var(--rule);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-control);
 }
 .md pre code {
   font-size: inherit;
@@ -476,14 +611,19 @@ svg {
 .md table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 13px;
+  font-size: var(--t-base);
   margin: 0 0 0.8em;
 }
 .md th,
 .md td {
   border-bottom: 1px solid var(--rule);
-  padding: 4px 8px;
+  padding: var(--s1) var(--s2);
   text-align: left;
+}
+.md th {
+  color: var(--ink);
+  font-weight: var(--weight-medium);
+  border-bottom-color: var(--rule-lit);
 }
 
 /* --- Toast ---------------------------------------------------------------- */
@@ -492,15 +632,26 @@ svg {
   bottom: var(--s5);
   left: 50%;
   transform: translateX(-50%);
-  background: color-mix(in srgb, var(--warm-800) 95%, transparent);
+  background: var(--surface-raised);
   border: 1px solid var(--rule-lit);
   color: var(--ink);
-  padding: 8px 14px;
-  border-radius: var(--r-md);
-  font-size: 12px;
-  max-width: min(460px, calc(100% - 40px));
+  padding: var(--s2) var(--s4);
+  border-radius: var(--r-panel);
+  font-size: var(--t-sm);
+  max-width: min(460px, calc(100% - var(--s7)));
   box-shadow: 0 8px 24px color-mix(in srgb, var(--warm-950) 55%, transparent);
   z-index: 60;
+  animation: toast-in var(--dur-fast) var(--ease-out);
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(var(--s1));
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
 }
 
 .spin {
@@ -519,7 +670,7 @@ svg {
 }
 ::-webkit-scrollbar-thumb {
   background: var(--rule-strong);
-  border-radius: 99px;
+  border-radius: var(--r-pill);
   border: 3px solid transparent;
   background-clip: content-box;
 }
@@ -538,7 +689,7 @@ svg {
    user with a full-width bar indistinguishable from 100% complete. */
 @media (prefers-reduced-motion: reduce) {
   .spin,
-  .job.done {
+  .toast {
     animation: none;
   }
   .folder-hit,
@@ -609,4 +760,9 @@ svg {
   max-width: 68ch;
   margin: 0 auto;
   flex: 1;
+}
+.doc .ui-source {
+  width: 100%;
+  max-width: 76ch;
+  margin: 0 auto;
 }

@@ -1,3 +1,4 @@
+import { Text } from "@ui";
 import { MarkdownViewer } from "./MarkdownViewer";
 
 /// Dispatches an artifact to the right reader. Markdown is the only live
@@ -10,6 +11,14 @@ export function FileViewer({
   text: string | null;
   empty?: string;
 }) {
-  if (!text) return <div className="hist-empty">{empty}</div>;
+  if (!text) {
+    return (
+      <div className="hist-empty">
+        <Text size="sm" tone="ghost">
+          {empty}
+        </Text>
+      </div>
+    );
+  }
   return <MarkdownViewer text={text} />;
 }

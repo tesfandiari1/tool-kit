@@ -29,6 +29,7 @@ import {
 import { ACTIVE } from "@/app/types";
 import type { Job, JobId, Scan, Settings } from "@/app/types";
 import { basename, fmtElapsed } from "@/app/format";
+import { FlowLayout } from "@/shell/FlowLayout";
 import { jobDetailItems, jobDetailText } from "./details";
 import { JOBS, type JobDef } from "./jobs";
 import { runServiceDescription } from "./plan";
@@ -56,6 +57,7 @@ export function RunView({
   canRun,
   runLabel,
   hint,
+  hintActionable,
   note,
   finished,
   total,
@@ -89,6 +91,8 @@ export function RunView({
   canRun: boolean;
   runLabel: string;
   hint: string | null;
+  /// When false, the hint is status prose, not a control `onHint` answers.
+  hintActionable: boolean;
   note: string | null;
   finished: number;
   total: number;
@@ -119,8 +123,63 @@ export function RunView({
 }) {
   const inputCount = settings.jobType === "transcribe" ? scan.transcribe : scan.convert;
 
-  return (
-    <main className={`flow${expanded ? " flow--workspace" : ""}`}>
+  const jobPanel = (
+    <JobPanel
+      settings={settings}
+      scan={scan}
+      job={job}
+      expanded={expanded}
+      running={running}
+      canRun={canRun}
+      runLabel={runLabel}
+      hint={hint}
+      hintActionable={hintActionable}
+      note={note}
+      finished={finished}
+      total={total}
+      persist={persist}
+      onRun={onRun}
+      onStop={onStop}
+      onHint={onHint}
+    />
+  );
+
+  const queuePanel =
+    jobs.length > 0 ? (
+      <Panel
+        className="queue"
+        title="Queue"
+        bare
+        actions={
+          <Row gap={2}>
+            {!running && failedCount > 0 && (
+              <Button variant="link" onClick={onRetryFailed}>
+                Retry {failedCount} failed
+              </Button>
+            )}
+            {!running && doneCount > 0 && settings.outputDir && (
+              <Button variant="link" onClick={onRevealOutput}>
+                Show in Finder
+              </Button>
+            )}
+            <Badge square>{total}</Badge>
+          </Row>
+        }
+      >
+        <JobList
+          jobs={jobs}
+          now={now}
+          selectedId={selectedId}
+          onOpen={onPreview}
+          onCopy={onCopy}
+          onReveal={onRevealJob}
+          onRetry={onRetryJob}
+        />
+      </Panel>
+    ) : null;
+
+  const inputs = (
+    <>
       <InputPicker
         inputs={settings.inputs}
         count={inputCount}
@@ -135,71 +194,132 @@ export function RunView({
         placeholder="Choose where results are saved"
         onPick={onPickOutput}
       />
+    </>
+  );
 
-      <Panel title="Job">
-        <Stack gap={3}>
-          <Segmented
-            label="Job"
-            value={settings.jobType}
-            onChange={(jobType: JobId) => {
-              persist({ jobType });
-            }}
-            options={JOBS.map((j) => {
-              const JIcon = j.icon;
-              return {
-                value: j.id,
-                label: j.label,
-                icon: (selected: boolean) => <JIcon weight={selected ? "fill" : "regular"} />,
-                count: j.id === "transcribe" ? scan.transcribe : scan.convert,
-              };
-            })}
-          />
-          <Text size="xs" tone="faint" className="run-desc">
-            {runServiceDescription({
-              description: job.desc,
-              provider: job.service,
-              jobType: settings.jobType,
-              conversionRoute: settings.conversionRoute,
-              profile: settings.conversionProfile,
-            })}
-          </Text>
-          <Row gap={2} align="stretch">
-            {/* `lg` is the launcher's single actuator. With a document open the
-                queue is what the column is for, so Run steps down a size rather
-                than staying the loudest thing on screen. */}
-            <Button
-              variant="primary"
-              size={expanded ? "md" : "lg"}
-              block
-              busy={running}
-              disabled={!canRun}
-              onClick={onRun}
-              icon={running ? <CircleNotchIcon className="spin" weight="bold" /> : <PlayIcon weight="fill" />}
-            >
-              {running ? `Working… ${String(finished)} of ${String(total)}` : runLabel}
-            </Button>
-            {running && (
-              <Button
-                variant="quiet"
-                size={expanded ? "md" : "lg"}
-                onClick={onStop}
-                title="Stop this run"
-                icon={<StopIcon weight="fill" />}
-              >
-                Stop
-              </Button>
-            )}
-          </Row>
+  /// Compact launcher: inputs and queue scroll; Job (with Run) stays pinned.
+  /// Workspace: one column, queue grows, controls compress via `.flow--workspace`.
+  if (!expanded) {
+    return (
+      <FlowLayout foot={jobPanel}>
+        {inputs}
+        {queuePanel}
+      </FlowLayout>
+    );
+  }
+
+  return (
+    <FlowLayout variant="workspace">
+      {inputs}
+      {jobPanel}
+      {queuePanel}
+    </FlowLayout>
+  );
+}
+
+function JobPanel({
+  settings,
+  scan,
+  job,
+  expanded,
+  running,
+  canRun,
+  runLabel,
+  hint,
+  hintActionable,
+  note,
+  finished,
+  total,
+  persist,
+  onRun,
+  onStop,
+  onHint,
+}: {
+  settings: Settings;
+  scan: Scan;
+  job: JobDef;
+  expanded: boolean;
+  running: boolean;
+  canRun: boolean;
+  runLabel: string;
+  hint: string | null;
+  /// When false, the hint is status prose, not a control `onHint` answers.
+  hintActionable: boolean;
+  note: string | null;
+  finished: number;
+  total: number;
+  persist: (patch: Partial<Settings>) => void;
+  onRun: () => void;
+  onStop: () => void;
+  onHint: () => void;
+}) {
+  return (
+    <Panel title="Job">
+      <Stack gap={3}>
+        <Segmented
+          label="Job"
+          value={settings.jobType}
+          onChange={(jobType: JobId) => {
+            persist({ jobType });
+          }}
+          options={JOBS.map((j) => {
+            const JIcon = j.icon;
+            return {
+              value: j.id,
+              label: j.label,
+              icon: (selected: boolean) => <JIcon weight={selected ? "fill" : "regular"} />,
+              count: j.id === "transcribe" ? scan.transcribe : scan.convert,
+            };
+          })}
+        />
+        <Text size="xs" tone="faint" className="run-desc">
+          {runServiceDescription({
+            description: job.desc,
+            provider: job.service,
+            jobType: settings.jobType,
+            conversionRoute: settings.conversionRoute,
+            profile: settings.conversionProfile,
+          })}
+        </Text>
+        <Row gap={2} align="stretch">
+          {/* `lg` is the launcher's single actuator. With a document open the
+              queue is what the column is for, so Run steps down a size rather
+              than staying the loudest thing on screen. */}
+          <Button
+            variant="primary"
+            size={expanded ? "md" : "lg"}
+            block
+            busy={running}
+            disabled={!canRun}
+            onClick={onRun}
+            icon={running ? <CircleNotchIcon className="spin" weight="bold" /> : <PlayIcon weight="fill" />}
+          >
+            {running ? `Working… ${String(finished)} of ${String(total)}` : runLabel}
+          </Button>
           {running && (
-            <Meter value={total ? finished / total : 0} label="Run progress" />
+            <Button
+              variant="quiet"
+              size={expanded ? "md" : "lg"}
+              onClick={onStop}
+              title="Stop this run"
+              icon={<StopIcon weight="fill" />}
+            >
+              Stop
+            </Button>
           )}
-          {/* An app composite rather than a Button: this is a full sentence, and
-              Button's label treatment (uppercase mono, nowrap) clips it. */}
-          {!running && hint && (
+        </Row>
+        <div className="job-msg">
+          {running && <Meter value={total ? finished / total : 0} label="Run progress" />}
+          {!running && hint && hintActionable && (
             <button type="button" className="hint" onClick={onHint}>
               <WarningCircleIcon weight="fill" />
               {hint}
             </button>
+          )}
+          {!running && hint && !hintActionable && (
+            <Text size="xs" tone="faint">
+              {hint}
+            </Text>
           )}
           {!running && !hint && note && (
             <Row gap={2}>
@@ -211,42 +331,9 @@ export function RunView({
               </Text>
             </Row>
           )}
-        </Stack>
-      </Panel>
-
-      {jobs.length > 0 && (
-        <Panel
-          className="queue"
-          title="Queue"
-          bare
-          actions={
-            <Row gap={2}>
-              {!running && failedCount > 0 && (
-                <Button variant="link" onClick={onRetryFailed}>
-                  Retry {failedCount} failed
-                </Button>
-              )}
-              {!running && doneCount > 0 && settings.outputDir && (
-                <Button variant="link" onClick={onRevealOutput}>
-                  Show in Finder
-                </Button>
-              )}
-              <Badge square>{total}</Badge>
-            </Row>
-          }
-        >
-          <JobList
-            jobs={jobs}
-            now={now}
-            selectedId={selectedId}
-            onOpen={onPreview}
-            onCopy={onCopy}
-            onReveal={onRevealJob}
-            onRetry={onRetryJob}
-          />
-        </Panel>
-      )}
-    </main>
+        </div>
+      </Stack>
+    </Panel>
   );
 }
 
@@ -303,10 +390,10 @@ function InputPicker({
       actions={count > 0 ? <Badge square>{count}</Badge> : undefined}
     >
       <Stack gap={3}>
-        <Well className={dragging ? "is-dropping" : undefined}>
+        <Well className={dragging ? "is-dropping" : undefined} selectable={false}>
           {inputs.length === 0 ? (
             <div className="drop-empty">
-              <Text size="sm" tone="ghost">
+              <Text size="sm" tone="faint">
                 Drop files or folders here
               </Text>
               <Text size="xs" tone="ghost">
