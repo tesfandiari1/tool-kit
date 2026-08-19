@@ -1,12 +1,16 @@
 # Session handoff
 
 **Last updated:** 2026-08-18
-**Branch:** `main`, HEAD `4590a9a`. M6 is next.
-**Backend checkpoint:** `4590a9a`. M3 is complete: AnyDoc converts 18
-extensions in-process under a hard timeout, PDF stays on its isolated worker,
-contract is 0.4.0, and the container smoke converts a docx inside the image.
-**Recorded code state:** the live worktree has unrelated changes in `AGENTS.md`
-and `CLAUDE.md`. Preserve them and stage M6 paths explicitly.
+**Branch:** `main`, HEAD `1f69cab`. The M6 desktop vertical slice is landed;
+the milestone gate remains open on the M5-dependent Datalab-fallback durability
+scenario in CVR-067 and the CVR-081 direct-path baseline.
+**Backend checkpoint:** `4590a9a` closes M3; `322d96e` is the later
+OpenAPI/runtime route-kind correction consumed by the desktop. AnyDoc converts
+19 extensions over 18 media types in-process under a hard timeout, PDF stays on
+its isolated worker, contract is 0.4.0, and the container smoke converts a docx
+inside the image.
+**Recorded code state:** the live worktree has unrelated security, layout, and
+UI changes plus `CLAUDE.md` metadata. Preserve them and stage explicit paths.
 **Read this first** in any parallel session, then re-read the live worktree.
 This file goes stale the moment someone lands a commit.
 
@@ -20,9 +24,18 @@ This file goes stale the moment someone lands a commit.
 
 ## Do this next
 
-1. **M3 is closed at `4590a9a`; continue M6 after Increment 0.** The transport
-   decisions above are settled, and `src/app/api/schema.ts` has been regenerated
-   from OpenAPI 0.4.0. Increment 1 is the reversible per-file route switch.
+1. **M3 is closed at `4590a9a`; the M6 implementation is landed through
+   `1f69cab`.** The desktop now has the reversible route setting, Keychain-backed
+   backend token, native multipart submit/poll/download helpers, durable
+   per-file recovery, capability-driven per-file routing, route/failure details,
+   and the enabled Run preflight. Direct Datalab remains the default.
+
+   Do not call M6 complete yet. CVR-067 still carries one explicit
+   M5-dependent Datalab-fallback durability scenario, and CVR-081 still needs
+   the representative direct-path baseline before cutover. Backend-mode
+   history reuse is also deliberately conservative: conversion batches with
+   the backend route selected do not reuse or copy direct-provider results,
+   because the two result provenances are not interchangeable yet.
 
    **CVR-036 now advertises the full AnyDoc format set: 19 extensions over 18
    media types.** An earlier pass this same day closed it by narrowing, on the
@@ -90,22 +103,18 @@ This file goes stale the moment someone lands a commit.
    contend the write lock with the job runner. Exposure is loopback-only
    today. Give it a real rate limit when Caddy and LAN exposure land (M7).
 
-3. **Desktop OpenAPI prep is done; M6 still owns the wire-up.** The user
-   authorized shaping the frontend to the contract ahead of M6. `src/app/api/`
-   is a standard openapi-typescript/openapi-fetch layer, and
-   `commands.serviceRequest` is its typed IPC door. Remaining M6 work: the
-   Rust `service_request` handler, backend URL + Keychain token settings, and
-   wiring the client into the run view. **M6 Increment 0 regenerated
-   `src/app/api/schema.ts` from OpenAPI 0.4.0.** It now includes the expanded
-   18-media-type input set, both engines, the `ReadinessResponse` schema and
-   `/health/ready` responses, `durability: "persistent"`, `maxActiveJobs`, and
-   the reworded summaries.
+3. **Desktop OpenAPI and M6 wire-up are done.** `src/app/api/` is the typed
+   openapi-typescript/openapi-fetch layer; `commands.serviceRequest` reaches the
+   registered Rust `service_request` handler, whose create-conversion branch
+   streams the desktop source as multipart. The dedicated Markdown command
+   streams to a collision-safe disk path and returns only that path over IPC.
+   `src/app/api/schema.ts` matches OpenAPI 0.4.0, including the complete proven
+   PDF/AnyDoc input set, both engines, readiness, persistent durability, and
+   `maxActiveJobs`.
 
    **The dual-pane workspace is closed.** Compact is a `Panel` launcher;
    opening a result splits the window; Edit writes through `write_document`.
-   Do not re-do that work. Record: `docs/WORKSPACE_HANDOFF.md`. M6 still owns
-   `service_request`; do not treat it as available. `src/app/api/schema.ts`
-   stays M6's.
+   Do not re-do that work. Record: `docs/WORKSPACE_HANDOFF.md`.
 4. **Do not** create a root Cargo workspace, bump TypeScript 7, migrate
    `keyring` 4, unpin `pdf-inspector`, or take `libc` 1.0 (still alpha).
 
@@ -184,35 +193,38 @@ the root is the required layout, not clutter.
 
 ## Current product state
 
-- Desktop still converts via Datalab and transcribes via Rev.ai. Keys stay in
-  the macOS Keychain. Verified under `pnpm tauri dev` on 2026-08-17: the
-  window renders, autodetect and the output folder work, and a run starts and
-  reaches the provider.
+- Desktop conversion defaults to the existing direct Datalab route and
+  transcription still uses Rev.ai. A user may now select the local conversion
+  backend; Run is planned per file from live `capabilities.inputFormats`, while
+  image/HTML formats stay permanently direct and `local_only` rejects anything
+  that would require Datalab. Keys stay in the macOS Keychain.
 - The desktop does **not** render in a plain browser, and that is expected.
   `useWindowFocusClass` and `useCloseConfirm` call `getCurrentWindow()` in a
   mount effect; with no `window.__TAURI_INTERNALS__` that throws and React 19
   tears the tree down. Use `pnpm tauri dev`, or `?gallery` for the
   bridge-free design review.
-- Desktop frontend now has an OpenAPI client layer at `src/app/api/`
-  (user-authorized pre-M6 prep). `schema.ts` is generated from and matches
-  `backend/openapi/openapi.yaml` at contract 0.4.0. `client.ts` is a
-  standard `openapi-fetch` client typed by that schema: call sites get the
-  library's `{ data, error }` results, with `error` carrying the contract's
-  ErrorEnvelope. `transport.ts` plugs a Tauri-backed `fetch` into
-  openapi-fetch's custom-fetch seam: every request goes through one
-  `service_request` command with payload `{ method, path, headers, body? }`
-  and answer `{ status, headers, body }`. The host resolves the real base
-  URL, attaches the Keychain token, and for `createConversion` streams the
-  file whose desktop path sits in the `source` field. `index.ts` re-exports
-  the client plus the `paths`/`components`/`operations` schema type
-  namespaces. ESLint blocks importing the generated schema outside
-  `src/app/api/`. Nothing consumes the client yet; `service_request` has no
-  Rust handler until M6.
+- The OpenAPI client at `src/app/api/` is live at contract 0.4.0. The
+  capability preflight consumes it through the Tauri-backed fetch seam, and
+  the registered host handler owns the base URL, bearer token, multipart file
+  stream, response limits, and token redaction. Submit and poll validate UUID
+  response identity; poll also requires the response ID to equal the requested
+  job before any artifact can be downloaded. The webview sees neither bearer
+  values nor document bytes.
+- Backend jobs persist a stable client run ID, idempotency key, original
+  backend URL, source mtime, profile, and optional backend job ID before
+  submission. Restart recovery replays or resumes against that recorded URL.
+  Generation retirement is serialized with guarded backend mutation, terminal
+  bookkeeping, and `job-updated` emission; a stale download loses the guard and
+  deletes only the exact collision-safe output path it created. Unknown future
+  statuses stay pending through an explicit terminal allowlist.
+- Backend-mode history reuse/copy is intentionally disabled for now. Direct
+  Datalab history and backend output are recorded with distinct provenance,
+  but the reuse matcher does not yet select by that provenance. Re-running is
+  the safe behavior until that refinement lands.
 - Backend M1, M2, and M3 are complete. M1 shipped the loopback PDF slice; M2
   made jobs, sources, and artifacts durable across restart; M3 added AnyDoc
-  for the seven non-PDF desktop formats. Per-increment evidence, checkpoints,
-  and test counts are in the `docs/BACKEND_EPIC.md` verification log rather
-  than repeated here.
+  for its full fixture-proven format set. Per-increment evidence, checkpoints,
+  and test counts are in the `docs/BACKEND_EPIC.md` verification log.
 - **`TOOLKIT_CONVERTER_SCRATCH_PARENT` is dead config.** `config.rs` parses and
   validates it and nothing reads it. Left in place on purpose: removing an
   environment variable changes the public surface and deserves its own
@@ -222,8 +234,9 @@ the root is the required layout, not clutter.
   (no portable way to induce it), the M1 PDF fixture corpus (no `.pdf` exists in
   the repo; that is CVR-040 in M4), and a multi-process restart test in Rust
   (the container smoke covers it against the real binary).
-- The service remains loopback-only. No LAN, Caddy, AnyDoc, or Datalab
-  fallback until their milestones.
+- The service remains loopback-only. No LAN or Caddy exists yet, and Datalab
+  fallback inside the backend remains M5 work; the M6 `standard` profile falls
+  through to the existing desktop Datalab lifecycle instead.
 
 ## Toolchain and dependencies
 

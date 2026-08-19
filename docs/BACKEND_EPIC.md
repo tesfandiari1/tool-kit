@@ -1,8 +1,11 @@
 # Epic: Rust conversion backend
 
-**Status:** In progress. M3 gate met; M6 is next and may run in parallel
-**Current milestone:** M3. AnyDoc and local format routing (all increments done)
-**Latest verified checkpoint:** `5f298f6` plus the uncommitted M3 close-out below
+**Status:** In progress. M3 gate met; M6 implementation landed, gate still open
+**Current milestone:** M6 validation and pre-cutover baseline
+**Latest implementation checkpoint:** `1f69cab`. The shared-tree landing gate
+passed 53 frontend tests and 60 desktop Rust tests with 3 live smokes ignored;
+the Rust count includes 3 concurrent, unstaged `secrets.rs` tests. Build and
+Clippy were clean.
 **Target:** CPU-only Rust/Axum modular monolith
 **Architecture:** [`BACKEND_SERVICE_PLAN.md`](BACKEND_SERVICE_PLAN.md)
 **Immediate plan:** [`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)
@@ -50,7 +53,7 @@ integration boundary at a time.
 | M3 | AnyDoc and proven non-PDF local conversion | Complete | M2 |
 | M4 | Corpus-calibrated routing and quality policy | Planned | M3 |
 | M5 | Restart-safe Datalab fallback and privacy policy | Planned | M4 |
-| M6 | Desktop app uses the backend | Planned | M2 (M5 for one CVR-067 scenario) |
+| M6 | Desktop app uses the backend | In progress | M2 (M5 for one CVR-067 scenario) |
 | M7 | LAN deployment, operations, and recovery | Planned | M6 |
 | M8 | Evaluation, reversible cutover, and cleanup | Planned | M7 |
 
@@ -390,41 +393,49 @@ leave the network, and a known or uncertain remote request is never duplicated.
 
 ## M6: Desktop integration
 
-**Format gap (2026-08-18 review):** the desktop accepts ~18 convert extensions;
-the backend advertises three until M3 Increment 4 completes. M6 must not present
-backend routing as all-or-nothing. Increment plan and per-file fallback live in
-[`DESKTOP_EXECUTION_PLAN.md`](DESKTOP_EXECUTION_PLAN.md). Run
-`pnpm generate:api` as Increment 0. The committed schema trails OpenAPI 0.4.0.
+**Implementation checkpoint (2026-08-18):** the desktop now routes per file
+from the live `capabilities.inputFormats` contract; it never hardcodes the
+backend's proven PDF/AnyDoc set. Image and HTML formats remain permanently on
+the direct Datalab path, unsupported direct-eligible formats fall back only
+under `standard`, and `local_only` never sends them to Datalab. The generated
+schema matches OpenAPI 0.4.0. Increment detail and the remaining validation
+work live in [`DESKTOP_EXECUTION_PLAN.md`](DESKTOP_EXECUTION_PLAN.md).
 
-- [ ] **CVR-060:** Add backend URL and device-token settings outside React
+- [x] **CVR-060:** Add backend URL and device-token settings outside React
   state, keeping the token in the macOS Keychain.
-- [ ] **CVR-061:** Generate or validate and commit the Tauri HTTP client/schema
+- [x] **CVR-061:** Generate or validate and commit the Tauri HTTP client/schema
   against the backend OpenAPI contract, including the capability correction
   temporarily diffed during M2.
-- [ ] **CVR-062:** Stream selected files from Tauri to the backend with an
+- [x] **CVR-062:** Stream selected files from Tauri to the backend with an
   idempotency key and stable client run ID.
-- [ ] **CVR-063:** Poll durable job state and recover an in-progress desktop run
+- [x] **CVR-063:** Poll durable job state and recover an in-progress desktop run
   after app restart.
-- [ ] **CVR-064:** Download Markdown through Tauri and preserve current
+- [x] **CVR-064:** Download Markdown through Tauri and preserve current
   collision-safe output naming.
-- [ ] **CVR-065:** Show selected route, warnings, privacy decisions, and
+- [x] **CVR-065:** Show selected route, warnings, privacy decisions, and
   actionable failures without exposing provider credentials to the webview.
   **Gate Run on `capabilities.inputFormats`:** disable or fall back to the
   direct path for extensions the backend does not advertise; never fail silently
   at upload for formats the UI allowed.
-- [ ] **CVR-066:** Keep the existing direct-provider path behind a reversible
+- [x] **CVR-066:** Keep the existing direct-provider path behind a reversible
   switch until the deployment gate passes.
 - [ ] **CVR-067:** Add end-to-end desktop tests for local success, Datalab
   fallback, restart recovery, backend unavailability, and retry-safe replay.
+  Deterministic native and loopback coverage now proves local success,
+  restart/replay, unknown-status pending behavior, backend unavailability,
+  `needs_remote` profile decisions, stop/retry cleanup, response identity, and
+  path-only artifact IPC. The explicit M5-dependent end-to-end durability
+  scenario for backend-owned Datalab fallback remains pending.
 
 - [ ] **CVR-081:** Capture direct-path baselines (~10 representative files:
   native PDF, scanned PDF, docx, xlsx, and formats still on Datalab) and
   compare output completeness, routing, and failure behavior against the
   backend path. **Moved from M8**: run before cutover, not after M7.
 
-**M6 gate:** The desktop completes representative local and remote conversions,
-recovers active jobs, never exposes backend or provider credentials to the
-webview, and CVR-081 baselines are recorded.
+**M6 gate: not met yet.** The implementation completes local conversions,
+recovers active jobs, keeps credentials and bytes native, and preserves the
+direct fallback. The M5-dependent CVR-067 fallback-durability scenario and the
+CVR-081 representative direct-path baselines remain open.
 
 ## M7: LAN deployment and operations
 
@@ -509,19 +520,15 @@ work.
 
 ## Next execution sequence
 
-**Now:** M3 is closed. Next is M6 desktop integration, starting with
-`pnpm generate:api` (the committed schema trails OpenAPI 0.4.0). CVR-039
-(parse-path optimization) stays optional and unscheduled: measure before
-building it.
+**Now:** M6 implementation is landed through `1f69cab`. Next, capture the
+CVR-081 direct-path baseline and retain the M5-dependent CVR-067
+fallback-durability scenario for M5. Do not close M6 merely because the code
+path and offline gate are green. CVR-039 (parse-path optimization) stays
+optional and unscheduled: measure before building it.
 
-M6 desktop integration may run in parallel in a second session under the
-ownership table in [`HANDOFF.md`](HANDOFF.md). The one coordination point is
-`pnpm generate:api` after M3 widens `inputFormats`; run by whichever session
-lands second; the M3 session never writes `src/app/api/schema.ts`.
-
-Recommended milestone order after M3: M6 (with per-file Datalab fallback) may
-parallel M4; M5 after M4 fixture suite; M7-lite (CVR-070/071/073/075) before
-full M7 ops debloat; M8 cutover last.
+Recommended milestone order: CVR-081 baseline; M4 fixture policy; M5 plus the
+deferred CVR-067 durability scenario; M7-lite (CVR-070/071/073/075); M8 cutover
+last.
 
 The M2 plan ([`BACKEND_EXECUTION_PLAN.md`](BACKEND_EXECUTION_PLAN.md)) is
 complete. Historical reference only. Active increment detail for M6 is in
@@ -529,6 +536,48 @@ complete. Historical reference only. Active increment detail for M6 is in
 [`HANDOFF.md`](HANDOFF.md) before touching files.
 
 ## Verification log
+
+### 2026-08-18: M6 desktop backend vertical slice
+
+CVR-060 through CVR-066 are implemented. CVR-067 and CVR-081 remain open for
+the explicit evidence named on their tickets.
+
+- `b893dd3` regenerated the committed OpenAPI 0.4.0 schema and recorded the
+  multipart/download command decisions. `af93c18` and `03c0ce4` added the
+  durable per-file in-flight ledger and bound every recovery row to its
+  original backend URL.
+- `bed0ab2` added the reversible direct/backend setting, backend URL and
+  profile, plus the Keychain-backed backend token surface. `1533485` registered
+  the native service door, streamed multipart from the desktop path, bounded
+  generic responses, and streamed Markdown directly to collision-safe disk.
+- `24f8231` added capability-driven per-file planning. Permanent image/HTML
+  formats stay direct even if advertised; arbitrary files never enter the
+  conversion path; unavailable service capacity blocks only files that need
+  it; `local_only` never falls through to Datalab.
+- `6f19ee8` added durable submit/replay, five-second polling, explicit terminal
+  allowlisting, restart recovery, path-only downloads, `needs_remote` profile
+  decisions, and distinct backend history output. `eed27c5` and `1f69cab`
+  carried route, reason codes, warnings, and failures into the enabled UI.
+- `0039e47`, `c9f917c`, and `94554de` closed Stop/new-run races by serializing
+  generation retirement, guarded mutation, terminal bookkeeping, and event
+  emission. `3f91168` rejects invalid or redirected response IDs before an
+  artifact request.
+- `489b24f` added an ignored, environment-gated live compatibility smoke. It
+  passed once against an ephemeral 0.4.0 service and the checked-in AnyDoc DOCX
+  fixture through the actual native capabilities, submit, poll, and streamed
+  download helpers.
+- The final shared-tree landing gate for `1f69cab` passed 53 frontend tests,
+  the production build, Clippy with warnings denied, and 60 desktop Rust tests;
+  3 credentialed live smokes stayed ignored. That Rust count includes 3 tests
+  from concurrent, unstaged `secrets.rs` work and is not an exact-commit count.
+  The atomic-retirement landing gate similarly passed 52 frontend tests and
+  the shared-tree 60-test Rust suite.
+- Conservative caveat: when the backend route is selected, conversion history
+  reuse/copy is disabled because direct-provider and backend results are not
+  yet safely interchangeable in the reuse matcher.
+
+Still pending: CVR-081's representative direct-path baseline and the
+M5-dependent end-to-end durability scenario for backend-owned Datalab fallback.
 
 ### 2026-08-17: Foundation and PDF vertical slice
 
