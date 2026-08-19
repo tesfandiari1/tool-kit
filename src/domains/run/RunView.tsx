@@ -29,7 +29,9 @@ import {
 import { ACTIVE } from "@/app/types";
 import type { Job, JobId, Scan, Settings } from "@/app/types";
 import { basename, fmtElapsed } from "@/app/format";
+import { jobDetailItems, jobDetailText } from "./details";
 import { JOBS, type JobDef } from "./jobs";
+import { runServiceDescription } from "./plan";
 
 /// A job's status mapped onto the design system's tones. The library knows
 /// nothing about our five statuses, and this one line is the whole cost of
@@ -153,7 +155,13 @@ export function RunView({
             })}
           />
           <Text size="xs" tone="faint" className="run-desc">
-            {job.desc}, via {job.service}
+            {runServiceDescription({
+              description: job.desc,
+              provider: job.service,
+              jobType: settings.jobType,
+              conversionRoute: settings.conversionRoute,
+              profile: settings.conversionProfile,
+            })}
           </Text>
           <Row gap={2} align="stretch">
             {/* `lg` is the launcher's single actuator. With a document open the
@@ -477,6 +485,13 @@ function JobRow({
     (job.status === "working" || job.status === "processing") && job.startedAt !== null
       ? fmtElapsed(now, job.startedAt)
       : "0:00";
+  const details = jobDetailItems(job);
+  const detailText = jobDetailText(details);
+  const detailTone = details.some(({ kind }) => kind === "failure")
+    ? "fault"
+    : details.some(({ kind }) => kind === "warning")
+      ? "muted"
+      : "ghost";
   return (
     /* Not a <button>: the row already holds three of them, and nesting is
        invalid. The name is the primary control and the actions are its
@@ -524,6 +539,11 @@ function JobRow({
               {basename(job.outputPath)}
             </Text>
           )
+        )}
+        {details.length > 0 && (
+          <Text as="span" size="xs" tone={detailTone} className="job-sub" title={detailText}>
+            {detailText}
+          </Text>
         )}
       </div>
       <Mono size="xs" tone={active ? "ink" : "ghost"} className="job-time">

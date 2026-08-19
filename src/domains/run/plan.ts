@@ -1,4 +1,4 @@
-import type { JobId, Scan } from "@/app/types";
+import type { ConversionProfile, ConversionRoute, JobId, Scan } from "@/app/types";
 
 /// The buckets a selection costs. Extracted so the numbers the Run button
 /// promises can be tested without mounting the app — getting them wrong
@@ -56,4 +56,80 @@ export function runButtonLabel(verb: string, toRun: number, copying: number): st
   if (toRun > 0) return `${verb} ${toRun} file${toRun > 1 ? "s" : ""}`;
   if (copying > 0) return `Copy ${copying} result${copying > 1 ? "s" : ""}`;
   return "Run pipeline";
+}
+
+/// The native backend route deliberately does not reuse direct-provider
+/// history yet: a backend result is not interchangeable with a Datalab result.
+/// Keep the UI's counts and route plan on that same conservative policy.
+export function effectiveSkipAlreadyDone(
+  jobType: JobId,
+  conversionRoute: ConversionRoute,
+  requested: boolean,
+): boolean {
+  return requested && !(jobType === "convert" && conversionRoute === "backend");
+}
+
+export function largeRunConfirmation({
+  totalFiles,
+  provider,
+  backendFiles,
+  directFiles,
+  highAccuracy,
+  profile,
+}: {
+  totalFiles: number;
+  provider: string;
+  backendFiles: number;
+  directFiles: number;
+  highAccuracy: boolean;
+  profile: ConversionProfile;
+}): string {
+  const accuracy =
+    highAccuracy && directFiles > 0
+      ? ", with high-accuracy convert on (slower, more credits per page)"
+      : "";
+
+  if (backendFiles === 0) {
+    return `This will send ${totalFiles} files to ${provider}${accuracy}.\n\nEach file uses ${provider} credits.`;
+  }
+  if (directFiles === 0) {
+    const fallbackAccuracy = highAccuracy
+      ? " with high-accuracy convert on (slower, more credits per page)"
+      : "";
+    const cost =
+      profile === "local_only"
+        ? `Local only forbids ${provider} fallback, so no ${provider} credits are planned.`
+        : `Files that require remote fallback may also use ${provider} credits${fallbackAccuracy}.`;
+    return `This will send ${totalFiles} files to your conversion backend.\n\n${cost}`;
+  }
+  const fallback =
+    profile === "local_only"
+      ? ` Backend files cannot fall back to ${provider} under Local only.`
+      : ` Backend files may also use ${provider} credits if remote fallback is required.`;
+  return (
+    `This will send ${backendFiles} files to your conversion backend and ${directFiles} files to ${provider}${accuracy}.` +
+    `\n\nThe ${directFiles} files routed directly to ${provider} use provider credits.${fallback}`
+  );
+}
+
+export function runServiceDescription({
+  description,
+  provider,
+  jobType,
+  conversionRoute,
+  profile,
+}: {
+  description: string;
+  provider: string;
+  jobType: JobId;
+  conversionRoute: ConversionRoute;
+  profile: ConversionProfile;
+}): string {
+  if (jobType !== "convert" || conversionRoute === "direct") {
+    return `${description}, via ${provider}`;
+  }
+  if (profile === "local_only") {
+    return `${description}, via your conversion backend only`;
+  }
+  return `${description}, via your conversion backend with ${provider} fallback where required`;
 }

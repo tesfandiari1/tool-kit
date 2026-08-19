@@ -7,7 +7,13 @@ import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
 import type { Job, JobId, Scan, SecretStatus, Settings, View } from "@/app/types";
 import { RunView } from "@/domains/run/RunView";
 import { JOBS } from "@/domains/run/jobs";
-import { canStartRun, planRun, runButtonLabel } from "@/domains/run/plan";
+import {
+  canStartRun,
+  effectiveSkipAlreadyDone,
+  largeRunConfirmation,
+  planRun,
+  runButtonLabel,
+} from "@/domains/run/plan";
 import {
   missingConversionCredentials,
   planConversionRoutes,
@@ -359,11 +365,16 @@ export default function App() {
   // What the selection actually costs. Skip, copy, and billable work, plus the
   // skip-off case: files already in this folder that will still be sent and
   // land as numbered copies. The button only ever promises the billable number.
+  const skipAlreadyDone = effectiveSkipAlreadyDone(
+    settings.jobType,
+    settings.conversionRoute,
+    settings.skipAlreadyDone,
+  );
   const { skipping, copying, toRun, colliding } = planRun(
     settings.jobType,
     inputCount,
     scan,
-    settings.skipAlreadyDone,
+    skipAlreadyDone,
   );
 
   const conversionPlan = planConversionRoutes({
@@ -371,7 +382,7 @@ export default function App() {
     route: settings.conversionRoute,
     profile: settings.conversionProfile,
     capabilities,
-    skipAlreadyDone: settings.skipAlreadyDone,
+    skipAlreadyDone,
   });
   const missingCredentials =
     settings.jobType === "convert"
@@ -380,14 +391,8 @@ export default function App() {
         ? ["revai" as const]
         : [];
   const routeBlocked = settings.jobType === "convert" && conversionPlan.blocked.length > 0;
-  // The planner already has the final per-file routing contract. Native
-  // backend submit/poll is deliberately a separate readiness gate so the next
-  // increment can enable execution without changing that routing math. Until
-  // then, never let the existing all-Datalab pipeline consume backend files.
-  const backendExecutionBlocked =
-    settings.jobType === "convert" && conversionPlan.backend.length > 0;
   const preflightReady =
-    scanCurrent && !routeBlocked && !backendExecutionBlocked && missingCredentials.length === 0;
+    scanCurrent && !routeBlocked && missingCredentials.length === 0;
   const canRun = canStartRun({
     hasInputs: settings.inputs.length > 0,
     hasOutput: Boolean(settings.outputDir),
@@ -406,12 +411,20 @@ export default function App() {
     // A large batch is irreversible spend the moment it starts — Stop only
     // helps once you have noticed. Confirm the size and the cost driver first.
     if (toRun >= BIG_RUN) {
+      const backendFiles =
+        settings.jobType === "convert" ? conversionPlan.backend.length : 0;
+      const directFiles =
+        settings.jobType === "convert" ? conversionPlan.direct.length : toRun;
       const go = await confirm(
-        `This will send ${toRun} files to ${job.service}` +
-          (settings.jobType === "convert" && settings.datalabHighAccuracy
-            ? ", with high-accuracy convert on (slower, more credits per page)."
-            : ".") +
-          "\n\nEach file is billed by the provider.",
+        largeRunConfirmation({
+          totalFiles: toRun,
+          provider: job.service,
+          backendFiles,
+          directFiles,
+          highAccuracy:
+            settings.jobType === "convert" && settings.datalabHighAccuracy,
+          profile: settings.conversionProfile,
+        }),
         { title: `${job.verb} ${toRun} files?`, kind: "warning", okLabel: `${job.verb} all`, cancelLabel: "Cancel" }
       );
       if (!go) return;
@@ -521,10 +534,6 @@ export default function App() {
       hint = `${count} file${count > 1 ? "s need" : " needs"} Datalab, but Local only forbids remote fallback — choose Standard or remove ${count > 1 ? "them" : "it"}`;
       hintOpensSettings = true;
     }
-  } else if (backendExecutionBlocked) {
-    const count = conversionPlan.backend.length;
-    hint = `${count} file${count > 1 ? "s are" : " is"} routed to the local backend, but native submit/poll is not available in this increment yet`;
-    hintOpensSettings = true;
   } else if (missingCredentials.length > 0) {
     const labels = missingCredentials.map((secret) => {
       if (secret === "datalab") return "Datalab key";

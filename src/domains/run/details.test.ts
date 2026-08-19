@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { jobDetailItems } from "./details";
+import { jobDetailItems, jobDetailText } from "./details";
 
 describe("jobDetailItems", () => {
   it("returns no details for a direct job without backend metadata", () => {
@@ -39,5 +39,18 @@ describe("jobDetailItems", () => {
         value: "future_failure: The service explained what happened.",
       },
     ]);
+  });
+
+  it("formats every returned detail into the visible queue text", () => {
+    const items = jobDetailItems({
+      route: "future_route",
+      reasonCodes: ["future_reason"],
+      warnings: ["future_warning"],
+      failure: { code: "future_failure", message: "Future-safe message" },
+    });
+
+    expect(jobDetailText(items)).toBe(
+      "Route: future_route · Reason: future_reason · Warning: future_warning · Failure: future_failure: Future-safe message",
+    );
   });
 });

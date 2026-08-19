@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { canStartRun, planRun, runButtonLabel } from "./plan";
+import {
+  canStartRun,
+  effectiveSkipAlreadyDone,
+  largeRunConfirmation,
+  planRun,
+  runButtonLabel,
+  runServiceDescription,
+} from "./plan";
 import { EMPTY_SCAN } from "@/app/types";
 
 const scan = {
@@ -98,5 +105,105 @@ describe("runButtonLabel", () => {
     expect(runButtonLabel("Convert", 3, 2)).toBe("Convert 3 files");
     expect(runButtonLabel("Convert", 0, 2)).toBe("Copy 2 results");
     expect(runButtonLabel("Convert", 0, 0)).toBe("Run pipeline");
+  });
+});
+
+describe("effectiveSkipAlreadyDone", () => {
+  it("disables reuse only for backend-routed conversion", () => {
+    expect(effectiveSkipAlreadyDone("convert", "backend", true)).toBe(false);
+    expect(effectiveSkipAlreadyDone("convert", "direct", true)).toBe(true);
+    expect(effectiveSkipAlreadyDone("transcribe", "backend", true)).toBe(true);
+    expect(effectiveSkipAlreadyDone("convert", "backend", false)).toBe(false);
+  });
+});
+
+describe("largeRunConfirmation", () => {
+  it("names provider credits for direct batches", () => {
+    expect(
+      largeRunConfirmation({
+        totalFiles: 25,
+        provider: "Datalab",
+        backendFiles: 0,
+        directFiles: 25,
+        highAccuracy: true,
+        profile: "standard",
+      }),
+    ).toBe(
+      "This will send 25 files to Datalab, with high-accuracy convert on (slower, more credits per page).\n\nEach file uses Datalab credits.",
+    );
+  });
+
+  it("warns that standard backend-only batches may still use remote fallback credits", () => {
+    expect(
+      largeRunConfirmation({
+        totalFiles: 25,
+        provider: "Datalab",
+        backendFiles: 25,
+        directFiles: 0,
+        highAccuracy: true,
+        profile: "standard",
+      }),
+    ).toBe(
+      "This will send 25 files to your conversion backend.\n\nFiles that require remote fallback may also use Datalab credits with high-accuracy convert on (slower, more credits per page).",
+    );
+  });
+
+  it("states direct cost and possible fallback cost for a mixed standard batch", () => {
+    expect(
+      largeRunConfirmation({
+        totalFiles: 25,
+        provider: "Datalab",
+        backendFiles: 18,
+        directFiles: 7,
+        highAccuracy: false,
+        profile: "standard",
+      }),
+    ).toBe(
+      "This will send 18 files to your conversion backend and 7 files to Datalab.\n\nThe 7 files routed directly to Datalab use provider credits. Backend files may also use Datalab credits if remote fallback is required.",
+    );
+  });
+
+  it("promises no fallback credits only under Local only", () => {
+    expect(
+      largeRunConfirmation({
+        totalFiles: 25,
+        provider: "Datalab",
+        backendFiles: 25,
+        directFiles: 0,
+        highAccuracy: true,
+        profile: "local_only",
+      }),
+    ).toBe(
+      "This will send 25 files to your conversion backend.\n\nLocal only forbids Datalab fallback, so no Datalab credits are planned.",
+    );
+  });
+});
+
+describe("runServiceDescription", () => {
+  const describe = (jobType: "convert" | "transcribe", route: "direct" | "backend", profile: "standard" | "local_only") =>
+    runServiceDescription({
+      description: jobType === "convert" ? "Extract structured text" : "Transcribe audio",
+      provider: jobType === "convert" ? "Datalab" : "Rev.ai",
+      jobType,
+      conversionRoute: route,
+      profile,
+    });
+
+  it("keeps direct conversion and transcription on their named provider", () => {
+    expect(describe("convert", "direct", "standard")).toBe(
+      "Extract structured text, via Datalab",
+    );
+    expect(describe("transcribe", "backend", "local_only")).toBe(
+      "Transcribe audio, via Rev.ai",
+    );
+  });
+
+  it("names fallback policy for backend conversion", () => {
+    expect(describe("convert", "backend", "standard")).toBe(
+      "Extract structured text, via your conversion backend with Datalab fallback where required",
+    );
+    expect(describe("convert", "backend", "local_only")).toBe(
+      "Extract structured text, via your conversion backend only",
+    );
   });
 });

@@ -34,3 +34,7 @@ export function jobDetailItems(job: JobMetadata): JobDetailItem[] {
 
   return items;
 }
+
+export function jobDetailText(items: readonly JobDetailItem[]): string {
+  return items.map(({ label, value }) => `${label}: ${value}`).join(" · ");
+}
