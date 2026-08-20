@@ -40,16 +40,16 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: backend
+          workspaces: apps/converter
       - run: cargo clippy --locked --manifest-path crates/worker-protocol/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path crates/worker-protocol/Cargo.toml
-      - run: cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --locked --manifest-path backend/Cargo.toml
+      - run: cargo clippy --locked --manifest-path apps/converter/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path apps/converter/Cargo.toml
       - uses: astral-sh/setup-uv@v10
       # Property-based testing against the running service. It boots its own
       # copy on a throwaway port and data root, so it shares nothing with the
       # steps above.
-      - run: backend/scripts/contract-fuzz.sh
+      - run: apps/converter/scripts/contract-fuzz.sh
 
   desktop:
     runs-on: macos-latest
@@ -60,9 +60,9 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
-      - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+          workspaces: apps/desktop/src-tauri
+      - run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib
 
   # The RustSec advisory database moves without us, so this job can go red on a
   # commit that changed nothing. That is the job working. It is separate from
@@ -79,6 +79,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.20.2
-      - run: cargo deny --manifest-path backend/Cargo.toml check
-      - run: cargo deny --manifest-path src-tauri/Cargo.toml check
+      - run: cargo deny --manifest-path apps/converter/Cargo.toml check
+      - run: cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml check
       - run: cargo deny --manifest-path crates/worker-protocol/Cargo.toml check

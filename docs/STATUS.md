@@ -25,7 +25,7 @@ rewrite code, commands, identifiers, or quotations to match prose rules.
 | Exposure | Loopback only. Tailscale remote access is M7, unbuilt |
 | Backend Datalab fallback | Not built. Phase 2, now unblocked |
 | Phase 1 | **Complete 2026-08-19.** All four gates met |
-| Desktop version | **1.0.0** (`package.json`, `src-tauri/Cargo.toml`, `tauri.conf.json`) |
+| Desktop version | **1.0.0** (`apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml`, `tauri.conf.json`) |
 | 1.0 bundle | Signed, **notarized and stapled** (app and DMG), verified by `pnpm verify:release --notarized`. Keychain entitlement is parked until the provisioning profile lands, so that one section fails by design |
 | Latest container smoke | `20260819T161851Z`, image `sha256:4a0cbdd0…` |
 
@@ -43,7 +43,7 @@ running log. `git log` is the source of truth.
 | `a337594` | Consolidation of every planning doc into this file |
 
 **Sprint 0, Sprint 1, Sprint A, and the Phase 1 closeout are done.** `scanKey`
-in `src/shell/App.tsx` includes `conversionRoute` and `backendUrl` (S0.7). The
+in `apps/desktop/src/shell/App.tsx` includes `conversionRoute` and `backendUrl` (S0.7). The
 capability probe retries on an interval instead of latching Run off for the
 session (S0.8).
 
@@ -116,7 +116,7 @@ and pass the text-local corpus gate plus `pnpm verify:all`.
 
 ### The 20 backend extensions
 
-`SOURCE_FORMATS` in `backend/src/conversion/model.rs` is the one admission
+`SOURCE_FORMATS` in `apps/converter/src/conversion/model.rs` is the one admission
 table. It drives extension, media-type, and magic checks at upload, engine
 selection at execution, and the capabilities `inputFormats` list. It carries
 **20 extensions over 18 media types**: PDF on its own isolated worker plus 19
@@ -152,10 +152,10 @@ appears only with a fixture that proves it.
 
 | Cap | Value | Where |
 |---|---|---|
-| Backend upload ceiling | **25 MiB** (`26214400`) | `DEFAULT_MAX_UPLOAD_BYTES`, `backend/src/config.rs` |
+| Backend upload ceiling | **25 MiB** (`26214400`) | `DEFAULT_MAX_UPLOAD_BYTES`, `apps/converter/src/config.rs` |
 | Backend output ceiling | 50 MiB (`52428800`) | `TOOLKIT_CONVERTER_MAX_OUTPUT_BYTES` |
-| Desktop preview and open | **2 MiB** | `MAX_PREVIEW_BYTES`, `src-tauri/src/lib.rs` |
-| Backend manifest read | 2 MiB | `MAX_MANIFEST_BYTES`, `backend/src/conversion/service.rs` |
+| Desktop preview and open | **2 MiB** | `MAX_PREVIEW_BYTES`, `apps/desktop/src-tauri/src/lib.rs` |
+| Backend manifest read | 2 MiB | `MAX_MANIFEST_BYTES`, `apps/converter/src/conversion/service.rs` |
 
 A source over 25 MiB fails at upload. A result over 2 MiB converts and lands on
 disk but refuses to open in the thread pane with "File is too large to
@@ -183,7 +183,7 @@ paid success.
 `deploy/docker/compose.yaml` with two different meanings. Under `environment:` it is
 the in-container path `/run/secrets/bootstrap_token`. Under `secrets:` it is a
 host-side substitution, `${TOOLKIT_CONVERTER_TOKEN_FILE:-./secrets/bootstrap-token.txt}`.
-`backend/.env.example` sets it to an absolute host path. If you export it in
+`apps/converter/.env.example` sets it to an absolute host path. If you export it in
 your shell or place a `.env` beside `compose.yaml` that sets it to the
 container path, Compose looks for the host secret file at
 `/run/secrets/bootstrap_token` and the stack fails to start. Leave it unset on
@@ -198,16 +198,16 @@ garbled fonts, forms, blanks, and rejections. Keep them in the backend suite.
 Do not delete them.
 
 AnyDoc coverage already lives in `every_advertised_anydoc_family_converts`
-inside `backend/tests/http_contract.rs`.
+inside `apps/converter/tests/http_contract.rs`.
 
 | # | Task | State |
 |---|---|---|
 | C.1 | Name the five case IDs in `verify-local-corpus.sh`, assert the manifest carries them | Done. See the note below |
-| C.2 | `backend/scripts/verify-local-corpus.sh` runs `routing_policy` plus the AnyDoc sweep | Done |
+| C.2 | `apps/converter/scripts/verify-local-corpus.sh` runs `routing_policy` plus the AnyDoc sweep | Done |
 | C.3 | `pnpm verify:local-corpus` in the root `package.json` | Done |
 | C.4 | Run `pnpm verify:all` and `pnpm verify:container` | Both green 2026-08-19 |
 | C.5 | Record the container smoke timestamp in section 9 | Done (`20260819T161851Z`) |
-| C.6 | `backend/scripts/print-corpus-pdf.sh` plus `write_native_pdf_fixture_to_env` in `corpus.rs` | Done |
+| C.6 | `apps/converter/scripts/print-corpus-pdf.sh` plus `write_native_pdf_fixture_to_env` in `corpus.rs` | Done |
 
 **C.1 does not filter, on purpose.** `verify-local-corpus.sh` runs the whole
 `routing_policy` suite, which is a superset of the five, so filtering would buy
@@ -221,7 +221,7 @@ field was rejected: `policy.rs` parses the manifest with
 
 **All six pass as of 2026-08-19.** D.1 and D.4 are reproducible against the
 running container. D.2, D.3, D.5, and D.6 passed in one `pnpm tauri dev`
-session. Generate inputs with `backend/scripts/print-corpus-pdf.sh` if you have
+session. Generate inputs with `apps/converter/scripts/print-corpus-pdf.sh` if you have
 no sample handy.
 
 | # | Step | Pass when |
@@ -257,8 +257,8 @@ No gate rebuilds it.
 ```bash
 docker compose -f deploy/docker/compose.yaml up -d   # skip if already healthy
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/health/ready
-backend/scripts/print-corpus-pdf.sh /tmp/toolkit-native.pdf
-backend/scripts/print-corpus-pdf.sh /tmp/toolkit-scanned.pdf scanned
+apps/converter/scripts/print-corpus-pdf.sh /tmp/toolkit-native.pdf
+apps/converter/scripts/print-corpus-pdf.sh /tmp/toolkit-scanned.pdf scanned
 pnpm tauri dev
 ```
 
@@ -315,7 +315,7 @@ through D.3. Not required for this gate.
 3. All six acceptance steps pass once. **Done 2026-08-19.**
 4. Archive the four superseded docs. No live doc contradicts another on
    milestone status or scope. **Done.** The docs are in `docs/archive/`, the
-   `backend/README.md` milestone line reads M4, and `backend/evals/README.md`
+   `apps/converter/README.md` milestone line reads M4, and `apps/converter/evals/README.md`
    carries a "Phase 1 local-text cases" section. That section replaced an
    earlier plan to add a `localTextOnly` manifest field, which C.1 rules out.
 
@@ -329,7 +329,7 @@ first sprint.
 **Highest-complexity milestone.** Uncertain billable submission and
 restart-safe polling are where production bugs live.
 
-**Port the desktop taxonomy from `src-tauri/src/providers.rs` verbatim.**
+**Port the desktop taxonomy from `apps/desktop/src-tauri/src/providers.rs` verbatim.**
 Especially `send_retrying()`, which retries only failures that prove the server
 never started work, `terminal_poll_error()`, and the rule that a result-fetch
 5xx or 429 stays transient after the work is already billed. Do not redesign
@@ -348,7 +348,7 @@ backend Datalab as an optimization, not a desktop blocker.
 ### S2.3: provenance-aware history reuse
 
 Backend results file under `backend:markdown` and Datalab fallbacks under
-`backend_fallback:{format}`. The matcher in `src-tauri/src/lib.rs` calls
+`backend_fallback:{format}`. The matcher in `apps/desktop/src-tauri/src/lib.rs` calls
 `history::reusable(app, files, jt.id(), &jobs::output_format_for(jt, cfg))`,
 which produces the plain Datalab format string and never selects a backend row.
 
@@ -562,7 +562,7 @@ and legacy code is removed only after a separate approval.
 ### M0: architecture and boundaries. Closed
 
 - [x] CVR-001: record the dirty-worktree baseline and backend-owned paths.
-- [x] CVR-002: independent `backend/` crate, not a root workspace.
+- [x] CVR-002: independent `apps/converter/` crate, not a root workspace.
 - [x] CVR-003: select Rust/Axum as the production foundation.
 - [x] CVR-004: modular monolith, one container, one in-process worker, parser
   child-process isolation.
@@ -647,7 +647,7 @@ validated, downloadable artifacts.
   engine reported as a caveat reached the user. The M4 policy populates it.
 - [x] CVR-036: PDF plus 19 AnyDoc extensions, each with a round-trip fixture and
   each family with a bounded-failure fixture. Licenses in
-  `backend/tests/fixtures/SOURCES.md`.
+  `apps/converter/tests/fixtures/SOURCES.md`.
 - [x] CVR-037: container and contract gates re-run with AnyDoc present, plus the
   AnyDoc hard outer timeout. Smoke `20260818T192759Z`, image `sha256:cd989ed8…`.
   Hang and panic wrapper tests pass.
@@ -714,7 +714,7 @@ The corpus is the proof. `partly-scanned-9-text-pages` and
 `partly-scanned-9-text-pages-local-only` expect the same `succeeded` and the
 same `pages_without_extractable_text` warning, and `scanned-1-page` and
 `scanned-1-page-local-only` both expect `needs_remote` with no artifact.
-`backend/README.md` says the same thing. Do not write a profile split into any
+`apps/converter/README.md` says the same thing. Do not write a profile split into any
 doc before M5 builds one.
 
 #### The confidence correction
@@ -812,7 +812,7 @@ open, and history reuse still ignores provenance.
   path. The body never crosses IPC.
 - Everything else goes through one `service_request` command. The registered
   host handler owns the base URL, bearer token, multipart file stream, response
-  limits, and token redaction. `src/app/api/transport.ts` plugs that
+  limits, and token redaction. `apps/desktop/src/app/api/transport.ts` plugs that
   Tauri-backed `fetch` into openapi-fetch's documented seam.
 
 ### M7 and M8
@@ -868,7 +868,7 @@ converter container, not a separate service.**
   also holds its own permit, which matters because a timed-out AnyDoc parse
   detaches still holding one. Two jobs never parse concurrently.
 - SQLx 0.9, default features disabled, only `runtime-tokio`, `sqlite`,
-  `migrate`, `macros`. Track migration changes through `backend/build.rs`.
+  `migrate`, `macros`. Track migration changes through `apps/converter/build.rs`.
 - Store sources and artifacts on the filesystem, not as SQLite blobs.
 - One host-local `/data` dataset. Never put the live SQLite database on SMB,
   NFS, or another network filesystem.
@@ -1106,7 +1106,7 @@ hosts must coordinate durable work.
   ```bash
   docker buildx create --name toolkit-capped --driver docker-container --bootstrap
   docker update --cpus 4 buildx_buildkit_toolkit-capped0
-  TOOLKIT_SMOKE_BUILDER=toolkit-capped backend/scripts/container-smoke.sh
+  TOOLKIT_SMOKE_BUILDER=toolkit-capped apps/converter/scripts/container-smoke.sh
   ```
 
 ### Backend correctness
@@ -1116,7 +1116,7 @@ hosts must coordinate durable work.
   engine's vocabulary in shared layers, and make at least one restart test and
   one container test use the new engine's input.
 - **The fault barrier is production code that production never arms.**
-  `backend/src/faults.rs` is reachable only from a test holding an `AppState`.
+  `apps/converter/src/faults.rs` is reachable only from a test holding an `AppState`.
   Do not add a flag, an environment variable, or a route that arms it. Its four
   call sites sit between committed transactions on purpose. A parked task must
   hold no SQLite write lock.
@@ -1180,7 +1180,7 @@ hosts must coordinate durable work.
   fails silently at runtime.
 
 The rest are in `CLAUDE.md` under Gotchas: `setSize` clamping order, page zoom
-versus the traffic lights, `src/shell/geometry.ts` as the only home for window
+versus the traffic lights, `apps/desktop/src/shell/geometry.ts` as the only home for window
 geometry, `react-resizable-panels` layout keying, and the ⌥⌘V shortcut choice.
 
 ### Process
@@ -1239,7 +1239,7 @@ pnpm verify:api-drift # schema.ts still matches the contract
 pnpm verify:deps      # cargo-deny over both crates
 pnpm verify:contract  # Schemathesis against a live service
 
-src-tauri/scripts/verify-release.sh  # the built bundle, after pnpm tauri build
+apps/desktop/src-tauri/scripts/verify-release.sh  # the built bundle, after pnpm tauri build
 ```
 
 `pnpm verify` is deliberately desktop-scoped, so in-flight backend work cannot
@@ -1257,7 +1257,7 @@ that changed nothing, and that must not read as a broken build. Desktop clippy a
 because of `macos-private-api` and `security-framework`. **CI does not run the container
 smoke.** It is a local release gate, so re-run it by hand before closing any
 milestone that touches persistence, the worker, the Dockerfile, or Compose.
-Evidence lands in `backend/target/container-smoke/<utc-timestamp>/evidence.md`,
+Evidence lands in `apps/converter/target/container-smoke/<utc-timestamp>/evidence.md`,
 which is gitignored. Paste the relevant lines into this file rather than linking
 the path.
 
@@ -1315,7 +1315,7 @@ Landed for 1.0:
 | Poll emits only on change | `jobs.rs` | The backend poll called `set_status` with the same pending note every 5s per job |
 | Staged job tree survives cancellation | `api/conversions.rs` | A dropped request future reaches no `.await`, so a client that quit mid-upload left up to 25 MiB nothing deleted. Mirrors `impl Drop for ProbeFile` |
 | CSP set, `allow-destroy` dropped | `tauri.conf.json`, `capabilities/default.json` | The app renders Markdown converted from confidential documents, so a remote image reference is an outbound request. `style-src 'unsafe-inline'` is load-bearing: CodeMirror injects `<style>` at runtime |
-| OFL text ships in the bundle | `src/ui/fonts/OFL.txt` | Three OFL woff2 files land in `Contents/Resources` and clause 2 requires the licence to accompany them |
+| OFL text ships in the bundle | `apps/desktop/src/ui/fonts/OFL.txt` | Three OFL woff2 files land in `Contents/Resources` and clause 2 requires the licence to accompany them |
 | Copyright, category, min system version | `tauri.conf.json` | `LSMinimumSystemVersion` was defaulting to 10.13. It is now **26.0**, so the DMG will not launch on macOS 15 or earlier |
 | Four dead artifacts deleted | `FileViewer.tsx`, `PanelTone "bare"`, `icons/tray.png`, `icons/icon.png` | Nothing imported or loaded any of them |
 | Gallery chunk kept out of the build | `main.tsx` | `import.meta.env.DEV &&` lets Rollup drop the dynamic import. The packaged webview can never reach `?gallery` |
@@ -1332,13 +1332,13 @@ across a real version step, and accessibility. Nothing has run the shipped
 
 ### Live API smoke tests
 
-`src-tauri/src/live_smoke.rs` hits the real Datalab and Rev.ai endpoints. They
+`apps/desktop/src-tauri/src/live_smoke.rs` hits the real Datalab and Rev.ai endpoints. They
 are `#[ignore]`d because they spend API credits, and they read keys from the
 environment. Note that `REV_AI_API_KEY` must be exported as `REVAI_API_KEY`.
 
 ```bash
 DATALAB_API_KEY=… REVAI_API_KEY=… \
-  cargo test --manifest-path src-tauri/Cargo.toml --lib live_smoke -- --ignored --nocapture
+  cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib live_smoke -- --ignored --nocapture
 ```
 
 ### Verification log
@@ -1435,8 +1435,8 @@ gate unprovable.
 
 | Session | May edit | Must not edit |
 |---|---|---|
-| Backend | `backend/**`, `docs/*.md` | `src/**`, `src-tauri/**` |
-| Desktop | `src/**`, `src-tauri/**` | `backend/**` persistence, worker, OpenAPI |
+| Backend | `apps/converter/**`, `docs/*.md` | `apps/desktop/**` |
+| Desktop | `apps/desktop/**` | `apps/converter/**` persistence, worker, OpenAPI |
 | Shared docs | `README.md`, `CLAUDE.md`, `AGENTS.md`: append or reconcile | Reverting the other session's section |
 
 Shared repo files (`.github/`, `LICENSE`, `rust-toolchain.toml`,
@@ -1520,9 +1520,9 @@ smoke against the real binary.
 | `README.md` | How to run, test, and release |
 | `CLAUDE.md` | Desktop architecture invariants |
 | `AGENTS.md` | Learned user preferences and workspace facts |
-| `src/ui/UI.md` | Design language and the rules for extending it |
-| `backend/README.md` | Converter setup and environment variables |
-| `backend/evals/README.md` | Corpus manifest data rules |
+| `apps/desktop/src/ui/UI.md` | Design language and the rules for extending it |
+| `apps/converter/README.md` | Converter setup and environment variables |
+| `apps/converter/evals/README.md` | Corpus manifest data rules |
 | `.impeccable.md` | Design context read by every `/impeccable` skill |
 
 The former live documents live in `docs/archive/` with a redirect at the top of

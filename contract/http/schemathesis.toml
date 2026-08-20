@@ -1,5 +1,5 @@
 # Schemathesis configuration for the conversion contract, run by
-# `backend/scripts/contract-fuzz.sh`.
+# `apps/converter/scripts/contract-fuzz.sh`.
 #
 # The suite is generated from `openapi.yaml`. Nothing here lists a case to try:
 # Schemathesis derives them from the schema and asserts that responses match

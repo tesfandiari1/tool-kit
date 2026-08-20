@@ -37,7 +37,7 @@ that hold up.
 every row is not a column, and a table with one column left is prose, not a
 grid. A real table has content in most of its columns and survives untouched.
 `evenly_spaced_lines_publish_as_prose_rather_than_a_false_table` in
-`backend/tests/vision_worker.rs` pins it. Nothing answers the under-reaching
+`apps/converter/tests/vision_worker.rs` pins it. Nothing answers the under-reaching
 half, so a form still arrives as loose fields.
 
 **`render.swift` is compiled into both binaries** so the preview tool cannot
@@ -58,7 +58,7 @@ order is reading order.
 
 ## Corpus note
 
-`backend/tests/support/corpus.rs` generates its `scanned` fixture as a coarse
+`apps/converter/tests/support/corpus.rs` generates its `scanned` fixture as a coarse
 checkerboard. It exists to make `pdf-inspector` classify a page image-only, and
 it carries no text, so Vision correctly returns nothing from it. Judging OCR
 needs a fixture that holds real words: use `pdf2png` on the `native` fixture,

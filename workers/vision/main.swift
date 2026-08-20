@@ -1,6 +1,6 @@
 // tool-kit-vision-worker: read one image with Apple Vision, write Markdown.
 //
-// Spawned the way backend/src/engines/pdf_inspector.rs spawns
+// Spawned the way apps/converter/src/engines/pdf_inspector.rs spawns
 // tool-kit-pdf-worker: cleared environment, staging directory as argv[1],
 // source bytes on stdin, stdout and stderr on /dev/null. The report file is
 // the only channel back, so every decision has to land there. Exit 0 once a

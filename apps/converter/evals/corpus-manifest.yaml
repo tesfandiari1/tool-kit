@@ -1,0 +1,200 @@
+# M4 routing-policy corpus: one entry per input class the policy has to get
+# right. Every case is generated in-process by the named function in
+# `apps/converter/tests/support/corpus.rs`, so there are no fixture blobs to license.
+#
+# Expectations are the ones the service actually emits, read back from the real
+# worker. `the_eval_corpus_manifest_uses_only_strings_the_service_can_emit` in
+# `src/conversion/policy.rs` checks every string here against the vocabulary in
+# code, which is what stops this file drifting back into fiction.
+schemaVersion: 2
+cases:
+  - id: native-text-1-page
+    generator: native_pdf
+    generatorArgs: [1]
+    profile: standard
+    expectedStatus: succeeded
+    expectedRoute: local_pdf
+    expectedReasonCodes: [native_text_pdf]
+    expectedWarnings: []
+    expectedArtifact: true
+
+  - id: native-text-10-pages
+    generator: native_pdf
+    generatorArgs: [10]
+    profile: standard
+    expectedStatus: succeeded
+    expectedRoute: local_pdf
+    expectedReasonCodes: [native_text_pdf]
+    expectedWarnings: []
+    expectedArtifact: true
+
+  # One text page and one image page classifies as mixed, so the worker gives
+  # up before the policy sees a ratio.
+  - id: mixed-1-text-1-image
+    generator: partly_scanned_pdf
+    generatorArgs: [1]
+    profile: standard
+    expectedStatus: needs_remote
+    expectedRoute: local_pdf
+    expectedReasonCodes: [mixed_pdf]
+    expectedWarnings: []
+    expectedArtifact: false
+
+  # The live defect M4 exists for. The worker converts these (text_based,
+  # confidence 0.667 and 0.9), and the image page's content is absent from the
+  # Markdown. They must never publish silently.
+  #
+  # They must also never be routed remote on this signal alone: an ordinary
+  # report with a one-line cover page and no images anywhere reports the same
+  # 0.9, and loses nothing. Warning is what the signal supports; billing is
+  # not. Profile therefore does not change the outcome here.
+  - id: partly-scanned-2-text-pages
+    generator: partly_scanned_pdf
+    generatorArgs: [2]
+    profile: standard
+    expectedStatus: succeeded
+    expectedRoute: local_pdf
+    expectedReasonCodes: [native_text_pdf]
+    expectedWarnings: [pages_without_extractable_text]
+    expectedArtifact: true
+
+  - id: partly-scanned-9-text-pages
+    generator: partly_scanned_pdf
+    generatorArgs: [9]
+    profile: standard
+    expectedStatus: succeeded
+    expectedRoute: local_pdf
+    expectedReasonCodes: [native_text_pdf]
+    expectedWarnings: [pages_without_extractable_text]
+    expectedArtifact: true
+
+  # The control that makes the three cases above warnings and not routes: same
+  # confidence, no images anywhere, nothing missing.
+  - id: sparse-cover-page
+    generator: sparse_cover_pdf
+    generatorArgs: [9]
+    profile: standard
+    expectedStatus: succeeded
+    expectedRoute: local_pdf
+    expectedReasonCodes: [native_text_pdf]
+    expectedWarnings: [pages_without_extractable_text]
+    expectedArtifact: true
+
+  - id: partly-scanned-9-text-pages-local-only
+    generator: partly_scanned_pdf
+    generatorArgs: [9]
+    profile: local_only
+    expectedStatus: succeeded
+    expectedRoute: local_pdf
+    expectedReasonCodes: [native_text_pdf]
+    expectedWarnings: [pages_without_extractable_text]
+    expectedArtifact: true
+
+  - id: scanned-1-page
+    generator: image_only_pdf
+    generatorArgs: [1]
+    profile: standard
+    expectedStatus: needs_remote
+    expectedRoute: local_pdf
+    expectedReasonCodes: [scanned_pdf]
+    expectedWarnings: []
+    expectedArtifact: false
+
+  - id: scanned-3-pages
+    generator: image_only_pdf
+    generatorArgs: [3]
+    profile: standard
+    expectedStatus: needs_remote
+    expectedRoute: local_pdf
+    expectedReasonCodes: [scanned_pdf]
+    expectedWarnings: []
+    expectedArtifact: false
+
+  # local_only cannot rescue an engine that produced no Markdown at all.
+  - id: scanned-1-page-local-only
+    generator: image_only_pdf
+    generatorArgs: [1]
+    profile: local_only
+    expectedStatus: needs_remote
+    expectedRoute: local_pdf
+    expectedReasonCodes: [scanned_pdf]
+    expectedWarnings: []
+    expectedArtifact: false
+
+  # Ruled grid: the inspector reports both tables and columns on the page.
+  - id: dense-table
+    generator: dense_table_pdf
+    generatorArgs: []
+    profile: standard
+    expectedStatus: succeeded
+    expectedRoute: local_pdf
+    expectedReasonCodes: [native_text_pdf]
+    expectedWarnings: [dense_tables, multi_column_layout]
+    expectedArtifact: true
+
+  - id: two-column-text
+    generator: two_column_pdf
+    generatorArgs: []
+    profile: standard
+    expectedStatus: succeeded
+    expectedRoute: local_pdf
+    expectedReasonCodes: [native_text_pdf]
+    expectedWarnings: [multi_column_layout]
+    expectedArtifact: true
+
+  # Identity-H with no ToUnicode: the text extracts as mojibake, and the
+  # inspector flags the page rather than trusting it.
+  - id: garbled-identity-h-font
+    generator: garbled_font_pdf
+    generatorArgs: []
+    profile: standard
+    expectedStatus: needs_remote
+    expectedRoute: local_pdf
+    expectedReasonCodes: [ocr_required]
+    expectedWarnings: []
+    expectedArtifact: false
+
+  # The field value lives in the annotation, not the content stream.
+  - id: acroform-text-field
+    generator: form_pdf
+    generatorArgs: []
+    profile: standard
+    expectedStatus: needs_remote
+    expectedRoute: local_pdf
+    expectedReasonCodes: [ocr_required]
+    expectedWarnings: []
+    expectedArtifact: false
+
+  - id: blank-content-stream
+    generator: blank_content_pdf
+    generatorArgs: []
+    profile: standard
+    expectedStatus: needs_remote
+    expectedRoute: local_pdf
+    expectedReasonCodes: [scanned_pdf]
+    expectedWarnings: []
+    expectedArtifact: false
+
+  # Rejections never reach the policy, so the route is the one recorded when
+  # the local attempt started and the reason codes stay empty.
+  - id: encrypted
+    generator: encrypted_pdf
+    generatorArgs: []
+    profile: standard
+    expectedStatus: failed
+    expectedRoute: local_pdf
+    expectedReasonCodes: []
+    expectedWarnings: []
+    expectedArtifact: false
+    expectedFailureCode: encrypted_pdf
+
+  - id: truncated
+    generator: truncated_pdf
+    generatorArgs: []
+    profile: standard
+    expectedStatus: failed
+    expectedRoute: local_pdf
+    expectedReasonCodes: []
+    expectedWarnings: []
+    expectedArtifact: false
+    expectedFailureCode: invalid_pdf_structure

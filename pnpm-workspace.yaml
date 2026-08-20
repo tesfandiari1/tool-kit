@@ -1,3 +1,10 @@
+# The desktop app is the only Node package. apps/converter and
+# crates/worker-protocol are Rust, and the root manifest holds just the
+# cross-cutting scripts (the contract lint, the drift check, the Rust
+# verifies), so its deps stay at two.
+packages:
+  - apps/desktop
+
 allowBuilds:
   # Scarf's install script reports installation analytics to a third party.
   # It arrived with @stoplight/spectral-cli and has no part in linting a file.

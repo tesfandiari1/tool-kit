@@ -6,7 +6,7 @@ updates:
       interval: weekly
 
   - package-ecosystem: cargo
-    directory: /backend
+    directory: /apps/converter
     schedule:
       interval: weekly
   - package-ecosystem: cargo
@@ -15,7 +15,7 @@ updates:
       interval: weekly
 
   - package-ecosystem: cargo
-    directory: /src-tauri
+    directory: /apps/desktop/src-tauri
     schedule:
       interval: weekly
 

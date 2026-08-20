@@ -1,5 +1,6 @@
-# Clippy policy for this crate. Keep in sync with apps/converter/clippy.toml and
-# apps/desktop/src-tauri/clippy.toml. There is no root Cargo workspace to share this from.
+# Clippy policy for this crate. Keep in sync with apps/desktop/src-tauri/clippy.toml and
+# crates/worker-protocol/clippy.toml. There is no root Cargo workspace to share
+# this from.
 #
 # These flags only affect lints enabled in Cargo.toml [lints.clippy].
 # Integration tests under tests/ are separate crates and do not get

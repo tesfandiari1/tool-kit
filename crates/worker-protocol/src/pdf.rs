@@ -1,7 +1,7 @@
 //! The PDF worker's report contract.
 //!
-//! Written by `backend/src/bin/tool-kit-pdf-worker.rs` and read by
-//! `backend/src/engines/pdf_inspector.rs`. Both import these types, so the
+//! Written by `apps/converter/src/bin/tool-kit-pdf-worker.rs` and read by
+//! `apps/converter/src/engines/pdf_inspector.rs`. Both import these types, so the
 //! compiler holds the two ends together.
 
 use serde::{Deserialize, Serialize};

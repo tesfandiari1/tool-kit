@@ -31,8 +31,8 @@ pnpm tauri dev     # first run compiles the Rust desktop crate, so it is slow
 pnpm lint          # type-aware ESLint
 pnpm build         # frontend only: tsc + vite build
 
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings
+cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo clippy --manifest-path apps/converter/Cargo.toml --all-targets -- -D warnings
 ```
 
 See [`docs/STATUS.md`](docs/STATUS.md) for session state and
@@ -44,8 +44,8 @@ current; do not jump to TypeScript 7.
 
 ```bash
 pnpm lint && pnpm build
-cargo test --manifest-path src-tauri/Cargo.toml --lib
-cargo test --locked --manifest-path backend/Cargo.toml
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib
+cargo test --locked --manifest-path apps/converter/Cargo.toml
 ```
 
 Three gates come from outside the repo, so they check work nobody here wrote
@@ -61,7 +61,7 @@ pnpm verify:contract # Schemathesis, property-based testing of the live service
 root, seeds one conversion, and derives its cases from
 `contract/http/openapi.yaml`. It needs `uv` and Docker is not involved.
 
-Ignored desktop tests in `src-tauri/src/live_smoke.rs` hit real Datalab and
+Ignored desktop tests in `apps/desktop/src-tauri/src/live_smoke.rs` hit real Datalab and
 Rev.ai endpoints and spend API credits. CI runs all of the above on every push
 and pull request.
 
@@ -78,7 +78,7 @@ APPLE_SIGNING_IDENTITY="Developer ID Application: …" pnpm tauri build
 pnpm verify:release --notarized
 ```
 
-Artifacts land in `src-tauri/target/release/bundle/`. Signing credentials live
+Artifacts land in `apps/desktop/src-tauri/target/release/bundle/`. Signing credentials live
 in `.env.local` (gitignored).
 
 **`pnpm tauri build` notarizes the `.app` and not the DMG.** It staples the app
@@ -104,24 +104,24 @@ dialogs: reads are authorised by the `keychain-access-groups` entitlement and
 matched on team id rather than by a per-item ACL bound to the code signature.
 
 That entitlement is restricted, so it only works when
-`src-tauri/embedded.provisionprofile` is present to authorise it. Without the
+`apps/desktop/src-tauri/embedded.provisionprofile` is present to authorise it. Without the
 profile the app falls back to the legacy keychain, which still works but ties
 access to the signature. A bare `cargo run` binary can never carry the profile,
 so the dev loop always uses the fallback and keeps its own copy of each key.
 
 ## Conversion backend
 
-The production conversion service lives in [`backend/`](backend/). It converts
+The production conversion service lives in [`apps/converter/`](apps/converter/). It converts
 native-text PDFs and supported office formats on loopback. M4 routing policy and M6 desktop integration are landed. Backend Datalab
 fallback is Phase 2. LAN deploy is Phase 3. See [`docs/STATUS.md`](docs/STATUS.md).
 
 - [`docs/STATUS.md`](docs/STATUS.md): state, critical path, milestones, traps, verify commands
-- [`backend/README.md`](backend/README.md): backend setup and verification
+- [`apps/converter/README.md`](apps/converter/README.md): backend setup and verification
 - [`docs/archive/`](docs/archive/README.md): closed plans and verification evidence
 
 ## License
 
 MIT. Bundled fonts are SIL OFL 1.1; see
-[`src/ui/fonts/THIRD_PARTY_NOTICES.md`](src/ui/fonts/THIRD_PARTY_NOTICES.md).
+[`apps/desktop/src/ui/fonts/THIRD_PARTY_NOTICES.md`](apps/desktop/src/ui/fonts/THIRD_PARTY_NOTICES.md).
 The converter's runtime notices are in
-[`backend/THIRD_PARTY_NOTICES.md`](backend/THIRD_PARTY_NOTICES.md).
+[`apps/converter/THIRD_PARTY_NOTICES.md`](apps/converter/THIRD_PARTY_NOTICES.md).

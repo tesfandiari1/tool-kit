@@ -15,9 +15,9 @@
 
 ## Learned Workspace Facts
 
-- Frontend layout: `src/app` (types, commands, OpenAPI client), `src/platform/host.ts` (only Tauri/host imports), `src/domains/{run,settings,history,thread}`, `src/shell` (App + its hooks), `src/ui` (design system).
-- `pnpm generate:api` writes `src/app/api/schema.ts` from `contract/http/openapi.yaml`; import the generated schema only from `src/app/api`.
-- Conversion backend lives in `backend/`. Milestones and session state live in `docs/STATUS.md`; product direction in `docs/north-star.md`. Desktop HTTP to that service is M6. Backend sessions own `backend/**`. Desktop sessions own `src/**` and `src-tauri/**`.
+- Frontend layout, under `apps/desktop/`: `src/app` (types, commands, OpenAPI client), `src/platform/host.ts` (only Tauri/host imports), `src/domains/{run,settings,history,thread}`, `src/shell` (App + its hooks), `src/ui` (design system).
+- `pnpm generate:api` writes `apps/desktop/src/app/api/schema.ts` from `contract/http/openapi.yaml`; import the generated schema only from `src/app/api`.
+- Conversion backend lives in `apps/converter/`. Milestones and session state live in `docs/STATUS.md`; product direction in `docs/north-star.md`. Desktop HTTP to that service is M6. Backend sessions own `apps/converter/**`. Desktop sessions own `apps/desktop/**`.
 - `docs/north-star.md` defines the local-first pivot: workspace folder, projects as real directories, `.toolkit/index.db` as rebuildable index, tool-run provenance, no durable backend job retention in product mode.
 - AnyDoc is a Rust crate inside the single converter container, not a separate service. PDF stays on the isolated `pdf-inspector` child worker.
 - Toolchain pins live in `rust-toolchain.toml`, `.node-version`, and `package.json` `packageManager`. TypeScript stays on 6.x (7 has no compiler API and breaks typescript-eslint). `security-framework` needs the non-default `OSX_10_15` feature. `pdf-inspector` stays `=1.15.0`. Do not take `libc` 1.0. Do not create a root Cargo workspace.

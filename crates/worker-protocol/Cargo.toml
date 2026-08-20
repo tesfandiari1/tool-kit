@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 
-# Copied verbatim from backend/Cargo.toml [lints]. There is no root workspace
+# Copied verbatim from apps/converter/Cargo.toml [lints]. There is no root workspace
 # to share them from, so all three crates carry their own copy.
 [lints.rust]
 unsafe_code = "forbid"

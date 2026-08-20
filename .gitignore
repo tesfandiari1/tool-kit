@@ -15,10 +15,10 @@ dist-ssr
 *.tsbuildinfo
 
 # tsconfig.node.json is a composite project, so it cannot set noEmit (TS6310).
-# Its output is redirected to node_modules/.tmp; these two are what leaked into
-# the repo root before that fix, and are never source.
-/vite.config.js
-/vite.config.d.ts
+# Its output is redirected to node_modules/.tmp. These two are what leaked into
+# the frontend root before that fix, and are never source.
+/apps/desktop/vite.config.js
+/apps/desktop/vite.config.d.ts
 
 # Secrets and local env. Keep committed examples.
 .env
@@ -41,7 +41,7 @@ deploy/docker/secrets/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
-backend/data/
+apps/converter/data/
 
 # Rust (crate gitignores already cover /target/ in each crate)
 /target/

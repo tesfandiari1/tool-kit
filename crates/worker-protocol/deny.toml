@@ -3,7 +3,7 @@
 #   cargo deny --manifest-path crates/worker-protocol/Cargo.toml check
 #
 # There is no root workspace, so this is a third separate file beside
-# `backend/deny.toml` and `src-tauri/deny.toml`. Keep all three the same in
+# `apps/converter/deny.toml` and `apps/desktop/src-tauri/deny.toml`. Keep all three the same in
 # shape and expect them to differ in content.
 #
 # This graph is seven crates deep and all of it is serde. That is the point:
