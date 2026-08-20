@@ -5,7 +5,7 @@ It supersedes the four documents now in `docs/archive/`: `HANDOFF.md`,
 `CLOSEOUT_EXECUTION_PLAN.md`, `BACKEND_EPIC.md`, and `BACKEND_SERVICE_PLAN.md`. Read it before you touch the tree, then re-read
 the worktree. This file goes stale the moment someone lands a commit.
 
-**Last updated:** 2026-08-19
+**Last updated:** 2026-08-20
 
 Docs use **standard** STE voice: American spelling, active voice, no em dashes,
 no semicolons between independent sentences. Use a colon in section titles,
@@ -24,11 +24,87 @@ rewrite code, commands, identifiers, or quotations to match prose rules.
 | Backend | M0, M1, M2, M3, M4 complete. M5 and M8 unbuilt. **M7 cancelled**, see section 4 |
 | Desktop | M6 implementation landed, **gate open** (CVR-067, CVR-081) |
 | Exposure | Loopback only, and staying there. M7 remote access is cancelled |
+| Local backend | **Sidecar landed 2026-08-20.** The converter ships inside the `.app`. `settings::LocalBackendMode` picks Sidecar (the app owns the process) or Manual (Docker, by URL). Settings UI and the default-route flip are not built, see section 3 |
 | Backend Datalab fallback | Not built. Phase 2, now unblocked |
 | Phase 1 | **Complete 2026-08-19.** All four gates met |
 | Desktop version | **1.0.0** (`apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml`, `tauri.conf.json`) |
-| 1.0 bundle | Signed, **notarized and stapled** (app and DMG), verified by `pnpm verify:release --notarized`. Keychain entitlement is parked until the provisioning profile lands, so that one section fails by design |
+| 1.0 bundle | **Signed, notarized and stapled 2026-08-20, and the first bundle to carry the sidecars.** Apple accepted the app (`667c0ab9`) and the DMG (`ac8c18da`), both `Ready for distribution`, no issues. A quarantined copy of the DMG answers `accepted / source=Notarized Developer ID`. Keychain entitlement stays parked until the provisioning profile lands, so `verify-release.sh` still fails that one section by design |
 | Latest container smoke | `20260819T161851Z`, image `sha256:4a0cbdd0…` |
+
+### The sidecar, 2026-08-20
+
+The converter now ships inside the app, so a user installs one DMG and deploys
+nothing.
+
+**What landed.** `pnpm sidecars` builds the converter, the PDF worker, and the
+Swift Vision worker and stages them with the `-aarch64-apple-darwin` suffix that
+`bundle.externalBin` requires, plus the pdf-inspector bcmaps as a resource.
+`backend_host.rs` owns the process. Two converter edits support it: `main.rs`
+logs `listener.local_addr()` rather than the configured address, which is the
+port handshake and also fixes a log that lied whenever Docker used port 0, and
+`TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF` gives the service a way to notice its
+parent died. `verify-release.sh` grew three sections that grade the sidecars.
+
+**Measured, not assumed.** All three binaries link only the macOS base system
+and the OS Swift runtime, so nothing needs bundling. Staged as siblings, the
+converter finds both workers with no env var, reports engines `pdf-inspector`,
+`anydoc` and `apple-vision`, and advertises **24 media types against Docker's
+18**. A PNG converted through `local_vision` and a PDF through `local_pdf`, both
+offline under `local_only`. SIGTERM and stdin EOF each stop it inside 250 ms,
+independently. Bundle cost is 17.5 MB of Mach-O plus 1.6 MB of bcmaps.
+
+**The one design consequence worth remembering.** The port is ephemeral, so the
+recorded origin on an in-flight ledger row cannot be a URL. Sidecar rows record
+the literal alias `sidecar`, and `BackendContext` still gets the live origin.
+Without that, `recovery_origin_still_configured` fails on every relaunch, the
+row is deleted, `recovery_blocker` is set, and nothing ever clears it, so Retry
+dies permanently.
+
+**The release path is proven, not assumed.** A signed build stamps all three
+helpers `flags=0x10000(runtime)`, team `92MA44797J`, timestamped, signed
+inner-out ahead of the `.app`, so `build-sidecars.sh` is right to do no signing
+of its own. `verify-release.sh` passes every section but the parked keychain
+entitlement. Apple notarized the app and the DMG on the first submission either
+has ever made with nested binaries, with no issues raised against any helper.
+The strongest check is the last one: out of a **quarantined** copy of the
+installed app, the converter starts, resolves both workers through
+`current_exe().with_file_name(...)`, resolves the bcmaps through
+`BaseDirectory::Resource`, and reports `pdf-inspector`, `anydoc` and
+`apple-vision` across 24 media types. The hardened runtime blocks none of it,
+so the app needs no entitlement to spawn its own signed helpers.
+
+**Not built.** The Settings control for Sidecar versus Manual, the live status
+row, and the flip of the default conversion route to the backend. Switching
+`localBackendMode` today takes a relaunch or a Restart, because `save_settings`
+does not start or stop the host.
+
+### The workspace and first run, 2026-08-20
+
+The app opened on the run queue, which is a batch tool's home. It now opens on
+a library. `workspace.rs` creates or adopts the one folder an install is bound
+to: `.toolkit/workspace.json` is the identity marker, an Inbox project is
+guaranteed, and `.toolkit/index.db` is derived state that a missing file
+answers as an empty list rather than an error. Identity lives in the marker,
+not the path, so renaming the folder in Finder changes nothing. Four commands
+carry it: `suggested_workspace_path`, `inspect_workspace_path`,
+`setup_workspace`, `list_projects`. `setup_workspace` persists the binding from
+the host rather than trusting the webview, which can lose a race against
+`save_settings`.
+
+This is the second SQLite database in the app. `history.rs` still owns every
+statement against `history.db`, and `workspace.rs` owns every statement against
+`index.db`. One is app state, the other is derived state a user may delete.
+
+First run asks three questions, and `conversionMode.ts` maps the third onto the
+three settings it really is, which lets the copy say "this Mac" while the app
+goes on speaking in routes and profiles. Local means `local_only` rather than
+`standard` with a preference, because choosing this Mac has to mean the bytes
+cannot leave it.
+
+**Not built.** Nothing imports into a project yet, so the library lists what
+onboarding created and no more. The gate writes `conversionRoute: backend` with
+no Settings control to change it back, which is the same missing surface the
+sidecar section names.
 
 ### The restructure, 2026-08-19
 

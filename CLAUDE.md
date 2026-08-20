@@ -30,6 +30,8 @@ apps/
     src/                    app/ domains/ platform/ shell/ ui/
     src-tauri/              name kept: tauri.conf.json, .cargo/config.toml, and
                             dev-run.sh all resolve against this exact depth
+      binaries/             staged sidecars, gitignored. `pnpm sidecars` fills it
+      resources/            staged pdf-inspector bcmaps, gitignored, same script
   converter/                the HTTP service, container only
 crates/
   worker-protocol/          wire contracts for every spawned worker
@@ -55,6 +57,7 @@ an ESLint rule, and that rule is load-bearing rather than decorative.
 Run from the repo root.
 
 ```bash
+pnpm sidecars         # build + stage the three bundled binaries and the bcmaps. See below
 pnpm tauri dev        # run the app with HMR (first run is slow: it compiles the Rust backend)
 pnpm build            # frontend only: tsc + vite build
 pnpm lint             # ESLint, type-aware (recommended + stylistic + react-hooks); kept clean
@@ -64,6 +67,14 @@ cargo check  --manifest-path apps/desktop/src-tauri/Cargo.toml
 cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo clippy --manifest-path apps/converter/Cargo.toml --all-targets -- -D warnings
 ```
+
+**`pnpm sidecars` is a prerequisite for every one of those cargo commands**,
+not a release step. `tauri-build` resolves `bundle.externalBin` at build-script
+time, so a missing binary fails `cargo check`, `cargo clippy`, `cargo test` and
+`pnpm tauri dev` alike with `ResourcePathNotFound`, long before anything tries
+to bundle. `pnpm tauri` and `pnpm verify` run it for you. A bare `cargo` command
+does not, which is the whole reason it is named here. The staged artifacts are
+gitignored, so a fresh clone needs one run before the desktop crate compiles.
 
 Clippy is the Rust linter. Both crates deny a small extra set in
 `Cargo.toml` `[lints.clippy]` (todo/dbg/unwrap in non-test code, unused
@@ -154,6 +165,27 @@ moment `apps/desktop/src-tauri/embedded.provisionprofile` exists:
 }
 ```
 
+**The bundler signs each sidecar on its own, and that is now measured.** A
+signed build on 2026-08-20 stamped all three helpers with
+`flags=0x10000(runtime)`, team `92MA44797J` and a secure timestamp, inner-out:
+converter, PDF worker, Vision worker, `tool-kit`, then the `.app`. It replaces
+the `adhoc,linker-signed` signature cargo and swiftc leave behind. Apple
+notarized the result, reported `Ready for distribution` with no issues, and the
+converter then started, resolved both workers and advertised its 24 media types
+out of a quarantined copy of the installed app. So `build-sidecars.sh` is right
+to do no signing, and a post-build re-sign would only break the nested seal.
+
+**Restoring `entitlements` may hand entitlements.plist to all three sidecars.**
+tauri-cli 2.11.4 builds one codesign argument vector per sign target and
+appends `--entitlements` to every one of them, with no test for whether the
+target is the outer bundle. That is read from the bundler source, not measured
+here, because the key is parked and there was nothing to measure. If it holds,
+each helper claims `com.apple.application-identifier` and the restricted
+`keychain-access-groups` on a Mach-O with nowhere to carry a profile. Run
+`codesign -d --entitlements - --xml` against each helper on the first build
+after the key comes back, and run it before notarizing, because the notary is
+the expensive place to learn this.
+
 **Always check the bundle afterwards.** `pnpm tauri build` succeeds without a
 signing identity and produces a working `.app`, so nothing fails at build time:
 
@@ -208,6 +240,35 @@ header.
 
 **The backend does everything; the frontend is a thin shell.** All network calls, secrets, and file IO are in Rust. The frontend only calls Tauri commands and stays in sync by listening to `job-updated` events: there is no business logic in it. `src/shell/App.tsx` owns all state and renders one of the views in `src/domains/`; presentation comes from the `@ui` design system (`src/ui`).
 
+**The converter ships inside the app.** `bundle.externalBin` puts three binaries
+in `Contents/MacOS/` beside `tool-kit`, and `bundle.resources` puts the
+pdf-inspector bcmaps in `Contents/Resources/pdf-inspector/bcmaps`:
+
+```text
+Tool-Kit.app/Contents/
+  MacOS/       tool-kit  tool-kit-converter  tool-kit-pdf-worker  tool-kit-vision-worker
+  Resources/   pdf-inspector/bcmaps/  (169 files)
+```
+
+That layout is not a convention, it is the contract. `config.rs` in the
+converter finds both of its workers through `current_exe().with_file_name(…)`,
+so putting them side by side is what makes the sibling probe resolve, in
+`target/debug` and in the bundle alike, with no env var and no branch.
+`backend_host.rs` reaches the converter the same way.
+
+`settings::LocalBackendMode` picks who owns the process. **Sidecar** is the
+default: the app spawns the converter on `127.0.0.1:0`, reads the real port off
+the service's own listening line, mints a Keychain token for it, and stops it
+again on exit. **Manual** points at `settings.backend_url` and leaves the
+process to the user, which is how the Docker deployment is reached. Every read
+of the backend origin and token goes through `backend_host::backend_origin` and
+`backend_host::backend_token` so the two modes cannot drift apart.
+
+The sidecar advertises **more** than the container can. `workers/vision/` is
+Swift against Apple's Vision framework, so it cannot ship in the Linux image:
+`capabilities.inputFormats` is 24 media types in the app and 18 in Docker, and
+images convert locally only in Sidecar mode.
+
 ### Rust (`apps/desktop/src-tauri/src/`)
 
 - **`providers.rs`**: the integration layer and the main extension point. Both services are `submit → poll → fetch` (`datalab_*`, `revai_*`). `send_retrying()` wraps submits with backoff, but **only retries failures that prove the server never started work** (429/502/503/504/529 and connect errors) so a retry can't double-bill; multipart bodies are rebuilt per attempt. Timeouts are per-request: `UPLOAD_TIMEOUT` (30 min, submits carry whole files) vs `POLL_TIMEOUT` (60s). Every poll checks the HTTP status through `terminal_poll_error()` before parsing, so a 401/404 fails the job instead of reading as "still pending". Results flow through `PollResult` (Pending/Done/Failed).
@@ -216,11 +277,13 @@ header.
   - **Generation counter.** `JobManager::generation` is bumped by every new run and by Stop. Each spawned task captures it and aborts as soon as it stops matching, which is what makes Stop work and stops a second run's tasks from spending credits and writing files invisibly. **Every write-back to a job needs a `stale()` check in front of it**, not just the expensive steps: a submit can run for 30 minutes, so a finished upload that writes "processing" over a row the user already stopped leaves a job no task will ever finish, and `running` (derived from the job list) sticks on.
   - **Run config snapshot.** Settings are read once at run start into `JobManager::run_config`, so changing Settings mid-run can't split one run across two output formats.
   - `write_output()` returns `Result` and uses `create_new`, so a failed or colliding write **fails the job** instead of reporting a green success with nothing on disk.
-- **`history.rs`**: persistent run history in **SQLite** (`rusqlite`, bundled), one `history.db` beside `settings.json`. Owns *all* SQL. Nothing else opens the database. Two jobs: remember where every result went, and answer "already done?" on every input scan through an indexed lookup by `source_path`, which is why it is a database and not a log file. **A storage error never fails a job**: `with_db` swallows everything, and a database that will not open degrades to "no history". A result is reusable only when the source path, job, *and* output format match, the recorded output still exists, and the source mtime is unchanged. The lookup is path-keyed rather than content-hashed, because hashing means reading every byte of every file on every scan.
+- **`history.rs`**: persistent run history in **SQLite** (`rusqlite`, bundled), one `history.db` beside `settings.json`. Owns every statement that touches it, and nothing else opens it. `workspace.rs` owns the other database, `.toolkit/index.db` inside the workspace, and the two never meet: one is app state, the other is derived state a user may delete. Two jobs: remember where every result went, and answer "already done?" on every input scan through an indexed lookup by `source_path`, which is why it is a database and not a log file. **A storage error never fails a job**: `with_db` swallows everything, and a database that will not open degrades to "no history". A result is reusable only when the source path, job, *and* output format match, the recorded output still exists, and the source mtime is unchanged. The lookup is path-keyed rather than content-hashed, because hashing means reading every byte of every file on every scan.
 
   **One rule governs a run: never do the same work twice.** A reusable result already in the chosen output folder means nothing happens; one in a *different* folder is **copied** (`jobs::reuse_result`), because the source is unchanged and the format matches, so the bytes a re-run would buy are bytes already on disk; anything else goes to the provider. That is why `Scan` reports `already_here_*` and `reusable_*` separately: the first is "nothing to do", the second is free work the Run button must stay enabled for, and it relabels itself "Copy N results" when that is all that is left. Retention is capped at 5,000 rows; `PRAGMA user_version` makes a new column a migration rather than a crash.
 - **`secrets.rs`**: API keys in the **macOS data protection keychain** via `security-framework` (service `dev.esfandiari.toolkit`, access group `92MA44797J.dev.esfandiari.toolkit`, accounts `datalab`/`revai`/`backend`). Keys never reach the webview or disk. Reads are memoised per process for latency, not for prompt count: see the two-keychain Gotcha for why there are no prompts left to count.
 - **`settings.rs`**: non-secret config (input paths, output dir, job, Datalab format, optional pipeline id, high-accuracy toggle) persisted as JSON in the app config dir. **`#[serde(default)]` on the struct is load-bearing**: without it, adding a field makes every existing `settings.json` fail to parse, and `load()` swallows the error and silently resets the user's output folder and job. `save()` writes to a temp file and renames for the same reason: `load()` answers a torn or truncated file with `unwrap_or_default()`, so a crash mid-write would wipe the user's config.
+- **`backend_host.rs`**: owns the sidecar process and answers "where is the backend, and what is its token". Spawns on `127.0.0.1:0` and learns the real port by parsing the service's own `conversion service listening` line off stdout, which is why that message string is load-bearing on both sides. Mints the token through `secrets::set_key` **before** writing the 0600 token file, because `secrets.rs` memoises a miss for the whole process and only `set_key` drops the memo. The data root is stable at `<app_data>/converter`: a fresh one per launch would empty the service's replay ledger, so a recovered submit carrying a stored idempotency key would create a duplicate conversion instead of replaying. Emits `backend-status` on every transition.
+  - **Stopping takes two mechanisms because they fail in different places.** Closing the child's stdin needs no pid and reaches a child we never learned one for. `/bin/kill -TERM` reaches a build with the stdin knob off. Both run, then `SIGKILL`. `unsafe_code = "forbid"` rules out `libc::kill` and an inner `#[allow]` cannot lift a `forbid`, so the signal goes through `/bin/kill`.
 - **`lib.rs`**: the Tauri command surface + `setup()` (menu-bar tray, ⌥⌘V global shortcut). `run_pipeline` expands the selected files/folders into a concrete file list (`collect_input_files`), clears the queue, and spawns one job per match. Commands return `Result<T, String>`.
 
 ### Adding a provider / job
@@ -229,7 +292,7 @@ Add a `JobType` variant and a `ProviderKind`, implement submit/poll in `provider
 
 ### Frontend (`apps/desktop/src/`)
 
-`src/shell/App.tsx` owns all state and hands it to view components in `src/domains/{run,history,settings,thread}`. The shell's non-run concerns are extracted as hooks beside it: `useToast` (the one channel for errors that never reach a job row), `useDocuments` (which results are open and which one the pane shows) with `useDocumentSave` (the debounced write, ⌘S, and the write before a close), `useHostWindow` (`useDragDrop`, `useWindowFocusClass`, `useCloseConfirm`), `useFitWindow` (the launcher's height follows its content), and `useZoom` (⌘+/-/0). Local state mirrors `Settings` and is persisted via `save_settings` on change; the job list is authoritative from `job-updated` events. Inputs are a list of paths added by drag-drop (`getCurrentWebview().onDragDropEvent`) or the Files/Folder pickers.
+`src/shell/App.tsx` owns all state and hands it to view components in `src/domains/{run,library,onboarding,history,settings,thread}`. The shell's non-run concerns are extracted as hooks beside it: `useToast` (the one channel for errors that never reach a job row), `useDocuments` (which results are open and which one the pane shows) with `useDocumentSave` (the debounced write, ⌘S, and the write before a close), `useHostWindow` (`useDragDrop`, `useWindowFocusClass`, `useCloseConfirm`), `useFitWindow` (the launcher's height follows its content), and `useZoom` (⌘+/-/0). Local state mirrors `Settings` and is persisted via `save_settings` on change; the job list is authoritative from `job-updated` events. Inputs are a list of paths added by drag-drop (`getCurrentWebview().onDragDropEvent`) or the Files/Folder pickers.
 
 `src/platform/host.ts` is the only module allowed to import `@tauri-apps/*` for dialogs, window, and drag-drop. `src/app/commands.ts` is the typed IPC boundary.
 
@@ -264,6 +327,12 @@ Type is three families with non-overlapping jobs: **Instrument Serif** for displ
 - **macOS has two keychains and only one of them has no dialogs.** The legacy file-based store grants access through a per-item ACL bound to the reader's *designated requirement*, so any signature change voids every "Always Allow" and the prompts return. The data protection store has no ACLs at all: access is the `keychain-access-groups` entitlement, matched on **team id**, so no dialog exists in that path. `secrets.rs` targets the second through `security-framework`'s `use_protected_keychain()`.
   That entitlement is **restricted**, so `codesign` honours it only when `Contents/embedded.provisionprofile` authorises the claim. A bundled `.app` carries one. A bare `cargo run` Mach-O has nowhere to put it, so the dev loop gets `errSecMissingEntitlement` (-34018), falls back to the legacy keychain, and keeps its **own separate copy of every key**. Exercise the real path with `pnpm tauri build --debug`. `scripts/dev-run.sh` still signs the dev binary, now only so those legacy items stay trusted across rebuilds. Still let the app create the items: don't seed them with the `security` CLI.
 - **The provisioning profile is pinned to the signing certificate**, and macOS evaluates it at install and at every launch. `apps/desktop/src-tauri/embedded.provisionprofile` lives ~18 years, but the Developer ID cert inside it expires **2031-06-18**. Rotating the cert means regenerating the profile from the portal, or the app stops launching.
+- **`pnpm sidecars` gates `cargo`, not just the bundler.** `tauri-build` resolves `externalBin` in the build script, so a missing staged binary fails `cargo check`/`clippy`/`test` and `pnpm tauri dev` with `ResourcePathNotFound`. The artifacts are gitignored, so this bites on every fresh clone and after every `git clean`.
+- **`Contents/MacOS` is sealed as nested code, so only executables go there.** The bcmaps are a `resource`, never an `externalBin`. A data file in `MacOS/` breaks the seal on the user's machine while every check on the build machine still passes. `verify-release.sh` sweeps that directory and fails anything that is not Mach-O.
+- **`TOOLKIT_CONVERTER_PDF_BCMAPS_DIR` fails silently when unset.** `pdf-inspector` falls back to `CARGO_MANIFEST_DIR/external/bcmaps`, which exists on the build machine and on nobody else's, so CJK PDFs lose their ToUnicode mapping with no error anywhere. `backend_host.rs` treats a missing bcmaps resource as fatal to the start on purpose. Do not soften that to a warning.
+- **Set `RUST_LOG` for the child, never inherit it.** The supervisor learns the sidecar's port by parsing one log line. A quieter inherited filter suppresses that line and the app hangs at Starting with nothing on screen to explain it.
+- **`RunEvent::Exit`, not `ExitRequested`.** `ExitRequested` never fires on ⌘Q for this app, because the window hides instead of being destroyed. And a long blocking wait inside `Exit` stalls AppKit termination and the app reads as hung, which is why the converter's shutdown grace is 5s and the Exit path caps at 7.
+- **A converter that reads stdin must not read it on tokio's blocking pool.** Dropping the runtime waits for blocking tasks that already started, so a pool read of a pipe nobody closes makes SIGTERM inert: the service drains, `main` returns, and the process then hangs forever. `stdin_eof` uses a detached `std::thread`, which does not hold up process exit.
 - **Capabilities.** Custom Tauri commands need no capability entries, but **core commands do**: `core:window:default` does *not* include `hide`/`destroy`, so the close-confirm handler needs them listed explicitly in `capabilities/default.json`. A missing one fails silently at runtime. The window-phase and zoom work added `set-max-size`, `set-resizable`, `current-monitor`, and `webview:set-webview-zoom` for the same reason.
 - **Window geometry lives in `src/shell/geometry.ts` and nowhere else.** `App.tsx`, `useFitWindow.ts`, `useZoom.ts` and `tauri.conf.json` all read those names, so the config that opens the window and the code that resizes it cannot drift apart. `SplitPane`'s defaults repeat `SPLIT` by hand only because nothing under `src/ui` may import from the app. `SPLIT.minStart` is what the run column's widest control needs, and `WORKSPACE.minWidth` is then derived from it: `SPLIT.start`% of the minimum window must clear the floor, or the floor beats the ratio at every width and the seam sits at its minimum forever. Change one and redo the arithmetic on the other.
 - **macOS clamps `setSize` to the min and max in force at that instant**, so the bounds move before the size in both directions. Growing into the workspace: `setResizable(true)` → `setMinSize` → `setMaxSize` → `setSize`. Shrinking back: record the current size → `setMinSize(launcher)` → `clearMaxSize` → `setSize` → `setResizable(false)`. Backwards, the window lands at the other phase's size and stays there, with no error to say so.
@@ -291,7 +360,7 @@ lives in [`docs/archive/`](docs/archive/README.md).
 
 - [`docs/STATUS.md`](docs/STATUS.md): state, critical path, milestones, architecture, traps, verify commands
 - [`.impeccable.md`](.impeccable.md): design context; every `/impeccable` skill reads it
-- Local Tauri v2 docs: `/Users/tristin/code/tauri-skills/knowledgebase/tauri-v2`.
+- Local Tauri v2 docs: `/Users/tristin/code/knowledge-base/topics/tauri/raw/tauri-v2`.
 
 <!-- gitnexus:start -->
 # GitNexus: code intelligence
