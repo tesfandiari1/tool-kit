@@ -2,7 +2,7 @@
 #
 # Post-build checks on the macOS bundle, run after `pnpm tauri build`.
 #
-# Two checks earn this script.
+# Three checks earn this script.
 #
 # The designated requirement. An unsigned build still produces a working .app,
 # so nothing before this point fails, but its requirement is a bare cdhash of
@@ -16,6 +16,11 @@
 # app still builds, still runs and still stores keys, but falls back to the
 # legacy keychain, where access is an ACL bound to the code signature and every
 # rebuild re-prompts for every key, with nothing on screen to explain it.
+#
+# The sidecar signatures. The bundler copies the conversion service and its two
+# workers into Contents/MacOS and signs each one on its own. A sidecar that
+# missed --options runtime passes codesign --verify --deep --strict here and is
+# rejected by the notary an hour later, taking the whole submission with it.
 #
 # Usage: apps/desktop/src-tauri/scripts/verify-release.sh [--notarized]
 #
@@ -33,7 +38,7 @@ NOTARIZED="no"
 while [ $# -gt 0 ]; do
   case "$1" in
     --notarized) NOTARIZED="yes"; shift ;;
-    -h|--help) sed -n '2,24p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -95,6 +100,88 @@ codesign --verify --deep --strict --verbose=2 "$APP" 2>/dev/null \
   || fail "codesign --verify rejected the bundle"
 pass "codesign --verify"
 
+printf '\n== Sidecars\n'
+# --deep --strict above already passed, and it says nothing about any of this.
+# Each sidecar is signed on its own by the bundler, so each carries its own
+# flags, its own team and its own timestamp, and the app's signature does not
+# cover a single one of those three.
+for sidecar in tool-kit-converter tool-kit-pdf-worker tool-kit-vision-worker; do
+  BIN="${APP}/Contents/MacOS/${sidecar}"
+  [ -f "$BIN" ] || fail "Contents/MacOS/${sidecar} is missing. The app spawns the
+     conversion service by name beside its own executable, so this bundle has no
+     local backend at all: every Convert job fails on any machine without Docker.
+     Run pnpm sidecars, then build again."
+  [ -x "$BIN" ] || fail "Contents/MacOS/${sidecar} is not executable, so the spawn
+     dies with permission denied and the local backend never binds a port"
+
+  INFO="$(codesign -d --verbose=4 "$BIN" 2>&1)" \
+    || fail "Contents/MacOS/${sidecar} carries no signature. macOS SIGKILLs an
+     unsigned helper on Apple Silicon with no message, which the converter
+     reports as a worker handshake failure that never mentions signing."
+
+  FLAGS="$(printf '%s\n' "$INFO" | sed -n 's/^CodeDirectory .*\(flags=[^ ]*\).*/\1/p' | head -n 1)"
+  [ -n "$FLAGS" ] || fail "could not read CodeDirectory flags for ${sidecar}"
+  case "$FLAGS" in
+    *adhoc*)
+      fail "${sidecar} is ad-hoc signed (${FLAGS}), so it is not covered by the
+     Developer ID identity the app carries. Notarization refuses the submission
+     and Gatekeeper rejects the app on every Mac but this one." ;;
+  esac
+  case "$FLAGS" in
+    *runtime*) : ;;
+    *)
+      fail "${sidecar} was signed without the hardened runtime (${FLAGS}). Every
+     local check passes on a bundle like this, including codesign --verify
+     --deep --strict, and the notary rejects the whole submission an hour later." ;;
+  esac
+
+  TEAM="$(printf '%s\n' "$INFO" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
+  [ "$TEAM" = "$WANT_TEAM" ] || fail "${sidecar} is signed by team
+     '${TEAM:-<missing>}', not ${WANT_TEAM}. A helper signed by another team
+     breaks the app's seal and cannot reach the keys this team's app wrote."
+
+  STAMP="$(printf '%s\n' "$INFO" | sed -n 's/^Timestamp=//p' | head -n 1)"
+  [ -n "$STAMP" ] || fail "${sidecar} has no secure timestamp, only a local signing
+     time. The notary requires one, and without it the signature stops verifying
+     the day the certificate expires rather than outliving it."
+
+  pass "${sidecar}: ${FLAGS}, team ${TEAM}, timestamped ${STAMP}"
+done
+
+printf '\n== Nested code\n'
+# Contents/MacOS is sealed as nested code, so it holds executables and nothing
+# else. A resource that lands there breaks the seal on the user's machine while
+# every check on the build machine still passes.
+NESTED=0
+while IFS= read -r entry; do
+  KIND="$(file -b "$entry")"
+  case "$KIND" in
+    *Mach-O*) NESTED=$((NESTED + 1)) ;;
+    *)
+      fail "Contents/MacOS/${entry#"${APP}/Contents/MacOS/"} is ${KIND}, not Mach-O.
+     That directory is sealed as nested code and only executables belong in it.
+     Data files go to Contents/Resources, which is where tauri.conf.json's
+     bundle.resources map puts them." ;;
+  esac
+done < <(find "${APP}/Contents/MacOS" -mindepth 1 \! -type d)
+pass "${NESTED} Mach-O files under Contents/MacOS and nothing else"
+
+printf '\n== Converter resources\n'
+# validate_cmaps in apps/converter/src/engines/pdf_inspector.rs checks these
+# four sentinels and no others, so a copy that drops the remaining 165 files
+# starts clean and silently loses ToUnicode mapping for every other CJK
+# ordering. Nothing at runtime reports it.
+BCMAPS="${APP}/Contents/Resources/pdf-inspector/bcmaps"
+[ -d "$BCMAPS" ] || fail "no Contents/Resources/pdf-inspector/bcmaps. The converter
+     falls back to the crate's build-time path, which exists on this machine and
+     on no user's, and CJK PDFs come out with unmapped text and no error"
+for cmap in Adobe-CNS1-UCS2.bcmap Adobe-GB1-UCS2.bcmap Adobe-Japan1-UCS2.bcmap Adobe-Korea1-UCS2.bcmap; do
+  [ -s "${BCMAPS}/${cmap}" ] \
+    || fail "bcmaps/${cmap} is missing or empty, so the PDF engine refuses to start
+     and the converter comes up with no pdf-inspector engine at all"
+done
+pass "bcmaps: $(find "$BCMAPS" -type f | wc -l | tr -d ' ') files, four CMap sentinels non-empty"
+
 printf '\n== Bundle metadata\n'
 PLIST="${APP}/Contents/Info.plist"
 for key in CFBundleShortVersionString LSMinimumSystemVersion NSHumanReadableCopyright LSApplicationCategoryType; do
@@ -104,9 +191,13 @@ for key in CFBundleShortVersionString LSMinimumSystemVersion NSHumanReadableCopy
 done
 
 printf '\n== Bundled notices\n'
-for f in OFL.txt THIRD_PARTY_NOTICES.md; do
+# Two for the fonts, two for the PDF engine: the pdf-inspector crate is MIT and
+# its bcmaps carry Adobe's own terms. Both licences require the notice to ship
+# with the code, and this bundle now ships all four.
+for f in OFL.txt THIRD_PARTY_NOTICES.md pdf-inspector-MIT.txt adobe-bcmaps.txt; do
   [ -f "${APP}/Contents/Resources/${f}" ] \
-    || fail "Resources/${f} is missing, and the OFL requires it to ship beside the fonts"
+    || fail "Resources/${f} is missing, and its licence requires it to ship beside
+     the code it covers"
   pass "Resources/${f}"
 done
 

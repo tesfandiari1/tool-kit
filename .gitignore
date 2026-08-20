@@ -46,6 +46,13 @@ apps/converter/data/
 # Rust (crate gitignores already cover /target/ in each crate)
 /target/
 
+# Sidecar staging. build-sidecars.sh writes both, and every file in them is
+# derived: three Mach-O binaries from cargo and swiftc, the bcmaps and the two
+# licences from the pdf-inspector crate source. Roughly 19 MB that a clean
+# checkout rebuilds in one command.
+/apps/desktop/src-tauri/binaries/
+/apps/desktop/src-tauri/resources/pdf-inspector/
+
 # Python bytecode (the icon generator is the only .py in the tree)
 __pycache__/
 

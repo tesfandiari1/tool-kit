@@ -52,9 +52,17 @@
     ],
     "copyright": "Copyright (c) 2026 Tristin Esfandiari",
     "category": "Productivity",
+    "externalBin": [
+      "binaries/tool-kit-converter",
+      "binaries/tool-kit-pdf-worker",
+      "binaries/tool-kit-vision-worker"
+    ],
     "resources": {
       "../src/ui/fonts/OFL.txt": "OFL.txt",
-      "../src/ui/fonts/THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+      "../src/ui/fonts/THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "resources/pdf-inspector/bcmaps": "pdf-inspector/bcmaps",
+      "resources/pdf-inspector/pdf-inspector-MIT.txt": "pdf-inspector-MIT.txt",
+      "resources/pdf-inspector/adobe-bcmaps.txt": "adobe-bcmaps.txt"
     },
     "macOS": {
       "minimumSystemVersion": "26.0"
