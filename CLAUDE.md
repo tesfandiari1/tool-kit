@@ -258,13 +258,26 @@ so putting them side by side is what makes the sibling probe resolve, in
 `target/debug` and in the bundle alike, with no env var and no branch.
 `backend_host.rs` reaches the converter the same way.
 
-`settings::LocalBackendMode` picks who owns the process. **Sidecar** is the
-default: the app spawns the converter on `127.0.0.1:0`, reads the real port off
-the service's own listening line, mints a Keychain token for it, and stops it
-again on exit. **Manual** points at `settings.backend_url` and leaves the
-process to the user, which is how the Docker deployment is reached. Every read
-of the backend origin and token goes through `backend_host::backend_origin` and
-`backend_host::backend_token` so the two modes cannot drift apart.
+`backend_host::Deployment` says where the service is, and **it is not a
+setting**. **Sidecar** is what the app does: it spawns the converter on
+`127.0.0.1:0`, reads the real port off the service's own listening line, mints a
+Keychain token for it, and stops it again on exit. **Manual** happens only when
+a deployment has dropped `backend-override.json` beside `settings.json`, which
+is how the Docker deployment is reached and which nothing in the app writes.
+`pnpm backend:docker`, `pnpm backend:sidecar` and `pnpm backend:where` are that
+deployment act. Every read of the backend origin and token goes through
+`backend_host::backend_origin` and `backend_host::backend_token`, so the two
+cannot drift apart.
+
+**Why a file and not a preference.** The service ships in the bundle, so
+running one elsewhere is a deployment decision, not a taste. Leaving it in
+Settings meant a URL field that did nothing in the mode everyone was actually
+in: `backend_origin` returned the sidecar's port and never read
+`settings.backend_url`, so the box accepted a URL, saved it, and changed
+nothing. A file nobody surfaces cannot be reached by a stray click, and a
+malformed one is an error rather than a silent fall back to Sidecar, because
+converting on this Mac while the container someone deployed sits idle is the
+one outcome they did not ask for.
 
 The sidecar advertises **more** than the container can. `workers/vision/` is
 Swift against Apple's Vision framework, so it cannot ship in the Linux image:

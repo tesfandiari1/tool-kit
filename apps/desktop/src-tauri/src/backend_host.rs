@@ -41,7 +41,6 @@ use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
 use crate::secrets;
-use crate::settings::{self, LocalBackendMode};
 
 /// Sits beside the app binary in `Contents/MacOS` and in `target/debug` alike,
 /// because tauri-bundler strips the `-{target}` suffix when it copies.
@@ -283,8 +282,18 @@ fn host(app: &AppHandle) -> Option<BackendHost> {
 /// Start the sidecar when this install owns the process. A no-op in Manual
 /// mode, where the user runs the service and the app only points at a URL.
 pub(crate) fn start(app: &AppHandle) {
-    if settings::load(app).local_backend_mode != LocalBackendMode::Sidecar {
-        return;
+    match deployment(app) {
+        Ok(Deployment::Sidecar) => {}
+        Ok(Deployment::Manual { .. }) => return,
+        // A broken override leaves nothing to point at and nothing to spawn.
+        // Publishing it puts the reason in the status row rather than leaving
+        // the app looking like it simply has no backend.
+        Err(message) => {
+            if let Some(host) = host(app) {
+                host.publish(app, BackendState::Failed { message });
+            }
+            return;
+        }
     }
     let Some(host) = host(app) else {
         return;
@@ -367,16 +376,79 @@ const STARTING: &str = "The conversion service is starting. Try again in a momen
 /// `validate_base_url` rejects it on sight.
 pub(crate) const SIDECAR_ALIAS: &str = "sidecar";
 
+/// The file a deployment drops beside `settings.json` to point this app at a
+/// conversion service it runs itself, a container being the reason to.
+pub(crate) const OVERRIDE_FILE: &str = "backend-override.json";
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackendOverride {
+    url: String,
+}
+
+/// Where the conversion service lives.
+///
+/// Sidecar unless a deployment dropped [`OVERRIDE_FILE`]. The app never writes
+/// that file and no control surfaces it, which is the point: the service ships
+/// inside the bundle, so running one somewhere else is a deployment act rather
+/// than a preference to wander into from Settings. It also means nobody can
+/// land in Manual by a stray click and then watch every job fail against a URL
+/// nothing is serving.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Deployment {
+    Sidecar,
+    Manual { origin: String },
+}
+
+impl Deployment {
+    pub(crate) fn is_sidecar(&self) -> bool {
+        matches!(self, Self::Sidecar)
+    }
+}
+
+/// An unreadable or malformed override is an error, never a quiet fall back to
+/// Sidecar. The file is there because someone deployed a container, so
+/// converting on this Mac instead is the one outcome they did not ask for, and
+/// silence is what would make it cost a day to find.
+pub(crate) fn deployment(app: &AppHandle) -> Result<Deployment, String> {
+    let Ok(directory) = app.path().app_config_dir() else {
+        return Ok(Deployment::Sidecar);
+    };
+    let path = directory.join(OVERRIDE_FILE);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Deployment::Sidecar);
+        }
+        Err(error) => return Err(format!("Could not read {}: {error}", path.display())),
+    };
+    parse_override(&raw).map_err(|reason| format!("{} {reason}", path.display()))
+}
+
+fn parse_override(raw: &str) -> Result<Deployment, String> {
+    let parsed: BackendOverride =
+        serde_json::from_str(raw).map_err(|error| format!("is not readable: {error}"))?;
+    // Trailing slash trimmed here so the ledger's origin comparison, which is
+    // an exact string match, cannot fail on a URL that differs by punctuation.
+    let origin = parsed.url.trim().trim_end_matches('/').to_string();
+    if origin.is_empty() {
+        return Err("names no url".to_string());
+    }
+    if !origin.starts_with("http://") && !origin.starts_with("https://") {
+        return Err(format!("names {origin}, which is not an http url"));
+    }
+    Ok(Deployment::Manual { origin })
+}
+
 /// The origin every backend request goes to, read at the moment of the request.
 ///
 /// Nothing may hold on to this. The kernel picks the sidecar's port at each
 /// launch and again at each restart, so an origin kept from one run is refused
 /// by the next.
 pub(crate) fn backend_origin(app: &AppHandle) -> Result<String, String> {
-    let settings = settings::load(app);
-    match settings.local_backend_mode {
-        LocalBackendMode::Sidecar => sidecar_origin(app),
-        LocalBackendMode::Manual => Ok(settings.backend_url),
+    match deployment(app)? {
+        Deployment::Sidecar => sidecar_origin(app),
+        Deployment::Manual { origin } => Ok(origin),
     }
 }
 
@@ -399,7 +471,7 @@ pub(crate) fn backend_token(app: &AppHandle) -> Result<String, String> {
     if let Some(token) = secrets::get_key("backend").filter(|value| !value.trim().is_empty()) {
         return Ok(token);
     }
-    if settings::load(app).local_backend_mode == LocalBackendMode::Sidecar {
+    if deployment(app).is_ok_and(|which| which.is_sidecar()) {
         // Minted at the top of the launch, so an empty slot means the launch
         // has not got that far rather than that anything is missing.
         return Err(STARTING.to_string());
@@ -415,10 +487,10 @@ pub(crate) fn backend_token(app: &AppHandle) -> Result<String, String> {
 /// row is deleted. The alias holds still and keeps the guarantee the comparison
 /// exists for: in Sidecar mode this app mints the token and hands it to its own
 /// child alone. Manual mode records the URL and its guard is untouched.
-pub(crate) fn ledger_origin(mode: LocalBackendMode, live: &str) -> &str {
-    match mode {
-        LocalBackendMode::Sidecar => SIDECAR_ALIAS,
-        LocalBackendMode::Manual => live,
+pub(crate) fn ledger_origin(deployment: &Deployment) -> &str {
+    match deployment {
+        Deployment::Sidecar => SIDECAR_ALIAS,
+        Deployment::Manual { origin } => origin,
     }
 }
 
@@ -1014,8 +1086,10 @@ pub(crate) fn backend_status(app: AppHandle) -> BackendStatus {
 
 #[tauri::command]
 pub(crate) async fn restart_backend(app: AppHandle) -> Result<(), String> {
-    if settings::load(&app).local_backend_mode != LocalBackendMode::Sidecar {
-        return Err("Tool-Kit does not own the conversion service in Manual mode".to_string());
+    if !deployment(&app)?.is_sidecar() {
+        return Err(format!(
+            "Tool-Kit does not own the conversion service while {OVERRIDE_FILE} points it elsewhere"
+        ));
     }
     stop(&app, STOP_BUDGET).await;
     start(&app);
@@ -1199,5 +1273,52 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(std::fs::read_to_string(&path).expect("token"), token);
+    }
+
+    #[test]
+    fn an_override_names_the_service_a_deployment_runs() {
+        assert_eq!(
+            parse_override(r#"{"url": "http://127.0.0.1:8080"}"#),
+            Ok(Deployment::Manual {
+                origin: "http://127.0.0.1:8080".to_string()
+            })
+        );
+    }
+
+    /// The ledger compares origins by exact string, so a URL that differs only
+    /// by its trailing slash would abandon every in-flight row it recorded.
+    #[test]
+    fn a_trailing_slash_does_not_make_a_second_origin() {
+        assert_eq!(
+            parse_override(r#"{"url": "  http://backend.internal:8080/  "}"#),
+            parse_override(r#"{"url": "http://backend.internal:8080"}"#)
+        );
+    }
+
+    /// Every one of these is a deployment that meant to point somewhere. The
+    /// alternative to an error is converting on this Mac while the container
+    /// the person deployed sits idle, with nothing anywhere saying so.
+    #[test]
+    fn an_override_that_names_nothing_usable_is_an_error_not_a_fall_back() {
+        for (raw, expected) in [
+            (r#"{"url": ""}"#, "names no url"),
+            (r#"{"url": "   "}"#, "names no url"),
+            (r#"{"url": "127.0.0.1:8080"}"#, "not an http url"),
+            (r#"{"url": "file:///etc/passwd"}"#, "not an http url"),
+            (r#"{"origin": "http://127.0.0.1:8080"}"#, "is not readable"),
+            (r#"{"url": 8080}"#, "is not readable"),
+            ("not json at all", "is not readable"),
+        ] {
+            let error = parse_override(raw).expect_err(&format!("{raw} should not parse"));
+            assert!(error.contains(expected), "{raw} gave {error}");
+        }
+    }
+
+    /// `deny_unknown_fields` is the reason this one fails. A deployment that
+    /// wrote the wrong key should hear about it rather than get a silent
+    /// Sidecar, which is the same failure the whole type exists to prevent.
+    #[test]
+    fn a_misspelled_key_is_refused_rather_than_ignored() {
+        assert!(parse_override(r#"{"url": "http://a.b:1", "extra": 1}"#).is_err());
     }
 }

@@ -662,6 +662,10 @@ async fn run_pipeline(
         }
     }
 
+    // Once per run, beside the origin. Which deployment this is decides only
+    // what the ledger records, and re-reading the file per file would let a
+    // half-written override split one run across two recorded origins.
+    let deployment = backend_host::deployment(&app)?;
     let client_run_id = uuid::Uuid::new_v4().to_string();
     // From the run snapshot, so editing the OCR settings mid-run cannot split
     // one run across two recognizers. Carried on each job and recorded on its
@@ -687,10 +691,7 @@ async fn run_pipeline(
                     source_path: &source_path,
                     file_name: &file_name,
                     output_dir: &output_dir,
-                    backend_url: backend_host::ledger_origin(
-                        cfg.local_backend_mode,
-                        &backend_origin,
-                    ),
+                    backend_url: backend_host::ledger_origin(&deployment),
                     client_run_id: &client_run_id,
                     idempotency_key: &idempotency_key,
                     conversion_profile: cfg.conversion_profile.id(),
@@ -1062,12 +1063,15 @@ pub fn run() {
             // Opened once and held for the process. A database that can't be
             // opened degrades to "no history" rather than failing startup.
             app.manage(history::init(app.handle()));
-            // Manual mode only. In Sidecar mode there is no port yet, and the
+            // Manual only. In Sidecar mode there is no port yet, and the
             // resume path fails a job on one refused connection, so recovery
             // waits for the first service that answers (see `backend_host`).
-            if settings::load(app.handle()).local_backend_mode
-                == settings::LocalBackendMode::Manual
-            {
+            // A broken override reports itself through `start` below, and
+            // recovering against a backend we cannot name would be worse.
+            if matches!(
+                backend_host::deployment(app.handle()),
+                Ok(backend_host::Deployment::Manual { .. })
+            ) {
                 jobs::recover_in_flight(app.handle().clone());
             }
             // Nothing waits on this: the sidecar comes up on its own task and

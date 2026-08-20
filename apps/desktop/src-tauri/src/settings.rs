@@ -10,20 +10,22 @@ const DEFAULT_BACKEND_URL: &str = "http://127.0.0.1:8080";
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversionRoute {
-    /// Keep today's direct Datalab path until the backend deployment gate passes.
-    #[default]
+    /// Datalab, over the network, one request per file.
     Direct,
-    Backend,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LocalBackendMode {
-    /// The app owns the local conversion service process.
+    /// The conversion service, which ships inside the app.
+    ///
+    /// The default, because the service is in the bundle and a fresh install
+    /// should convert without an API key and without sending a document
+    /// anywhere. Direct stays a choice for the formats the local engines hand
+    /// back, and Rev.ai transcription is untouched either way.
+    ///
+    /// Nobody arrives here by surprise. A settings.json that predates the
+    /// route names none, so `#[serde(default)]` would move it, but that same
+    /// file has no `workspace_path` either and the onboarding gate reads that
+    /// as first run and asks. The gate writes the route explicitly, so this
+    /// default only decides the frame before someone answers.
     #[default]
-    Sidecar,
-    /// The user runs the service themselves; the app only points at a URL.
-    Manual,
+    Backend,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +78,9 @@ pub struct Settings {
     pub conversion_route: ConversionRoute,
     /// Base URL for the Rust conversion service. The bearer token is stored
     /// separately in Keychain and never serialized with these settings.
+    /// Vestigial. `backend_host::Deployment` carries the Manual URL now, read
+    /// from the file a deployment drops, and nothing reads this. It stays only
+    /// until the Settings field that writes it goes with it.
     pub backend_url: String,
     /// Backend routing profile. `best_quality` is intentionally unavailable
     /// until the backend implements it instead of returning 409.
@@ -109,8 +114,6 @@ pub struct Settings {
     pub workspace_id: Option<String>,
     /// The project new documents land in.
     pub active_project_id: Option<String>,
-    /// Who owns the local conversion service process.
-    pub local_backend_mode: LocalBackendMode,
 }
 
 impl Default for Settings {
@@ -122,7 +125,7 @@ impl Default for Settings {
             datalab_format: "markdown".into(),
             datalab_pipeline_id: None,
             datalab_high_accuracy: true,
-            conversion_route: ConversionRoute::Direct,
+            conversion_route: ConversionRoute::Backend,
             backend_url: DEFAULT_BACKEND_URL.into(),
             conversion_profile: ConversionProfile::Standard,
             language_correction: true,
@@ -136,7 +139,6 @@ impl Default for Settings {
             workspace_path: None,
             workspace_id: None,
             active_project_id: None,
-            local_backend_mode: LocalBackendMode::Sidecar,
         }
     }
 }
@@ -170,13 +172,13 @@ pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConversionProfile, ConversionRoute, LocalBackendMode, Settings};
+    use super::{ConversionProfile, ConversionRoute, Settings};
 
     #[test]
-    fn defaults_keep_conversion_on_the_direct_provider() {
+    fn defaults_convert_through_the_service_in_the_bundle() {
         let settings = Settings::default();
 
-        assert_eq!(settings.conversion_route, ConversionRoute::Direct);
+        assert_eq!(settings.conversion_route, ConversionRoute::Backend);
         assert_eq!(settings.backend_url, "http://127.0.0.1:8080");
         assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
     }
@@ -185,7 +187,7 @@ mod tests {
     fn backend_settings_serialize_for_the_webview_without_a_token() {
         let value = serde_json::to_value(Settings::default()).expect("settings should serialize");
 
-        assert_eq!(value["conversionRoute"], "direct");
+        assert_eq!(value["conversionRoute"], "backend");
         assert_eq!(value["backendUrl"], "http://127.0.0.1:8080");
         assert_eq!(value["conversionProfile"], "standard");
         assert_eq!(value["languageCorrection"], true);
@@ -214,7 +216,10 @@ mod tests {
         assert_eq!(settings.datalab_pipeline_id.as_deref(), Some("pl_existing"));
         assert!(!settings.datalab_high_accuracy);
         assert!(!settings.skip_already_done);
-        assert_eq!(settings.conversion_route, ConversionRoute::Direct);
+        // The route this file never named now defaults to the bundled service.
+        // Safe because the same file has no workspace_path, so onboarding runs
+        // and asks before a single conversion goes anywhere.
+        assert_eq!(settings.conversion_route, ConversionRoute::Backend);
         assert_eq!(settings.backend_url, "http://127.0.0.1:8080");
         assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
         // A file written before `zoom` existed must load at 100%, not at 0.0.
@@ -225,7 +230,6 @@ mod tests {
         assert_eq!(settings.workspace_path, None);
         assert_eq!(settings.workspace_id, None);
         assert_eq!(settings.active_project_id, None);
-        assert_eq!(settings.local_backend_mode, LocalBackendMode::Sidecar);
     }
 
     #[test]

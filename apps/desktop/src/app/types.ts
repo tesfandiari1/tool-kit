@@ -9,7 +9,6 @@ export type ConversionProfile = "standard" | "local_only";
 export type ReuseDisposition = "pending" | "already_here" | "reusable";
 /// How the local conversion service gets started. `sidecar` is the app
 /// spawning and owning it; `manual` is the developer running it themselves.
-export type LocalBackendMode = "sidecar" | "manual";
 /// The one conversion question first run asks. It maps onto a route, a
 /// profile, and a backend mode; see `domains/onboarding/conversionMode`.
 export type OnboardingConversionMode = "local" | "cloud";
@@ -110,7 +109,6 @@ export interface Settings {
   workspaceId: string | null;
   /// The project the library opens on. Null until a workspace exists.
   activeProjectId: string | null;
-  localBackendMode: LocalBackendMode;
   inputs: string[];
   outputDir: string | null;
   jobType: JobId;
@@ -143,14 +141,13 @@ export const DEFAULT_SETTINGS: Settings = {
   workspacePath: null,
   workspaceId: null,
   activeProjectId: null,
-  localBackendMode: "sidecar",
   inputs: [],
   outputDir: null,
   jobType: "convert",
   datalabFormat: "markdown",
   datalabPipelineId: null,
   datalabHighAccuracy: true,
-  conversionRoute: "direct",
+  conversionRoute: "backend",
   backendUrl: DEFAULT_BACKEND_URL,
   conversionProfile: "standard",
   languageCorrection: true,

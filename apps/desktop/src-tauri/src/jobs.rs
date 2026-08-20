@@ -1315,7 +1315,9 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
     let Some(backend) = job.backend else {
         return;
     };
-    let mode = settings::load(app).local_backend_mode;
+    let Ok(deployment) = backend_host::deployment(app) else {
+        return;
+    };
     let ocr_custom_words = backend.ocr.custom_words_wire();
     if !history::upsert_in_flight(
         app,
@@ -1323,7 +1325,7 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
             source_path: &job.source_path,
             file_name: &job.file_name,
             output_dir: &job.output_dir,
-            backend_url: backend_host::ledger_origin(mode, &backend.backend_url),
+            backend_url: backend_host::ledger_origin(&deployment),
             client_run_id: &backend.client_run_id,
             idempotency_key: &backend.idempotency_key,
             conversion_profile: backend.profile.id(),
@@ -1673,8 +1675,10 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
 
     let manager = app.state::<JobManager>();
     let config = settings::load(&app);
-    let configured_origin =
-        backend_host::ledger_origin(config.local_backend_mode, &config.backend_url).to_string();
+    let Ok(deployment) = backend_host::deployment(&app) else {
+        return;
+    };
+    let configured_origin = backend_host::ledger_origin(&deployment).to_string();
     manager.set_run_config(config);
     let generation = manager.generation();
     for entry in entries {
@@ -2131,17 +2135,15 @@ mod backend_tests {
     /// every relaunch and left its Retry button dead.
     #[test]
     fn a_sidecar_row_survives_the_port_the_next_launch_is_given() {
-        let recorded = backend_host::ledger_origin(
-            settings::LocalBackendMode::Sidecar,
-            "http://127.0.0.1:51001",
-        );
+        // The port is no longer an argument, so this is now a property of the
+        // type rather than of the value passed in. The test stays because the
+        // guarantee it names is the one that broke Retry, and a future arm
+        // that reached for a live URL again would fail right here.
+        let recorded = backend_host::ledger_origin(&backend_host::Deployment::Sidecar);
         assert_eq!(recorded, backend_host::SIDECAR_ALIAS);
         let entry = ledger_entry(recorded);
 
-        let now = backend_host::ledger_origin(
-            settings::LocalBackendMode::Sidecar,
-            "http://127.0.0.1:64707",
-        );
+        let now = backend_host::ledger_origin(&backend_host::Deployment::Sidecar);
 
         assert!(recovery_origin_still_configured(&entry, now));
     }
@@ -2150,18 +2152,18 @@ mod backend_tests {
     /// one they have moved away from must not be handed the current token.
     #[test]
     fn a_manual_row_still_refuses_a_service_the_user_replaced() {
-        let entry = ledger_entry(backend_host::ledger_origin(
-            settings::LocalBackendMode::Manual,
-            "http://127.0.0.1:8080",
-        ));
+        let manual = |url: &str| backend_host::Deployment::Manual {
+            origin: url.to_string(),
+        };
+        let entry = ledger_entry(backend_host::ledger_origin(&manual("http://127.0.0.1:8080")));
 
         assert!(recovery_origin_still_configured(
             &entry,
-            backend_host::ledger_origin(settings::LocalBackendMode::Manual, "http://127.0.0.1:8080/")
+            backend_host::ledger_origin(&manual("http://127.0.0.1:8080/"))
         ));
         assert!(!recovery_origin_still_configured(
             &entry,
-            backend_host::ledger_origin(settings::LocalBackendMode::Manual, "http://other.host:8080")
+            backend_host::ledger_origin(&manual("http://other.host:8080"))
         ));
     }
 

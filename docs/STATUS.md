@@ -24,7 +24,7 @@ rewrite code, commands, identifiers, or quotations to match prose rules.
 | Backend | M0, M1, M2, M3, M4 complete. M5 and M8 unbuilt. **M7 cancelled**, see section 4 |
 | Desktop | M6 implementation landed, **gate open** (CVR-067, CVR-081) |
 | Exposure | Loopback only, and staying there. M7 remote access is cancelled |
-| Local backend | **Sidecar landed 2026-08-20.** The converter ships inside the `.app`. `settings::LocalBackendMode` picks Sidecar (the app owns the process) or Manual (Docker, by URL). Settings UI and the default-route flip are not built, see section 3 |
+| Local backend | **Sidecar landed 2026-08-20, and it is now the only path the app chooses.** The converter ships inside the `.app` and `conversion_route` defaults to `backend`. `backend_host::Deployment` reads `backend-override.json`, which only a deployment writes, so Manual (Docker) is unreachable from the UI. See section 3 |
 | Backend Datalab fallback | Not built. Phase 2, now unblocked |
 | Phase 1 | **Complete 2026-08-19.** All four gates met |
 | Desktop version | **1.0.0** (`apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml`, `tauri.conf.json`) |
@@ -73,10 +73,18 @@ installed app, the converter starts, resolves both workers through
 `apple-vision` across 24 media types. The hardened runtime blocks none of it,
 so the app needs no entitlement to spawn its own signed helpers.
 
-**Not built.** The Settings control for Sidecar versus Manual, the live status
-row, and the flip of the default conversion route to the backend. Switching
-`localBackendMode` today takes a relaunch or a Restart, because `save_settings`
-does not start or stop the host.
+**Where the service runs stopped being a setting, 2026-08-20.** The app uses
+the sidecar. `backend_host::Deployment` reads `backend-override.json` beside
+`settings.json`, absent means Sidecar, and `pnpm backend:docker` is the only
+thing that writes it. `local_backend_mode` is gone from `Settings` and
+`backend_host` no longer reads `Settings` at all. `conversion_route` now
+defaults to `backend`, which is what makes "the app uses the sidecar" true
+rather than nominal: it used to default to `direct`, so the sidecar ran and
+converted nothing.
+
+**Not built.** The live backend status row. `settings.backend_url` and the
+Settings field that writes it are vestigial and should go together: nothing
+reads the value now, and the Manual URL comes from the override file.
 
 ### The workspace and first run, 2026-08-20
 

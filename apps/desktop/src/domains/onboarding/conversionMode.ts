@@ -1,18 +1,17 @@
 import type { OnboardingConversionMode, Settings } from "@/app/types";
 
-/// First run asks one question and three settings answer it. Keeping the
-/// mapping here rather than in the gate is what lets the copy on screen say
-/// "this Mac" while the app still speaks in routes and profiles.
+/// First run asks one question and two settings answer it. Keeping the mapping
+/// here rather than in the gate is what lets the copy on screen say "this Mac"
+/// while the app still speaks in routes and profiles.
+///
+/// Where the service runs is not among them. It is the one in the bundle unless
+/// a deployment dropped `backend-override.json`, which no answer here can do.
 export function conversionPatch(mode: OnboardingConversionMode): Partial<Settings> {
   switch (mode) {
     case "local":
       // Local only forbids the remote fallback outright: choosing this Mac has
       // to mean the bytes cannot leave it, not that they usually don't.
-      return {
-        conversionRoute: "backend",
-        conversionProfile: "local_only",
-        localBackendMode: "sidecar",
-      };
+      return { conversionRoute: "backend", conversionProfile: "local_only" };
     case "cloud":
       return { conversionRoute: "direct", conversionProfile: "standard" };
     default: {
