@@ -24,7 +24,7 @@ dist-ssr
 .env
 .env.*
 !.env.example
-backend/secrets/
+deploy/docker/secrets/
 
 # Local tool caches and agent state
 .firecrawl/

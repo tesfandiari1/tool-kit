@@ -645,7 +645,7 @@ mod tests {
     /// accepted 18.
     #[test]
     fn advertised_media_types_match_the_openapi_upload_contract() {
-        let spec = include_str!("../../openapi/openapi.yaml");
+        let spec = include_str!("../../../contract/http/openapi.yaml");
         let declared = spec
             .split_once(
                 "            encoding:\n              source:\n                contentType: ",

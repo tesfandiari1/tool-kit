@@ -19,7 +19,7 @@ rewrite code, commands, identifiers, or quotations to match prose rules.
 | Item | Value |
 |---|---|
 | Branch | `main`. Run `git log --oneline -8` for the tip |
-| OpenAPI contract | **0.4.2** (`backend/openapi/openapi.yaml`) |
+| OpenAPI contract | **0.4.2** (`contract/http/openapi.yaml`) |
 | Backend | M0, M1, M2, M3, M4 complete. M5, M7, M8 unbuilt |
 | Desktop | M6 implementation landed, **gate open** (CVR-067, CVR-081) |
 | Exposure | Loopback only. Tailscale remote access is M7, unbuilt |
@@ -165,8 +165,8 @@ preview". Acceptance should not use files near either limit.
 
 | # | Task | Verify |
 |---|---|---|
-| B.1 | `openssl rand -hex 32 > backend/secrets/bootstrap-token.txt` | File exists, mode 600 |
-| B.2 | `docker compose -f backend/compose.yaml up --build` | `curl http://127.0.0.1:8080/health/ready` returns 200 |
+| B.1 | `openssl rand -hex 32 > deploy/docker/secrets/bootstrap-token.txt` | File exists, mode 600 |
+| B.2 | `docker compose -f deploy/docker/compose.yaml up --build` | `curl http://127.0.0.1:8080/health/ready` returns 200 |
 | B.3 | Store the token in the Keychain through Settings | Capability preflight returns `inputFormats` |
 | B.4 | Set route **backend**, URL `http://127.0.0.1:8080`, profile **`local_only`** | Run enabled for backend formats |
 | B.5 | `pnpm tauri dev`, not the stale `.app` bundle | Window opens, no webview bridge error |
@@ -180,7 +180,7 @@ externally, so a backend gap shows up as `needs_remote` instead of as a silent
 paid success.
 
 **Compose token trap.** `TOOLKIT_CONVERTER_TOKEN_FILE` appears twice in
-`backend/compose.yaml` with two different meanings. Under `environment:` it is
+`deploy/docker/compose.yaml` with two different meanings. Under `environment:` it is
 the in-container path `/run/secrets/bootstrap_token`. Under `secrets:` it is a
 host-side substitution, `${TOOLKIT_CONVERTER_TOKEN_FILE:-./secrets/bootstrap-token.txt}`.
 `backend/.env.example` sets it to an absolute host path. If you export it in
@@ -255,14 +255,14 @@ One `pnpm tauri dev` session covers all four. Do not use the bundled `.app`.
 No gate rebuilds it.
 
 ```bash
-docker compose -f backend/compose.yaml up -d   # skip if already healthy
+docker compose -f deploy/docker/compose.yaml up -d   # skip if already healthy
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/health/ready
 backend/scripts/print-corpus-pdf.sh /tmp/toolkit-native.pdf
 backend/scripts/print-corpus-pdf.sh /tmp/toolkit-scanned.pdf scanned
 pnpm tauri dev
 ```
 
-In Settings paste the token from `backend/secrets/bootstrap-token.txt`, set
+In Settings paste the token from `deploy/docker/secrets/bootstrap-token.txt`, set
 route **backend**, URL `http://127.0.0.1:8080`, and profile **`local_only`**.
 
 | # | Do this | Pass when |
@@ -1278,7 +1278,7 @@ it had just constructed and could not fail.
 root, seeds one real conversion from `tests/fixtures/anydoc/text.docx`, and
 then runs the whole derived suite twice: once with the seeded id, once with a
 UUID no conversion has. Roughly 400 cases per pass. It needs `uv` and no
-Docker. Config lives in `backend/openapi/schemathesis.toml` and every check
+Docker. Config lives in `contract/http/schemathesis.toml` and every check
 turned off there names the reason.
 
 **Its first run found three admission rules the contract never documented**:

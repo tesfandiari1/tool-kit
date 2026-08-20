@@ -6,7 +6,8 @@
 // the only channel back, so every decision has to land there. Exit 0 once a
 // report is written, 70 on any failure.
 //
-// The wire contract is backend/src/vision_protocol.rs. Keep the two in sync.
+// The wire contract is crates/worker-protocol/src/vision.rs. Keep the two in
+// sync.
 
 import CoreGraphics
 import CryptoKit
@@ -29,7 +30,7 @@ private let maxOutputBytesEnv = "TOOLKIT_WORKER_MAX_OUTPUT_BYTES"
 private let languageCorrectionEnv = "TOOLKIT_VISION_WORKER_LANGUAGE_CORRECTION"
 private let customWordsEnv = "TOOLKIT_VISION_WORKER_CUSTOM_WORDS"
 
-/// The rejection codes vision_protocol.rs declares. Nothing else may be sent.
+/// The rejection codes worker-protocol declares. Nothing else may be sent.
 private enum Rejection: String {
     case invalidImage = "invalid_image"
     case multiFrameImage = "multi_frame_image"

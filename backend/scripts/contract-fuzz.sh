@@ -2,9 +2,9 @@
 #
 # Property-based contract testing against the real service.
 #
-# Schemathesis reads `openapi/openapi.yaml` and derives its own cases from it:
-# hundreds of requests per run, checked for server errors, undeclared status
-# codes, wrong content types, responses that do not match their schema,
+# Schemathesis reads `contract/http/openapi.yaml` and derives its own cases
+# from it: hundreds of requests per run, checked for server errors, undeclared
+# status codes, wrong content types, responses that do not match their schema,
 # missing declared headers, and accepted data the contract says is invalid.
 #
 # It is here because `tests/http_contract.rs` cannot do this job. Those 46
@@ -15,7 +15,7 @@
 #
 # The run is namespaced away from every other stack: its own port, its own
 # data root under `target/`, and a token generated per run. It never reads
-# `backend/secrets/` and cannot reach the real converter-data volume.
+# `deploy/docker/secrets/` and cannot reach the real converter-data volume.
 #
 # Usage: backend/scripts/contract-fuzz.sh [--examples N] [--seed N] [--no-build]
 
@@ -23,6 +23,9 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 BACKEND_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+# The contract lives outside the crate: it describes the service, and the
+# desktop client is generated from the same file.
+REPO_ROOT="$(cd -- "${BACKEND_DIR}/.." && pwd -P)"
 
 # Pinned. An unpinned tool is a gate that can change its mind between runs
 # without a commit, and a new check arriving as a red CI job nobody asked for
@@ -61,8 +64,8 @@ need openssl
 need uuidgen
 need uvx
 
-SPEC="${BACKEND_DIR}/openapi/openapi.yaml"
-CONFIG="${BACKEND_DIR}/openapi/schemathesis.toml"
+SPEC="${REPO_ROOT}/contract/http/openapi.yaml"
+CONFIG="${REPO_ROOT}/contract/http/schemathesis.toml"
 FIXTURE="${BACKEND_DIR}/tests/fixtures/anydoc/text.docx"
 DOCX_TYPE="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 for f in "$SPEC" "$CONFIG" "$FIXTURE"; do

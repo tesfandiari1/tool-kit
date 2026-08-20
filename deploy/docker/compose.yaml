@@ -4,10 +4,10 @@ services:
   converter:
     build:
       # The repo root, not backend/: the Dockerfile needs crates/worker-protocol
-      # too. Resolved against this file, so `-f backend/compose.yaml` from any
-      # directory still lands on it.
-      context: ..
-      dockerfile: backend/Dockerfile
+      # too. Resolved against this file, so `-f deploy/docker/compose.yaml` from
+      # any directory still lands on it.
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
     image: tool-kit-converter:dev
     restart: unless-stopped
     init: true

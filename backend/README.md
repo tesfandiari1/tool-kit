@@ -34,7 +34,8 @@ without publishing partial Markdown. Datalab routing is not active yet.
 | `GET` | `/api/v1/conversions/{id}/artifacts/markdown` | Bearer | Stream Markdown |
 | `GET` | `/api/v1/conversions/{id}/artifacts/manifest` | Bearer | Stream manifest JSON |
 
-The complete live contract is [`openapi/openapi.yaml`](openapi/openapi.yaml).
+The complete live contract is
+[`contract/http/openapi.yaml`](../contract/http/openapi.yaml).
 Collection lookup, cancellation, retries, purge, and remote conversion are
 absent until their tracked milestones land.
 
@@ -73,10 +74,10 @@ and nothing more. The underlying error goes to the log at `warn`.
 Run all commands from the repository root. Create a development token once:
 
 ```bash
-mkdir -p backend/secrets
+mkdir -p deploy/docker/secrets
 umask 077
-openssl rand -hex 32 > backend/secrets/bootstrap-token.txt
-docker compose -f backend/compose.yaml up --build
+openssl rand -hex 32 > deploy/docker/secrets/bootstrap-token.txt
+docker compose -f deploy/docker/compose.yaml up --build
 ```
 
 Compose publishes only `127.0.0.1:8080`, mounts the token as a read-only secret,
@@ -93,7 +94,7 @@ without it the service cannot write its own data root on first start.
 Submit and poll a clean PDF from another terminal:
 
 ```bash
-TOKEN="$(tr -d '\r\n' < backend/secrets/bootstrap-token.txt)"
+TOKEN="$(tr -d '\r\n' < deploy/docker/secrets/bootstrap-token.txt)"
 
 curl -i \
   -H "Authorization: Bearer ${TOKEN}" \
@@ -132,7 +133,7 @@ submission's tree and superseded attempt staging. Resetting local development is
 a deliberate, manual act:
 
 ```bash
-docker compose -f backend/compose.yaml down -v
+docker compose -f deploy/docker/compose.yaml down -v
 ```
 
 `-v` destroys the `converter-data` volume and every real conversion in it. There
@@ -190,8 +191,8 @@ cargo check --locked --offline --manifest-path backend/Cargo.toml --all-targets
 cargo test --locked --offline --manifest-path backend/Cargo.toml
 cargo clippy --locked --offline --manifest-path backend/Cargo.toml --all-targets -- -D warnings
 # Extra deny-set lives in Cargo.toml [lints]; keep in sync with src-tauri.
-docker compose -f backend/compose.yaml config --quiet
-docker build -f backend/Dockerfile -t tool-kit-converter:m2 .
+docker compose -f deploy/docker/compose.yaml config --quiet
+docker build -f deploy/docker/Dockerfile -t tool-kit-converter:m2 .
 ```
 
 The image healthcheck uses `--start-interval`, which needs Docker 25 or newer.

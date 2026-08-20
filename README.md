@@ -58,8 +58,8 @@ pnpm verify:contract # Schemathesis, property-based testing of the live service
 ```
 
 `verify:contract` builds the backend, starts it on a throwaway port and data
-root, seeds one conversion, and derives its cases from `openapi.yaml`. It needs
-`uv` and Docker is not involved.
+root, seeds one conversion, and derives its cases from
+`contract/http/openapi.yaml`. It needs `uv` and Docker is not involved.
 
 Ignored desktop tests in `src-tauri/src/live_smoke.rs` hit real Datalab and
 Rev.ai endpoints and spend API credits. CI runs all of the above on every push

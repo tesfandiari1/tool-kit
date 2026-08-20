@@ -3,7 +3,7 @@
 //! Grades the Swift Vision worker's protocol, not its OCR quality.
 //!
 //! Every test returns early when the worker binary is missing. It is built by
-//! `backend/vision-worker/build.sh`, which refuses to run off macOS, and `bin/`
+//! `workers/vision/build.sh`, which refuses to run off macOS, and `bin/`
 //! is gitignored, so Linux CI and a fresh checkout both reach this file with
 //! nothing to spawn. A skip there is the honest answer; a failure would only
 //! say the platform is not macOS.
@@ -31,8 +31,11 @@ fn tool(name: &str) -> Option<PathBuf> {
     if !cfg!(target_os = "macos") {
         return None;
     }
+    // The worker is a sibling of the crate, not part of it, so this hops out of
+    // backend/ to reach it. A wrong path here skips every test in the file
+    // silently, which is the same thing a missing binary means.
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("vision-worker/bin")
+        .join("../workers/vision/bin")
         .join(name);
     path.is_file().then_some(path)
 }

@@ -1,4 +1,4 @@
-# Build context for backend/Dockerfile, which builds from the repo root
+# Build context for deploy/docker/Dockerfile, which builds from the repo root
 # because backend/Cargo.toml has a path dependency on ../crates/worker-protocol.
 #
 # Deny everything, then add back exactly what the Dockerfile copies. The

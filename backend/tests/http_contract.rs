@@ -265,8 +265,9 @@ async fn startup_reconciliation_ignores_the_readiness_probe_directory() {
 
 #[test]
 fn conversion_profile_job_status_and_route_json_values_are_stable() {
-    let document: YamlValue = serde_yaml_ng::from_str(include_str!("../openapi/openapi.yaml"))
-        .expect("OpenAPI must be valid YAML");
+    let document: YamlValue =
+        serde_yaml_ng::from_str(include_str!("../../contract/http/openapi.yaml"))
+            .expect("OpenAPI must be valid YAML");
     let profile_values = document["components"]["schemas"]["ConversionProfile"]["enum"]
         .as_sequence()
         .unwrap()
@@ -343,8 +344,9 @@ fn vocabulary(schema: &YamlValue) -> Vec<&str> {
 /// "free to drift".
 #[test]
 fn the_documented_routing_vocabulary_is_everything_the_policy_can_emit() {
-    let document: YamlValue = serde_yaml_ng::from_str(include_str!("../openapi/openapi.yaml"))
-        .expect("OpenAPI must be valid YAML");
+    let document: YamlValue =
+        serde_yaml_ng::from_str(include_str!("../../contract/http/openapi.yaml"))
+            .expect("OpenAPI must be valid YAML");
     let schemas = &document["components"]["schemas"];
 
     let reason_codes = &schemas["Route"]["properties"]["reasonCodes"]["items"];
@@ -2102,7 +2104,7 @@ async fn persistence_dependent_routes_remain_absent() {
 
 #[test]
 fn openapi_parses_and_documents_only_the_live_routes() {
-    let spec = include_str!("../openapi/openapi.yaml");
+    let spec = include_str!("../../contract/http/openapi.yaml");
     let document: YamlValue = serde_yaml_ng::from_str(spec).expect("OpenAPI must be valid YAML");
     let paths = document["paths"]
         .as_mapping()

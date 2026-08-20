@@ -15,7 +15,7 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "lint:api": "spectral lint backend/openapi/openapi.yaml --ruleset backend/openapi/.spectral.yaml --fail-severity=warn",
+    "lint:api": "spectral lint contract/http/openapi.yaml --ruleset contract/http/.spectral.yaml --fail-severity=warn",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -29,7 +29,7 @@
     "verify:local-corpus": "backend/scripts/verify-local-corpus.sh",
     "verify:api-drift": "backend/scripts/verify-api-drift.sh",
     "verify:release": "src-tauri/scripts/verify-release.sh",
-    "generate:api": "openapi-typescript backend/openapi/openapi.yaml -o src/app/api/schema.ts",
+    "generate:api": "openapi-typescript contract/http/openapi.yaml -o src/app/api/schema.ts",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -3,7 +3,7 @@ import type { paths } from "./schema";
 import { hostFetch } from "./transport";
 
 /// The conversion-service client. A standard openapi-fetch client over the
-/// schema generated from `backend/openapi/openapi.yaml`: every path, method,
+/// schema generated from `contract/http/openapi.yaml`: every path, method,
 /// body, response, and error type comes from the contract, and results arrive
 /// as the library's `{ data, error }` unions, with `error` carrying the
 /// contract's ErrorEnvelope.

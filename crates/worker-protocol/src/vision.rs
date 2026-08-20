@@ -6,7 +6,7 @@
 //! carries no PDF inspection and its rejection codes are its own, so one shared
 //! type would describe neither.
 //!
-//! The Swift side is `backend/vision-worker/main.swift`. Keep the two in sync.
+//! The Swift side is `workers/vision/main.swift`. Keep the two in sync.
 
 use serde::{Deserialize, Serialize};
 

@@ -8,8 +8,8 @@
 #
 # Everything is namespaced away from a developer's stack: its own Compose
 # project (so its own volume), its own port, its own image tag, and its own
-# bootstrap token. It never reads or writes backend/secrets/ and it can never
-# reach the real converter-data volume.
+# bootstrap token. It never reads or writes deploy/docker/secrets/ and it can
+# never reach the real converter-data volume.
 #
 # Usage: backend/scripts/container-smoke.sh [--phase graceful|sigkill|all] [--keep] [--no-build]
 #
@@ -33,9 +33,11 @@ BACKEND_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 # dependency on ../crates/worker-protocol, which no backend-rooted context can
 # reach.
 REPO_ROOT="$(cd -- "${BACKEND_DIR}/.." && pwd -P)"
+DEPLOY_DIR="${REPO_ROOT}/deploy/docker"
 
-# A developer's exported shell or a gitignored backend/.env must not bend the
-# run. Compose interpolation reads the environment, so clear the names it uses.
+# A developer's exported shell or a gitignored deploy/docker/.env must not bend
+# the run. Compose interpolation reads the environment, so clear the names it
+# uses.
 unset TOOLKIT_CONVERTER_PORT TOOLKIT_CONVERTER_TOKEN_FILE RUST_LOG || true
 
 PROJECT="tool-kit-converter-smoke"
@@ -90,8 +92,8 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
 need docker; need curl; need jq; need openssl; need awk; need sed
 docker info >/dev/null 2>&1 || fail "the Docker daemon is not reachable"
 docker compose version >/dev/null 2>&1 || fail "docker compose v2 is required"
-[ -f "${BACKEND_DIR}/compose.yaml" ] || fail "missing ${BACKEND_DIR}/compose.yaml"
-[ -f "${BACKEND_DIR}/Dockerfile" ] || fail "missing ${BACKEND_DIR}/Dockerfile"
+[ -f "${DEPLOY_DIR}/compose.yaml" ] || fail "missing ${DEPLOY_DIR}/compose.yaml"
+[ -f "${DEPLOY_DIR}/Dockerfile" ] || fail "missing ${DEPLOY_DIR}/Dockerfile"
 
 if command -v shasum >/dev/null 2>&1; then
   sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
@@ -164,7 +166,7 @@ services:
       - ${RUN_DIR}/stub:/opt/smoke:ro
 YAML
 
-BASE_ARGS=(-f "${BACKEND_DIR}/compose.yaml")
+BASE_ARGS=(-f "${DEPLOY_DIR}/compose.yaml")
 SMOKE=(-f "${RUN_DIR}/compose.smoke.yaml")
 HOLD=(-f "${RUN_DIR}/compose.hold.yaml")
 
@@ -196,7 +198,7 @@ cleanup() {
   fi
   if [ "$KEEP" = "yes" ]; then
     printf '\n--keep: leaving the stack up. Tear down with:\n  docker compose -p %s -f %s -f %s down -v\n' \
-      "$PROJECT" "${BACKEND_DIR}/compose.yaml" "${RUN_DIR}/compose.smoke.yaml"
+      "$PROJECT" "${DEPLOY_DIR}/compose.yaml" "${RUN_DIR}/compose.smoke.yaml"
   else
     assert_smoke_volume
     compose "${SMOKE[@]}" down -v --remove-orphans --timeout 45 >/dev/null 2>&1 || true
@@ -386,7 +388,7 @@ if [ "$BUILD" = "no" ]; then
 elif [ -n "${TOOLKIT_SMOKE_BUILDER:-}" ]; then
   note "building through capped builder ${TOOLKIT_SMOKE_BUILDER}"
   docker buildx build --builder "${TOOLKIT_SMOKE_BUILDER}" --load -t "$IMAGE" \
-    -f "${BACKEND_DIR}/Dockerfile" "$REPO_ROOT"
+    -f "${DEPLOY_DIR}/Dockerfile" "$REPO_ROOT"
 else
   compose "${SMOKE[@]}" build
 fi

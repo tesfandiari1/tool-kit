@@ -2,7 +2,7 @@
 #
 # The generated client still matches the contract it was generated from.
 #
-# `src/app/api/schema.ts` is produced from `backend/openapi/openapi.yaml` by
+# `src/app/api/schema.ts` is produced from `contract/http/openapi.yaml` by
 # `pnpm generate:api`, and ESLint blocks importing it from anywhere but
 # `src/app/api/`. What can still go wrong is the file going stale: the contract
 # gains a field and nobody regenerates, or someone edits the generated file by
@@ -27,7 +27,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 
-CONTRACT="${ROOT_DIR}/backend/openapi/openapi.yaml"
+CONTRACT="${ROOT_DIR}/contract/http/openapi.yaml"
 GENERATED="${ROOT_DIR}/src/app/api/schema.ts"
 
 [ -f "${CONTRACT}" ] || { printf 'FAIL: no contract at %s\n' "${CONTRACT}" >&2; exit 1; }
