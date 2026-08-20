@@ -1,4 +1,4 @@
-import { ACTIVE, type Job } from "@/app/types";
+import { ACTIVE, type Job, type View } from "@/app/types";
 
 /// What the title bar says.
 ///
@@ -8,18 +8,23 @@ import { ACTIVE, type Job } from "@/app/types";
 export type BarStatus =
   /// A run is in flight. The only state that outranks knowing where you are.
   | { kind: "run"; done: number; total: number; since: number | null }
-  /// Otherwise the strip names the surface: the open document, or the panel
-  /// opened over the launcher.
-  | { kind: "label"; text: string; variant: "view" | "document" };
+  /// Otherwise the strip names the surface: the workspace you are in, the open
+  /// document, or the panel opened over either.
+  ///
+  /// `view` sets in the label treatment; the other two are names the user
+  /// chose, so they keep their own case.
+  | { kind: "label"; text: string; variant: "view" | "document" | "workspace" };
 
 export interface BarStatusInput {
-  view: "run" | "history" | "settings";
+  view: View;
   jobs: readonly Job[];
   /// The open document's file name, when the workspace is showing one.
   documentName: string | null;
+  /// The open workspace's folder name. Null before one exists.
+  workspaceName: string | null;
 }
 
-export function barStatus({ view, jobs, documentName }: BarStatusInput): BarStatus {
+export function barStatus({ view, jobs, documentName, workspaceName }: BarStatusInput): BarStatus {
   const active = jobs.filter((job) => ACTIVE.includes(job.status));
   if (active.length > 0) {
     // Elapsed belongs to the run, not to whichever file happens to be first, so
@@ -36,6 +41,12 @@ export function barStatus({ view, jobs, documentName }: BarStatusInput): BarStat
   if (view === "history") return { kind: "label", text: "History", variant: "view" };
   if (view === "settings") return { kind: "label", text: "Settings", variant: "view" };
   if (documentName) return { kind: "label", text: documentName, variant: "document" };
+  // The library is a place rather than a panel, so the strip names the
+  // workspace you are in.
+  if (view === "library" && workspaceName) {
+    return { kind: "label", text: workspaceName, variant: "workspace" };
+  }
+  if (view === "library") return { kind: "label", text: "Library", variant: "view" };
   return { kind: "label", text: "Run", variant: "view" };
 }
 

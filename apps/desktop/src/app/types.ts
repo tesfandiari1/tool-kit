@@ -7,9 +7,38 @@ export type SecretId = "datalab" | "revai" | "backend";
 export type ConversionRoute = "direct" | "backend";
 export type ConversionProfile = "standard" | "local_only";
 export type ReuseDisposition = "pending" | "already_here" | "reusable";
-/// The compact launcher, or a panel that replaces the left column. Documents
-/// open beside it and are not a view.
-export type View = "run" | "settings" | "history";
+/// How the local conversion service gets started. `sidecar` is the app
+/// spawning and owning it; `manual` is the developer running it themselves.
+export type LocalBackendMode = "sidecar" | "manual";
+/// The one conversion question first run asks. It maps onto a route, a
+/// profile, and a backend mode; see `domains/onboarding/conversionMode`.
+export type OnboardingConversionMode = "local" | "cloud";
+/// The library, or a panel that replaces the left column. Documents open
+/// beside it and are not a view.
+export type View = "library" | "run" | "settings" | "history";
+
+/// The workspace `setup_workspace` created or adopted.
+export interface WorkspaceInfo {
+  workspacePath: string;
+  workspaceId: string;
+  /// The project every import lands in until the user picks another.
+  inboxProjectId: string;
+  /// The folder already held a workspace, so setup adopted it rather than
+  /// writing a new one. It is what makes first run say "Open" instead of
+  /// "Create".
+  adopted: boolean;
+}
+
+/// One project folder, as the sidebar lists it.
+export interface ProjectSummary {
+  id: string;
+  title: string;
+  /// Relative to the workspace root ("Inbox"), so moving the workspace does
+  /// not stale the list.
+  path: string;
+  /// RFC 3339 UTC.
+  createdAt: string;
+}
 
 export interface ScannedConversionFile {
   sourcePath: string;
@@ -72,6 +101,16 @@ export interface Job {
 }
 
 export interface Settings {
+  /// First run has been answered. The gate is keyed on `workspacePath`, which
+  /// is the thing the app cannot work without; this records that the user was
+  /// asked rather than that a folder happens to exist.
+  onboardingComplete: boolean;
+  /// The workspace folder. Null means first run.
+  workspacePath: string | null;
+  workspaceId: string | null;
+  /// The project the library opens on. Null until a workspace exists.
+  activeProjectId: string | null;
+  localBackendMode: LocalBackendMode;
   inputs: string[];
   outputDir: string | null;
   jobType: JobId;
@@ -100,6 +139,11 @@ export type SecretStatus = Record<SecretId, boolean>;
 export const DEFAULT_BACKEND_URL = "http://127.0.0.1:8080";
 
 export const DEFAULT_SETTINGS: Settings = {
+  onboardingComplete: false,
+  workspacePath: null,
+  workspaceId: null,
+  activeProjectId: null,
+  localBackendMode: "sidecar",
   inputs: [],
   outputDir: null,
   jobType: "convert",

@@ -1,6 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { HistoryEntry, Job, JobId, RunResult, Scan, SecretId, SecretStatus, Settings } from "./types";
+import type {
+  HistoryEntry,
+  Job,
+  JobId,
+  ProjectSummary,
+  RunResult,
+  Scan,
+  SecretId,
+  SecretStatus,
+  Settings,
+  WorkspaceInfo,
+} from "./types";
 import type { ServiceRequestPayload, ServiceResponsePayload } from "./api/transport";
 
 /// Typed IPC boundary. Views import `commands`, never `invoke` with a raw
@@ -13,6 +24,17 @@ export const commands = {
   saveSettings: async (settings: Settings): Promise<void> => {
     await invoke("save_settings", { settings });
   },
+  /// Where a workspace should go when the user has not said. The host picks
+  /// it; first run only confirms it.
+  suggestedWorkspacePath: () => invoke<string>("suggested_workspace_path"),
+  /// Whether a workspace is already there. Read-only: nothing is written until
+  /// `setupWorkspace`, so first run can name what the button is about to do
+  /// before the user commits to it.
+  inspectWorkspacePath: (path: string) => invoke<boolean>("inspect_workspace_path", { path }),
+  /// Creates the workspace, or adopts the one already there, and guarantees an
+  /// Inbox project either way.
+  setupWorkspace: (path: string) => invoke<WorkspaceInfo>("setup_workspace", { path }),
+  listProjects: () => invoke<ProjectSummary[]>("list_projects"),
   secretStatus: () => invoke<SecretStatus>("secret_status"),
   setSecret: async (provider: SecretId, value: string): Promise<void> => {
     await invoke("set_secret", { provider, value });

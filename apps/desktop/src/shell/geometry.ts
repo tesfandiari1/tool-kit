@@ -11,6 +11,11 @@ export const LAUNCHER = { width: 560, minWidth: 480, minHeight: 460 } as const;
 /// 300px floor and still leaves the document 643px, about 68 characters.
 export const WORKSPACE = { minWidth: 960, minHeight: 560, width: 1180, height: 780 } as const;
 
+/// First run. Deliberately between the two: wide enough that one sentence and
+/// one control read as the whole window, and small enough that the workspace
+/// arriving afterwards is a visible change rather than nothing happening.
+export const ONBOARDING = { width: 720, height: 520, minWidth: 640, minHeight: 480 } as const;
+
 /// Breathing room so a full-height window never sits flush against the work area.
 export const SCREEN_MARGIN = 48;
 

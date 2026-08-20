@@ -1,12 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ClockCounterClockwiseIcon, GearSixIcon } from "@phosphor-icons/react";
+import { ArrowLeftIcon, ClockCounterClockwiseIcon, GearSixIcon } from "@phosphor-icons/react";
 import { Button, Label, Mono, SplitPane, StatusDot } from "@ui";
-import { fmtElapsed } from "@/app/format";
+import { basename, fmtElapsed } from "@/app/format";
 import { barStatus, runCounter } from "./barStatus";
 import { conversionClient } from "@/app/api";
 import { commands } from "@/app/commands";
 import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
-import type { Job, JobId, Scan, SecretStatus, Settings, View } from "@/app/types";
+import type {
+  Job,
+  JobId,
+  OnboardingConversionMode,
+  ProjectSummary,
+  Scan,
+  SecretStatus,
+  Settings,
+  View,
+  WorkspaceInfo,
+} from "@/app/types";
+import { LibraryShell } from "@/domains/library/LibraryShell";
+import { OnboardingGate } from "@/domains/onboarding/OnboardingGate";
+import { conversionPatch } from "@/domains/onboarding/conversionMode";
 import { RunView } from "@/domains/run/RunView";
 import { JOBS } from "@/domains/run/jobs";
 import {
@@ -40,7 +53,7 @@ import {
   workArea,
   type WindowSize,
 } from "@/platform/host";
-import { LAUNCHER, SPLIT, WORKSPACE, ZOOM } from "./geometry";
+import { LAUNCHER, ONBOARDING, SPLIT, WORKSPACE, ZOOM } from "./geometry";
 import { useToast } from "./useToast";
 import { useDocuments } from "./useDocuments";
 import { useDocumentSave } from "./useDocumentSave";
@@ -62,6 +75,12 @@ function clampZoom(factor: number): number {
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  /// The host has answered `get_settings`. Nothing renders before it does: a
+  /// single frame at `DEFAULT_SETTINGS` has no workspace path, which is how
+  /// first run is detected, so it would flash the onboarding gate at someone
+  /// who has used the app for a year.
+  const [loaded, setLoaded] = useState(false);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [secrets, setSecrets] = useState<SecretStatus>({ datalab: false, revai: false, backend: false });
   const [jobs, setJobs] = useState<Job[]>([]);
   const [scanResult, setScanResult] = useState<{ key: string; value: Scan }>({
@@ -70,7 +89,7 @@ export default function App() {
   });
   const [capabilities, setCapabilities] = useState<ConversionCapabilities>({ state: "idle" });
   const [now, setNow] = useState(() => Date.now());
-  const [view, setView] = useState<View>("run");
+  const [view, setView] = useState<View>("library");
   /// Bumped once when a run finishes. Refreshes the already-done counts and an
   /// open History panel — a 200-file run emits hundreds of job-updated events,
   /// so reacting to those instead would re-scan the disk hundreds of times.
@@ -101,6 +120,15 @@ export default function App() {
   const scan = scanCurrent ? scanResult.value : EMPTY_SCAN;
   const job = useMemo(() => JOBS.find((j) => j.id === settings.jobType) ?? JOBS[0], [settings.jobType]);
   const inputCount = settings.jobType === "transcribe" ? scan.transcribe : scan.convert;
+
+  /// First run, keyed on the one thing the app cannot work without. The gate
+  /// replaces the whole tree while this holds.
+  const onboarding = loaded && settings.workspacePath === null;
+  const workspacePath = settings.workspacePath;
+  /// A workspace is open, so the library is home and the run flow is off the
+  /// default nav.
+  const libraryMode = loaded && workspacePath !== null;
+  const home: View = libraryMode ? "library" : "run";
 
   /// Surface backend failures instead of dropping them on the floor.
   const call = useCallback(
@@ -149,10 +177,15 @@ export default function App() {
         commands.secretStatus(),
         commands.listJobs(),
       ]);
-      settingsRef.current = s;
-      setSettings(s);
+      // Spread over the defaults rather than trusting the host's shape: a key
+      // the stored settings.json predates arrives absent, and `undefined` is
+      // not `null`, so an absent workspacePath would read as "already set up".
+      const merged = { ...DEFAULT_SETTINGS, ...s };
+      settingsRef.current = merged;
+      setSettings(merged);
       setSecrets(k);
       setJobs(j);
+      setLoaded(true);
     })();
   }, []);
 
@@ -160,6 +193,22 @@ export default function App() {
     const un = commands.onJobUpdated(upsert);
     return () => void un.then((f) => f());
   }, [upsert]);
+
+  // The sidebar's list. Re-read once per finished run rather than per
+  // job-updated event, for the same reason the history panel does.
+  useEffect(() => {
+    if (!libraryMode) return;
+    let live = true;
+    void commands
+      .listProjects()
+      .then((p) => {
+        if (live) setProjects(p);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [libraryMode, workspacePath, runsFinished]);
 
   // Rescan whenever the selection changes: the counts drive the run label, the
   // job autodetect, and the suggested output folder.
@@ -229,6 +278,23 @@ export default function App() {
   const persist = useCallback((patch: Partial<Settings>) => {
     applySettings({ ...settingsRef.current, ...patch });
   }, [applySettings]);
+
+  /// First run's answer, in one write: where the workspace is, which project
+  /// the library opens on, and how conversion runs. One write rather than
+  /// three, so a crash between them cannot leave a workspace with no route.
+  const completeOnboarding = useCallback(
+    (workspace: WorkspaceInfo, mode: OnboardingConversionMode) => {
+      persist({
+        onboardingComplete: true,
+        workspacePath: workspace.workspacePath,
+        workspaceId: workspace.workspaceId,
+        activeProjectId: workspace.inboxProjectId,
+        ...conversionPatch(mode),
+      });
+      setView("library");
+    },
+    [persist],
+  );
 
   // Match the job to what was dropped, and put results beside the input.
   //
@@ -304,6 +370,7 @@ export default function App() {
     view,
     jobs,
     documentName: docs.find((d) => d.id === activeId)?.title ?? null,
+    workspaceName: workspacePath === null ? null : basename(workspacePath),
   });
 
   useEffect(() => {
@@ -335,10 +402,16 @@ export default function App() {
   useZoom(zoom, onZoom);
 
   const expanded = docs.length > 0;
+  /// A workspace window: resizable, inside `WORKSPACE`'s bounds, at the size
+  /// the user last left it. The library is one, and so is an open document.
+  const wantsWorkspace = libraryMode || expanded;
+  /// The compact launcher belongs to the run flow alone. It is what
+  /// `useFitWindow` sizes, and neither the gate nor the library is one.
+  const launcher = loaded && !onboarding && !wantsWorkspace;
   // Zoom decides how many logical pixels the launcher's content wants, so the
   // fit has to know it.
-  useFitWindow(!expanded, zoom);
-  const wasExpanded = useRef(false);
+  useFitWindow(launcher, zoom);
+  const wasWorkspace = useRef(false);
   /// The launcher's size, read the moment before it grows. Only ever
   /// `LAUNCHER.width` now that the launcher is fixed, but measured rather than
   /// assumed, so a collapse cannot disagree with the window on screen.
@@ -364,7 +437,22 @@ export default function App() {
       .catch(() => undefined);
   }, []);
 
-  // The window follows the document. Each phase remembers its own size, so
+  // First run opens at its own size. Bounds before size, as everywhere else:
+  // the gate is taller and wider than the launcher's minimum, and macOS clamps
+  // `setSize` to whatever is in force at that instant.
+  useEffect(() => {
+    if (!onboarding) return;
+    void (async () => {
+      try {
+        await setWindowMinSize(ONBOARDING.minWidth, ONBOARDING.minHeight);
+        await resizeWindow(ONBOARDING.width, ONBOARDING.height);
+      } catch {
+        // No window to size off a real host.
+      }
+    })();
+  }, [onboarding]);
+
+  // The window follows the surface. Each phase remembers its own size, so
   // widening the workspace never leaves the launcher stretched, and the
   // workspace opens where the user last left it rather than at a default.
   //
@@ -375,17 +463,17 @@ export default function App() {
   // Native resizing is the OS animating a real window: there is nothing here
   // to match in CSS, and trying would fight it.
   useEffect(() => {
-    if (expanded === wasExpanded.current) return;
-    wasExpanded.current = expanded;
+    if (wantsWorkspace === wasWorkspace.current) return;
+    wasWorkspace.current = wantsWorkspace;
     void (async () => {
       // Both reads at once. The split restores its saved ratio a frame after
       // this effect starts and clamps that percentage against the width in
       // force right then, so every round trip before the resize costs it.
       const [current, area] = await Promise.all([
         windowSize(),
-        expanded ? workArea().catch(() => null) : Promise.resolve(null),
+        wantsWorkspace ? workArea().catch(() => null) : Promise.resolve(null),
       ]);
-      if (expanded) {
+      if (wantsWorkspace) {
         compactSize.current = current;
         await setWindowResizable(true);
         await setWindowMinSize(WORKSPACE.minWidth, WORKSPACE.minHeight);
@@ -410,7 +498,7 @@ export default function App() {
         await setWindowResizable(false);
       }
     })();
-  }, [expanded, persist]);
+  }, [wantsWorkspace, persist]);
 
   // Escape closes the document you are reading, not the window and not the
   // panel beside it. Bound only while something is open, so an app with no
@@ -444,6 +532,27 @@ export default function App() {
     }
     wasRunning.current = running;
   }, [running, doneCount, mutateInputs]);
+
+  // Every hook is above this line, which is the only reason the two
+  // whole-window states below can return early at all.
+  if (!loaded) return <div className="app" />;
+
+  if (onboarding) {
+    return (
+      <div className="app">
+        {/* The gate carries no chrome, but the window still has to be
+            draggable: under titleBarStyle Overlay the webview covers the title
+            bar and only `data-tauri-drag-region` moves it. */}
+        <header className="bar" data-tauri-drag-region="deep">
+          <div className="bar-lights" aria-hidden />
+        </header>
+        <OnboardingGate onDone={completeOnboarding} onToast={showToast} />
+        <div className="toast-region" role="status" aria-live="polite">
+          {toast && <div className="toast">{toast}</div>}
+        </div>
+      </div>
+    );
+  }
 
   // What the selection actually costs. Skip, copy, and billable work, plus the
   // skip-off case: files already in this folder that will still be sent and
@@ -668,6 +777,20 @@ export default function App() {
   // and changing a setting is not a reason to lose it.
   let left: ReactNode;
   switch (view) {
+    case "library":
+      left =
+        workspacePath === null ? null : (
+          <LibraryShell
+            workspacePath={workspacePath}
+            projects={projects}
+            activeProjectId={settings.activeProjectId}
+            onSelectProject={(activeProjectId) => {
+              persist({ activeProjectId });
+            }}
+            onOpenSettings={() => setView("settings")}
+          />
+        );
+      break;
     case "settings":
       left = (
         <SettingsPanel
@@ -676,7 +799,7 @@ export default function App() {
           onPersist={persist}
           onSecrets={setSecrets}
           onToast={showToast}
-          onClose={() => setView("run")}
+          onClose={() => setView(home)}
         />
       );
       break;
@@ -687,7 +810,7 @@ export default function App() {
           onChanged={() => setRunsFinished((n) => n + 1)}
           onOpen={(e) => void openHistory(e)}
           onToast={showToast}
-          onClose={() => setView("run")}
+          onClose={() => setView(home)}
         />
       );
       break;
@@ -812,31 +935,49 @@ export default function App() {
                 </>
               )}
             </>
-          ) : status.variant === "document" ? (
+          ) : status.variant === "view" ? (
+            <Label>{status.text}</Label>
+          ) : (
+            /* A document's file name and a workspace's folder name are both
+               names the user chose, so neither takes the label's uppercase. */
             <Mono size="sm" tone="ink" truncate>
               {status.text}
             </Mono>
-          ) : (
-            <Label>{status.text}</Label>
           )}
         </div>
         <div className="bar-actions">
-          <Button
-            variant="ghost"
-            iconOnly
-            icon={<ClockCounterClockwiseIcon weight={view === "history" ? "fill" : "regular"} />}
-            onClick={() => {
-              setView((v) => (v === "history" ? "run" : "history"));
-            }}
-            title="History"
-            aria-label="History"
-          />
+          {/* The run flow is off the default nav in a workspace, but a drop
+              still lands there, so it needs a way back that is not the gear. */}
+          {libraryMode && view === "run" && (
+            <Button
+              variant="ghost"
+              iconOnly
+              icon={<ArrowLeftIcon />}
+              onClick={() => setView("library")}
+              title="Library"
+              aria-label="Library"
+            />
+          )}
+          {/* History belongs to the run flow's output folder, which the
+              library has replaced. Hidden until it means something here. */}
+          {!libraryMode && (
+            <Button
+              variant="ghost"
+              iconOnly
+              icon={<ClockCounterClockwiseIcon weight={view === "history" ? "fill" : "regular"} />}
+              onClick={() => {
+                setView((v) => (v === "history" ? home : "history"));
+              }}
+              title="History"
+              aria-label="History"
+            />
+          )}
           <Button
             variant="ghost"
             iconOnly
             icon={<GearSixIcon weight={view === "settings" ? "fill" : "regular"} />}
             onClick={() => {
-              setView((v) => (v === "settings" ? "run" : "settings"));
+              setView((v) => (v === "settings" ? home : "settings"));
             }}
             title="Settings"
             aria-label="Settings"

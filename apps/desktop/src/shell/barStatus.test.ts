@@ -22,7 +22,7 @@ function job(status: Status, startedAt: number | null = null): Job {
   };
 }
 
-const idle = { view: "run", jobs: [], documentName: null } as const;
+const idle = { view: "run", jobs: [], documentName: null, workspaceName: null } as const;
 
 describe("barStatus", () => {
   it("names the surface when nothing is running", () => {
@@ -36,6 +36,14 @@ describe("barStatus", () => {
       kind: "label",
       text: "Settings",
       variant: "view",
+    });
+  });
+
+  it("names the workspace in the library, and keeps its case", () => {
+    expect(barStatus({ ...idle, view: "library", workspaceName: "Tool-Kit" })).toEqual({
+      kind: "label",
+      text: "Tool-Kit",
+      variant: "workspace",
     });
   });
 

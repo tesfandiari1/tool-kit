@@ -328,6 +328,147 @@ html.fit-window.is-scrolled .bar {
   min-width: 0;
 }
 
+/* --- First run ------------------------------------------------------------
+   The gate replaces the whole app while there is no workspace, so it is a
+   window rather than a panel: no border, no header rail, one column centred on
+   a measure short enough to read in a glance. */
+.onboarding-gate {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: var(--s5) var(--s5) var(--s6);
+  display: flex;
+  flex-direction: column;
+}
+/* The beat absorbs the column's slack and centres inside it, so a two-line
+   beat and a five-line one sit on the same optical line. */
+.onboarding-beat {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--s3);
+  /* A cross-fade and nothing else: the beats are the same window saying a
+     different thing, not cards arriving. `--dur` rather than a literal, which
+     also gets the reduced-motion substitution below for free. */
+  animation: beat-in var(--dur) var(--ease-out);
+}
+@keyframes beat-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+/* A fixed slot, outside the fading beat. Every beat's CTA is the same size, so
+   the control the user is aiming at is in one place from the first frame of
+   first run to the last. */
+.onboarding-foot {
+  flex: none;
+  padding-top: var(--s5);
+}
+
+/* --- Library --------------------------------------------------------------
+   Home. Projects on the left, the selected project's documents in the centre.
+   A grid rather than a split: the sidebar is chrome at a width the content
+   does not get a say in. */
+.library-shell {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(160px, 200px) minmax(0, 1fr);
+}
+.lib-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  /* The title bar already pays --s2 below itself, so the top inset here makes
+     the same --s4 the panels get in the run column. */
+  padding: var(--s2) var(--s4) var(--s4);
+  border-right: 1px solid var(--rule);
+  min-height: 0;
+  min-width: 0;
+}
+.lib-side__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+/* One object, so the rows sit at the atom step from each other and the list
+   reads as a block rather than as five separate controls. */
+.lib-side__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+.lib-project {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 var(--s2);
+  border: 0;
+  border-radius: var(--r-control);
+  background: none;
+  color: inherit;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease);
+}
+.lib-project:hover:not(.is-active) {
+  background: color-mix(in oklch, var(--ink) 4%, transparent);
+}
+/* Where you are, said with a step up in surface. Not cobalt: that is the
+   control you press, and this is a statement of place — the same answer the
+   queue's selected row gives. */
+.lib-project.is-active {
+  background: var(--surface-raised);
+}
+/* Two characters wide whether or not it reads, the same reservation the
+   segmented control's count keeps. */
+.lib-project__count {
+  min-width: 2ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.lib-project svg {
+  color: var(--ink-3);
+}
+.lib-project.is-active svg {
+  color: var(--ink-2);
+}
+.lib-side__foot {
+  flex: none;
+  display: flex;
+}
+
+.library-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* Empty-state optical padding, which is the one job --s6 has. */
+.library-empty {
+  flex: 1;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--s1);
+  padding: var(--s6);
+  text-align: center;
+}
+
 /* --- Workspace re-rank ----------------------------------------------------
    The window is two applications at two widths, so this is not one layout
    stretched. With a document open the drop well has already done its job and
@@ -806,12 +947,14 @@ html.fit-window.is-scrolled .bar {
    user with a full-width bar indistinguishable from 100% complete. */
 @media (prefers-reduced-motion: reduce) {
   .spin,
-  .toast {
+  .toast,
+  .onboarding-beat {
     animation: none;
   }
   .folder-hit,
   .ui-well.is-dropping,
-  .job-actions {
+  .job-actions,
+  .lib-project {
     transition: none;
   }
 }
