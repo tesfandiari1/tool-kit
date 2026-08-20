@@ -19,6 +19,37 @@ macOS is the only target: the bundle builds `app` + `dmg` only, and the app uses
 `titleBarStyle: Overlay` + `underWindowBackground` vibrancy (which requires
 `macOSPrivateApi`, ruling out Mac App Store submission. fine for a signed DMG).
 
+## Repository layout
+
+Paths in this file are repo-relative. Inside the Frontend and Design system
+sections below, a bare `src/...` means `apps/desktop/src/...`.
+
+```text
+apps/
+  desktop/                  the .app: frontend + Tauri host
+    src/                    app/ domains/ platform/ shell/ ui/
+    src-tauri/              name kept: tauri.conf.json, .cargo/config.toml, and
+                            dev-run.sh all resolve against this exact depth
+  converter/                the HTTP service, container only
+crates/
+  worker-protocol/          wire contracts for every spawned worker
+workers/
+  vision/                   Swift, macOS 26+, cannot ship in the Linux image
+contract/http/              OpenAPI spec, Spectral ruleset, Schemathesis config
+deploy/docker/              Dockerfile, compose.yaml, secrets/
+docs/
+```
+
+The build context for the image is the **repo root**, not `apps/converter`,
+because the converter has a path dependency on `crates/worker-protocol` and a
+context cannot reach outside itself. The root `.dockerignore` denies everything
+and adds back only what the Dockerfile copies, which keeps the context under a
+megabyte against a tree that carries gigabytes of `target/`.
+
+`src/ui` is not a package. It is written so it could become one, and `UI.md`
+names the trigger: the day a second client appears. Until then the boundary is
+an ESLint rule, and that rule is load-bearing rather than decorative.
+
 ## Commands
 
 Run from the repo root.
@@ -211,7 +242,7 @@ Add a `JobType` variant and a `ProviderKind`, implement submit/poll in `provider
 - **Zoom is the whole app, not the document.** ⌘+/-/0 step `webview.setZoom` along a fixed ladder (`ZOOM`, 10 points a step) and persist as `settings.zoom`. Stepping moves an index rather than adding to the factor: `1 + 0.1 - 0.1` is not 1 in binary floating point, so ⌘+ then ⌘- would never come home. `useZoom` publishes the factor as `--zoom` on `:root` for the chrome that has to divide by it.
 - Inputs auto-clear after a run only when that run was started by `run()` *and* something succeeded, so a Retry or a wholly failed run leaves the selection alone.
 
-### Design system (`apps/desktop/src/ui`, docs in `src/ui/UI.md`)
+### Design system (`apps/desktop/src/ui`, docs in its `UI.md`)
 
 The design language lives in a self-contained library imported as `@ui`. **Read `src/ui/UI.md` before touching any UI.** Its four rules are the reason to reject a change:
 
@@ -239,7 +270,12 @@ Type is three families with non-overlapping jobs: **Instrument Serif** for displ
 - **⌘+/- is webview page zoom, and it does not move the traffic lights.** macOS draws them in logical pixels, so a 64px CSS reservation is 32 logical px at zoom 0.5 and the lights land on top of whatever sits beside them. Any chrome measured against an OS-drawn element divides by the factor instead: `calc(64px / var(--zoom, 1))`, with `--zoom` published on `:root` by `useZoom`. A CSS pixel handed to the window is the same problem the other way round, which is why `useFitWindow` multiplies `scrollHeight` by the factor before asking for a height.
 - **`react-resizable-panels` has two layout paths that disagree about what a key means.** `defaultLayout` is read by panel id. `setLayout` reads `Object.values(layout)` and re-keys the result by panel order, so it is an array wearing an object's clothes and key order decides which pane gets which width. Our layout arrives from a Rust `BTreeMap`, which serialises alphabetically, so `{end, start}` came back and opened the split inverted: two thirds on the launcher, one third on the document, and every drag saved the inversion back. `paneLayout` in `src/ui/primitives/splitLayout.ts` rebuilds the object in panel order and is the only thing allowed to construct one.
 - **`defaultLayout` is also validated against the panels present at mount**, and the document pane renders only once a document is open. So the group starts with one panel, drops the two-id layout whole, and hands out an even split when the second pane appears. `SplitPane` re-applies imperatively on the collapsed→expanded edge, retrying: the group registers its second panel a render later, and the window is still growing from launcher width, where the intended share falls under `minStart` and gets clamped there for good.
-- **Icons.** `icons/mark.png` is the source artwork. `icons/make-icons.py` renders every shipped size from it, `.icns` ladder included. Colours come from the `--warm-*` ramp in `src/ui/tokens.css`, and the plate is `--surface-solid`, so the Dock icon and the window are the same charcoal. `icons/tray.png` / `tray@2x.png` derive from **the mark's** alpha as **template images** (black + alpha, used with `icon_as_template(true)`) so macOS tints them for light and dark menu bars: putting the colour app icon in the tray is a visible native-correctness bug. Take that alpha from `mark.png`, never from `icon.png`. The app icon is a filled plate, so its alpha is a black square.
+- **Icons.** `icons/make-icons.py` renders every shipped size, `.icns` ladder
+  included, from `icons/mark.png`. **That file is missing and has never been in
+  git**, so the ladder cannot be regenerated today. Do not reconstruct it by
+  upscaling a shipped icon: the mark is two flat colours with no blended pixels,
+  and a 256px raster promoted to master would bake its own resampling into every
+  size forever. Redraw it or find the original. `icons/make-icons.py` renders every shipped size from it, `.icns` ladder included. Colours come from the `--warm-*` ramp in `src/ui/tokens.css`, and the plate is `--surface-solid`, so the Dock icon and the window are the same charcoal. `icons/tray.png` / `tray@2x.png` derive from **the mark's** alpha as **template images** (black + alpha, used with `icon_as_template(true)`) so macOS tints them for light and dark menu bars: putting the colour app icon in the tray is a visible native-correctness bug. Take that alpha from `mark.png`, never from `icon.png`. The app icon is a filled plate, so its alpha is a black square.
 - **Global shortcut is ⌥⌘V**, not ⌘⇧V: that one is macOS "Paste and Match Style" and registering it hijacks the combination system-wide.
 - **Datalab pipeline mode**: a `pl_…` id in Settings switches Convert from `/api/v1/convert` to `/api/v1/pipelines/{id}/run` (run → poll execution → fetch the last step's result).
 - **pnpm 11** gates package build scripts: esbuild is approved via `allowBuilds: { esbuild: true }` in `pnpm-workspace.yaml`.
