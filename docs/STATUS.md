@@ -19,15 +19,37 @@ rewrite code, commands, identifiers, or quotations to match prose rules.
 | Item | Value |
 |---|---|
 | Branch | `main`. Run `git log --oneline -8` for the tip |
-| OpenAPI contract | **0.4.2** (`contract/http/openapi.yaml`) |
-| Backend | M0, M1, M2, M3, M4 complete. M5, M7, M8 unbuilt |
+| Layout | **Restructured.** `apps/{desktop,converter}`, `crates/`, `workers/`, `contract/`, `deploy/`. See CLAUDE.md |
+| OpenAPI contract | **0.4.4** (`contract/http/openapi.yaml`) |
+| Backend | M0, M1, M2, M3, M4 complete. M5 and M8 unbuilt. **M7 cancelled**, see section 4 |
 | Desktop | M6 implementation landed, **gate open** (CVR-067, CVR-081) |
-| Exposure | Loopback only. Tailscale remote access is M7, unbuilt |
+| Exposure | Loopback only, and staying there. M7 remote access is cancelled |
 | Backend Datalab fallback | Not built. Phase 2, now unblocked |
 | Phase 1 | **Complete 2026-08-19.** All four gates met |
 | Desktop version | **1.0.0** (`apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml`, `tauri.conf.json`) |
 | 1.0 bundle | Signed, **notarized and stapled** (app and DMG), verified by `pnpm verify:release --notarized`. Keychain entitlement is parked until the provisioning profile lands, so that one section fails by design |
 | Latest container smoke | `20260819T161851Z`, image `sha256:4a0cbdd0…` |
+
+### The restructure, 2026-08-19
+
+Five commits moved every application into `apps/` and lifted the shared and
+platform-specific pieces out of the converter. The call graph is unchanged:
+`run_pipeline` reported 88 impacted symbols over 28 processes before and after.
+
+| Commit | Content |
+|---|---|
+| `58d24e2` | CLAUDE.md describes the tree, and stops claiming a missing icon source |
+| `26ec239` | The frontend and both crates fold into `apps/` |
+| `2e94a99` | Contract, deployment, and the Vision worker leave `backend/` |
+| `f99b9ef` | One protocol crate for every spawned worker |
+| `8b23c46` | M7 closed out, ignore rules land ahead of what they cover |
+
+`packages/ui` was considered and skipped: `UI.md` names the trigger as a second
+client and there is not one, the library has no app imports to catch, and the
+move would have dropped three test files out of Vitest's scope silently.
+`workers/pdf` is deferred because `tool-kit-pdf-worker` is a `[[bin]]` reached
+through `CARGO_BIN_EXE_tool-kit-pdf-worker`, which only resolves inside its own
+package, so it is a crate extraction rather than a move.
 
 The sprint that closed Phase 1, newest first. This is a snapshot, not a
 running log. `git log` is the source of truth.

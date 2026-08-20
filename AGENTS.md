@@ -10,13 +10,14 @@
 - Stay on latest stable dependencies except the documented pins; do not bump TypeScript 7 just to be current.
 - Operational milestones in `docs/STATUS.md`; product target in `docs/north-star.md`. Do not add separate phase execution-plan docs unless they encode critical patterns.
 - Launcher window should fit content height (`useFitWindow`); no page scroll in the compact launcher phase.
-- Keep job UX progress (Tauri poll → `job-updated`) separate from operator monitoring (logs/metrics at M7). See `docs/archive/MONITORING_AND_PROGRESS.md`.
+- Keep job UX progress (Tauri poll → `job-updated`) separate from operator monitoring. M7 carried the metrics work and is cancelled, but the split still holds. See `docs/archive/MONITORING_AND_PROGRESS.md`.
 - Use Clippy with a small production deny-set and test exceptions in each crate's `clippy.toml`. Do not enable `pedantic` or blanket `unwrap_used`.
 
 ## Learned Workspace Facts
 
 - Frontend layout, under `apps/desktop/`: `src/app` (types, commands, OpenAPI client), `src/platform/host.ts` (only Tauri/host imports), `src/domains/{run,settings,history,thread}`, `src/shell` (App + its hooks), `src/ui` (design system).
 - `pnpm generate:api` writes `apps/desktop/src/app/api/schema.ts` from `contract/http/openapi.yaml`; import the generated schema only from `src/app/api`.
+- Repo layout: `apps/{desktop,converter}`, `crates/worker-protocol`, `workers/vision` (Swift, macOS only), `contract/http`, `deploy/docker`. The image builds from the repo root because the converter path-depends on `crates/worker-protocol`.
 - Conversion backend lives in `apps/converter/`. Milestones and session state live in `docs/STATUS.md`; product direction in `docs/north-star.md`. Desktop HTTP to that service is M6. Backend sessions own `apps/converter/**`. Desktop sessions own `apps/desktop/**`.
 - `docs/north-star.md` defines the local-first pivot: workspace folder, projects as real directories, `.toolkit/index.db` as rebuildable index, tool-run provenance, no durable backend job retention in product mode.
 - AnyDoc is a Rust crate inside the single converter container, not a separate service. PDF stays on the isolated `pdf-inspector` child worker.
@@ -27,7 +28,7 @@
 <!-- gitnexus:start -->
 # GitNexus: code intelligence
 
-This project is indexed by GitNexus as **tool-kit** (1912 symbols, 5507 relationships, 163 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **tool-kit** (3393 symbols, 9474 relationships, 290 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root. It auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
