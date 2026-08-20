@@ -178,8 +178,10 @@ to do no signing, and a post-build re-sign would only break the nested seal.
 **Restoring `entitlements` may hand entitlements.plist to all three sidecars.**
 tauri-cli 2.11.4 builds one codesign argument vector per sign target and
 appends `--entitlements` to every one of them, with no test for whether the
-target is the outer bundle. That is read from the bundler source, not measured
-here, because the key is parked and there was nothing to measure. If it holds,
+target is the outer bundle. A gate for exactly this landed in `9a30bed98` and
+was removed again in `cc8c0b531`, so the behaviour is version-dependent and
+worth re-reading on any CLI bump. That is read from the bundler source, not
+measured here, because the key is parked and there was nothing to measure. If it holds,
 each helper claims `com.apple.application-identifier` and the restricted
 `keychain-access-groups` on a Mach-O with nowhere to carry a profile. Run
 `codesign -d --entitlements - --xml` against each helper on the first build

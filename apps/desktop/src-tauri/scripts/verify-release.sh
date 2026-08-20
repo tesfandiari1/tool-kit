@@ -180,7 +180,19 @@ for cmap in Adobe-CNS1-UCS2.bcmap Adobe-GB1-UCS2.bcmap Adobe-Japan1-UCS2.bcmap A
     || fail "bcmaps/${cmap} is missing or empty, so the PDF engine refuses to start
      and the converter comes up with no pdf-inspector engine at all"
 done
-pass "bcmaps: $(find "$BCMAPS" -type f | wc -l | tr -d ' ') files, four CMap sentinels non-empty"
+# The sentinels do not catch a truncated copy, and the count is the only thing
+# that does. It is compared against what build-sidecars.sh staged rather than a
+# number written down here, so a pdf-inspector bump moves both at once.
+STAGED="${CRATE_DIR}/resources/pdf-inspector/bcmaps"
+[ -d "$STAGED" ] || fail "no ${STAGED} to compare the bundled CMaps against.
+     Run pnpm sidecars, which stages the set this bundle should carry"
+WANT_CMAPS="$(find "$STAGED" -type f | wc -l | tr -d ' ')"
+GOT_CMAPS="$(find "$BCMAPS" -type f | wc -l | tr -d ' ')"
+[ "$GOT_CMAPS" = "$WANT_CMAPS" ] || fail "the bundle carries ${GOT_CMAPS} CMap files and
+     pnpm sidecars staged ${WANT_CMAPS}. validate_cmaps reads four of them at startup, so a
+     partial copy starts clean and silently loses ToUnicode mapping for every
+     ordering whose file did not make it"
+pass "bcmaps: ${GOT_CMAPS} files matching the staged set, four CMap sentinels non-empty"
 
 printf '\n== Bundle metadata\n'
 PLIST="${APP}/Contents/Info.plist"
