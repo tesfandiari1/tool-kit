@@ -18,3 +18,4 @@ a live document, the live one wins.
 | `WORKSPACE_HANDOFF.md` | The desktop dual-pane weave. Closed 2026-08-18. |
 | `MONITORING_AND_PROGRESS.md` | Job UX vs operator monitoring recommendation. |
 | `YAAK_ARCHITECTURE_REFERENCE.md` | Host and IPC patterns to borrow. M6 shipped the relevant patterns. |
+| `M7_EXECUTION.md` | Remote deployment over a tailnet. Cancelled unstarted when the local-first pivot removed the reason. |

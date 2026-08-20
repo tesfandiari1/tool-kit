@@ -1,9 +1,19 @@
 # M7 execution plan
 
-The sprint-level plan for M7 remote deployment. [`STATUS.md`](STATUS.md) section 4
+**Cancelled 2026-08-19, unstarted.** M7 existed to make the converter reachable
+from anywhere over a private tailnet. Adopting [`north-star.md`](../north-star.md)
+removed the reason: the product is one local workspace on one Mac, and the app
+now runs three engines the container cannot host at all (Apple Vision, and MLX
+Whisper and mlx-lm to come). Remote reach to a service that does less than the
+app is not worth hardening. Nothing here shipped. Kept as the record of what was
+planned and why it stopped.
+
+---
+
+The sprint-level plan for M7 remote deployment. [`STATUS.md`](../STATUS.md) section 4
 holds the decisions and the ticket set. This file holds the order of work, the
 file-level steps, and the verification for each one. It is live for the duration
-of M7 and moves to [`archive/`](archive/README.md) when the M7 gate closes.
+of M7 and moves to [`archive/`](README.md) when the M7 gate closes.
 
 **Created:** 2026-08-19
 

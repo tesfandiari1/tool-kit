@@ -368,7 +368,14 @@ after M5 rather than before.
 
 ---
 
-## 4. Phase 3: M7 remote deployment
+## 4. Phase 3: M7 remote deployment. Cancelled
+
+**Cancelled 2026-08-19, unstarted.** Adopting
+[`north-star.md`](north-star.md) made the product one local workspace on one
+Mac, and the app now runs engines the container cannot host at all. Remote reach
+to a service that does less than the app is not worth hardening. The sprint plan
+moved to [`archive/M7_EXECUTION.md`](archive/M7_EXECUTION.md). Everything below
+is the record of what was planned, not work to do.
 
 **Revised 2026-08-19. The exposure decision changed.** The service must now be
 reachable from anywhere in the world, not only from the LAN. Caddy with internal
@@ -427,7 +434,7 @@ one. It is no longer a release blocker.
 
 ### Sequence
 
-**The sprint-level plan lives in [`M7_EXECUTION.md`](M7_EXECUTION.md).** It holds
+**The sprint-level plan is archived at [`archive/M7_EXECUTION.md`](archive/M7_EXECUTION.md).** It holds
 the file-level steps, the verify command for each sprint, and the commit
 boundaries. This table is the summary. Where the two disagree, the execution plan
 is newer.
@@ -1508,7 +1515,7 @@ smoke against the real binary.
 | File | Role |
 |---|---|
 | `docs/STATUS.md` | **This file. The single live status document** |
-| `docs/M7_EXECUTION.md` | The M7 sprint plan. Live until the M7 gate closes, then archived |
+| `docs/north-star.md` | The local-first product target. Supersedes the M7 remote-deployment track |
 | `docs/archive/` | Everything closed, with a note on why |
 | `README.md` | How to run, test, and release |
 | `CLAUDE.md` | Desktop architecture invariants |

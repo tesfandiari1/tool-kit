@@ -70,3 +70,19 @@ __pycache__/
 # it is not told otherwise. contract-fuzz.sh keeps it in memory; this covers a
 # hand-run `st`.
 .schemathesis/
+
+# Hypothesis writes its own nested .gitignore holding a bare `*`, so the
+# directory hides itself. That is the tool's choice, not ours, and it vanishes
+# if the tool changes its mind. Name it here so the root list is the answer.
+.hypothesis/
+
+# Local model weights and the MLX build surface. Weights are derived: they are
+# fetched from a pinned revision in the model registry and verified by hash, so
+# deleting them costs a download and never content. They are also gigabytes,
+# and an accidental `git add` of one is not something you undo cleanly. These
+# land before the first fetch rather than after it.
+models/cache/
+*.safetensors
+*.gguf
+*.metallib
+.build/
