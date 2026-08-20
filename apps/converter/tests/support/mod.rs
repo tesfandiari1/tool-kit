@@ -428,6 +428,7 @@ impl TestHarness {
             worker_poll_interval: self.options.worker_poll_interval,
             recovery_limit: self.options.recovery_limit,
             shutdown_grace: Duration::from_secs(30),
+            shutdown_on_stdin_eof: false,
         }
     }
 

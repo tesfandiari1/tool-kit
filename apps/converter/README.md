@@ -165,6 +165,7 @@ values or unavailable startup dependencies prevent the listener from binding.
 | `TOOLKIT_CONVERTER_DATA_DIR` | `/data` | Persistent data root: database and every artifact |
 | `TOOLKIT_CONVERTER_SCRATCH_PARENT` | `/tmp` | Read by the config loader and used nowhere else |
 | `TOOLKIT_CONVERTER_PDF_WORKER_PATH` | sibling binary | Absolute worker override |
+| `TOOLKIT_CONVERTER_VISION_WORKER_PATH` | sibling binary where it exists | Absolute macOS Vision worker override |
 | `TOOLKIT_CONVERTER_PDF_BCMAPS_DIR` | crate fallback | Runtime CMap directory; container sets this explicitly |
 | `TOOLKIT_CONVERTER_MAX_UPLOAD_BYTES` | `26214400` | Per-source streaming ceiling |
 | `TOOLKIT_CONVERTER_MAX_OUTPUT_BYTES` | `52428800` | Markdown ceiling enforced before worker write |
@@ -177,7 +178,24 @@ values or unavailable startup dependencies prevent the listener from binding.
 | `TOOLKIT_CONVERTER_WORKER_POLL_INTERVAL_SECS` | `1` | Queue poll that backs up the wake-up notification |
 | `TOOLKIT_CONVERTER_RECOVERY_LIMIT` | `3` | Fresh attempts a job may receive across restarts |
 | `TOOLKIT_CONVERTER_SHUTDOWN_GRACE_SECS` | `30` | Shared HTTP and worker shutdown deadline |
+| `TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF` | `0` | Shut down when stdin closes; `0` or `1` |
 | `RUST_LOG` | `tool_kit_converter=info` | Structured tracing filter |
+
+The two worker overrides differ in one way. A configured path is a promise, so
+the engine reports what it finds there whether or not the file exists. Only the
+implicit sibling probe is allowed to come back empty, and an absent Vision
+worker means the engine is simply absent, which is the normal case off macOS.
+
+`TOOLKIT_CONVERTER_BIND_ADDR` accepts port `0`. The kernel then picks a free
+port and the `conversion service listening` log line carries the bound address,
+so that line is the only place the real port appears.
+
+`TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF=1` is for a parent process that spawns
+the service with a pipe on stdin. The write end closes when that parent dies,
+including a kill it could not handle, so EOF is a parent-death signal no
+handler can deliver. Leave it off wherever stdin is a terminal, a closed
+descriptor, or `/dev/null`, because EOF there says nothing about a parent. The
+container leaves it off and shuts down on SIGTERM alone.
 
 `TOOLKIT_CONVERTER_SCRATCH_PARENT` does not work. The config loader parses and
 validates it, and no other code reads it. It stays until a separate decision on

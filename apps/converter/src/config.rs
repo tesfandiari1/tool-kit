@@ -19,6 +19,9 @@ const DEFAULT_DATABASE_BUSY_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_WORKER_POLL_INTERVAL_SECS: u64 = 1;
 const DEFAULT_RECOVERY_LIMIT: usize = 3;
 const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 30;
+/// Off, so a container keeps shutting down on SIGTERM alone. Only a parent that
+/// pipes stdin turns it on.
+const DEFAULT_SHUTDOWN_ON_STDIN_EOF: u64 = 0;
 const PDF_WORKER_NAME: &str = "tool-kit-pdf-worker";
 const VISION_WORKER_NAME: &str = "tool-kit-vision-worker";
 
@@ -40,6 +43,10 @@ pub struct Settings {
     pub worker_poll_interval: Duration,
     pub recovery_limit: usize,
     pub shutdown_grace: Duration,
+    /// Shut down when stdin reaches EOF. That is how a supervised sidecar
+    /// learns its parent died: the pipe closes even when the parent was killed
+    /// outright and could signal nothing.
+    pub shutdown_on_stdin_eof: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -176,6 +183,12 @@ impl Settings {
                 1,
                 600,
             )?),
+            shutdown_on_stdin_eof: read_bounded_u64(
+                "TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF",
+                DEFAULT_SHUTDOWN_ON_STDIN_EOF,
+                0,
+                1,
+            )? == 1,
         })
     }
 }
@@ -291,9 +304,10 @@ mod tests {
     use tracing_subscriber::EnvFilter;
 
     use super::{
-        DEFAULT_BIND_ADDRESS, DEFAULT_DATABASE_BUSY_TIMEOUT_SECS, DEFAULT_LOG_FILTER,
-        DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_RECOVERY_LIMIT,
-        DEFAULT_SHUTDOWN_GRACE_SECS, DEFAULT_WORKER_POLL_INTERVAL_SECS,
+        read_bounded_u64, DEFAULT_BIND_ADDRESS, DEFAULT_DATABASE_BUSY_TIMEOUT_SECS,
+        DEFAULT_LOG_FILTER, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_MAX_UPLOAD_BYTES,
+        DEFAULT_RECOVERY_LIMIT, DEFAULT_SHUTDOWN_GRACE_SECS, DEFAULT_SHUTDOWN_ON_STDIN_EOF,
+        DEFAULT_WORKER_POLL_INTERVAL_SECS,
     };
 
     #[test]
@@ -320,6 +334,32 @@ mod tests {
         assert!(std::path::Path::new(super::DEFAULT_TOKEN_FILE).is_absolute());
         assert!(std::path::Path::new(super::DEFAULT_DATA_DIR).is_absolute());
         assert!(std::path::Path::new(super::DEFAULT_SCRATCH_PARENT).is_absolute());
+    }
+
+    #[test]
+    fn stdin_eof_shutdown_is_off_unless_a_parent_asks_for_it() {
+        assert_eq!(DEFAULT_SHUTDOWN_ON_STDIN_EOF, 0);
+
+        let value = read_bounded_u64(
+            "TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF",
+            DEFAULT_SHUTDOWN_ON_STDIN_EOF,
+            0,
+            1,
+        )
+        .expect("the unset knob must fall back to its default");
+
+        assert_eq!(value, 0, "the variable is set in this shell, so unset it");
+    }
+
+    #[test]
+    fn stdin_eof_shutdown_rejects_anything_but_zero_or_one() {
+        // The range check covers the default as well as a read value, so a
+        // default outside the window exercises the bound without touching the
+        // process environment, which the other tests share.
+        let error = read_bounded_u64("TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF", 2, 0, 1)
+            .expect_err("2 is outside the flag's range");
+
+        assert!(error.to_string().contains("0..=1"), "{error}");
     }
 
     #[test]

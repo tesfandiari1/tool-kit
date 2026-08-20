@@ -277,6 +277,7 @@ async fn unwritable_data_root_fails_startup_instead_of_serving() {
         worker_poll_interval: Duration::from_secs(1),
         recovery_limit: 3,
         shutdown_grace: Duration::from_secs(30),
+        shutdown_on_stdin_eof: false,
     };
 
     let error = AppState::initialize(&settings)

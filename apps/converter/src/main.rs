@@ -16,9 +16,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     init_tracing(&settings.log_filter)?;
     let app_state = AppState::initialize(&settings).await?;
     let listener = TcpListener::bind(settings.bind_address).await?;
+    // The bound address, never the configured one. Port 0 asks the kernel for a
+    // free port, so the configured value names no port at all and this line is
+    // the only place the real one appears.
+    let bound_address = listener.local_addr()?;
 
     tracing::info!(
-        bind_address = %settings.bind_address,
+        bind_address = %bound_address,
         service_version = env!("CARGO_PKG_VERSION"),
         "conversion service listening"
     );
@@ -27,7 +31,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         listener,
         app_state,
         settings.shutdown_grace,
-        shutdown_signal(),
+        shutdown_signal(settings.shutdown_on_stdin_eof),
     )
     .await?
     {
@@ -116,7 +120,7 @@ fn init_tracing(raw_filter: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(shutdown_on_stdin_eof: bool) {
     let interrupt = async {
         if let Err(error) = tokio::signal::ctrl_c().await {
             tracing::error!(%error, "failed to install interrupt handler");
@@ -140,12 +144,46 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = pending::<()>();
 
-    tokio::select! {
-        () = interrupt => {}
-        () = terminate => {}
+    let reason = tokio::select! {
+        () = interrupt => "interrupt",
+        () = terminate => "terminate",
+        () = stdin_eof(shutdown_on_stdin_eof) => "stdin_eof",
+    };
+
+    tracing::info!(reason, "shutdown signal received");
+}
+
+/// Resolves when stdin reaches EOF, and stays pending forever when the knob is
+/// off. A supervised sidecar reads its parent's death off that pipe: the write
+/// end closes even when the parent was killed outright and could signal
+/// nothing, which is the one orphan case a signal handler cannot cover.
+///
+/// The read sits on a detached OS thread, not on the blocking pool. Dropping
+/// the runtime waits for every blocking task that already started, so a pool
+/// read of a pipe nobody closes makes SIGTERM inert: the service drains, `main`
+/// returns, and the process then hangs forever on that read. A detached thread
+/// does not hold up process exit, so the two shutdown paths stay independent.
+async fn stdin_eof(enabled: bool) {
+    if !enabled {
+        pending::<()>().await;
     }
 
-    tracing::info!("shutdown signal received");
+    let (closed, wait) = oneshot::channel();
+    std::thread::spawn(move || {
+        let outcome = io::copy(&mut io::stdin().lock(), &mut io::sink());
+        // A read error leaves no way to notice the parent going away, so treat
+        // it as the pipe closing rather than run on as a possible orphan.
+        if let Err(error) = outcome {
+            tracing::error!(%error, "failed to read stdin, treating it as closed");
+        }
+        // The receiver is gone whenever another arm of the select won, which is
+        // the ordinary case and not a failure.
+        let _ = closed.send(());
+    });
+
+    if wait.await.is_err() {
+        tracing::error!("the stdin reader stopped, treating it as closed");
+    }
 }
 
 #[cfg(test)]
@@ -162,7 +200,7 @@ mod tests {
 
     use tokio::time::{timeout, Instant};
 
-    use super::drain_with_deadline;
+    use super::{drain_with_deadline, stdin_eof};
 
     #[tokio::test]
     async fn http_drain_and_job_shutdown_start_together_under_one_deadline() {
@@ -191,5 +229,14 @@ mod tests {
         );
         assert!(jobs_started.load(Ordering::SeqCst));
         assert!(started_at.elapsed() < Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn stdin_is_not_a_shutdown_trigger_unless_the_knob_is_on() {
+        // The container inherits whatever stdin Docker hands it, so an off knob
+        // has to leave the process untouched even when that stdin is at EOF.
+        let resolved = timeout(Duration::from_millis(50), stdin_eof(false)).await;
+
+        assert!(resolved.is_err(), "the disabled reader must stay pending");
     }
 }
