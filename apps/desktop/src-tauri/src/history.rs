@@ -965,6 +965,38 @@ mod tests {
         assert!(!delete_in_flight_row(&conn, pending.idempotency_key).unwrap());
     }
 
+    /// In Sidecar mode the ledger records the alias, not the port. A retry
+    /// rebuilds the row from the live context, so both writes have to land on
+    /// the same durable identity or `restore_in_flight` returns silently and
+    /// the retry runs with no recovery row behind it.
+    #[test]
+    fn a_sidecar_row_binds_to_the_alias_rather_than_to_a_port() {
+        let conn = db();
+        let (src, out) = pair("inflight-sidecar-alias");
+        let source_path = src.to_string_lossy().into_owned();
+        let output_dir = out.parent().unwrap().to_string_lossy().into_owned();
+        let pending = NewInFlight {
+            source_path: &source_path,
+            file_name: "report.pdf",
+            output_dir: &output_dir,
+            backend_url: crate::backend_host::SIDECAR_ALIAS,
+            client_run_id: "56565656-5656-4656-8656-565656565656",
+            idempotency_key: "78787878-7878-4878-8878-787878787878",
+            conversion_profile: "standard",
+            ocr_language_correction: true,
+            ocr_custom_words: "",
+        };
+
+        assert!(upsert_in_flight_row(&conn, &pending).unwrap());
+        // The rebuilt row a retry writes, one sidecar restart and one new port
+        // later.
+        assert!(upsert_in_flight_row(&conn, &pending).unwrap());
+
+        let rows = select_in_flight(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].backend_url, "sidecar");
+    }
+
     #[test]
     fn an_idempotency_key_cannot_move_to_another_backend() {
         let conn = db();

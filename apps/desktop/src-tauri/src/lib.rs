@@ -1,9 +1,11 @@
+mod backend_host;
 mod conversion_service;
 mod history;
 mod jobs;
 mod providers;
 mod secrets;
 mod settings;
+mod workspace;
 
 #[cfg(test)]
 mod live_smoke;
@@ -54,6 +56,39 @@ fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
 #[tauri::command]
 fn list_jobs(state: State<JobManager>) -> Vec<Job> {
     state.list()
+}
+
+/// The folder the first-launch picker opens on: ~/Documents/Tool-Kit.
+#[tauri::command]
+fn suggested_workspace_path() -> String {
+    workspace::suggested_workspace_path()
+}
+
+/// Whether the picked folder is already a Tool-Kit workspace, so onboarding
+/// can offer "adopt" instead of "create".
+#[tauri::command]
+fn inspect_workspace_path(path: String) -> bool {
+    workspace::inspect_workspace_path(&path)
+}
+
+/// First-launch setup. The folder is created or adopted, and the settings
+/// that bind this install to it are saved here — the webview can lose a race
+/// against `save_settings`, so the host persists rather than trusting it to.
+#[tauri::command]
+fn setup_workspace(app: AppHandle, path: String) -> Result<workspace::WorkspaceInfo, String> {
+    let info = workspace::setup_workspace(&path)?;
+    let mut cfg = settings::load(&app);
+    cfg.workspace_path = Some(info.workspace_path.clone());
+    cfg.workspace_id = Some(info.workspace_id.clone());
+    cfg.active_project_id = Some(info.inbox_project_id.clone());
+    cfg.onboarding_complete = true;
+    settings::save(&app, &cfg)?;
+    Ok(info)
+}
+
+#[tauri::command]
+fn list_projects(app: AppHandle) -> Result<Vec<workspace::ProjectSummary>, String> {
+    workspace::list_projects(&app)
 }
 
 /// How deep a dropped folder is walked. Deep enough for real project trees,
@@ -306,7 +341,13 @@ struct Scan {
 async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String> {
     let cfg = settings::load(&app);
     let convert = if cfg.conversion_route == settings::ConversionRoute::Backend {
-        match plan_backend_conversion_files(&inputs, &cfg.backend_url).await {
+        // A service still starting reads the same here as one that cannot
+        // answer: either way the scan falls back to direct-eligible metadata.
+        let planned = match backend_host::backend_origin(&app) {
+            Ok(origin) => plan_backend_conversion_files(&inputs, &origin).await,
+            Err(error) => Err(error),
+        };
+        match planned {
             Ok(mut plan) => {
                 plan.direct.append(&mut plan.backend);
                 plan.direct
@@ -513,9 +554,14 @@ async fn run_pipeline(
     // history reuse, and what the run itself produces.
     let cfg = settings::load(&app);
     let mut backend_files = Vec::new();
+    // Read once for the whole run. Every ledger row and every job context has
+    // to name the origin the submit actually goes to, and in Sidecar mode that
+    // is a port this launch was handed rather than anything in Settings.
+    let mut backend_origin = String::new();
     let mut files =
         if jt == JobType::Convert && cfg.conversion_route == settings::ConversionRoute::Backend {
-            let plan = plan_backend_conversion_files(&inputs, &cfg.backend_url).await?;
+            backend_origin = backend_host::backend_origin(&app)?;
+            let plan = plan_backend_conversion_files(&inputs, &backend_origin).await?;
             if cfg.conversion_profile == settings::ConversionProfile::LocalOnly
                 && !plan.direct.is_empty()
             {
@@ -577,8 +623,10 @@ async fn run_pipeline(
 
     let backend_needed = files.iter().any(|file| backend_files.contains(file));
     let direct_needed = files.iter().any(|file| !backend_files.contains(file));
-    if backend_needed && !secrets::has_key("backend") {
-        return Err("Add your backend token in Settings".into());
+    if backend_needed {
+        // Through the accessor, so Sidecar mode says the service is starting
+        // rather than telling the user to paste a token it mints itself.
+        backend_host::backend_token(&app)?;
     }
     if direct_needed {
         let provider = jt.provider();
@@ -639,7 +687,10 @@ async fn run_pipeline(
                     source_path: &source_path,
                     file_name: &file_name,
                     output_dir: &output_dir,
-                    backend_url: &cfg.backend_url,
+                    backend_url: backend_host::ledger_origin(
+                        cfg.local_backend_mode,
+                        &backend_origin,
+                    ),
                     client_run_id: &client_run_id,
                     idempotency_key: &idempotency_key,
                     conversion_profile: cfg.conversion_profile.id(),
@@ -652,7 +703,7 @@ async fn run_pipeline(
                 source_path,
                 output_dir.clone(),
                 jobs::BackendContext::new(
-                    cfg.backend_url.clone(),
+                    backend_origin.clone(),
                     client_run_id.clone(),
                     idempotency_key,
                     None,
@@ -747,7 +798,10 @@ fn retry_failed(app: AppHandle, state: State<JobManager>) -> Result<usize, Strin
 /// Quit for real. The close button only hides the window (this is a menu-bar
 /// app), so "Stop and quit" needs an explicit way out.
 #[tauri::command]
-fn quit_app(app: AppHandle) {
+async fn quit_app(app: AppHandle) {
+    // The sidecar goes down here rather than in `RunEvent::Exit`, which runs
+    // inside applicationWillTerminate where a wait reads to the user as a hang.
+    backend_host::stop(&app, backend_host::STOP_BUDGET).await;
     app.exit(0);
 }
 
@@ -974,6 +1028,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(JobManager::default())
+        .manage(backend_host::BackendHost::new())
         .invoke_handler(tauri::generate_handler![
             secret_status,
             set_secret,
@@ -993,14 +1048,31 @@ pub fn run() {
             retry_failed,
             list_history,
             clear_history,
+            suggested_workspace_path,
+            inspect_workspace_path,
+            setup_workspace,
+            list_projects,
             conversion_service::service_request,
-            conversion_service::download_conversion_markdown
+            conversion_service::download_conversion_markdown,
+            backend_host::backend_status,
+            backend_host::restart_backend,
+            backend_host::open_backend_log
         ])
         .setup(|app| {
             // Opened once and held for the process. A database that can't be
             // opened degrades to "no history" rather than failing startup.
             app.manage(history::init(app.handle()));
-            jobs::recover_in_flight(app.handle().clone());
+            // Manual mode only. In Sidecar mode there is no port yet, and the
+            // resume path fails a job on one refused connection, so recovery
+            // waits for the first service that answers (see `backend_host`).
+            if settings::load(app.handle()).local_backend_mode
+                == settings::LocalBackendMode::Manual
+            {
+                jobs::recover_in_flight(app.handle().clone());
+            }
+            // Nothing waits on this: the sidecar comes up on its own task and
+            // the window opens whether or not it made it.
+            backend_host::start(app.handle());
 
             #[cfg(desktop)]
             {
@@ -1074,6 +1146,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            // Not ExitRequested: it never fires on ⌘Q here, because the window
+            // hides instead of being destroyed. This is the last point at which
+            // the sidecar can be taken down with us.
+            if let tauri::RunEvent::Exit = event {
+                backend_host::stop_on_exit(app);
+            }
             // Closing the window only hides it, so the Dock icon has to be a
             // way back in — otherwise the app looks dead but is still running.
             #[cfg(target_os = "macos")]

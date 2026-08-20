@@ -1,8 +1,9 @@
 //! Native HTTP boundary for the conversion service.
 //!
 //! The webview supplies only contract paths, ordinary request metadata, and a
-//! desktop source path. This module owns the configured service URL, Keychain
-//! token, file streaming, response bounds, and artifact writes.
+//! desktop source path. This module owns file streaming, response bounds, and
+//! artifact writes. The origin and the token come from `backend_host`, which is
+//! the only thing that knows which of them is in force.
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::{multipart, Client, Method, Response, Url};
@@ -14,7 +15,7 @@ use std::time::Duration;
 use tauri::AppHandle;
 use tokio::io::AsyncWriteExt;
 
-use crate::{secrets, settings};
+use crate::backend_host;
 
 const GENERIC_BODY_LIMIT: usize = 1024 * 1024;
 /// Matches the backend's documented default output ceiling. The service may
@@ -169,10 +170,10 @@ pub(crate) async fn service_request(
     app: AppHandle,
     request: ServiceRequestPayload,
 ) -> Result<ServiceResponsePayload, String> {
-    let base_url = current_base_url(&app);
+    let base_url = backend_host::backend_origin(&app)?;
     let route = classify_route(&request.method, &request.path)?;
     let token = if route.requires_authentication() {
-        Some(current_token()?)
+        Some(backend_host::backend_token(&app)?)
     } else {
         None
     };
@@ -186,8 +187,8 @@ pub(crate) async fn download_conversion_markdown(
     output_dir: String,
     file_name: String,
 ) -> Result<String, String> {
-    let base_url = current_base_url(&app);
-    let token = current_token()?;
+    let base_url = backend_host::backend_origin(&app)?;
+    let token = backend_host::backend_token(&app)?;
     download_markdown(&base_url, &token, &conversion_id, &output_dir, &file_name).await
 }
 
@@ -442,16 +443,6 @@ async fn download_markdown_with_limit(
     }
 
     Ok(path.to_string_lossy().into_owned())
-}
-
-fn current_base_url(app: &AppHandle) -> String {
-    settings::load(app).backend_url
-}
-
-fn current_token() -> Result<String, String> {
-    secrets::get_key("backend")
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "Backend token is not configured in Keychain".to_string())
 }
 
 /// One client for the process. A `Client` owns the connection pool, so building

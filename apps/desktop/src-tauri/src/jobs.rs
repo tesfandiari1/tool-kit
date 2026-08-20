@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 
 use crate::conversion_service::{self, ConversionFailure, ConversionJob};
 use crate::providers::{self, PollResult, ProviderKind};
-use crate::{history, secrets, settings};
+use crate::{backend_host, history, secrets, settings};
 
 /// One client for every provider request in the process.
 ///
@@ -34,6 +34,12 @@ fn provider_client() -> reqwest::Client {
         })
         .clone()
 }
+
+/// How patient the first poll of a recovered conversion is, before it calls the
+/// service gone. Twelve seconds covers a sidecar that has published its port
+/// and is still opening its database.
+const RESUME_MAX_ATTEMPTS: u32 = 6;
+const RESUME_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 const BACKEND_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const BACKEND_MAX_POLLS: u32 = 720;
@@ -790,15 +796,10 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         return;
     }
 
-    let token = match secrets::get_key("backend") {
-        Some(token) if !token.trim().is_empty() => token,
-        _ => {
-            fail_backend_retryable(
-                &app,
-                id,
-                generation,
-                "Backend token is unavailable. Add it in Settings, then retry.",
-            );
+    let token = match backend_host::backend_token(&app) {
+        Ok(token) => token,
+        Err(error) => {
+            fail_backend_retryable(&app, id, generation, &error);
             return;
         }
     };
@@ -807,16 +808,31 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         if !set_status(&app, id, generation, "processing", "Resuming conversion…") {
             return;
         }
-        let result =
-            conversion_service::poll_conversion(&backend.backend_url, &token, &backend_job_id)
-                .await;
-        if stale(&app) {
-            return;
-        }
-        match result {
-            Ok(view) => view,
-            Err(error) => {
-                fail_backend_retryable(&app, id, generation, &error);
+        // A recovered conversion resumes the instant the service reports ready,
+        // and the first request can still land before it answers. The 5s loop
+        // below tolerates a run of errors for the same reason. Without the same
+        // tolerance here, one refused connection fails a conversion the service
+        // is holding and has already done the work for.
+        let mut attempts = 0u32;
+        loop {
+            let result =
+                conversion_service::poll_conversion(&backend.backend_url, &token, &backend_job_id)
+                    .await;
+            if stale(&app) {
+                return;
+            }
+            match result {
+                Ok(view) => break view,
+                Err(error) => {
+                    attempts += 1;
+                    if attempts >= RESUME_MAX_ATTEMPTS {
+                        fail_backend_retryable(&app, id, generation, &error);
+                        return;
+                    }
+                }
+            }
+            tokio::time::sleep(RESUME_RETRY_INTERVAL).await;
+            if stale(&app) {
                 return;
             }
         }
@@ -1257,18 +1273,49 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
     }
 }
 
+/// Point a context at the service running now, and drop the verdict the last
+/// launch left on it.
+///
+/// A recovery blocker records why a row could not be resumed at startup. It is
+/// not a verdict on a retry the user just pressed, and nothing else clears it,
+/// so leaving it in place makes Retry re-fail with the same stale message for
+/// the rest of the session.
+fn refresh_for_retry(context: &mut BackendContext, origin: Result<&str, String>) {
+    match origin {
+        Ok(origin) => {
+            context.backend_url = origin.to_string();
+            context.recovery_blocker = None;
+        }
+        Err(error) => context.recovery_blocker = Some(error),
+    }
+}
+
 /// Re-persist a backend job's durable row before a retry.
 ///
 /// Stop deletes the ledger row, but the job stays in the list and Retry stays
 /// live. Without this the resubmit runs with no recovery row, so a crash
 /// during it loses the job and the source-change guard never fires.
 pub fn restore_in_flight(app: &AppHandle, id: u64) {
-    let Some(job) = app.state::<JobManager>().get(id) else {
+    let manager = app.state::<JobManager>();
+    // Retry-all runs this over every failed row, so a direct job leaves before
+    // any of the reads below.
+    if manager.get(id).is_none_or(|job| job.backend.is_none()) {
+        return;
+    }
+    // Read fresh rather than carried over: a sidecar that restarted since this
+    // job first ran is on a different port, and the retry has to follow it.
+    let origin = backend_host::backend_origin(app);
+    let Some(job) = manager.update(id, |current| {
+        if let Some(context) = &mut current.backend {
+            refresh_for_retry(context, origin.as_deref().map_err(Clone::clone));
+        }
+    }) else {
         return;
     };
     let Some(backend) = job.backend else {
         return;
     };
+    let mode = settings::load(app).local_backend_mode;
     let ocr_custom_words = backend.ocr.custom_words_wire();
     if !history::upsert_in_flight(
         app,
@@ -1276,7 +1323,7 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
             source_path: &job.source_path,
             file_name: &job.file_name,
             output_dir: &job.output_dir,
-            backend_url: &backend.backend_url,
+            backend_url: backend_host::ledger_origin(mode, &backend.backend_url),
             client_run_id: &backend.client_run_id,
             idempotency_key: &backend.idempotency_key,
             conversion_profile: backend.profile.id(),
@@ -1569,10 +1616,14 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
     });
 }
 
+/// `live` is the origin the resumed requests will actually go to, which in
+/// Sidecar mode is not what the row records: the ledger holds an alias there,
+/// and an alias is not a URL.
 fn validate_recovery_entry(
     entry: &history::InFlightEntry,
+    live: &str,
 ) -> Result<settings::ConversionProfile, String> {
-    conversion_service::validate_base_url(&entry.backend_url)
+    conversion_service::validate_base_url(live)
         .map_err(|error| format!("Cannot recover conversion: {error}"))?;
     if let Some(job_id) = entry.backend_job_id.as_deref() {
         conversion_service::validate_conversion_id(job_id)
@@ -1592,6 +1643,10 @@ fn validate_recovery_entry(
 /// for a recovered row if the configured origin still matches the one that row
 /// was submitted against. Sending the current token to a previously configured
 /// host would hand it to a service the user has since moved away from.
+///
+/// Both sides go through `backend_host::ledger_origin`, so in Sidecar mode both
+/// are the alias and the port is free to move. Comparing live URLs there would
+/// reject every row on every launch.
 fn recovery_origin_still_configured(entry: &history::InFlightEntry, configured: &str) -> bool {
     entry.backend_url.trim_end_matches('/') == configured.trim_end_matches('/')
 }
@@ -1599,6 +1654,9 @@ fn recovery_origin_still_configured(entry: &history::InFlightEntry, configured: 
 /// Recreate durable backend rows after startup. Invalid legacy origins and
 /// changed sources stay visible and stopped, but their durable rows are
 /// removed so they cannot resurrect forever or bind to current settings.
+///
+/// In Sidecar mode this runs on the first service that comes up rather than
+/// from `setup`, because the resume path needs a service that answers.
 pub(crate) fn recover_in_flight(app: AppHandle) {
     let Some(entries) = history::list_in_flight(&app) else {
         return;
@@ -1606,15 +1664,22 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
     if entries.is_empty() {
         return;
     }
+    // No origin means no recovery this time round, and the rows stay on the
+    // ledger. Deleting them here would throw away conversions the service has
+    // already been paid for and is still holding.
+    let Ok(live_origin) = backend_host::backend_origin(&app) else {
+        return;
+    };
 
     let manager = app.state::<JobManager>();
     let config = settings::load(&app);
-    let configured_url = config.backend_url.clone();
+    let configured_origin =
+        backend_host::ledger_origin(config.local_backend_mode, &config.backend_url).to_string();
     manager.set_run_config(config);
     let generation = manager.generation();
     for entry in entries {
-        let validation = validate_recovery_entry(&entry).and_then(|profile| {
-            if recovery_origin_still_configured(&entry, &configured_url) {
+        let validation = validate_recovery_entry(&entry, &live_origin).and_then(|profile| {
+            if recovery_origin_still_configured(&entry, &configured_origin) {
                 Ok(profile)
             } else {
                 Err(
@@ -1638,7 +1703,9 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
                 check_url: entry.fallback_check_url.clone(),
             });
         let mut context = BackendContext::new(
-            entry.backend_url,
+            // The live origin, never the recorded one: in Sidecar mode that is
+            // an alias, and `endpoint_url` would refuse it.
+            live_origin.clone(),
             entry.client_run_id,
             entry.idempotency_key,
             entry.backend_job_id,
@@ -2009,7 +2076,8 @@ mod backend_tests {
             source_mtime,
             created_at: 1,
         };
-        assert!(validate_recovery_entry(&entry).is_ok());
+        let live = "http://127.0.0.1:8080";
+        assert!(validate_recovery_entry(&entry, live).is_ok());
         // The one keychain slot holds one token. A row bound to an origin the
         // user has since replaced must not receive the new credential.
         assert!(recovery_origin_still_configured(
@@ -2022,19 +2090,123 @@ mod backend_tests {
         ));
 
         entry.backend_job_id = Some("not-a-uuid".into());
-        assert!(validate_recovery_entry(&entry)
+        assert!(validate_recovery_entry(&entry, live)
             .unwrap_err()
             .contains("conversion id"));
         entry.backend_job_id = None;
         entry.conversion_profile = "future_profile".into();
-        assert!(validate_recovery_entry(&entry)
+        assert!(validate_recovery_entry(&entry, live)
             .unwrap_err()
             .contains("unknown profile"));
         entry.conversion_profile = "standard".into();
         std::fs::remove_file(&source).unwrap();
-        assert!(validate_recovery_entry(&entry)
+        assert!(validate_recovery_entry(&entry, live)
             .unwrap_err()
             .contains("source changed or is missing"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn ledger_entry(recorded_origin: &str) -> history::InFlightEntry {
+        history::InFlightEntry {
+            source_path: "/tmp/report.pdf".into(),
+            file_name: "report.pdf".into(),
+            output_dir: "/tmp".into(),
+            backend_url: recorded_origin.into(),
+            client_run_id: "11111111-1111-4111-8111-111111111111".into(),
+            idempotency_key: "22222222-2222-4222-8222-222222222222".into(),
+            backend_job_id: None,
+            fallback_provider: None,
+            fallback_request_id: None,
+            fallback_check_url: None,
+            conversion_profile: "standard".into(),
+            ocr_language_correction: true,
+            ocr_custom_words: String::new(),
+            source_mtime: 1,
+            created_at: 1,
+        }
+    }
+
+    /// The bug this alias exists for: the kernel hands out a different port on
+    /// every launch, so comparing live URLs abandoned every in-flight row on
+    /// every relaunch and left its Retry button dead.
+    #[test]
+    fn a_sidecar_row_survives_the_port_the_next_launch_is_given() {
+        let recorded = backend_host::ledger_origin(
+            settings::LocalBackendMode::Sidecar,
+            "http://127.0.0.1:51001",
+        );
+        assert_eq!(recorded, backend_host::SIDECAR_ALIAS);
+        let entry = ledger_entry(recorded);
+
+        let now = backend_host::ledger_origin(
+            settings::LocalBackendMode::Sidecar,
+            "http://127.0.0.1:64707",
+        );
+
+        assert!(recovery_origin_still_configured(&entry, now));
+    }
+
+    /// Manual mode is untouched: the user names the service, so a row bound to
+    /// one they have moved away from must not be handed the current token.
+    #[test]
+    fn a_manual_row_still_refuses_a_service_the_user_replaced() {
+        let entry = ledger_entry(backend_host::ledger_origin(
+            settings::LocalBackendMode::Manual,
+            "http://127.0.0.1:8080",
+        ));
+
+        assert!(recovery_origin_still_configured(
+            &entry,
+            backend_host::ledger_origin(settings::LocalBackendMode::Manual, "http://127.0.0.1:8080/")
+        ));
+        assert!(!recovery_origin_still_configured(
+            &entry,
+            backend_host::ledger_origin(settings::LocalBackendMode::Manual, "http://other.host:8080")
+        ));
+    }
+
+    /// The alias names the service, it does not locate it, so recovery has to
+    /// validate the origin the resumed requests are actually going to.
+    #[test]
+    fn recovery_validates_the_live_origin_and_never_the_alias() {
+        let entry = ledger_entry(backend_host::SIDECAR_ALIAS);
+
+        assert!(validate_recovery_entry(&entry, backend_host::SIDECAR_ALIAS)
+            .unwrap_err()
+            .contains("Backend URL"));
+        // Fails later, on the source that does not exist, which is proof the
+        // origin passed.
+        assert!(validate_recovery_entry(&entry, "http://127.0.0.1:64707")
+            .unwrap_err()
+            .contains("source changed or is missing"));
+    }
+
+    #[test]
+    fn a_retry_drops_the_verdict_the_last_launch_left_and_follows_the_new_port() {
+        let mut context = BackendContext::new(
+            "http://127.0.0.1:51001".into(),
+            "11111111-1111-4111-8111-111111111111".into(),
+            "22222222-2222-4222-8222-222222222222".into(),
+            None,
+            settings::ConversionProfile::Standard,
+            conversion_service::OcrOptions::default(),
+        );
+        context.recovery_blocker = Some("Cannot recover conversion".into());
+
+        refresh_for_retry(&mut context, Ok("http://127.0.0.1:64707"));
+
+        // Nothing else in the tree clears this, so without it Retry re-fails
+        // with the same stale message for the rest of the session.
+        assert_eq!(context.recovery_blocker, None);
+        assert_eq!(context.backend_url, "http://127.0.0.1:64707");
+
+        // A service that is not up yet replaces the verdict rather than letting
+        // the retry run at a port that is no longer listening.
+        refresh_for_retry(&mut context, Err("The conversion service is starting.".into()));
+        assert_eq!(
+            context.recovery_blocker.as_deref(),
+            Some("The conversion service is starting.")
+        );
+        assert_eq!(context.backend_url, "http://127.0.0.1:64707");
     }
 }

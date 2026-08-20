@@ -236,6 +236,24 @@ mod tests {
         );
     }
 
+    /// The sidecar mints its token during the launch, after something has
+    /// already asked for it and been told there is none. `set_key` is the only
+    /// write that drops that memo, which is why `backend_host` goes through it
+    /// rather than writing the keychain directly: skip it and every backend job
+    /// fails for the rest of the session against a token that is really there.
+    #[test]
+    fn minting_the_backend_token_replaces_a_memoised_absence() {
+        assert_eq!(memoized("test-backend-mint", || None), None);
+        assert_eq!(memoized("test-backend-mint", || Some("minted".into())), None);
+
+        forget("test-backend-mint");
+
+        assert_eq!(
+            memoized("test-backend-mint", || Some("minted".into())),
+            Some("minted".into())
+        );
+    }
+
     #[test]
     fn only_a_missing_entitlement_falls_back_to_the_legacy_keychain() {
         assert_eq!(

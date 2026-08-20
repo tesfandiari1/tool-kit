@@ -18,6 +18,16 @@ pub enum ConversionRoute {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum LocalBackendMode {
+    /// The app owns the local conversion service process.
+    #[default]
+    Sidecar,
+    /// The user runs the service themselves; the app only points at a URL.
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConversionProfile {
     #[default]
     Standard,
@@ -89,6 +99,18 @@ pub struct Settings {
     /// struct fills a missing field from the `Default` impl below, so an
     /// existing settings.json loads at 1.0 rather than at 0.0.
     pub zoom: f64,
+    /// First-launch workspace setup has run. Until it has, the app shows the
+    /// workspace picker instead of the library.
+    pub onboarding_complete: bool,
+    /// The one workspace folder this install is bound to.
+    pub workspace_path: Option<String>,
+    /// Stable id from `.toolkit/workspace.json`, so a renamed folder is still
+    /// the same workspace.
+    pub workspace_id: Option<String>,
+    /// The project new documents land in.
+    pub active_project_id: Option<String>,
+    /// Who owns the local conversion service process.
+    pub local_backend_mode: LocalBackendMode,
 }
 
 impl Default for Settings {
@@ -110,6 +132,11 @@ impl Default for Settings {
             expanded_width: None,
             expanded_height: None,
             zoom: 1.0,
+            onboarding_complete: false,
+            workspace_path: None,
+            workspace_id: None,
+            active_project_id: None,
+            local_backend_mode: LocalBackendMode::Sidecar,
         }
     }
 }
@@ -143,7 +170,7 @@ pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConversionProfile, ConversionRoute, Settings};
+    use super::{ConversionProfile, ConversionRoute, LocalBackendMode, Settings};
 
     #[test]
     fn defaults_keep_conversion_on_the_direct_provider() {
@@ -192,6 +219,13 @@ mod tests {
         assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
         // A file written before `zoom` existed must load at 100%, not at 0.0.
         assert_eq!(settings.zoom, 1.0);
+        // Same rule for the workspace fields: an existing install has not
+        // onboarded and owns no workspace yet.
+        assert!(!settings.onboarding_complete);
+        assert_eq!(settings.workspace_path, None);
+        assert_eq!(settings.workspace_id, None);
+        assert_eq!(settings.active_project_id, None);
+        assert_eq!(settings.local_backend_mode, LocalBackendMode::Sidecar);
     }
 
     #[test]
