@@ -155,7 +155,45 @@ private func decodeOnlyFrame(_ source: Data) -> Decoded {
     guard frames == 1, let image = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
         return .rejected(.invalidImage)
     }
-    return .image(image)
+    return .image(flattenedOntoWhite(image))
+}
+
+/// An image carrying real transparency has to land on an opaque background
+/// before Vision sees it. Dark text drawn on a transparent background
+/// composites to nothing, so the recognizer finds no text and the run comes
+/// back `no_text_found`, which reads as a quality failure and spends the remote
+/// fallback on a file that was always readable. Nothing downstream can tell
+/// that apart from a genuinely blank scan.
+///
+/// White, because that is what the PDF rasterizer already fills with and what
+/// printing the image would do. It is a choice, not a neutral operation: light
+/// text on a transparent background disappears into it. Dark on light is what
+/// documents are, and the alternative loses the common case to protect the rare
+/// one.
+private func flattenedOntoWhite(_ image: CGImage) -> CGImage {
+    switch image.alphaInfo {
+    case .none, .noneSkipLast, .noneSkipFirst:
+        return image
+    default:
+        break
+    }
+    let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+    guard let context = CGContext(
+        data: nil, width: image.width, height: image.height,
+        bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+    ) else {
+        // A context this size is what the recognizer would have allocated
+        // anyway. Failing here means handing back the original rather than
+        // failing the run, since an unflattened image still converts whenever
+        // its transparent pixels happen to be light.
+        return image
+    }
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(bounds)
+    context.draw(image, in: bounds)
+    return context.makeImage() ?? image
 }
 
 // MARK: - Markdown rendering, ported from tk-vision.swift

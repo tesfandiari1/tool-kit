@@ -361,6 +361,55 @@ fn an_image_carrying_no_text_is_rejected_rather_than_converted_empty() {
     assert!(!run.staging.join(VISION_MARKDOWN_FILE).exists());
 }
 
+/// The contrast case to the blank page above, and the reason it needs its own
+/// rasterizer. `png` goes through `pdf2png`, which fills white, so every other
+/// PNG in this file is opaque and not one of them can catch this. `sips`
+/// renders the same page straight off the PDF and leaves the background
+/// transparent, which is what an image exported from a design tool or dragged
+/// out of a PDF viewer actually carries.
+///
+/// Vision reads composited pixels. Dark glyphs on a transparent background
+/// composite to nothing, so an unflattened source comes back `no_text_found`,
+/// which is indistinguishable downstream from a genuinely blank scan and
+/// spends the remote fallback on a file that was always readable.
+#[test]
+fn a_transparent_background_is_flattened_rather_than_read_as_blank() {
+    let Some(worker) = tool("tool-kit-vision-worker") else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let pdf_path = directory.path().join("transparent.pdf");
+    fs::write(
+        &pdf_path,
+        one_page_pdf(&helvetica_lines(&["Transparent Background Marker"])),
+    )
+    .unwrap();
+    let source = directory.path().join("transparent.png");
+    let status = Command::new("/usr/bin/sips")
+        .args(["-s", "format", "png"])
+        .arg(&pdf_path)
+        .arg("--out")
+        .arg(&source)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "sips failed to rasterize the pdf");
+    let sha256 = digest(&fs::read(&source).unwrap());
+
+    let run = run_worker(&worker, directory.path(), &source, &sha256, &[]);
+
+    assert!(run.status.success(), "worker exited {:?}", run.status);
+    let report = read_report(&run.staging);
+    let VisionOutcome::Converted { .. } = report.outcome else {
+        panic!("a transparent background is not a blank page: {:?}", report.outcome);
+    };
+    let markdown = fs::read_to_string(run.staging.join(VISION_MARKDOWN_FILE)).unwrap();
+    assert!(
+        markdown.contains("Transparent Background Marker"),
+        "the flattened page should read back its own text: {markdown}"
+    );
+}
+
 /// Only the first frame is ever read, so publishing it would hand back page one
 /// of a scanned document marked as the whole of it.
 #[test]
