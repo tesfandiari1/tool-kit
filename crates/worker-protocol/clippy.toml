@@ -1,8 +1,9 @@
 # Clippy policy for this crate. Keep in sync with backend/clippy.toml and
-# crates/worker-protocol/clippy.toml. There is no root Cargo workspace to share
-# this from.
+# src-tauri/clippy.toml. There is no root Cargo workspace to share this from.
 #
 # These flags only affect lints enabled in Cargo.toml [lints.clippy].
+# Integration tests under tests/ are separate crates and do not get
+# allow-*-in-tests; those crates allow unwrap_used at the crate root.
 
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true

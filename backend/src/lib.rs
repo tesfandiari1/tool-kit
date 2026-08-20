@@ -9,8 +9,12 @@
 pub mod config;
 pub mod faults;
 pub mod persistence;
-pub mod vision_protocol;
-pub mod worker_protocol;
+
+// The worker wire contracts moved to their own crate so the workers coming
+// after Vision cannot each grow a private copy. Re-exported under the names
+// they already had, because every call site here and in the worker binaries
+// names them that way and a rename would be churn, not a change.
+pub use tool_kit_worker_protocol::{pdf as worker_protocol, vision as vision_protocol};
 
 mod api;
 mod app;

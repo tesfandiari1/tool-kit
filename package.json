@@ -23,7 +23,7 @@
     "verify": "pnpm check && pnpm build && cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --locked --manifest-path src-tauri/Cargo.toml --lib",
     "verify:backend": "pnpm lint:api && cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings && cargo test --locked --manifest-path backend/Cargo.toml",
     "verify:all": "pnpm verify && pnpm verify:backend",
-    "verify:deps": "cargo deny --manifest-path src-tauri/Cargo.toml check && cargo deny --manifest-path backend/Cargo.toml check",
+    "verify:deps": "cargo deny --manifest-path src-tauri/Cargo.toml check && cargo deny --manifest-path backend/Cargo.toml check && cargo deny --manifest-path crates/worker-protocol/Cargo.toml check",
     "verify:contract": "backend/scripts/contract-fuzz.sh",
     "verify:container": "backend/scripts/container-smoke.sh",
     "verify:local-corpus": "backend/scripts/verify-local-corpus.sh",

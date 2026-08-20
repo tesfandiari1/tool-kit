@@ -1,3 +1,9 @@
+//! The PDF worker's report contract.
+//!
+//! Written by `backend/src/bin/tool-kit-pdf-worker.rs` and read by
+//! `backend/src/engines/pdf_inspector.rs`. Both import these types, so the
+//! compiler holds the two ends together.
+
 use serde::{Deserialize, Serialize};
 
 pub const WORKER_PROTOCOL_VERSION: u32 = 2;

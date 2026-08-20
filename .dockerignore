@@ -1,0 +1,15 @@
+# Build context for backend/Dockerfile, which builds from the repo root
+# because backend/Cargo.toml has a path dependency on ../crates/worker-protocol.
+#
+# Deny everything, then add back exactly what the Dockerfile copies. The
+# desktop app, node_modules, and the Rust target directories are most of this
+# tree and none of them build the image, so a deny list would have to grow
+# every time the repo does.
+*
+!backend/Cargo.toml
+!backend/Cargo.lock
+!backend/build.rs
+!backend/migrations
+!backend/src
+!crates
+**/target

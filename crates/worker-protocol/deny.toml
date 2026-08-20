@@ -1,0 +1,53 @@
+# Supply-chain gate for the worker protocol, run by `pnpm verify:deps`.
+#
+#   cargo deny --manifest-path crates/worker-protocol/Cargo.toml check
+#
+# There is no root workspace, so this is a third separate file beside
+# `backend/deny.toml` and `src-tauri/deny.toml`. Keep all three the same in
+# shape and expect them to differ in content.
+#
+# This graph is seven crates deep and all of it is serde. That is the point:
+# every worker binary links this crate, so a dependency added here is linked
+# into all of them. A new entry in the allow list below should read as a
+# question, not a formality.
+
+[graph]
+# Every target any worker runs on. The PDF worker ships in the Linux container
+# and in the macOS app, and the Vision and MLX workers are Apple silicon only,
+# so the union is wider than either sibling file's list.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+]
+all-features = false
+
+[advisories]
+yanked = "deny"
+# No exceptions. A serde-only graph that needs one is a graph that grew.
+ignore = []
+
+[licenses]
+# Permissive only, and every entry is present in this crate's Cargo.lock today.
+# Unicode-3.0 arrives with unicode-ident through serde_derive's proc-macro
+# chain, which is the only non-MIT/Apache license in the tree.
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "Unicode-3.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Unlike the sqlx tree next door, this graph is small enough that a duplicate
+# version is a real signal rather than permanent noise, so it stays a warning
+# here instead of being switched off. A wildcard version is a defect: it makes
+# the lockfile the only record of what was built.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -9,6 +9,10 @@ updates:
     directory: /backend
     schedule:
       interval: weekly
+  - package-ecosystem: cargo
+    directory: /crates/worker-protocol
+    schedule:
+      interval: weekly
 
   - package-ecosystem: cargo
     directory: /src-tauri

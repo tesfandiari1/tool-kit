@@ -4,15 +4,21 @@ ARG RUST_VERSION=1.97.1
 ARG DEBIAN_VERSION=bookworm-20260623-slim
 
 FROM rust:${RUST_VERSION}-bookworm AS builder
-WORKDIR /build
+WORKDIR /build/backend
 
+# The build context is the repo root, not backend/, because backend/Cargo.toml
+# has a path dependency on ../crates/worker-protocol and a context cannot reach
+# outside itself. The repo layout is mirrored under /build so that relative
+# path resolves in the image exactly as it does in the tree.
+#
 # Least-churn first, so a source edit invalidates only the last COPY.
 # `sqlx::migrate!("./migrations")` reads the SQL at compile time, so the
 # migrations directory is a build input, not just a runtime asset.
-COPY Cargo.toml Cargo.lock ./
-COPY build.rs ./
-COPY migrations ./migrations
-COPY src ./src
+COPY crates /build/crates
+COPY backend/Cargo.toml backend/Cargo.lock ./
+COPY backend/build.rs ./
+COPY backend/migrations ./migrations
+COPY backend/src ./src
 
 RUN cargo build --locked --release --bins \
     && PDF_INSPECTOR_SOURCE="$(find /usr/local/cargo/registry/src -mindepth 2 -maxdepth 2 -type d -name 'pdf-inspector-1.15.0' -print -quit)" \
@@ -44,8 +50,8 @@ RUN install -d -o 10001 -g 10001 -m 0700 /data
 # advertises the 18 media types this image can actually convert instead of the
 # 24 the contract knows about, and an image posted here is refused with
 # `source_format_unavailable` rather than accepted and failed.
-COPY --from=builder /build/target/release/tool-kit-converter /usr/local/bin/tool-kit-converter
-COPY --from=builder /build/target/release/tool-kit-pdf-worker /usr/local/bin/tool-kit-pdf-worker
+COPY --from=builder /build/backend/target/release/tool-kit-converter /usr/local/bin/tool-kit-converter
+COPY --from=builder /build/backend/target/release/tool-kit-pdf-worker /usr/local/bin/tool-kit-pdf-worker
 COPY --from=builder /build/pdf-inspector-runtime/bcmaps /opt/pdf-inspector/bcmaps
 COPY --from=builder /build/pdf-inspector-runtime/licenses /usr/share/licenses/pdf-inspector
 

@@ -3,7 +3,11 @@ name: tool-kit-converter
 services:
   converter:
     build:
-      context: .
+      # The repo root, not backend/: the Dockerfile needs crates/worker-protocol
+      # too. Resolved against this file, so `-f backend/compose.yaml` from any
+      # directory still lands on it.
+      context: ..
+      dockerfile: backend/Dockerfile
     image: tool-kit-converter:dev
     restart: unless-stopped
     init: true

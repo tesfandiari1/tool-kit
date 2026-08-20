@@ -41,6 +41,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
+      - run: cargo clippy --locked --manifest-path crates/worker-protocol/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path crates/worker-protocol/Cargo.toml
       - run: cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path backend/Cargo.toml
       - uses: astral-sh/setup-uv@v10
@@ -79,3 +81,4 @@ jobs:
           tool: cargo-deny@0.20.2
       - run: cargo deny --manifest-path backend/Cargo.toml check
       - run: cargo deny --manifest-path src-tauri/Cargo.toml check
+      - run: cargo deny --manifest-path crates/worker-protocol/Cargo.toml check

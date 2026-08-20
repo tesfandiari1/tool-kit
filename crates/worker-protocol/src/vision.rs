@@ -1,10 +1,10 @@
 //! The Swift Vision worker's report contract.
 //!
-//! Deliberately separate from [`crate::worker_protocol`]: the two workers share
-//! conventions only (source bytes on stdin, the staging directory as argv[1], a
-//! report file written into it, a `--version` handshake, exit 0 or 70). A
-//! Vision report carries no PDF inspection and its rejection codes are its own,
-//! so one shared type would describe neither.
+//! Deliberately separate from [`crate::pdf`]: the two workers share conventions
+//! only (source bytes on stdin, the staging directory as argv[1], a report file
+//! written into it, a `--version` handshake, exit 0 or 70). A Vision report
+//! carries no PDF inspection and its rejection codes are its own, so one shared
+//! type would describe neither.
 //!
 //! The Swift side is `backend/vision-worker/main.swift`. Keep the two in sync.
 
@@ -21,9 +21,9 @@ pub const VISION_MARKDOWN_FILE: &str = "result.md";
 pub const VISION_WORKER_IDENTITY_PREFIX: &str = "tool-kit-vision-worker protocol=1 apple-vision=";
 
 /// The source-binding names are the shared worker ones: identical meaning,
-/// identical parent-side values. See `worker_protocol.rs`, which declares them
-/// for the PDF worker. They are repeated rather than imported so this module
-/// stays free of that one, which is the whole point of a per-engine protocol.
+/// identical parent-side values. See [`crate::pdf`], which declares them for
+/// the PDF worker. They are repeated rather than imported so this module stays
+/// free of that one, which is the whole point of a per-engine protocol.
 pub const VISION_WORKER_EXPECTED_SOURCE_BYTES_ENV: &str = "TOOLKIT_WORKER_EXPECTED_SOURCE_BYTES";
 pub const VISION_WORKER_EXPECTED_SOURCE_SHA256_ENV: &str = "TOOLKIT_WORKER_EXPECTED_SOURCE_SHA256";
 pub const VISION_WORKER_MAX_OUTPUT_BYTES_ENV: &str = "TOOLKIT_WORKER_MAX_OUTPUT_BYTES";

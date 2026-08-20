@@ -29,6 +29,10 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 BACKEND_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+# The image builds from the repo root: backend/Cargo.toml has a path
+# dependency on ../crates/worker-protocol, which no backend-rooted context can
+# reach.
+REPO_ROOT="$(cd -- "${BACKEND_DIR}/.." && pwd -P)"
 
 # A developer's exported shell or a gitignored backend/.env must not bend the
 # run. Compose interpolation reads the environment, so clear the names it uses.
@@ -365,7 +369,7 @@ verify_bundle() {
   # The build context is the working tree, not the commit. Say so, or evidence
   # taken over a dirty tree reads as if it covered the commit it names.
   printf -- '- tree: `%s`\n' \
-    "$(test -n "$(git -C "$BACKEND_DIR" status --porcelain -- "$BACKEND_DIR" 2>/dev/null)" \
+    "$(test -n "$(git -C "$BACKEND_DIR" status --porcelain -- "$BACKEND_DIR" "${REPO_ROOT}/crates" 2>/dev/null)" \
        && echo 'dirty (image built from uncommitted working tree)' || echo clean)"
   printf -- '- docker: `%s`\n' "$(docker version --format '{{.Server.Version}}')"
   printf -- '- compose: `%s`\n' "$(docker compose version --short)"
@@ -381,7 +385,8 @@ if [ "$BUILD" = "no" ]; then
   note "reusing the existing ${IMAGE}"
 elif [ -n "${TOOLKIT_SMOKE_BUILDER:-}" ]; then
   note "building through capped builder ${TOOLKIT_SMOKE_BUILDER}"
-  docker buildx build --builder "${TOOLKIT_SMOKE_BUILDER}" --load -t "$IMAGE" "$BACKEND_DIR"
+  docker buildx build --builder "${TOOLKIT_SMOKE_BUILDER}" --load -t "$IMAGE" \
+    -f "${BACKEND_DIR}/Dockerfile" "$REPO_ROOT"
 else
   compose "${SMOKE[@]}" build
 fi

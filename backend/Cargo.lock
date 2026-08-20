@@ -2246,11 +2246,19 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "tool-kit-worker-protocol",
  "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "tool-kit-worker-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
