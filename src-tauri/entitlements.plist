@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Three keys, and all three exist to reach the data protection keychain.
+
+  keychain-access-groups is a restricted entitlement: codesign only honours it
+  when an embedded provisioning profile authorises the claim, which is why
+  Contents/embedded.provisionprofile ships beside this. Without it the app falls
+  back to the legacy file-based keychain, where access is an ACL bound to the
+  designated requirement and every rebuild re-prompts for every key.
+
+  Add nothing here to make a build error go away. allow-jit,
+  allow-unsigned-executable-memory and get-task-allow all weaken the hardened
+  runtime, and the last one blocks notarization outright.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.application-identifier</key>
+  <string>92MA44797J.dev.esfandiari.toolkit</string>
+  <key>com.apple.developer.team-identifier</key>
+  <string>92MA44797J</string>
+  <key>keychain-access-groups</key>
+  <array>
+    <string>92MA44797J.dev.esfandiari.toolkit</string>
+  </array>
+</dict>
+</plist>

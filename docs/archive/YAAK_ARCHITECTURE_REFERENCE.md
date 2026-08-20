@@ -154,7 +154,7 @@ Their web README "slice 2" is the TrueNAS send path in prose: the client posts a
 | [`crates/yaak-crypto/src/manager.rs`](https://github.com/mountain-loop/yaak/blob/main/crates/yaak-crypto/src/manager.rs) | Workspace keys wrapped by the master key. Comment on `get_master_key`: hold the lock for the whole call so concurrent access does not prompt Keychain twice. |
 | [`crates/yaak-commands/src/encryption.rs`](https://github.com/mountain-loop/yaak/blob/main/crates/yaak-commands/src/encryption.rs) | Host-generic commands. Thin wrappers. |
 
-**Do not steal.** Human-exportable workspace keys (`YKM_…`) unless we later encrypt collections on disk. Tool-Kit keys are already Keychain accounts `datalab` / `revai` (service `ai.uniwise.toolkit`). M6 adds the conversion-box token the same way. `keyring` stays 3.x with `apple-native`.
+**Do not steal.** Human-exportable workspace keys (`YKM_…`) unless we later encrypt collections on disk. Tool-Kit keys are already Keychain accounts `datalab` / `revai` (service `dev.esfandiari.toolkit`). M6 adds the conversion-box token the same way. They live in the data protection keychain via `security-framework`.
 
 ### 7. Capabilities as a honest host report
 

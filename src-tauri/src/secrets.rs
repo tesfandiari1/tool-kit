@@ -1,21 +1,43 @@
-//! API keys stored in the OS keychain (macOS Keychain via the `keyring` crate),
-//! so secrets never live in the webview or a plaintext file.
+//! API keys in the macOS **data protection** keychain, so secrets never reach
+//! the webview or a plaintext file.
 //!
-//! **Every read is memoised for the life of the process.** macOS authorises a
-//! keychain item per *read*, not per launch, so an uncached `get_key` turns one
-//! run over 200 files into 200 dialogs, and the three status reads at startup
-//! into six as soon as React's StrictMode mounts the app twice. Memoised, the
-//! ceiling is one prompt per account per launch.
+//! macOS has two keychains and the difference is the whole point of this
+//! module. The legacy file-based store grants access through a per-item ACL
+//! bound to the reader's designated requirement, so any change to the app's
+//! signature voids every "Always Allow" and the dialogs come back. The data
+//! protection store has no ACLs at all: access is the `keychain-access-groups`
+//! entitlement, matched on team ID, so no dialog exists in that path.
 //!
-//! The prompts themselves come from code identity, not from this module: see
-//! `scripts/dev-run.sh`, which gives the dev binary the same signature the
-//! installed app has so the keychain still recognises it after a rebuild.
+//! That entitlement is restricted and is only honoured when an embedded
+//! provisioning profile authorises it. A bundled `.app` carries one at
+//! `Contents/embedded.provisionprofile`; a bare `cargo run` binary has nowhere
+//! to put it. So the dev loop falls back to the legacy store and keeps its own
+//! separate copy of every key. Use `pnpm tauri build --debug` to exercise the
+//! real path.
+//!
+//! Reads stay memoised for the life of the process. The old reason was prompt
+//! count, which no longer applies: the reason now is latency, because a
+//! 200-file run reads the same key once per file and each read is a round trip
+//! to `securityd`.
 
-use keyring::Entry;
+use security_framework::base::Error as SecError;
+use security_framework::os::macos::keychain::SecKeychain;
+use security_framework::os::macos::passwords::find_generic_password;
+use security_framework::passwords::{
+    delete_generic_password_options, generic_password, set_generic_password_options,
+};
+use security_framework::passwords_options::PasswordOptions;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-const SERVICE: &str = "ai.uniwise.toolkit";
+const SERVICE: &str = "dev.esfandiari.toolkit";
+const ACCESS_GROUP: &str = "92MA44797J.dev.esfandiari.toolkit";
+
+/// `errSecMissingEntitlement`. `security-framework-sys` does not name it.
+const MISSING_ENTITLEMENT: i32 = -34018;
+
+/// An account no key is ever stored under, so the probe reads nothing real.
+const PROBE_ACCOUNT: &str = "entitlement-probe";
 
 type Cache = HashMap<String, Option<String>>;
 
@@ -30,15 +52,15 @@ fn cache() -> MutexGuard<'static, Cache> {
 /// Read `name` through the cache, calling `read` only on a miss.
 ///
 /// The lock spans `read` on purpose: four jobs starting together would
-/// otherwise race into four separate dialogs for the same account.
+/// otherwise make four separate round trips for the same account.
 fn memoized(name: &str, read: impl FnOnce() -> Option<String>) -> Option<String> {
     let mut cache = cache();
     if let Some(hit) = cache.get(name) {
         return hit.clone();
     }
     let value = read();
-    // A denied prompt is memoised as `None` too. "Deny" answered once should not
-    // come back for every remaining file in the run; the app restarts to re-ask.
+    // A missing key is memoised as `None` too, so a run over 200 files does not
+    // re-ask for a key that is not there. Settings drops the memo on write.
     cache.insert(name.to_owned(), value.clone());
     value
 }
@@ -47,18 +69,103 @@ fn forget(name: &str) {
     cache().remove(name);
 }
 
-fn entry(name: &str) -> Result<Entry, String> {
-    Entry::new(SERVICE, name).map_err(|e| e.to_string())
+/// Which of the two keychains this process can reach.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Store {
+    Protected,
+    Legacy,
+}
+
+/// Only a missing entitlement rules the data protection keychain out. Every
+/// other outcome, `errSecItemNotFound` included, proves it answered us.
+fn classify(probe: Result<Vec<u8>, SecError>) -> Store {
+    match probe {
+        Err(error) if error.code() == MISSING_ENTITLEMENT => Store::Legacy,
+        _ => Store::Protected,
+    }
+}
+
+fn store() -> Store {
+    static STORE: OnceLock<Store> = OnceLock::new();
+    *STORE.get_or_init(|| {
+        let selected = classify(generic_password(protected(PROBE_ACCOUNT)));
+        if selected == Store::Legacy {
+            // Expected under `cargo run`, which cannot carry the profile. In a
+            // release bundle it means the entitlement or the profile is missing
+            // and the keychain dialogs are about to come back.
+            eprintln!(
+                "[tool-kit] no keychain-access-groups entitlement, falling back \
+                 to the legacy keychain"
+            );
+        }
+        selected
+    })
+}
+
+/// A data protection query for one account.
+fn protected(account: &str) -> PasswordOptions {
+    let mut options = PasswordOptions::new_generic_password(SERVICE, account);
+    options.use_protected_keychain();
+    options.set_access_group(ACCESS_GROUP);
+    // These are machine-local credentials. Roaming them through iCloud Keychain
+    // would copy them to every Mac signed into the account.
+    options.set_access_synchronized(Some(false));
+    options
+}
+
+/// Keychain Access lists items by label, and the service name alone reads as a
+/// bare bundle id there.
+fn label(account: &str) -> String {
+    format!("Tool-Kit ({account})")
+}
+
+fn read(account: &str) -> Option<String> {
+    let bytes = match store() {
+        Store::Protected => generic_password(protected(account)).ok()?,
+        Store::Legacy => {
+            let keychain = SecKeychain::default().ok()?;
+            let (password, _) = find_generic_password(Some(&[keychain]), SERVICE, account).ok()?;
+            password.to_vec()
+        }
+    };
+    String::from_utf8(bytes).ok()
+}
+
+fn write(account: &str, value: &str) -> Result<(), String> {
+    match store() {
+        Store::Protected => {
+            let mut options = protected(account);
+            options.set_label(&label(account));
+            set_generic_password_options(value.as_bytes(), options).map_err(|e| e.to_string())
+        }
+        Store::Legacy => SecKeychain::default()
+            .and_then(|keychain| keychain.set_generic_password(SERVICE, account, value.as_bytes()))
+            .map_err(|e| e.to_string()),
+    }
+}
+
+fn erase(account: &str) {
+    match store() {
+        Store::Protected => {
+            let _ = delete_generic_password_options(protected(account));
+        }
+        Store::Legacy => {
+            if let Ok(keychain) = SecKeychain::default() {
+                if let Ok((_, item)) = find_generic_password(Some(&[keychain]), SERVICE, account) {
+                    item.delete();
+                }
+            }
+        }
+    }
 }
 
 /// Store (or, when `value` is empty, clear) the key for a provider.
 pub fn set_key(name: &str, value: &str) -> Result<(), String> {
-    let entry = entry(name)?;
     let result = if value.is_empty() {
-        let _ = entry.delete_credential();
+        erase(name);
         Ok(())
     } else {
-        entry.set_password(value).map_err(|e| e.to_string())
+        write(name, value)
     };
     // Drop the memo whatever happened. A failed write must not leave the old
     // value cached as though it were still what the keychain holds, and the
@@ -68,9 +175,7 @@ pub fn set_key(name: &str, value: &str) -> Result<(), String> {
 }
 
 pub fn get_key(name: &str) -> Option<String> {
-    memoized(name, || {
-        entry(name).ok().and_then(|e| e.get_password().ok())
-    })
+    memoized(name, || read(name))
 }
 
 pub fn has_key(name: &str) -> bool {
@@ -96,11 +201,11 @@ mod tests {
         for _ in 0..10 {
             assert_eq!(memoized("test-read-once", read), Some("secret".into()));
         }
-        assert_eq!(reads.load(Ordering::SeqCst), 1, "one prompt, not eleven");
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "one round trip, not eleven");
     }
 
     #[test]
-    fn a_missing_or_denied_key_is_memoised_too() {
+    fn a_missing_key_is_memoised_too() {
         let reads = AtomicUsize::new(0);
         let read = || {
             reads.fetch_add(1, Ordering::SeqCst);
@@ -129,5 +234,45 @@ mod tests {
             memoized("test-invalidate", || Some("new".into())),
             Some("new".into())
         );
+    }
+
+    #[test]
+    fn only_a_missing_entitlement_falls_back_to_the_legacy_keychain() {
+        assert_eq!(
+            classify(Err(SecError::from_code(MISSING_ENTITLEMENT))),
+            Store::Legacy
+        );
+        // errSecItemNotFound. The probe account holds nothing, which is the
+        // expected answer and still proves the entitlement is in force.
+        assert_eq!(classify(Err(SecError::from_code(-25300))), Store::Protected);
+        assert_eq!(classify(Ok(b"key".to_vec())), Store::Protected);
+    }
+
+    /// Talks to the real keychain, so it is ignored by default. Run it after
+    /// changing the store selection:
+    ///
+    ///   cargo test --lib secrets::tests::an_unsigned -- --ignored --nocapture
+    ///
+    /// A test binary is ad-hoc signed and carries no profile, so this asserts
+    /// the exact condition the dev-loop fallback depends on. If it ever stops
+    /// reporting -34018, the fallback is dead code and dev reads are silently
+    /// hitting a different store than they used to.
+    #[test]
+    #[ignore]
+    fn an_unsigned_binary_is_refused_the_data_protection_keychain() {
+        let error = generic_password(protected(PROBE_ACCOUNT))
+            .expect_err("an unentitled binary must not read the protected store");
+        println!("code {}: {:?}", error.code(), error.message());
+        assert_eq!(error.code(), MISSING_ENTITLEMENT);
+        assert_eq!(classify(Err(error)), Store::Legacy);
+    }
+
+    #[test]
+    fn the_access_group_is_prefixed_with_the_team_id() {
+        // codesign rejects a group that does not start with the team that signs
+        // the app, and the failure surfaces as a runtime -34018, not a build
+        // error, so assert the shape here.
+        assert!(ACCESS_GROUP.starts_with("92MA44797J."));
+        assert!(ACCESS_GROUP.ends_with(SERVICE));
     }
 }

@@ -2,16 +2,20 @@
 # Cargo `runner` for local macOS builds: sign the freshly built binary with the
 # app's real identity, then exec it.
 #
-# The keychain authorises a *code identity*, not a path. `cargo run` leaves an
-# ad-hoc, linker-signed binary whose designated requirement is its own cdhash,
-# so every rebuild arrives as a new app and every key read prompts again. No
-# amount of "Always Allow" survives that.
+# This only matters for the *legacy* keychain, which is the one the dev loop is
+# stuck with: `keychain-access-groups` is a restricted entitlement and needs an
+# embedded provisioning profile, which a bare Mach-O has nowhere to put. So dev
+# reads fall back to the legacy store, and that store authorises a *code
+# identity*, not a path. `cargo run` leaves an ad-hoc, linker-signed binary
+# whose designated requirement is its own cdhash, so every rebuild arrives as a
+# new app and every key read prompts again. No amount of "Always Allow" survives
+# that. The shipped .app carries the profile and never reaches this code path.
 #
 # Signing with the same Developer ID and the same identifier as the shipped app
 # gives the dev binary a designated requirement byte-identical to the installed
 # one:
 #
-#   identifier "ai.uniwise.toolkit" and anchor apple generic and … subject.OU = <team>
+#   identifier "dev.esfandiari.toolkit" and anchor apple generic and … subject.OU = <team>
 #
 # That requirement is stable across rebuilds, so an "Always Allow" sticks, and
 # the items the installed app already created are already trusted for it.

@@ -26,7 +26,7 @@ rewrite code, commands, identifiers, or quotations to match prose rules.
 | Backend Datalab fallback | Not built. Phase 2, now unblocked |
 | Phase 1 | **Complete 2026-08-19.** All four gates met |
 | Desktop version | **1.0.0** (`package.json`, `src-tauri/Cargo.toml`, `tauri.conf.json`) |
-| 1.0 bundle | Signed, verified by `src-tauri/scripts/verify-release.sh`. **Not notarized** |
+| 1.0 bundle | Signed, **notarized and stapled** (app and DMG), verified by `pnpm verify:release --notarized`. Keychain entitlement is parked until the provisioning profile lands, so that one section fails by design |
 | Latest container smoke | `20260819T161851Z`, image `sha256:4a0cbdd0…` |
 
 The sprint that closed Phase 1, newest first. This is a snapshot, not a
@@ -278,7 +278,7 @@ never exercises restart recovery.
 Read the ledger across a D.5 restart with:
 
 ```bash
-sqlite3 ~/Library/Application\ Support/ai.uniwise.toolkit/history.db \
+sqlite3 ~/Library/Application\ Support/dev.esfandiari.toolkit/history.db \
   'select idempotency_key, fallback_provider, fallback_request_id
      from inflight_conversions;'
 ```
@@ -1162,12 +1162,12 @@ hosts must coordinate durable work.
 
 `CLAUDE.md` stays live and owns these in full. The two that bite backend work:
 
-- **Keychain prompts in dev are fixed by code identity, not by fewer reads.**
-  `src-tauri/.cargo/config.toml` sends `cargo run` through
-  `scripts/dev-run.sh`, which signs the binary with the Developer ID and
-  `--identifier ai.uniwise.toolkit`, so dev inherits the installed app's
-  already-trusted items. Let the app create the items. Do not seed them with the
-  `security` CLI.
+- **macOS has two keychains and the app targets the one without dialogs.**
+  Release builds reach the data protection keychain through the
+  `keychain-access-groups` entitlement, which needs the embedded provisioning
+  profile to authorise it. A bare `cargo run` binary cannot carry that profile,
+  so dev falls back to the legacy keychain with its own separate copy of every
+  key. Let the app create the items. Do not seed them with the `security` CLI.
 - **Custom Tauri commands need no capability entries, but core commands do.**
   `core:window:default` does not include `hide` or `destroy`. A missing entry
   fails silently at runtime.
@@ -1205,7 +1205,7 @@ Deliberately not latest, with the reason each pin exists:
 | Pin | Reason |
 |---|---|
 | TypeScript **6.0.3** | 7.0 has no compiler API and `typescript-eslint` crashes. `tsconfig.json` must not set `baseUrl` |
-| `keyring` **3.x** with `apple-native` | 4.x dropped that feature and needs a `keyring-core` rewrite |
+| `security-framework` with the **`OSX_10_15`** feature | Not a default feature, and it gates `use_protected_keychain()`. Without it `secrets.rs` silently targets the legacy keychain |
 | `pdf-inspector` **`=1.15.0`** | The Dockerfile copies that exact crate path |
 | `anydoc` **`=0.1.9`** | The verified and fixture-proven revision |
 | `libc` under 1.0 | 1.0 is still alpha |
@@ -1247,7 +1247,7 @@ CI (`.github/workflows/ci.yml`) runs frontend, backend, desktop, and
 dependencies as four jobs on push and pull request. `dependencies` is separate
 because the RustSec database moves without us, so it can go red on a commit
 that changed nothing, and that must not read as a broken build. Desktop clippy and tests use `macos-latest`
-because of `macos-private-api` and `keyring`. **CI does not run the container
+because of `macos-private-api` and `security-framework`. **CI does not run the container
 smoke.** It is a local release gate, so re-run it by hand before closing any
 milestone that touches persistence, the worker, the Dockerfile, or Compose.
 Evidence lands in `backend/target/container-smoke/<utc-timestamp>/evidence.md`,

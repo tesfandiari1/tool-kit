@@ -31,7 +31,9 @@ reqwest = { version = "0.13", features = ["json", "multipart", "stream"] }
 # lockfile through reqwest.
 bytes = "1"
 tokio = { version = "1", features = ["time", "fs", "io-util", "sync"] }
-keyring = { version = "3", features = ["apple-native"] }
+# Direct, for the data protection keychain in secrets.rs. OSX_10_15 is not a
+# default feature and gates PasswordOptions::use_protected_keychain.
+security-framework = { version = "3", features = ["OSX_10_15"] }
 mime_guess = "2"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }

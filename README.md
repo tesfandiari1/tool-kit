@@ -38,7 +38,7 @@ cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings
 See [`docs/STATUS.md`](docs/STATUS.md) for session state and
 [`CLAUDE.md`](CLAUDE.md) for desktop architecture, live API smokes, and
 signing details. Weekly Dependabot keeps npm, both Cargo crates, and Actions
-current; do not jump to TypeScript 7 or `keyring` 4.
+current; do not jump to TypeScript 7.
 
 ## Test
 
@@ -67,23 +67,47 @@ and pull request.
 
 ## Release
 
-macOS `app` + `dmg` only. Sign with a Developer ID; notarize the DMG if you
-will distribute it.
+macOS `app` + `dmg` only, Apple Silicon only, macOS 26 or later. Sign with a
+Developer ID, and notarize if anyone else will download it.
 
 ```bash
+# sign only; fine for a local install, locally-built apps are not quarantined
 APPLE_SIGNING_IDENTITY="Developer ID Application: …" pnpm tauri build
-src-tauri/scripts/verify-release.sh
+
+# sign + notarize: additionally export APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
+pnpm verify:release --notarized
 ```
 
 Artifacts land in `src-tauri/target/release/bundle/`. Signing credentials live
 in `.env.local` (gitignored).
 
+**`pnpm tauri build` notarizes the `.app` and not the DMG.** It staples the app
+and merely signs the DMG, so a *downloaded* DMG is still refused by Gatekeeper
+while a local install works. Finish it by hand:
+
+```bash
+xcrun notarytool submit <dmg> --apple-id … --password … --team-id … --wait
+xcrun stapler staple <dmg>
+```
+
 Do not skip the verify step. A build with no signing identity still succeeds
-and still produces a working `.app`, but it is ad-hoc signed, and the macOS
-keychain then treats every rebuild as a new app and re-prompts for all three
-API keys on every launch. `verify-release.sh` fails on exactly that, plus the
-Info.plist keys and the bundled font licence. Add `--notarized` after a
-notarized build to also check the stapled ticket and Gatekeeper.
+and still produces a working `.app`, but it is ad-hoc signed: Gatekeeper on any
+other Mac rejects it and notarization will not touch it. `verify-release.sh`
+fails on exactly that, plus the team clause in the designated requirement, the
+Info.plist keys, the bundled font licence, and the keychain entitlement. Add
+`--notarized` to also check both stapled tickets and Gatekeeper.
+
+### Keychain
+
+API keys live in the macOS **data protection** keychain, which has no access
+dialogs: reads are authorised by the `keychain-access-groups` entitlement and
+matched on team id rather than by a per-item ACL bound to the code signature.
+
+That entitlement is restricted, so it only works when
+`src-tauri/embedded.provisionprofile` is present to authorise it. Without the
+profile the app falls back to the legacy keychain, which still works but ties
+access to the signature. A bare `cargo run` binary can never carry the profile,
+so the dev loop always uses the fallback and keeps its own copy of each key.
 
 ## Conversion backend
 

@@ -96,12 +96,65 @@ APPLE_SIGNING_IDENTITY="Developer ID Application: … (92MA44797J)" pnpm tauri b
 
 Artifacts: `src-tauri/target/release/bundle/{macos/Tool-Kit.app, dmg/*.dmg}`. The Developer ID cert needs Apple's **G2 intermediate** in the keychain (`certs.apple.com/devidg2.der`) or the signing identity reads as untrusted/invalid. Signing + Apple creds live in `.env.local` (gitignored).
 
+Two files make the keychain work and both are inputs to the signature:
+`src-tauri/entitlements.plist` (wired through `bundle.macOS.entitlements`) and
+`src-tauri/embedded.provisionprofile` (through `bundle.macOS.files`, which the
+bundler copies into `Contents/` *before* it signs, so no post-build re-sign is
+needed). The profile comes from the portal: an explicit App ID for
+`dev.esfandiari.toolkit` with **Keychain Sharing** enabled, then Profiles → +
+→ **Developer ID**. It is committed, because it ships inside every copy of the
+app and is public by construction.
+
+**Both are parked right now.** `bundle.macOS` carries only
+`minimumSystemVersion`, because `files` hard-errors when the profile is absent
+and that would block every release build until the portal step happens. The app
+therefore signs without the entitlement and `secrets.rs` falls back to the
+legacy keychain. `verify-release.sh` fails at its **Keychain entitlement**
+section on such a build, which is accurate, not a bug. Restore both keys the
+moment `src-tauri/embedded.provisionprofile` exists:
+
+```json
+"macOS": {
+  "minimumSystemVersion": "26.0",
+  "entitlements": "entitlements.plist",
+  "files": { "embedded.provisionprofile": "embedded.provisionprofile" }
+}
+```
+
 **Always check the bundle afterwards.** `pnpm tauri build` succeeds without a
 signing identity and produces a working `.app`, so nothing fails at build time:
 
 ```bash
 src-tauri/scripts/verify-release.sh              # after a sign-only build
 src-tauri/scripts/verify-release.sh --notarized  # adds stapler + Gatekeeper
+```
+
+**`pnpm tauri build` notarizes the `.app` and not the DMG.** It staples the app,
+then bundles it and merely *signs* the DMG, so a downloaded DMG is still
+`rejected / source=Unnotarized Developer ID` and macOS refuses to open it. The
+app inside is fine, which is what makes this easy to miss: local installs work
+and only downloads fail. Finish the DMG by hand:
+
+```bash
+xcrun notarytool submit <dmg> --apple-id … --password … --team-id … --wait
+xcrun stapler staple <dmg>
+```
+
+Prove it the way a user gets it, since an un-quarantined file is not a test:
+
+```bash
+xattr -w com.apple.quarantine "0083;$(printf %x $(date +%s));Safari;" copy.dmg
+spctl -a -t open --context context:primary-signature -vv copy.dmg
+```
+
+**A failed DMG step leaves a mounted image that breaks every later build.**
+`bundle_dmg.sh` attaches a read-write `rw.<pid>.*.dmg` under `bundle/macos/`
+before laying out the window. If it dies there the volume stays attached, and
+the next build fails with nothing but `failed to run bundle_dmg.sh`. Clear it:
+
+```bash
+hdiutil detach /Volumes/dmg.* -force
+rm -f src-tauri/target/release/bundle/macos/rw.*.dmg
 ```
 
 It checks the designated requirement first, then `codesign --verify`, the four
@@ -125,7 +178,7 @@ The requirement check is the one that earns the script: see the Gotcha below.
 - **`history.rs`**: persistent run history in **SQLite** (`rusqlite`, bundled), one `history.db` beside `settings.json`. Owns *all* SQL. Nothing else opens the database. Two jobs: remember where every result went, and answer "already done?" on every input scan through an indexed lookup by `source_path`, which is why it is a database and not a log file. **A storage error never fails a job**: `with_db` swallows everything, and a database that will not open degrades to "no history". A result is reusable only when the source path, job, *and* output format match, the recorded output still exists, and the source mtime is unchanged. The lookup is path-keyed rather than content-hashed, because hashing means reading every byte of every file on every scan.
 
   **One rule governs a run: never do the same work twice.** A reusable result already in the chosen output folder means nothing happens; one in a *different* folder is **copied** (`jobs::reuse_result`), because the source is unchanged and the format matches, so the bytes a re-run would buy are bytes already on disk; anything else goes to the provider. That is why `Scan` reports `already_here_*` and `reusable_*` separately: the first is "nothing to do", the second is free work the Run button must stay enabled for, and it relabels itself "Copy N results" when that is all that is left. Retention is capped at 5,000 rows; `PRAGMA user_version` makes a new column a migration rather than a crash.
-- **`secrets.rs`**: API keys in the **macOS Keychain** via `keyring` (service `ai.uniwise.toolkit`, accounts `datalab`/`revai`). Keys never reach the webview or disk.
+- **`secrets.rs`**: API keys in the **macOS data protection keychain** via `security-framework` (service `dev.esfandiari.toolkit`, access group `92MA44797J.dev.esfandiari.toolkit`, accounts `datalab`/`revai`/`backend`). Keys never reach the webview or disk. Reads are memoised per process for latency, not for prompt count: see the two-keychain Gotcha for why there are no prompts left to count.
 - **`settings.rs`**: non-secret config (input paths, output dir, job, Datalab format, optional pipeline id, high-accuracy toggle) persisted as JSON in the app config dir. **`#[serde(default)]` on the struct is load-bearing**: without it, adding a field makes every existing `settings.json` fail to parse, and `load()` swallows the error and silently resets the user's output folder and job. `save()` writes to a temp file and renames for the same reason: `load()` answers a torn or truncated file with `unwrap_or_default()`, so a crash mid-write would wipe the user's config.
 - **`lib.rs`**: the Tauri command surface + `setup()` (menu-bar tray, ⌥⌘V global shortcut). `run_pipeline` expands the selected files/folders into a concrete file list (`collect_input_files`), clears the queue, and spawns one job per match. Commands return `Result<T, String>`.
 
@@ -166,8 +219,10 @@ Type is three families with non-overlapping jobs: **Instrument Serif** for displ
 
 ## Gotchas
 
-- **An unsigned release build re-prompts for every key, on every launch, forever.** `pnpm tauri build` with no `APPLE_SIGNING_IDENTITY` still produces a working `.app`, ad-hoc signed, whose designated requirement is `cdhash H"…"`: a literal hash of that one binary. The keychain authorises against that requirement, so the next build is a different app and every "Always Allow" is void. A Developer ID build gets `identifier "ai.uniwise.toolkit" and anchor apple generic and … subject.OU = "92MA44797J"`, which is stable across builds *and versions*, so trust survives an upgrade. This is the same failure the dev-run wrapper below solves for `cargo run`, arriving through the other door, and nothing on screen explains it. `src-tauri/scripts/verify-release.sh` fails on it by name.
-- **Keychain prompts in dev are fixed by code identity, not by fewer reads.** macOS authorises a keychain item against the reader's *designated requirement*, and an ad-hoc `cargo run` binary's requirement is its own cdhash, so every rebuild used to arrive as a new app and re-prompt. `src-tauri/.cargo/config.toml` sends `cargo run` through `scripts/dev-run.sh`, which signs the binary with the Developer ID and `--identifier ai.uniwise.toolkit`: the same requirement the installed app has, so dev inherits its already-trusted items and an "Always Allow" survives rebuilds. Every failure path still runs the binary, as cargo left it, and says why on stderr: a dev loop that died over an expired certificate would be worse than the prompts. `secrets.rs` memoises each read for the life of the process, which is what keeps a 200-file run from asking 200 times. Still let the app create the items: don't seed them with the `security` CLI.
+- **An unsigned release build cannot ship and cannot reach the keychain.** `pnpm tauri build` with no `APPLE_SIGNING_IDENTITY` still produces a working `.app`, ad-hoc signed, whose designated requirement is `cdhash H"…"`: a literal hash of that one binary. Gatekeeper on any other Mac rejects it, notarization will not touch it, and `codesign` will not honour the restricted `keychain-access-groups` entitlement, so the app silently drops to the legacy keychain. A Developer ID build gets `identifier "dev.esfandiari.toolkit" and anchor apple generic and … subject.OU = "92MA44797J"`, stable across builds *and versions*. `src-tauri/scripts/verify-release.sh` fails on every part of this by name.
+- **macOS has two keychains and only one of them has no dialogs.** The legacy file-based store grants access through a per-item ACL bound to the reader's *designated requirement*, so any signature change voids every "Always Allow" and the prompts return. The data protection store has no ACLs at all: access is the `keychain-access-groups` entitlement, matched on **team id**, so no dialog exists in that path. `secrets.rs` targets the second through `security-framework`'s `use_protected_keychain()`.
+  That entitlement is **restricted**, so `codesign` honours it only when `Contents/embedded.provisionprofile` authorises the claim. A bundled `.app` carries one. A bare `cargo run` Mach-O has nowhere to put it, so the dev loop gets `errSecMissingEntitlement` (-34018), falls back to the legacy keychain, and keeps its **own separate copy of every key**. Exercise the real path with `pnpm tauri build --debug`. `scripts/dev-run.sh` still signs the dev binary, now only so those legacy items stay trusted across rebuilds. Still let the app create the items: don't seed them with the `security` CLI.
+- **The provisioning profile is pinned to the signing certificate**, and macOS evaluates it at install and at every launch. `src-tauri/embedded.provisionprofile` lives ~18 years, but the Developer ID cert inside it expires **2031-06-18**. Rotating the cert means regenerating the profile from the portal, or the app stops launching.
 - **Capabilities.** Custom Tauri commands need no capability entries, but **core commands do**: `core:window:default` does *not* include `hide`/`destroy`, so the close-confirm handler needs them listed explicitly in `capabilities/default.json`. A missing one fails silently at runtime. The window-phase and zoom work added `set-max-size`, `set-resizable`, `current-monitor`, and `webview:set-webview-zoom` for the same reason.
 - **Window geometry lives in `src/shell/geometry.ts` and nowhere else.** `App.tsx`, `useFitWindow.ts`, `useZoom.ts` and `tauri.conf.json` all read those names, so the config that opens the window and the code that resizes it cannot drift apart. `SplitPane`'s defaults repeat `SPLIT` by hand only because nothing under `src/ui` may import from the app. `SPLIT.minStart` is what the run column's widest control needs, and `WORKSPACE.minWidth` is then derived from it: `SPLIT.start`% of the minimum window must clear the floor, or the floor beats the ratio at every width and the seam sits at its minimum forever. Change one and redo the arithmetic on the other.
 - **macOS clamps `setSize` to the min and max in force at that instant**, so the bounds move before the size in both directions. Growing into the workspace: `setResizable(true)` → `setMinSize` → `setMaxSize` → `setSize`. Shrinking back: record the current size → `setMinSize(launcher)` → `clearMaxSize` → `setSize` → `setResizable(false)`. Backwards, the window lands at the other phase's size and stays there, with no error to say so.
@@ -179,7 +234,7 @@ Type is three families with non-overlapping jobs: **Instrument Serif** for displ
 - **Datalab pipeline mode**: a `pl_…` id in Settings switches Convert from `/api/v1/convert` to `/api/v1/pipelines/{id}/run` (run → poll execution → fetch the last step's result).
 - **pnpm 11** gates package build scripts: esbuild is approved via `allowBuilds: { esbuild: true }` in `pnpm-workspace.yaml`.
 - **TypeScript stays on 6.x.** 7.0 has no compiler API; `typescript-eslint` crashes. `tsconfig.json` must not set `baseUrl` (deprecated in 6).
-- **`keyring` stays on 3.x** with `apple-native`. 4.x dropped that feature and needs a `keyring-core` rewrite.
+- **`security-framework` needs the `OSX_10_15` feature**, which is not a default. It gates `PasswordOptions::use_protected_keychain()`, and without it `secrets.rs` silently targets the legacy keychain.
 - **Do not create a root Cargo workspace.** `src-tauri` and `backend` keep separate lockfiles until a dedicated migration.
 - **Never `git add -A`.** Desktop and backend work share one dirty tree; stage explicit paths. See `docs/archive/BACKEND_BASELINE.md` and `docs/STATUS.md`.
 
