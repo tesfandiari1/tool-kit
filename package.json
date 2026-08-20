@@ -27,7 +27,7 @@
     "verify:contract": "backend/scripts/contract-fuzz.sh",
     "verify:container": "backend/scripts/container-smoke.sh",
     "verify:local-corpus": "backend/scripts/verify-local-corpus.sh",
-    "verify:api-drift": "pnpm generate:api && git diff --exit-code src/app/api/schema.ts",
+    "verify:api-drift": "backend/scripts/verify-api-drift.sh",
     "verify:release": "src-tauri/scripts/verify-release.sh",
     "generate:api": "openapi-typescript backend/openapi/openapi.yaml -o src/app/api/schema.ts",
     "tauri": "tauri"
