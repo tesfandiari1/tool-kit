@@ -130,10 +130,11 @@ impl SqliteRepository {
                 request_fingerprint, profile, status, source_relative_path,
                 source_media_type, source_byte_length, source_sha256,
                 reason_codes_json, warnings_json,
-                origin_request_id, created_at, updated_at
+                origin_request_id, created_at, updated_at,
+                ocr_language_correction, ocr_custom_words
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8, ?9, ?10,
-                '[]', '[]', ?11, ?12, ?12
+                '[]', '[]', ?11, ?12, ?12, ?13, ?14
              )",
         )
         .bind(&conversion_id)
@@ -148,6 +149,8 @@ impl SqliteRepository {
         .bind(&input.source.sha256)
         .bind(&input.origin_request_id)
         .bind(&created_at)
+        .bind(input.ocr_language_correction)
+        .bind(&input.ocr_custom_words)
         .execute(&mut *transaction)
         .await?;
 
@@ -1360,6 +1363,8 @@ async fn load_conversion(
             c.origin_request_id,
             c.created_at AS conversion_created_at,
             c.updated_at AS conversion_updated_at,
+            c.ocr_language_correction,
+            c.ocr_custom_words,
             a.id AS attempt_id,
             a.queue_seq,
             a.attempt_number,
@@ -1547,6 +1552,8 @@ fn decode_conversion(row: &SqliteRow) -> Result<StoredConversion, RepositoryErro
         origin_request_id: row.try_get("origin_request_id")?,
         created_at: row.try_get("conversion_created_at")?,
         updated_at: row.try_get("conversion_updated_at")?,
+        ocr_language_correction: row.try_get("ocr_language_correction")?,
+        ocr_custom_words: row.try_get("ocr_custom_words")?,
     })
 }
 
@@ -1976,6 +1983,48 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+
+        // ...and a media type that only migration 0004 admits, which also
+        // carries the OCR settings 0004 added.
+        let png_id = "aaaaaaaa-3333-4111-8222-333333333333";
+        sqlx::query(
+            "INSERT INTO conversions (
+                id, client_run_id, auth_scope, idempotency_key_hash,
+                request_fingerprint, profile, status, source_relative_path,
+                source_media_type, source_byte_length, source_sha256,
+                reason_codes_json, warnings_json, origin_request_id,
+                created_at, updated_at, ocr_language_correction,
+                ocr_custom_words
+             ) VALUES (
+                ?1, ?1, 'bootstrap', ?2, ?2, 'standard', 'queued', ?3,
+                'image/png', 256, ?2, '[]', '[]', 'request-4',
+                '2026-08-18T00:00:03Z', '2026-08-18T00:00:03Z', 0, 'Uniwise'
+             )",
+        )
+        .bind(png_id)
+        .bind("d".repeat(64))
+        .bind(format!("jobs/{png_id}/source/input"))
+        .execute(&pool)
+        .await
+        .expect("migration 0004 must admit the image media types");
+
+        // The M2 row predates both settings, so the rebuild must have given it
+        // the documented defaults rather than dropping it.
+        let defaults = sqlx::query(
+            "SELECT ocr_language_correction, ocr_custom_words
+             FROM conversions WHERE id = ?1",
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(defaults
+            .try_get::<bool, _>("ocr_language_correction")
+            .unwrap());
+        assert_eq!(
+            defaults.try_get::<String, _>("ocr_custom_words").unwrap(),
+            ""
+        );
 
         // ...and still reject nonsense.
         let bad_id = "cccccccc-3333-4333-8444-555555555555";
@@ -3293,6 +3342,8 @@ mod tests {
                 sha256: "f".repeat(64),
             },
             origin_request_id: Uuid::new_v4().to_string(),
+            ocr_language_correction: true,
+            ocr_custom_words: String::new(),
         }
     }
 

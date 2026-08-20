@@ -270,6 +270,11 @@ pub struct NewConversion {
     pub profile: Profile,
     pub source: NewSource,
     pub origin_request_id: String,
+    /// The OCR settings the request carried. Only the Vision engine reads
+    /// them, and they are stored because the runner claims work from this row
+    /// long after the request is gone.
+    pub ocr_language_correction: bool,
+    pub ocr_custom_words: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -348,4 +353,6 @@ pub struct StoredConversion {
     pub origin_request_id: String,
     pub created_at: String,
     pub updated_at: String,
+    pub ocr_language_correction: bool,
+    pub ocr_custom_words: String,
 }

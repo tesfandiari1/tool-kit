@@ -7,19 +7,12 @@ import type {
 
 /// AnyDoc has no local Format variant for these file types. They are an
 /// intentional permanent Datalab route, even if a future service advertises
-/// their MIME types by mistake.
-const PERMANENT_DIRECT_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "webp",
-  "tiff",
-  "tif",
-  "gif",
-  "bmp",
-  "html",
-  "htm",
-]);
+/// their MIME types by mistake. Images are not on the list: the Vision engine
+/// exists only on macOS 26 and up, so the same build has to route an image
+/// either way depending on what the service it is talking to advertises. This
+/// set must stay identical to `PERMANENT_DIRECT_FORMATS` in `lib.rs`, which
+/// does the authoritative routing at run time.
+const PERMANENT_DIRECT_EXTENSIONS = new Set(["html", "htm"]);
 
 export type ConversionCapabilities =
   | { state: "idle" | "loading" }

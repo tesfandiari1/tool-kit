@@ -183,45 +183,23 @@ export interface components {
             acceptingJobs: boolean;
             /** @constant */
             durability: "persistent";
-            inputFormats: [
-                "application/pdf",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "application/msword",
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                "application/vnd.ms-powerpoint",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "application/vnd.ms-excel",
-                "application/epub+zip",
-                "application/vnd.oasis.opendocument.text",
-                "application/vnd.oasis.opendocument.spreadsheet",
-                "application/vnd.oasis.opendocument.presentation",
-                "application/rtf",
-                "text/csv",
-                "application/vnd.ms-word.document.macroEnabled.12",
-                "application/vnd.ms-excel.sheet.macroEnabled.12",
-                "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
-                "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
-                "application/vnd.ms-powerpoint.slideshow.macroEnabled.12"
-            ];
+            /**
+             * @description What this deployment can convert, not what the contract knows. The image types need the Apple Vision engine, which ships only with macOS 26 and later, so a deployment without it advertises the other 18 and refuses an image upload with 409 `source_format_unavailable`. Read this list rather than assuming the whole enum.
+             *
+             *     Table order, and the image types are the tail, so the short list is the long one's prefix.
+             */
+            inputFormats: ("application/pdf" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/msword" | "application/vnd.openxmlformats-officedocument.presentationml.presentation" | "application/vnd.ms-powerpoint" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" | "application/vnd.ms-excel" | "application/epub+zip" | "application/vnd.oasis.opendocument.text" | "application/vnd.oasis.opendocument.spreadsheet" | "application/vnd.oasis.opendocument.presentation" | "application/rtf" | "text/csv" | "application/vnd.ms-word.document.macroEnabled.12" | "application/vnd.ms-excel.sheet.macroEnabled.12" | "application/vnd.ms-powerpoint.presentation.macroEnabled.12" | "application/vnd.openxmlformats-officedocument.presentationml.slideshow" | "application/vnd.ms-powerpoint.slideshow.macroEnabled.12" | "image/png" | "image/jpeg" | "image/webp" | "image/tiff" | "image/gif" | "image/bmp")[];
             outputFormats: string[];
             profiles: {
                 name: components["schemas"]["ConversionProfile"];
                 available: boolean;
             }[];
-            engines: [
-                {
-                    /** @constant */
-                    name: "pdf-inspector";
-                    /** @constant */
-                    version: "1.15.0";
-                },
-                {
-                    /** @constant */
-                    name: "anydoc";
-                    /** @constant */
-                    version: "0.1.9";
-                }
-            ];
+            /** @description The engines running in this process, pdf-inspector then anydoc. apple-vision is third and present only where it initialized; its version is the host's macOS product version, because Vision ships with the OS and has no version of its own. */
+            engines: {
+                /** @enum {string} */
+                name: "pdf-inspector" | "anydoc" | "apple-vision";
+                version: string;
+            }[];
             limits: {
                 maxUploadBytes: number;
                 maxOutputBytes: number;
@@ -240,6 +218,18 @@ export interface components {
             /** Format: uuid */
             clientRunId: string;
             profile: components["schemas"]["ConversionProfile"];
+            /**
+             * @description Whether local OCR applies language correction to the text it recognizes. Omit the part to leave it on. A value other than `true` or `false` is 422 `invalid_language_correction`.
+             *
+             *     Read only by the local image OCR engine and ignored by every other route, so sending it with a PDF or an Office document changes nothing.
+             */
+            languageCorrection?: boolean;
+            /**
+             * @description Words local OCR should prefer when it is unsure, one per line. Omit the part to send none. The field shares the 256-byte cap every text part has, and exceeding it is 422 `metadata_too_large`.
+             *
+             *     Read only by the local image OCR engine and ignored by every other route.
+             */
+            customWords?: string;
         };
         /** @enum {string} */
         ConversionProfile: "standard" | "local_only" | "best_quality";
@@ -293,13 +283,13 @@ export interface components {
             source: components["schemas"]["ManifestArtifact"];
             engine: {
                 /** @enum {string} */
-                name: "pdf-inspector" | "anydoc";
+                name: "pdf-inspector" | "anydoc" | "apple-vision";
                 version: string;
                 features: string[];
             };
             route: components["schemas"]["Route"];
-            /** @description Engine diagnostics. Inspection when engine.name is pdf-inspector, AnyDocDiagnostics when it is anydoc. */
-            document: components["schemas"]["Inspection"] | components["schemas"]["AnyDocDiagnostics"];
+            /** @description Engine diagnostics. Inspection when engine.name is pdf-inspector, AnyDocDiagnostics when it is anydoc, VisionDiagnostics when it is apple-vision. */
+            document: components["schemas"]["Inspection"] | components["schemas"]["AnyDocDiagnostics"] | components["schemas"]["VisionDiagnostics"];
             warnings: components["schemas"]["Warning"][];
             output: components["schemas"]["ManifestArtifact"];
             /** Format: date-time */
@@ -328,9 +318,9 @@ export interface components {
         };
         Route: {
             /** @enum {string} */
-            kind: "local_pdf" | "local_anydoc";
+            kind: "local_pdf" | "local_anydoc" | "local_vision";
             /**
-             * @description Why the conversion routed the way it did, in decision order. native_text_pdf, structured_document, and incomplete_local_text are the policy's own codes. The rest are the reason an engine gave for producing no Markdown, which always ends the job needs_remote.
+             * @description Why the conversion routed the way it did, in decision order. native_text_pdf, structured_document, recognized_image_text, and incomplete_local_text are the policy's own codes. The rest are the reason an engine gave for producing no Markdown, which always ends the job needs_remote.
              *
              *     Open vocabulary, deliberately not an enum: the remote route adds codes, and a closed enum would make that a breaking change for every generated client. Render an unknown code verbatim.
              */
@@ -344,6 +334,9 @@ export interface components {
         Warning: string;
         AnyDocDiagnostics: {
             format: string;
+            processingTimeMs: number;
+        };
+        VisionDiagnostics: {
             processingTimeMs: number;
         };
         Sha256: string;
@@ -395,7 +388,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description Idempotency, profile, or artifact-state conflict */
+        /** @description Idempotency, profile, engine availability, or artifact-state conflict. `source_format_unavailable` means the format is in the contract and no engine on this deployment converts it; check `inputFormats` first. */
         Conflict: {
             headers: {
                 "X-Request-Id": components["headers"]["RequestId"];

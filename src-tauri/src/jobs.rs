@@ -67,6 +67,11 @@ pub(crate) struct BackendContext {
     pub(crate) idempotency_key: String,
     pub(crate) backend_job_id: Option<String>,
     pub(crate) profile: settings::ConversionProfile,
+    /// The OCR options this submission belongs to: the run snapshot's on a
+    /// fresh run, the ledger's on a recovered one. Reading them from Settings
+    /// at submit time instead would resubmit a stored idempotency key under a
+    /// changed fingerprint, which the service answers 409 forever.
+    pub(crate) ocr: conversion_service::OcrOptions,
     phase: BackendPhase,
     fallback: Option<FallbackContext>,
     recovery_blocker: Option<String>,
@@ -79,6 +84,7 @@ impl BackendContext {
         idempotency_key: String,
         backend_job_id: Option<String>,
         profile: settings::ConversionProfile,
+        ocr: conversion_service::OcrOptions,
     ) -> Self {
         Self {
             backend_url,
@@ -86,6 +92,7 @@ impl BackendContext {
             idempotency_key,
             backend_job_id,
             profile,
+            ocr,
             phase: BackendPhase::SubmitOrPoll,
             fallback: None,
             recovery_blocker: None,
@@ -829,6 +836,7 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
             &job.source_path,
             &backend.client_run_id,
             backend.profile.id(),
+            &backend.ocr,
             &backend.idempotency_key,
         )
         .await;
@@ -1261,6 +1269,7 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
     let Some(backend) = job.backend else {
         return;
     };
+    let ocr_custom_words = backend.ocr.custom_words_wire();
     if !history::upsert_in_flight(
         app,
         &history::NewInFlight {
@@ -1271,6 +1280,8 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
             client_run_id: &backend.client_run_id,
             idempotency_key: &backend.idempotency_key,
             conversion_profile: backend.profile.id(),
+            ocr_language_correction: backend.ocr.language_correction,
+            ocr_custom_words: &ocr_custom_words,
         },
     ) {
         return;
@@ -1632,6 +1643,10 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
             entry.idempotency_key,
             entry.backend_job_id,
             profile,
+            conversion_service::OcrOptions::from_wire(
+                entry.ocr_language_correction,
+                &entry.ocr_custom_words,
+            ),
         );
         if let Some(fallback) = resumed_fallback {
             context = context.resuming_fallback(fallback);
@@ -1709,6 +1724,7 @@ mod backend_tests {
                 "22222222-2222-4222-8222-222222222222".into(),
                 job_id.map(str::to_owned),
                 settings::ConversionProfile::Standard,
+                conversion_service::OcrOptions::default(),
             )
         };
 
@@ -1771,6 +1787,7 @@ mod backend_tests {
             "22222222-2222-4222-8222-222222222222".into(),
             None,
             settings::ConversionProfile::Standard,
+            conversion_service::OcrOptions::default(),
         )
         .resuming_fallback(uncertain.clone());
         assert_eq!(resumed.phase, BackendPhase::DatalabFallback);
@@ -1784,6 +1801,7 @@ mod backend_tests {
             "33333333-3333-4333-8333-333333333333".into(),
             None,
             settings::ConversionProfile::Standard,
+            conversion_service::OcrOptions::default(),
         )
         .resuming_fallback(FallbackContext {
             provider: DATALAB_PIPELINE_PROVIDER.to_owned(),
@@ -1915,6 +1933,7 @@ mod backend_tests {
             "33333333-3333-4333-8333-333333333333".into(),
             Some("44444444-4444-4444-8444-444444444444".into()),
             settings::ConversionProfile::Standard,
+            conversion_service::OcrOptions::default(),
         );
         let job = Job::new_backend(1, "/tmp/report.pdf".into(), "/tmp".into(), context.clone());
 
@@ -1929,6 +1948,30 @@ mod backend_tests {
         let serialized = serde_json::to_value(&job).unwrap();
         assert!(serialized.get("backend").is_none());
         assert!(serialized.get("outputText").is_none());
+    }
+
+    /// The service folds the OCR options into the replay fingerprint, so a
+    /// recovered submit that reads them from Settings resubmits the stored
+    /// idempotency key under a changed fingerprint and 409s forever.
+    #[test]
+    fn a_recovered_context_carries_the_recorded_ocr_options() {
+        let recorded = conversion_service::OcrOptions::from_wire(false, "Uniwise\nDatalab");
+        let context = BackendContext::new(
+            "http://127.0.0.1:9123".into(),
+            "22222222-2222-4222-8222-222222222222".into(),
+            "33333333-3333-4333-8333-333333333333".into(),
+            None,
+            settings::ConversionProfile::Standard,
+            recorded,
+        );
+
+        // Settings have since gone back to the defaults. The context must not
+        // follow them, because the submit reads it and nothing else.
+        let now = settings::Settings::default();
+        assert!(now.language_correction && now.custom_words.is_empty());
+        assert!(!context.ocr.language_correction);
+        assert_eq!(context.ocr.custom_words, ["Uniwise", "Datalab"]);
+        assert_eq!(context.ocr.custom_words_wire(), "Uniwise\nDatalab");
     }
 
     #[test]
@@ -1961,6 +2004,8 @@ mod backend_tests {
             fallback_request_id: None,
             fallback_check_url: None,
             conversion_profile: "standard".into(),
+            ocr_language_correction: true,
+            ocr_custom_words: String::new(),
             source_mtime,
             created_at: 1,
         };

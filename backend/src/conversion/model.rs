@@ -67,8 +67,20 @@ pub(crate) struct SourceFormat {
     pub magic: ContainerMagic,
     pub engine: LocalEngineKind,
     /// The family label AnyDoc reports in its diagnostics; used to check
-    /// manifest consistency for non-PDF jobs. Unused for PDF.
+    /// manifest consistency for AnyDoc jobs. Unused for PDF and Vision.
     pub format_label: &'static str,
+}
+
+impl SourceFormat {
+    /// Whether the engine that converts this format came up in this process.
+    /// Vision is the only one whose absence is normal: a broken PDF worker
+    /// fails startup, and AnyDoc runs in-process.
+    pub(crate) fn is_servable(&self, vision_available: bool) -> bool {
+        match self.engine {
+            LocalEngineKind::Pdf | LocalEngineKind::AnyDoc => true,
+            LocalEngineKind::Vision => vision_available,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +90,14 @@ pub(crate) enum ContainerMagic {
     Ole,
     /// `{\rtf`, the group that must open every RTF file.
     Rtf,
+    // One variant per raster signature rather than a shared `Image`: a shared
+    // one would admit a `.png` upload carrying JPEG bytes.
+    Png,
+    Jpeg,
+    Webp,
+    Tiff,
+    Gif,
+    Bmp,
     /// CSV carries no signature at all, so admission cannot check one. The
     /// extension and declared media type are the whole gate, and the engine
     /// names the format explicitly because detection returns `None`.
@@ -88,6 +108,7 @@ pub(crate) enum ContainerMagic {
 pub(crate) enum LocalEngineKind {
     Pdf,
     AnyDoc,
+    Vision,
 }
 
 pub(crate) const SOURCE_FORMATS: &[SourceFormat] = &[
@@ -235,6 +256,64 @@ pub(crate) const SOURCE_FORMATS: &[SourceFormat] = &[
         engine: LocalEngineKind::AnyDoc,
         format_label: "ppt",
     },
+    // Raster images, OCRed by the Vision engine. `jpg`/`jpeg` and `tif`/`tiff`
+    // are one media type on two extensions each.
+    SourceFormat {
+        extension: "png",
+        media_type: "image/png",
+        magic: ContainerMagic::Png,
+        engine: LocalEngineKind::Vision,
+        format_label: "png",
+    },
+    SourceFormat {
+        extension: "jpg",
+        media_type: "image/jpeg",
+        magic: ContainerMagic::Jpeg,
+        engine: LocalEngineKind::Vision,
+        format_label: "jpeg",
+    },
+    SourceFormat {
+        extension: "jpeg",
+        media_type: "image/jpeg",
+        magic: ContainerMagic::Jpeg,
+        engine: LocalEngineKind::Vision,
+        format_label: "jpeg",
+    },
+    SourceFormat {
+        extension: "webp",
+        media_type: "image/webp",
+        magic: ContainerMagic::Webp,
+        engine: LocalEngineKind::Vision,
+        format_label: "webp",
+    },
+    SourceFormat {
+        extension: "tiff",
+        media_type: "image/tiff",
+        magic: ContainerMagic::Tiff,
+        engine: LocalEngineKind::Vision,
+        format_label: "tiff",
+    },
+    SourceFormat {
+        extension: "tif",
+        media_type: "image/tiff",
+        magic: ContainerMagic::Tiff,
+        engine: LocalEngineKind::Vision,
+        format_label: "tiff",
+    },
+    SourceFormat {
+        extension: "gif",
+        media_type: "image/gif",
+        magic: ContainerMagic::Gif,
+        engine: LocalEngineKind::Vision,
+        format_label: "gif",
+    },
+    SourceFormat {
+        extension: "bmp",
+        media_type: "image/bmp",
+        magic: ContainerMagic::Bmp,
+        engine: LocalEngineKind::Vision,
+        format_label: "bmp",
+    },
 ];
 
 pub(crate) fn source_format_by_extension(extension: &str) -> Option<&'static SourceFormat> {
@@ -260,6 +339,22 @@ pub(crate) fn advertised_media_types() -> Vec<&'static str> {
         }
     }
     seen
+}
+
+/// The media types this process can actually convert.
+///
+/// The contract is one list and a deployment is another. Vision ships only on
+/// macOS 26 and up, so a Linux container knows every image format and can
+/// convert none of them. Advertising what the host cannot serve turns a clean
+/// refusal at admission into a job that never runs.
+pub(crate) fn servable_media_types(vision_available: bool) -> Vec<&'static str> {
+    let mut servable = advertised_media_types();
+    servable.retain(|media_type| {
+        SOURCE_FORMATS
+            .iter()
+            .any(|format| format.media_type == *media_type && format.is_servable(vision_available))
+    });
+    servable
 }
 
 impl From<Profile> for ConversionProfile {
@@ -489,12 +584,41 @@ pub fn now() -> String {
 mod tests {
     use super::*;
 
+    const IMAGE_MEDIA_TYPES: [&str; 6] = [
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/tiff",
+        "image/gif",
+        "image/bmp",
+    ];
+
+    /// The contract never shrinks and a deployment often is smaller. Pinned
+    /// both ways because either half alone passes on a lie: an unconditional
+    /// list serves formats it cannot convert, and an over-eager filter hides
+    /// formats from the host that can.
+    #[test]
+    fn servable_media_types_follow_the_engines_this_process_started() {
+        assert_eq!(servable_media_types(true), advertised_media_types());
+        assert_eq!(servable_media_types(true).len(), 24);
+
+        let without_vision = servable_media_types(false);
+        assert_eq!(without_vision.len(), 18);
+        assert_eq!(
+            without_vision,
+            advertised_media_types()
+                .into_iter()
+                .filter(|media_type| !IMAGE_MEDIA_TYPES.contains(media_type))
+                .collect::<Vec<_>>(),
+        );
+    }
+
     /// The admission table and the database CHECK are two copies of one list.
     /// If they drift, an upload the API accepts fails at INSERT with a
     /// constraint error instead of a clean 415, so pin them together.
     #[test]
     fn advertised_media_types_match_the_migration_check() {
-        let sql = include_str!("../../migrations/0003_anydoc_full_format_set.sql");
+        let sql = include_str!("../../migrations/0004_image_source_formats.sql");
         let check = sql
             .split_once("source_media_type     TEXT NOT NULL")
             .expect("the conversions CHECK must exist")

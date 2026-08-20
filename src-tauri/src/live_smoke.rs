@@ -117,6 +117,10 @@ async fn conversion_service_compatibility_live() {
         &source_path,
         &client_run_id,
         "standard",
+        &conversion_service::OcrOptions {
+            language_correction: true,
+            custom_words: Vec::new(),
+        },
         &idempotency_key,
     )
     .await

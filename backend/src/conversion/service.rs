@@ -21,7 +21,8 @@ use crate::{
     },
     engines::{
         is_complete_native_inspection, AnyDocDiagnostics, AnyDocEngine, EngineAnalysis,
-        EngineFailure, EngineOutcome, PdfInspectorEngine, ANYDOC_ENGINE_NAME, ANYDOC_VERSION,
+        EngineFailure, EngineOutcome, PdfInspectorEngine, VisionDiagnostics, VisionEngine,
+        ANYDOC_ENGINE_NAME, ANYDOC_VERSION,
     },
     faults::{FaultBarrier, FaultPoint},
     persistence::{
@@ -30,6 +31,7 @@ use crate::{
         NewArtifact, NewConversion, NewSource, RepositoryError, SqliteRepository, StoredArtifact,
         StoredConversion, StoredFailure, SuccessfulArtifacts,
     },
+    vision_protocol::VISION_ENGINE_NAME,
     worker_protocol::{Inspection, PdfTypeLabel, PDF_INSPECTOR_VERSION},
 };
 
@@ -53,6 +55,9 @@ pub struct ConversionService {
     artifacts: ArtifactStore,
     pdf_engine: PdfInspectorEngine,
     anydoc_engine: AnyDocEngine,
+    /// Absent wherever the Vision worker does not run. Image jobs then fail
+    /// closed as `worker_unavailable`; nothing else changes.
+    vision_engine: Option<VisionEngine>,
     max_output_bytes: u64,
     /// How long a claimed job may wait for its engine's parser permit before
     /// the runner gives up and lets startup recovery requeue it.
@@ -67,6 +72,7 @@ impl ConversionService {
         artifacts: ArtifactStore,
         pdf_engine: PdfInspectorEngine,
         anydoc_engine: AnyDocEngine,
+        vision_engine: Option<VisionEngine>,
         max_output_bytes: u64,
         permit_wait_limit: Duration,
     ) -> Self {
@@ -75,6 +81,7 @@ impl ConversionService {
             artifacts,
             pdf_engine,
             anydoc_engine,
+            vision_engine,
             max_output_bytes,
             permit_wait_limit,
             work_notification: Arc::new(Notify::new()),
@@ -139,6 +146,8 @@ impl ConversionService {
             submission.client_run_id,
             submission.profile,
             &published_source.sha256,
+            submission.language_correction,
+            &submission.custom_words,
         );
         let input = NewConversion {
             id: job_id,
@@ -154,6 +163,8 @@ impl ConversionService {
                 sha256: published_source.sha256,
             },
             origin_request_id: submission.origin_request_id,
+            ocr_language_correction: submission.language_correction,
+            ocr_custom_words: submission.custom_words,
         };
 
         let decision = match self.repository.create_or_replay(input).await {
@@ -193,6 +204,14 @@ impl ConversionService {
             return Ok(None);
         };
         Ok(Some(self.public_view(job).await?))
+    }
+
+    /// The macOS product version the Vision worker handshook with, or `None`
+    /// where that engine is not running here. Doubles as the availability
+    /// answer: what capabilities advertises and what admission accepts both
+    /// turn on it.
+    pub fn vision_version(&self) -> Option<&str> {
+        self.vision_engine.as_ref().map(VisionEngine::version)
     }
 
     pub async fn accepting_jobs(&self) -> bool {
@@ -256,7 +275,10 @@ impl ConversionService {
     pub(crate) async fn claim_next_queued(
         &self,
     ) -> Result<Option<StoredConversion>, RepositoryError> {
-        self.repository.claim_next_queued(local_start).await
+        let vision_version = self.vision_version();
+        self.repository
+            .claim_next_queued(|media_type| local_start(media_type, vision_version))
+            .await
     }
 
     pub async fn artifact_views(
@@ -407,6 +429,10 @@ impl ConversionService {
             match source_format.engine {
                 LocalEngineKind::Pdf => self.pdf_engine.acquire().await,
                 LocalEngineKind::AnyDoc => self.anydoc_engine.acquire().await,
+                LocalEngineKind::Vision => match self.vision_engine.as_ref() {
+                    Some(engine) => engine.acquire().await,
+                    None => Err(EngineFailure::Unavailable),
+                },
             }
         };
         let mut cancellation = shutdown.clone();
@@ -464,6 +490,24 @@ impl ConversionService {
                     .convert(&paths, source, permit, shutdown, source_format.format_label)
                     .await
             }
+            // Unreachable: the permit above came from the same engine, so an
+            // absent one already failed the job. Spelled out because `expect`
+            // is denied and a wrong guess here would spend a real conversion.
+            LocalEngineKind::Vision => match self.vision_engine.as_ref() {
+                Some(engine) => {
+                    engine
+                        .convert(
+                            &paths,
+                            source,
+                            permit,
+                            shutdown,
+                            job.ocr_language_correction,
+                            &job.ocr_custom_words,
+                        )
+                        .await
+                }
+                None => Err(EngineFailure::Unavailable),
+            },
         };
         // Everything below this line is the routing policy's call, not the
         // engine's. The engine reports what it measured; `policy::decide` says
@@ -471,6 +515,7 @@ impl ConversionService {
         let route = match source_format.engine {
             LocalEngineKind::Pdf => RouteKind::LocalPdf,
             LocalEngineKind::AnyDoc => RouteKind::LocalAnyDoc,
+            LocalEngineKind::Vision => RouteKind::LocalVision,
         };
         let (analysis, local_result, published_bytes) = match conversion {
             Ok(EngineOutcome::Converted {
@@ -635,9 +680,10 @@ impl ConversionService {
                     .map(|format| format.engine)
                 {
                     Some(LocalEngineKind::AnyDoc) => RouteKind::LocalAnyDoc,
+                    Some(LocalEngineKind::Vision) => RouteKind::LocalVision,
                     // `None` is unreachable: the claim fails an engine-less
                     // media type closed. Spelled out rather than wildcarded so
-                    // a third engine is a compile error, not a job silently
+                    // a fourth engine is a compile error, not a job silently
                     // labelled `local_pdf`.
                     Some(LocalEngineKind::Pdf) | None => RouteKind::LocalPdf,
                 }
@@ -995,6 +1041,10 @@ pub struct Submission {
     pub client_run_id: Uuid,
     pub profile: ConversionProfile,
     pub source: SourceMetadata,
+    /// Read by the Vision engine and by nothing else.
+    pub language_correction: bool,
+    /// Newline separated, as the worker's env var wants it.
+    pub custom_words: String,
     pub idempotency_key: String,
     pub origin_request_id: String,
 }
@@ -1053,22 +1103,37 @@ async fn wait_for_cancellation(shutdown: &mut watch::Receiver<bool>) {
     }
 }
 
+/// The request identity a replay is matched on, so every field the job is run
+/// with belongs in it. The OCR options are persisted and read by the engine
+/// much later, so leaving them out lets a resumed run replay onto a job
+/// converted with the settings the user has since turned off.
 pub(crate) fn submission_fingerprint(
     client_run_id: Uuid,
     profile: ConversionProfile,
     source_sha256: &str,
+    language_correction: bool,
+    custom_words: &str,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"tool-kit-conversion-m1\0");
+    // Bumped with the fields below, so an old fingerprint cannot collide.
+    digest.update(b"tool-kit-conversion-m2\0");
     digest.update(client_run_id.as_bytes());
     digest.update(b"\0");
     digest.update(profile.as_str().as_bytes());
     digest.update(b"\0");
     digest.update(source_sha256.as_bytes());
+    digest.update(b"\0");
+    digest.update(if language_correction { b"1" } else { b"0" });
+    digest.update(b"\0");
+    digest.update(custom_words.as_bytes());
     hex::encode(digest.finalize())
 }
 
-fn local_start(media_type: &str) -> Option<LocalStart> {
+/// `vision_version` is the macOS product version the Vision worker handshook
+/// with, or `None` where that worker does not run. An image job claimed with no
+/// Vision engine has no engine record to write, so it fails unclaimable rather
+/// than starting against nothing.
+fn local_start(media_type: &str, vision_version: Option<&str>) -> Option<LocalStart> {
     let format = source_format_by_media_type(media_type)?;
     let start = match format.engine {
         LocalEngineKind::Pdf => LocalStart {
@@ -1084,6 +1149,13 @@ fn local_start(media_type: &str) -> Option<LocalStart> {
                 version: ANYDOC_VERSION.to_owned(),
             },
             route: RouteKind::LocalAnyDoc.as_str().to_owned(),
+        },
+        LocalEngineKind::Vision => LocalStart {
+            engine: EngineRecord {
+                name: VISION_ENGINE_NAME.to_owned(),
+                version: vision_version?.to_owned(),
+            },
+            route: RouteKind::LocalVision.as_str().to_owned(),
         },
     };
     Some(start)
@@ -1200,6 +1272,11 @@ fn validate_manifest(
             }
             "structured_document"
         }
+        VISION_ENGINE_NAME => {
+            serde_json::from_value::<VisionDiagnostics>(manifest.document.clone())
+                .map_err(|_| ArtifactReadFailure::Integrity)?;
+            "image_based"
+        }
         _ => return Err(ArtifactReadFailure::Integrity),
     };
     OffsetDateTime::parse(&manifest.started_at, &Rfc3339)
@@ -1304,6 +1381,9 @@ fn validate_manifest_shape(value: &serde_json::Value) -> Result<(), ArtifactRead
         }
         ANYDOC_ENGINE_NAME => {
             require_exact_object_keys(&value["document"], &["format", "processingTimeMs"])?;
+        }
+        VISION_ENGINE_NAME => {
+            require_exact_object_keys(&value["document"], &["processingTimeMs"])?;
         }
         _ => return Err(ArtifactReadFailure::Integrity),
     }
@@ -1422,11 +1502,27 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        classify_artifact_error, manifest_bytes_match, markdown_read_limit,
+        classify_artifact_error, manifest_bytes_match, markdown_read_limit, submission_fingerprint,
         validate_manifest_shape, wait_for_cancellation, ArtifactError, ArtifactReadFailure,
-        ManifestOutput,
+        ConversionProfile, ManifestOutput,
     };
     use crate::persistence::{ArtifactKind as StoredArtifactKind, StoredArtifact};
+
+    /// A replay is matched on the fingerprint alone, so an OCR option outside
+    /// it means a resumed run silently replays onto a job converted with the
+    /// setting the user has since changed.
+    #[test]
+    fn the_ocr_options_are_part_of_the_request_identity() {
+        let run = Uuid::new_v4();
+        let sha = "a".repeat(64);
+        let fingerprint = |correction, words| {
+            submission_fingerprint(run, ConversionProfile::Standard, &sha, correction, words)
+        };
+        let baseline = fingerprint(true, "Acme");
+        assert_ne!(baseline, fingerprint(false, "Acme"));
+        assert_ne!(baseline, fingerprint(true, ""));
+        assert_eq!(baseline, fingerprint(true, "Acme"));
+    }
 
     /// The permit wait selects on this, so it has to fire for a receiver that
     /// was already cancelled as well as one cancelled later.

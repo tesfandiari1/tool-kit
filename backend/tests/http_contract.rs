@@ -92,10 +92,11 @@ async fn public_health_and_capabilities_are_truthful() {
             "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
             "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
             "application/vnd.ms-powerpoint.slideshow.macroEnabled.12"
-        ])
+        ]),
+        "the test app runs no Vision worker, so the image types are contract only"
     );
     let engines = conversion["engines"].as_array().unwrap();
-    assert_eq!(engines.len(), 2);
+    assert_eq!(engines.len(), 2, "apple-vision is absent with its engine");
     assert_eq!(engines[0]["name"], "pdf-inspector");
     assert_eq!(engines[0]["version"], "1.15.0");
     assert_eq!(engines[1]["name"], "anydoc");
@@ -306,7 +307,7 @@ fn conversion_profile_job_status_and_route_json_values_are_stable() {
             "needs_remote",
         ]
     );
-    assert_eq!(route_values, ["local_pdf", "local_anydoc"]);
+    assert_eq!(route_values, ["local_pdf", "local_anydoc", "local_vision"]);
 }
 
 /// Pull the published strings out of one `as_str` match in policy.rs. The
@@ -1456,6 +1457,22 @@ async fn invalid_submission_fields_are_rejected_without_creating_jobs() {
     assert_eq!(
         json_body(response).await["error"]["code"],
         "profile_unavailable"
+    );
+
+    // A real PNG, well formed and advertised by the contract. Only the missing
+    // engine refuses it, and it must refuse before anything is staged.
+    let no_engine = multipart_body_with_media_type(
+        Uuid::new_v4(),
+        "standard",
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
+        "fixture.png",
+        "image/png",
+    );
+    let response = app.submit(no_engine, "vision-1", TOKEN).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "source_format_unavailable"
     );
 
     let wrong_signature = multipart_body(

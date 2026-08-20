@@ -22,18 +22,3 @@ rules:
 
   # No contact to name. The service is loopback-only and single-author.
   info-contact: "off"
-
-overrides:
-  # `array-items` predates OpenAPI 3.1, which resolves schemas as JSON Schema
-  # 2020-12. Both arrays below are tuples: `prefixItems` fixes each position
-  # and `maxItems` equals the prefix length, so no element can exist that
-  # `items` would describe. `openapi-typescript` reads them correctly and
-  # `schema.ts` carries the literal member types.
-  #
-  # Scoped to these two rather than turned off, so a genuinely untyped array
-  # added later still fails.
-  - files:
-      - "**/openapi.yaml#/components/schemas/ConversionCapabilities/properties/inputFormats"
-      - "**/openapi.yaml#/components/schemas/ConversionCapabilities/properties/engines"
-    rules:
-      array-items: "off"

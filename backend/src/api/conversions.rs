@@ -121,6 +121,7 @@ pub async fn create(
             multipart,
             &prepared.paths.source_staging,
             state.limits().max_upload_bytes,
+            state.service().vision_version().is_some(),
             &request_id,
         ),
     )
@@ -164,6 +165,8 @@ pub async fn create(
             client_run_id: staged.client_run_id,
             profile: staged.profile,
             source: staged.source,
+            language_correction: staged.language_correction,
+            custom_words: staged.custom_words,
             idempotency_key,
             origin_request_id: request_id.as_str().to_owned(),
         })
@@ -315,11 +318,14 @@ async fn stage_multipart(
     mut multipart: Multipart,
     source_path: &std::path::Path,
     max_upload_bytes: u64,
+    vision_available: bool,
     request_id: &RequestId,
 ) -> Result<StagedSubmission, ApiError> {
     let mut client_run_id = None;
     let mut profile = None;
     let mut source = None;
+    let mut language_correction = None;
+    let mut custom_words = None;
     while let Some(field) = multipart.next_field().await.map_err(|_| {
         error(
             StatusCode::BAD_REQUEST,
@@ -351,11 +357,51 @@ async fn stage_multipart(
                     )
                 })?);
             }
-            Some("source") if source.is_none() => {
-                source =
-                    Some(stream_source(field, source_path, max_upload_bytes, request_id).await?);
+            Some("languageCorrection") if language_correction.is_none() => {
+                let value = read_text(field, request_id).await?;
+                language_correction = Some(match value.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "invalid_language_correction",
+                            "languageCorrection must be true or false.",
+                            request_id,
+                        ))
+                    }
+                });
             }
-            Some("clientRunId" | "profile" | "source") => {
+            Some("customWords") if custom_words.is_none() => {
+                let value = read_text(field, request_id).await?;
+                // Newline is the documented separator, so it is the one control
+                // character allowed. The rest have to fail here: the value ends
+                // up in the worker's environment, and an interior NUL makes
+                // `Command::env` refuse to spawn, which would answer a 201 with
+                // a job that fails as "engine unavailable" and names nothing.
+                if value.chars().any(|c| c.is_control() && c != '\n') {
+                    return Err(error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "invalid_custom_words",
+                        "customWords must not contain control characters other than newline.",
+                        request_id,
+                    ));
+                }
+                custom_words = Some(value);
+            }
+            Some("source") if source.is_none() => {
+                source = Some(
+                    stream_source(
+                        field,
+                        source_path,
+                        max_upload_bytes,
+                        vision_available,
+                        request_id,
+                    )
+                    .await?,
+                );
+            }
+            Some("clientRunId" | "profile" | "source" | "languageCorrection" | "customWords") => {
                 return Err(error(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "duplicate_multipart_field",
@@ -367,7 +413,7 @@ async fn stage_multipart(
                 return Err(error(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "unexpected_multipart_field",
-                    "Exactly source, clientRunId, and profile fields are required.",
+                    "Only source, clientRunId, profile, languageCorrection, and customWords are accepted.",
                     request_id,
                 ));
             }
@@ -378,6 +424,9 @@ async fn stage_multipart(
         client_run_id: client_run_id.ok_or_else(|| missing_field("clientRunId", request_id))?,
         profile: profile.ok_or_else(|| missing_field("profile", request_id))?,
         source: source.ok_or_else(|| missing_field("source", request_id))?,
+        // Both are optional; absent is the documented default.
+        language_correction: language_correction.unwrap_or(true),
+        custom_words: custom_words.unwrap_or_default(),
     })
 }
 
@@ -418,6 +467,7 @@ async fn stream_source(
     mut field: axum::extract::multipart::Field<'_>,
     source_path: &std::path::Path,
     max_upload_bytes: u64,
+    vision_available: bool,
     request_id: &RequestId,
 ) -> Result<SourceMetadata, ApiError> {
     let filename = field.file_name().ok_or_else(|| {
@@ -458,6 +508,19 @@ async fn stream_source(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "invalid_source_media_type",
             "The source media type does not match its extension.",
+            request_id,
+        ));
+    }
+
+    // The request is well formed and the contract advertises the format; this
+    // host just has no engine for it. Refused here, before a byte is stored,
+    // because the alternative is a job accepted and never claimed. Conflict
+    // rather than 415: nothing about the upload is wrong.
+    if !format.is_servable(vision_available) {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "source_format_unavailable",
+            "No engine on this service can convert that source format.",
             request_id,
         ));
     }
@@ -549,6 +612,14 @@ fn has_container_magic(magic: ContainerMagic, prefix: &[u8]) -> bool {
             prefix.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])
         }
         ContainerMagic::Rtf => prefix.starts_with(b"{\\rtf"),
+        ContainerMagic::Png => prefix.starts_with(b"\x89PNG\r\n\x1a\n"),
+        ContainerMagic::Jpeg => prefix.starts_with(&[0xFF, 0xD8, 0xFF]),
+        // RIFF names the container and the four bytes after the length name
+        // the payload, so WAV and AVI open with the same first four bytes.
+        ContainerMagic::Webp => prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WEBP"),
+        ContainerMagic::Tiff => prefix.starts_with(b"II*\0") || prefix.starts_with(b"MM\0*"),
+        ContainerMagic::Gif => prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a"),
+        ContainerMagic::Bmp => prefix.starts_with(b"BM"),
         // CSV has no signature to check. Admission rests on the extension and
         // the declared media type; the engine still has the final say.
         ContainerMagic::None => true,
@@ -666,6 +737,8 @@ struct StagedSubmission {
     client_run_id: Uuid,
     profile: ConversionProfile,
     source: SourceMetadata,
+    language_correction: bool,
+    custom_words: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -680,7 +753,7 @@ pub(super) struct ArtifactListEnvelope {
 
 #[cfg(test)]
 mod tests {
-    use super::has_pdf_signature;
+    use super::{has_container_magic, has_pdf_signature, ContainerMagic};
 
     #[test]
     fn pdf_signature_allows_only_bom_or_whitespace_prefixes() {
@@ -688,5 +761,39 @@ mod tests {
         assert!(has_pdf_signature(b"\xEF\xBB\xBF \n%PDF-1.4"));
         assert!(!has_pdf_signature(b"PK\x03\x04%PDF-1.7"));
         assert!(!has_pdf_signature(b"not a pdf"));
+    }
+
+    /// One raster format must never admit another's bytes: a `.png` carrying a
+    /// JPEG is the mislabeling admission exists to stop.
+    #[test]
+    fn each_image_signature_admits_only_its_own_container() {
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+        let jpeg = b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00";
+        let webp = b"RIFF\x24\x00\x00\x00WEBPVP8 ";
+        let tiff_le = b"II*\x00\x08\x00\x00\x00";
+        let tiff_be = b"MM\x00*\x00\x00\x00\x08";
+        let gif = b"GIF89a\x01\x00\x01\x00";
+        let bmp = b"BM\x36\x00\x00\x00\x00\x00";
+
+        assert!(has_container_magic(ContainerMagic::Png, png));
+        assert!(has_container_magic(ContainerMagic::Jpeg, jpeg));
+        assert!(has_container_magic(ContainerMagic::Webp, webp));
+        assert!(has_container_magic(ContainerMagic::Tiff, tiff_le));
+        assert!(has_container_magic(ContainerMagic::Tiff, tiff_be));
+        assert!(has_container_magic(ContainerMagic::Gif, gif));
+        assert!(has_container_magic(ContainerMagic::Gif, b"GIF87a\x01\x00"));
+        assert!(has_container_magic(ContainerMagic::Bmp, bmp));
+
+        assert!(!has_container_magic(ContainerMagic::Png, jpeg));
+        assert!(!has_container_magic(ContainerMagic::Jpeg, png));
+        assert!(!has_container_magic(ContainerMagic::Tiff, gif));
+        assert!(!has_container_magic(ContainerMagic::Bmp, png));
+        // A RIFF container that is not WebP: WAV opens with the same four
+        // bytes and only the payload tag tells them apart.
+        assert!(!has_container_magic(
+            ContainerMagic::Webp,
+            b"RIFF\x24\x00\x00\x00WAVEfmt "
+        ));
+        assert!(!has_container_magic(ContainerMagic::Webp, b"RIFF"));
     }
 }

@@ -70,6 +70,12 @@ pub struct Settings {
     /// Backend routing profile. `best_quality` is intentionally unavailable
     /// until the backend implements it instead of returning 409.
     pub conversion_profile: ConversionProfile,
+    /// Whether local OCR corrects the words it recognizes. Read only by the
+    /// backend's image engine, so it changes nothing on the direct route.
+    pub language_correction: bool,
+    /// Words local OCR should prefer when it is unsure. Sent to the backend
+    /// one per line.
+    pub custom_words: Vec<String>,
     /// Leave a file alone when the history says it already has a result on
     /// disk. On by default: paying twice for the same conversion is the thing
     /// the history layer exists to prevent.
@@ -97,6 +103,8 @@ impl Default for Settings {
             conversion_route: ConversionRoute::Direct,
             backend_url: DEFAULT_BACKEND_URL.into(),
             conversion_profile: ConversionProfile::Standard,
+            language_correction: true,
+            custom_words: Vec::new(),
             skip_already_done: true,
             split_layout: None,
             expanded_width: None,
@@ -153,6 +161,8 @@ mod tests {
         assert_eq!(value["conversionRoute"], "direct");
         assert_eq!(value["backendUrl"], "http://127.0.0.1:8080");
         assert_eq!(value["conversionProfile"], "standard");
+        assert_eq!(value["languageCorrection"], true);
+        assert_eq!(value["customWords"], serde_json::json!([]));
         assert!(value.get("backendToken").is_none());
     }
 
@@ -182,5 +192,29 @@ mod tests {
         assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
         // A file written before `zoom` existed must load at 100%, not at 0.0.
         assert_eq!(settings.zoom, 1.0);
+    }
+
+    #[test]
+    fn settings_from_before_the_ocr_options_keep_the_backend_route_and_gain_defaults() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "inputs": ["/tmp/scan.png"],
+                "outputDir": "/tmp/output",
+                "jobType": "convert",
+                "conversionRoute": "backend",
+                "conversionProfile": "local_only",
+                "zoom": 1.1
+            }"#,
+        )
+        .expect("settings written before the OCR options should deserialize");
+
+        assert_eq!(settings.inputs, ["/tmp/scan.png"]);
+        assert_eq!(settings.conversion_route, ConversionRoute::Backend);
+        assert_eq!(settings.conversion_profile, ConversionProfile::LocalOnly);
+        assert_eq!(settings.zoom, 1.1);
+        // Absent fields arrive as on and empty, matching the backend's own
+        // defaults for the two parts.
+        assert!(settings.language_correction);
+        assert!(settings.custom_words.is_empty());
     }
 }

@@ -81,6 +81,9 @@ export interface Settings {
   conversionRoute: ConversionRoute;
   backendUrl: string;
   conversionProfile: ConversionProfile;
+  languageCorrection: boolean;
+  /// Words local OCR should prefer when it is unsure.
+  customWords: string[];
   skipAlreadyDone: boolean;
   /// Last SplitPane layout. Null until the user has dragged the seam.
   splitLayout: Record<string, number> | null;
@@ -106,6 +109,8 @@ export const DEFAULT_SETTINGS: Settings = {
   conversionRoute: "direct",
   backendUrl: DEFAULT_BACKEND_URL,
   conversionProfile: "standard",
+  languageCorrection: true,
+  customWords: [],
   skipAlreadyDone: true,
   splitLayout: null,
   expandedWidth: null,

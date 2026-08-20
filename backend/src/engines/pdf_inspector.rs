@@ -604,7 +604,7 @@ mod tests {
         write_worker(
             &worker,
             &worker_script(
-                "printf '%s' \"$TOOLKIT_PDF_WORKER_EXPECTED_SOURCE_SHA256\" > observed-source-sha256\n/bin/cat > observed-source\nexit 1",
+                "printf '%s' \"$TOOLKIT_WORKER_EXPECTED_SOURCE_SHA256\" > observed-source-sha256\n/bin/cat > observed-source\nexit 1",
             ),
         );
         let paths = paths(directory.path());
@@ -646,7 +646,7 @@ mod tests {
         write_worker(
             &worker,
             &worker_script(
-                "printf '%s' \"$TOOLKIT_PDF_WORKER_EXPECTED_SOURCE_SHA256\" > observed-source-sha256\n/bin/cat > observed-source\nexit 1",
+                "printf '%s' \"$TOOLKIT_WORKER_EXPECTED_SOURCE_SHA256\" > observed-source-sha256\n/bin/cat > observed-source\nexit 1",
             ),
         );
         let paths = paths(directory.path());

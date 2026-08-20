@@ -73,7 +73,7 @@ describe("planConversionRoutes", () => {
     expect(missingConversionCredentials(plan, secrets({ datalab: true, backend: true }))).toEqual([]);
   });
 
-  it("keeps image and HTML files direct even if the backend advertises them", () => {
+  it("keeps HTML direct but routes images on what the service advertises", () => {
     const image = file("/drop/photo.JPEG", "image/jpeg");
     const page = file("C:\\drop\\page.HTM", "text/html");
     const plan = planConversionRoutes({
@@ -84,26 +84,46 @@ describe("planConversionRoutes", () => {
       skipAlreadyDone: true,
     });
 
-    expect(plan.direct).toEqual([image, page]);
-    expect(plan.backend).toEqual([]);
+    // The Vision engine is live, so the image is local work. HTML has no local
+    // engine at all and stays direct however the service answers.
+    expect(plan.direct).toEqual([page]);
+    expect(plan.backend).toEqual([image]);
     expect(plan.needsDatalabKey).toBe(true);
-    expect(plan.needsBackendToken).toBe(false);
+    expect(plan.needsBackendToken).toBe(true);
+
+    // No engine — a Linux deployment, or a Mac below macOS 26 — and the same
+    // image goes back to Datalab.
+    const noVision = planConversionRoutes({
+      files: [image, page],
+      route: "backend",
+      profile: "standard",
+      capabilities: ready([page.mediaType]),
+      skipAlreadyDone: true,
+    });
+    expect(noVision.direct).toEqual([image, page]);
+    expect(noVision.backend).toEqual([]);
   });
 
   it("lets permanent-direct files proceed when the backend is unavailable but blocks candidates", () => {
+    const page = file("/drop/page.html", "text/html");
     const image = file("/drop/scan.tif", "image/tiff");
     const document = file("/drop/report.pdf", "application/pdf");
     const plan = planConversionRoutes({
-      files: [image, document],
+      files: [page, image, document],
       route: "backend",
       profile: "standard",
       capabilities: { state: "unavailable" },
       skipAlreadyDone: true,
     });
 
-    expect(plan.direct).toEqual([image]);
+    expect(plan.direct).toEqual([page]);
     expect(plan.backend).toEqual([]);
-    expect(plan.blocked).toEqual([{ file: document, reason: "backend_unavailable" }]);
+    // An image is a backend candidate now, so an unreachable service blocks it
+    // rather than handing it to Datalab behind the user's back.
+    expect(plan.blocked).toEqual([
+      { file: image, reason: "backend_unavailable" },
+      { file: document, reason: "backend_unavailable" },
+    ]);
   });
 
   it("never falls back to a remote provider in local-only mode", () => {

@@ -28,7 +28,7 @@ const MAX_ENTRIES: i64 = 5_000;
 
 /// Bump when the schema changes, and add a matching `if version < N` block in
 /// `migrate` — so a new column is a migration rather than a crash on startup.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// The open database, or `None` if it could not be opened. `None` makes every
 /// operation a silent no-op, which is the whole failure policy in one word.
@@ -77,6 +77,9 @@ pub struct NewInFlight<'a> {
     pub client_run_id: &'a str,
     pub idempotency_key: &'a str,
     pub conversion_profile: &'a str,
+    pub ocr_language_correction: bool,
+    /// Newline-joined custom words, the same form the submission sends.
+    pub ocr_custom_words: &'a str,
 }
 
 /// A backend conversion that can be recovered after an app restart.
@@ -101,6 +104,11 @@ pub struct InFlightEntry {
     pub fallback_request_id: Option<String>,
     pub fallback_check_url: Option<String>,
     pub conversion_profile: String,
+    /// The OCR options this submission was made with. Part of the service's
+    /// replay fingerprint, so recovery must resubmit these and not whatever
+    /// Settings hold now.
+    pub ocr_language_correction: bool,
+    pub ocr_custom_words: String,
     /// Source modification time in Unix milliseconds at submit time.
     pub source_mtime: i64,
     /// Unix seconds.
@@ -202,7 +210,19 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              ALTER TABLE inflight_conversions ADD COLUMN fallback_check_url TEXT;",
         )?;
     }
-    // Add `if version < 5 { … }` above when the schema changes again, then bump
+    if version < 5 {
+        // The OCR options are part of the service's replay fingerprint. Reading
+        // them back from Settings at recovery time resubmitted the stored key
+        // with a different fingerprint, which the service answers 409 forever.
+        // The defaults are the contract's, so a pre-5 row recovers unchanged.
+        conn.execute_batch(
+            "ALTER TABLE inflight_conversions
+                 ADD COLUMN ocr_language_correction INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE inflight_conversions
+                 ADD COLUMN ocr_custom_words TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    // Add `if version < 6 { … }` above when the schema changes again, then bump
     // SCHEMA_VERSION. A file written by a *newer* build is left untouched:
     // extra columns are harmless to read, and rewriting it would lose history.
     if version < SCHEMA_VERSION {
@@ -274,9 +294,10 @@ fn upsert_in_flight_row(conn: &Connection, pending: &NewInFlight<'_>) -> rusqlit
     let changed = conn.execute(
         "INSERT INTO inflight_conversions
            (idempotency_key, source_path, file_name, output_dir, backend_url,
-            client_run_id, backend_job_id, conversion_profile, source_mtime,
+            client_run_id, backend_job_id, conversion_profile,
+            ocr_language_correction, ocr_custom_words, source_mtime,
             created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(idempotency_key) DO NOTHING",
         rusqlite::params![
             pending.idempotency_key,
@@ -286,6 +307,8 @@ fn upsert_in_flight_row(conn: &Connection, pending: &NewInFlight<'_>) -> rusqlit
             pending.backend_url,
             pending.client_run_id,
             pending.conversion_profile,
+            pending.ocr_language_correction,
+            pending.ocr_custom_words,
             source_mtime,
             now_secs(),
         ],
@@ -368,7 +391,8 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
         "SELECT source_path, file_name, output_dir, backend_url,
                 client_run_id, idempotency_key, backend_job_id,
                 fallback_provider, fallback_request_id, fallback_check_url,
-                conversion_profile, source_mtime, created_at
+                conversion_profile, ocr_language_correction, ocr_custom_words,
+                source_mtime, created_at
            FROM inflight_conversions
           ORDER BY created_at ASC, idempotency_key ASC",
     )?;
@@ -385,8 +409,10 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
             fallback_request_id: row.get(8)?,
             fallback_check_url: row.get(9)?,
             conversion_profile: row.get(10)?,
-            source_mtime: row.get(11)?,
-            created_at: row.get(12)?,
+            ocr_language_correction: row.get(11)?,
+            ocr_custom_words: row.get(12)?,
+            source_mtime: row.get(13)?,
+            created_at: row.get(14)?,
         })
     })?;
     rows.collect()
@@ -859,6 +885,10 @@ mod tests {
             rows[0].backend_job_id.as_deref(),
             Some("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
         );
+        // A row written before the OCR columns existed reads back as the
+        // contract's defaults, which is what it was submitted with.
+        assert!(rows[0].ocr_language_correction);
+        assert_eq!(rows[0].ocr_custom_words, "");
         let pending = NewInFlight {
             source_path: &source_path,
             file_name: "report.pdf",
@@ -867,6 +897,8 @@ mod tests {
             client_run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             idempotency_key: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             conversion_profile: "standard",
+            ocr_language_correction: true,
+            ocr_custom_words: "",
         };
         assert!(
             !upsert_in_flight_row(&conn, &pending).unwrap(),
@@ -892,6 +924,8 @@ mod tests {
             client_run_id: "11111111-1111-4111-8111-111111111111",
             idempotency_key: "22222222-2222-4222-8222-222222222222",
             conversion_profile: "standard",
+            ocr_language_correction: false,
+            ocr_custom_words: "Uniwise\nDatalab",
         };
 
         assert!(upsert_in_flight_row(&conn, &pending).unwrap());
@@ -904,6 +938,10 @@ mod tests {
         assert_eq!(before_attach[0].client_run_id, pending.client_run_id);
         assert_eq!(before_attach[0].idempotency_key, pending.idempotency_key);
         assert_eq!(before_attach[0].conversion_profile, "standard");
+        // The OCR options are part of the replay fingerprint, so they have to
+        // survive the restart that recovery reads them back across.
+        assert!(!before_attach[0].ocr_language_correction);
+        assert_eq!(before_attach[0].ocr_custom_words, "Uniwise\nDatalab");
         assert!(before_attach[0].created_at > 0);
 
         let backend_job_id = "33333333-3333-4333-8333-333333333333";
@@ -941,6 +979,8 @@ mod tests {
             client_run_id: "12121212-1212-4212-8212-121212121212",
             idempotency_key: "34343434-3434-4434-8434-343434343434",
             conversion_profile: "standard",
+            ocr_language_correction: true,
+            ocr_custom_words: "",
         };
         assert!(upsert_in_flight_row(&conn, &original).unwrap());
 
@@ -973,6 +1013,8 @@ mod tests {
             client_run_id: "55555555-5555-4555-8555-555555555555",
             idempotency_key: "66666666-6666-4666-8666-666666666666",
             conversion_profile: "local_only",
+            ocr_language_correction: true,
+            ocr_custom_words: "",
         };
 
         assert!(upsert_in_flight_row(&conn, &pending).unwrap());
@@ -1005,6 +1047,8 @@ mod tests {
             client_run_id: "77777777-7777-4777-8777-777777777777",
             idempotency_key: "88888888-8888-4888-8888-888888888888",
             conversion_profile: "standard",
+            ocr_language_correction: true,
+            ocr_custom_words: "",
         };
 
         {
@@ -1256,6 +1300,8 @@ mod tests {
                 client_run_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
                 idempotency_key: key,
                 conversion_profile: "standard",
+                ocr_language_correction: true,
+                ocr_custom_words: "",
             },
         )
         .unwrap();

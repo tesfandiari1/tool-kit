@@ -94,6 +94,20 @@ export function SettingsPanel({
                 { value: "local_only", label: "Local only" },
               ]}
             />
+            <Switch
+              label="OCR language correction"
+              hint="Lets local OCR correct what it reads against a dictionary. Turn it off for part numbers, codes, and names it keeps rewriting."
+              checked={settings.languageCorrection}
+              onChange={(e) => {
+                onPersist({ languageCorrection: e.target.checked });
+              }}
+            />
+            <CustomWordsField
+              value={settings.customWords}
+              onCommit={(customWords) => {
+                onPersist({ customWords });
+              }}
+            />
             <KeyField
               label="Backend token"
               hint="Bearer token"
@@ -226,6 +240,56 @@ function PipelineField({
       type="text"
       value={draft}
       placeholder="pl_… blank uses the standard convert API"
+      onChange={(e) => {
+        setDraft(e.target.value);
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+      }}
+    />
+  );
+}
+
+/// The contract caps every multipart text part at 256 bytes. The list travels
+/// as one part, newline joined, so an over-long list fails every job in the run
+/// with a 422 that names neither this field nor Settings.
+const CUSTOM_WORDS_MAX_BYTES = 256;
+
+function customWordsBytes(words: string[]) {
+  return new TextEncoder().encode(words.join("\n")).length;
+}
+
+/// A list in the model, one text box in the UI, committed on blur or Enter for
+/// the same reason as the pipeline id: a half-typed word is not a word.
+function CustomWordsField({
+  value,
+  onCommit,
+}: {
+  value: string[];
+  onCommit: (value: string[]) => void;
+}) {
+  const [draft, setDraft] = useState(value.join(", "));
+  const commit = () => {
+    const words: string[] = [];
+    for (const word of draft
+      .split(/[,\n]/)
+      .map((w) => w.trim())
+      .filter(Boolean)) {
+      if (customWordsBytes([...words, word]) > CUSTOM_WORDS_MAX_BYTES) break;
+      words.push(word);
+    }
+    setDraft(words.join(", "));
+    onCommit(words);
+  };
+  const left = CUSTOM_WORDS_MAX_BYTES - customWordsBytes(value);
+  return (
+    <TextInput
+      label="Custom words (optional)"
+      hint={`Words local OCR should prefer when it is unsure. Worth setting for names and jargon it keeps getting wrong. ${String(left)} of ${String(CUSTOM_WORDS_MAX_BYTES)} bytes left.`}
+      type="text"
+      value={draft}
+      placeholder="Comma separated"
       onChange={(e) => {
         setDraft(e.target.value);
       }}

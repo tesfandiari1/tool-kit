@@ -19,6 +19,8 @@ const DEFAULT_DATABASE_BUSY_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_WORKER_POLL_INTERVAL_SECS: u64 = 1;
 const DEFAULT_RECOVERY_LIMIT: usize = 3;
 const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 30;
+const PDF_WORKER_NAME: &str = "tool-kit-pdf-worker";
+const VISION_WORKER_NAME: &str = "tool-kit-vision-worker";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Settings {
@@ -29,6 +31,9 @@ pub struct Settings {
     pub scratch_parent: PathBuf,
     pub pdf_worker_path: PathBuf,
     pub pdf_bcmaps_dir: Option<PathBuf>,
+    /// `None` where the Vision worker does not ship, which is every host but
+    /// macOS. The engine is then simply absent.
+    pub vision_worker_path: Option<PathBuf>,
     pub limits: Limits,
     pub pdf_threads: usize,
     pub database_busy_timeout: Duration,
@@ -78,7 +83,17 @@ impl Settings {
         )?;
         let pdf_worker_path = match read_optional_env("TOOLKIT_CONVERTER_PDF_WORKER_PATH")? {
             Some(path) => absolute_path("TOOLKIT_CONVERTER_PDF_WORKER_PATH", path)?,
-            None => sibling_worker_path()?,
+            None => sibling_worker_path(PDF_WORKER_NAME)?,
+        };
+        // A configured path is a promise, so it is kept whether or not the file
+        // is there and the engine reports what it finds. Only the implicit
+        // sibling probe is allowed to come back empty.
+        let vision_worker_path = match read_optional_env("TOOLKIT_CONVERTER_VISION_WORKER_PATH")? {
+            Some(path) => Some(absolute_path("TOOLKIT_CONVERTER_VISION_WORKER_PATH", path)?),
+            None => {
+                let sibling = sibling_worker_path(VISION_WORKER_NAME)?;
+                sibling.try_exists().unwrap_or(false).then_some(sibling)
+            }
         };
         let pdf_bcmaps_dir = read_optional_env("TOOLKIT_CONVERTER_PDF_BCMAPS_DIR")?
             .map(|path| absolute_path("TOOLKIT_CONVERTER_PDF_BCMAPS_DIR", path))
@@ -92,6 +107,7 @@ impl Settings {
             scratch_parent,
             pdf_worker_path,
             pdf_bcmaps_dir,
+            vision_worker_path,
             limits: Limits {
                 max_upload_bytes: read_bounded_u64(
                     "TOOLKIT_CONVERTER_MAX_UPLOAD_BYTES",
@@ -164,12 +180,12 @@ impl Settings {
     }
 }
 
-fn sibling_worker_path() -> Result<PathBuf, ConfigError> {
+fn sibling_worker_path(name: &str) -> Result<PathBuf, ConfigError> {
     let executable = env::current_exe().map_err(ConfigError::CurrentExecutable)?;
     let worker_name = if cfg!(windows) {
-        "tool-kit-pdf-worker.exe"
+        format!("{name}.exe")
     } else {
-        "tool-kit-pdf-worker"
+        name.to_owned()
     };
 
     Ok(executable.with_file_name(worker_name))

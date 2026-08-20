@@ -2,8 +2,9 @@ use axum::{extract::State, Json};
 use serde::Serialize;
 
 use crate::{
-    conversion::advertised_media_types,
+    conversion::servable_media_types,
     engines::{ANYDOC_ENGINE_NAME, ANYDOC_VERSION},
+    vision_protocol::VISION_ENGINE_NAME,
     worker_protocol::PDF_INSPECTOR_VERSION,
     AppState,
 };
@@ -43,7 +44,9 @@ struct ProfileCapability {
 #[derive(Debug, Serialize)]
 struct EngineCapability {
     name: &'static str,
-    version: &'static str,
+    /// Owned because Vision's version is the running macOS product version,
+    /// which is known only once the worker handshakes.
+    version: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +66,27 @@ struct RemoteFallbackCapabilities {
 
 pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
     let accepting_jobs = state.service().accepting_jobs().await;
+    let vision_version = state.service().vision_version().map(str::to_owned);
+    let vision_available = vision_version.is_some();
+    // Two engines everywhere, three where Vision came up. The client reads
+    // this to know what it can send, so an entry for an engine that is not
+    // here would be an invitation to a job that cannot run.
+    let mut engines = vec![
+        EngineCapability {
+            name: "pdf-inspector",
+            version: PDF_INSPECTOR_VERSION.to_owned(),
+        },
+        EngineCapability {
+            name: ANYDOC_ENGINE_NAME,
+            version: ANYDOC_VERSION.to_owned(),
+        },
+    ];
+    if let Some(version) = vision_version {
+        engines.push(EngineCapability {
+            name: VISION_ENGINE_NAME,
+            version,
+        });
+    }
     Json(CapabilitiesEnvelope {
         data: Capabilities {
             api_version: "v1",
@@ -70,7 +94,7 @@ pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
             conversion: ConversionCapabilities {
                 accepting_jobs,
                 durability: "persistent",
-                input_formats: advertised_media_types(),
+                input_formats: servable_media_types(vision_available),
                 output_formats: vec!["text/markdown", "application/json"],
                 profiles: vec![
                     ProfileCapability {
@@ -86,16 +110,7 @@ pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
                         available: false,
                     },
                 ],
-                engines: vec![
-                    EngineCapability {
-                        name: "pdf-inspector",
-                        version: PDF_INSPECTOR_VERSION,
-                    },
-                    EngineCapability {
-                        name: ANYDOC_ENGINE_NAME,
-                        version: ANYDOC_VERSION,
-                    },
-                ],
+                engines,
                 limits: LimitCapabilities {
                     max_upload_bytes: state.limits().max_upload_bytes,
                     max_output_bytes: state.limits().max_output_bytes,

@@ -4,9 +4,15 @@ pub const WORKER_PROTOCOL_VERSION: u32 = 2;
 pub const PDF_INSPECTOR_VERSION: &str = "1.15.0";
 pub const WORKER_REPORT_FILE: &str = "worker-report.json";
 pub const MARKDOWN_FILE: &str = "result.md";
-pub const WORKER_MAX_OUTPUT_BYTES_ENV: &str = "TOOLKIT_PDF_WORKER_MAX_OUTPUT_BYTES";
-pub const WORKER_EXPECTED_SOURCE_BYTES_ENV: &str = "TOOLKIT_PDF_WORKER_EXPECTED_SOURCE_BYTES";
-pub const WORKER_EXPECTED_SOURCE_SHA256_ENV: &str = "TOOLKIT_PDF_WORKER_EXPECTED_SOURCE_SHA256";
+/// Every engine worker is spawned with these, so they are named for the role
+/// and not for one engine. They were `TOOLKIT_PDF_WORKER_*` while the PDF
+/// worker was the only one; the Vision worker reads the same three with the
+/// same meaning, and a Swift binary reading `TOOLKIT_PDF_WORKER_...` reads as
+/// a bug. Nothing outside the spawn path sets them: not Compose, not the
+/// Dockerfile, not `.env.example`. Parent and child both take them from here.
+pub const WORKER_MAX_OUTPUT_BYTES_ENV: &str = "TOOLKIT_WORKER_MAX_OUTPUT_BYTES";
+pub const WORKER_EXPECTED_SOURCE_BYTES_ENV: &str = "TOOLKIT_WORKER_EXPECTED_SOURCE_BYTES";
+pub const WORKER_EXPECTED_SOURCE_SHA256_ENV: &str = "TOOLKIT_WORKER_EXPECTED_SOURCE_SHA256";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

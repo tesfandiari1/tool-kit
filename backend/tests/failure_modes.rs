@@ -263,6 +263,7 @@ async fn unwritable_data_root_fails_startup_instead_of_serving() {
         scratch_parent: data_dir.clone(),
         pdf_worker_path: env!("CARGO_BIN_EXE_tool-kit-pdf-worker").into(),
         pdf_bcmaps_dir: None,
+        vision_worker_path: None,
         limits: Limits {
             max_upload_bytes: 1024 * 1024,
             max_output_bytes: 2 * 1024 * 1024,

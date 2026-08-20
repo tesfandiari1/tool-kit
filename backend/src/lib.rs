@@ -9,6 +9,7 @@
 pub mod config;
 pub mod faults;
 pub mod persistence;
+pub mod vision_protocol;
 pub mod worker_protocol;
 
 mod api;

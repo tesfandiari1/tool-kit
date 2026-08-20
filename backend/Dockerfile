@@ -37,6 +37,13 @@ RUN apt-get update \
 # anonymous volume nobody prunes. Compose declares the volume instead.
 RUN install -d -o 10001 -g 10001 -m 0700 /data
 
+# No tool-kit-vision-worker here, and that is deliberate rather than missing.
+# It is Swift against Apple's Vision framework, so it builds and runs on macOS
+# only. The converter probes for it as a sibling of its own binary, finds
+# nothing, and leaves the engine absent. `capabilities.inputFormats` then
+# advertises the 18 media types this image can actually convert instead of the
+# 24 the contract knows about, and an image posted here is refused with
+# `source_format_unavailable` rather than accepted and failed.
 COPY --from=builder /build/target/release/tool-kit-converter /usr/local/bin/tool-kit-converter
 COPY --from=builder /build/target/release/tool-kit-pdf-worker /usr/local/bin/tool-kit-pdf-worker
 COPY --from=builder /build/pdf-inspector-runtime/bcmaps /opt/pdf-inspector/bcmaps

@@ -8,7 +8,7 @@ use crate::{
     auth::{AuthLoadError, BootstrapAuth},
     config::{Limits, Settings},
     conversion::ConversionService,
-    engines::{AnyDocEngine, EngineStartupError, PdfInspectorEngine},
+    engines::{AnyDocEngine, EngineStartupError, PdfInspectorEngine, VisionEngine},
     faults::FaultBarrier,
     jobs::{JobRuntime, StartupRecovery},
     persistence::{RepositoryError, SqliteRepository},
@@ -53,11 +53,31 @@ impl AppState {
             settings.limits.pdf_timeout,
         );
 
+        // Vision is optional and its absence is the normal case: no worker
+        // binary, or a host below macOS 26, and the engine is simply not
+        // there. A broken one is logged and dropped for the same reason.
+        // Failing startup over it would take the whole service down for the
+        // formats it never touches.
+        let vision_engine = settings.vision_worker_path.as_ref().and_then(|path| {
+            match VisionEngine::initialize(
+                path.clone(),
+                settings.limits.pdf_timeout,
+                settings.limits.max_output_bytes,
+            ) {
+                Ok(engine) => Some(engine),
+                Err(error) => {
+                    tracing::warn!(%error, "vision engine is unavailable; image conversion is off");
+                    None
+                }
+            }
+        });
+
         let service = ConversionService::new(
             repository,
             artifacts,
             pdf_engine,
             anydoc_engine,
+            vision_engine,
             settings.limits.max_output_bytes,
             // A parse that outlives its own hard timeout keeps the permit while
             // it detaches. Give the next claim one more timeout to wait, then

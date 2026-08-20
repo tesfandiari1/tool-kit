@@ -11,10 +11,15 @@ use crate::worker_protocol::FallbackReason;
 use super::ConversionProfile;
 
 /// Where a conversion's Markdown comes from.
+///
+/// Every route is local until M5's remote leg lands, which is the whole point
+/// of the shared prefix, so the naming lint has nothing to say here yet.
+#[expect(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RouteKind {
     LocalPdf,
     LocalAnyDoc,
+    LocalVision,
 }
 
 impl RouteKind {
@@ -22,6 +27,7 @@ impl RouteKind {
         match self {
             Self::LocalPdf => "local_pdf",
             Self::LocalAnyDoc => "local_anydoc",
+            Self::LocalVision => "local_vision",
         }
     }
 }
@@ -34,6 +40,10 @@ pub(crate) enum ReasonCode {
     NativeTextPdf,
     /// A non-PDF document parsed by AnyDoc.
     StructuredDocument,
+    /// Text read off an image by OCR. Neither of the codes above is true of a
+    /// photograph or a screenshot, and the difference matters to a reader
+    /// judging the output.
+    RecognizedImageText,
     /// The engine gave up before producing Markdown. Carries the engine's own
     /// reason.
     Engine(FallbackReason),
@@ -44,6 +54,7 @@ impl ReasonCode {
         match self {
             Self::NativeTextPdf => "native_text_pdf",
             Self::StructuredDocument => "structured_document",
+            Self::RecognizedImageText => "recognized_image_text",
             Self::Engine(reason) => reason.as_str(),
         }
     }
@@ -204,6 +215,7 @@ fn converted_reason(route: RouteKind) -> ReasonCode {
     match route {
         RouteKind::LocalPdf => ReasonCode::NativeTextPdf,
         RouteKind::LocalAnyDoc => ReasonCode::StructuredDocument,
+        RouteKind::LocalVision => ReasonCode::RecognizedImageText,
     }
 }
 
@@ -346,6 +358,7 @@ mod tests {
         for code in [
             ReasonCode::NativeTextPdf,
             ReasonCode::StructuredDocument,
+            ReasonCode::RecognizedImageText,
             ReasonCode::Engine(FallbackReason::ScannedPdf),
         ] {
             let value = code.as_str();
@@ -431,10 +444,12 @@ mod tests {
         let routes = [
             RouteKind::LocalPdf.as_str(),
             RouteKind::LocalAnyDoc.as_str(),
+            RouteKind::LocalVision.as_str(),
         ];
         let reasons = [
             ReasonCode::NativeTextPdf,
             ReasonCode::StructuredDocument,
+            ReasonCode::RecognizedImageText,
             ReasonCode::Engine(FallbackReason::ScannedPdf),
             ReasonCode::Engine(FallbackReason::ImageBasedPdf),
             ReasonCode::Engine(FallbackReason::MixedPdf),

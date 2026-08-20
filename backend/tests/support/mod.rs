@@ -193,6 +193,8 @@ impl TestHarness {
                     sha256: hex::encode(Sha256::digest(source)),
                 },
                 origin_request_id: Uuid::new_v4().to_string(),
+                ocr_language_correction: true,
+                ocr_custom_words: String::new(),
             })
             .await
             .unwrap();
@@ -412,6 +414,7 @@ impl TestHarness {
             scratch_parent: self.data_dir.clone(),
             pdf_worker_path: self.worker_path.clone(),
             pdf_bcmaps_dir: None,
+            vision_worker_path: None,
             limits: Limits {
                 max_upload_bytes: self.options.max_upload_bytes,
                 max_output_bytes: self.options.max_output_bytes,

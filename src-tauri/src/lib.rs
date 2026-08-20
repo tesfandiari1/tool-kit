@@ -160,10 +160,11 @@ const ALREADY_TEXT: &[&str] = &[
 ];
 
 /// These formats have no local engine and intentionally bypass the backend
-/// forever. Every other decision comes from live `capabilities.inputFormats`.
-const PERMANENT_DIRECT_FORMATS: &[&str] = &[
-    "png", "jpg", "jpeg", "webp", "tiff", "tif", "gif", "bmp", "html", "htm",
-];
+/// forever. Every other decision comes from live `capabilities.inputFormats`,
+/// images included: the Vision engine only exists on macOS 26 and up, so the
+/// same build has to route an image either way depending on what the service
+/// it is talking to actually advertises.
+const PERMANENT_DIRECT_FORMATS: &[&str] = &["html", "htm"];
 
 fn is_permanent_direct(path: &Path) -> bool {
     path.extension()
@@ -614,6 +615,14 @@ async fn run_pipeline(
     }
 
     let client_run_id = uuid::Uuid::new_v4().to_string();
+    // From the run snapshot, so editing the OCR settings mid-run cannot split
+    // one run across two recognizers. Carried on each job and recorded on its
+    // ledger row, because the service folds both into the replay fingerprint.
+    let ocr = conversion_service::OcrOptions {
+        language_correction: cfg.language_correction,
+        custom_words: cfg.custom_words.clone(),
+    };
+    let ocr_custom_words = ocr.custom_words_wire();
     for source in &files {
         let id = state.next_id();
         let source_path = source.to_string_lossy().into_owned();
@@ -634,6 +643,8 @@ async fn run_pipeline(
                     client_run_id: &client_run_id,
                     idempotency_key: &idempotency_key,
                     conversion_profile: cfg.conversion_profile.id(),
+                    ocr_language_correction: ocr.language_correction,
+                    ocr_custom_words: &ocr_custom_words,
                 },
             );
             Job::new_backend(
@@ -646,6 +657,7 @@ async fn run_pipeline(
                     idempotency_key,
                     None,
                     cfg.conversion_profile,
+                    ocr.clone(),
                 ),
             )
         } else {
@@ -1174,14 +1186,16 @@ mod scan_tests {
     }
 
     #[test]
-    fn only_permanent_image_and_html_formats_bypass_capabilities() {
-        for name in [
-            "a.png", "a.jpg", "a.jpeg", "a.webp", "a.tiff", "a.tif", "a.gif", "a.bmp", "a.html",
-            "a.htm", "A.PNG",
-        ] {
+    fn only_html_formats_bypass_capabilities() {
+        for name in ["a.html", "a.htm", "A.HTML"] {
             assert!(is_permanent_direct(Path::new(name)), "{name}");
         }
-        for name in ["a.pdf", "a.docx", "a.epub", "a.xlsx", "a.pptx"] {
+        // Images have a local engine now, so they must reach the capabilities
+        // lookup instead of being billed to a remote provider on sight.
+        for name in [
+            "a.png", "a.jpg", "a.jpeg", "a.webp", "a.tiff", "a.tif", "a.gif", "a.bmp", "a.pdf",
+            "a.docx", "a.epub", "a.xlsx", "a.pptx",
+        ] {
             assert!(!is_permanent_direct(Path::new(name)), "{name}");
         }
     }
@@ -1205,23 +1219,32 @@ mod scan_tests {
         assert!(names(&candidates).contains(&"table.csv".into()));
         assert!(!names(&candidates).contains(&"already.md".into()));
 
+        // A service with the Vision engine advertises image/png, so the image
+        // belongs to the backend rather than to Datalab.
         let supported = HashSet::from([
             "text/csv".to_string(),
             "application/vnd.oasis.opendocument.text".to_string(),
+            "image/png".to_string(),
         ]);
         let plan = route_conversion_candidates(candidates, &supported);
-        assert_eq!(names(&plan.backend), vec!["document.odt", "table.csv"]);
-        assert_eq!(names(&plan.direct), vec!["image.png", "legacy.docx"]);
+        assert_eq!(
+            names(&plan.backend),
+            vec!["document.odt", "image.png", "table.csv"]
+        );
+        assert_eq!(names(&plan.direct), vec!["legacy.docx"]);
         assert!(!names(&plan.backend).contains(&"movie.mp4".into()));
         assert!(!names(&plan.direct).contains(&"movie.mp4".into()));
         assert!(!names(&plan.backend).contains(&"program.exe".into()));
         assert!(!names(&plan.direct).contains(&"program.exe".into()));
 
         assert!(require_backend_capacity(plan, false).is_err());
+        // No advertised image support — a Linux deployment, or a Mac below
+        // macOS 26 — and the image still falls through to the direct route.
         let direct_only = route_conversion_candidates(
             vec![root.join("legacy.docx"), root.join("image.png")],
             &HashSet::new(),
         );
+        assert_eq!(names(&direct_only.direct), vec!["image.png", "legacy.docx"]);
         assert!(require_backend_capacity(direct_only, false).is_ok());
     }
 
@@ -1238,6 +1261,7 @@ mod scan_tests {
                 "22222222-2222-4222-8222-222222222222".into(),
                 None,
                 settings::ConversionProfile::Standard,
+                conversion_service::OcrOptions::default(),
             ),
         );
         assert_eq!(

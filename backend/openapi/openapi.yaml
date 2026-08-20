@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Tool-Kit Conversion Service
-  version: 0.4.2
+  version: 0.4.4
   description: >-
     CPU-only contract for durable, authenticated document conversion.
     Accepted conversions, idempotency records, and published artifacts are
@@ -70,7 +70,7 @@ paths:
               $ref: "#/components/schemas/ConversionSubmission"
             encoding:
               source:
-                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/msword, application/vnd.openxmlformats-officedocument.presentationml.presentation, application/vnd.ms-powerpoint, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel, application/epub+zip, application/vnd.oasis.opendocument.text, application/vnd.oasis.opendocument.spreadsheet, application/vnd.oasis.opendocument.presentation, application/rtf, text/csv, application/vnd.ms-word.document.macroEnabled.12, application/vnd.ms-excel.sheet.macroEnabled.12, application/vnd.ms-powerpoint.presentation.macroEnabled.12, application/vnd.openxmlformats-officedocument.presentationml.slideshow, application/vnd.ms-powerpoint.slideshow.macroEnabled.12
+                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/msword, application/vnd.openxmlformats-officedocument.presentationml.presentation, application/vnd.ms-powerpoint, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel, application/epub+zip, application/vnd.oasis.opendocument.text, application/vnd.oasis.opendocument.spreadsheet, application/vnd.oasis.opendocument.presentation, application/rtf, text/csv, application/vnd.ms-word.document.macroEnabled.12, application/vnd.ms-excel.sheet.macroEnabled.12, application/vnd.ms-powerpoint.presentation.macroEnabled.12, application/vnd.openxmlformats-officedocument.presentationml.slideshow, application/vnd.ms-powerpoint.slideshow.macroEnabled.12, image/png, image/jpeg, image/webp, image/tiff, image/gif, image/bmp
                 headers:
                   Content-Disposition:
                     required: true
@@ -313,7 +313,10 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     Conflict:
-      description: Idempotency, profile, or artifact-state conflict
+      description: >-
+        Idempotency, profile, engine availability, or artifact-state conflict.
+        `source_format_unavailable` means the format is in the contract and no
+        engine on this deployment converts it; check `inputFormats` first.
       headers:
         X-Request-Id:
           $ref: "#/components/headers/RequestId"
@@ -457,46 +460,47 @@ components:
           type: string
           const: persistent
         inputFormats:
+          description: >-
+            What this deployment can convert, not what the contract knows. The
+            image types need the Apple Vision engine, which ships only with
+            macOS 26 and later, so a deployment without it advertises the
+            other 18 and refuses an image upload with 409
+            `source_format_unavailable`. Read this list rather than assuming
+            the whole enum.
+
+
+            Table order, and the image types are the tail, so the short list
+            is the long one's prefix.
           type: array
-          prefixItems:
-            - type: string
-              const: application/pdf
-            - type: string
-              const: application/vnd.openxmlformats-officedocument.wordprocessingml.document
-            - type: string
-              const: application/msword
-            - type: string
-              const: application/vnd.openxmlformats-officedocument.presentationml.presentation
-            - type: string
-              const: application/vnd.ms-powerpoint
-            - type: string
-              const: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
-            - type: string
-              const: application/vnd.ms-excel
-            - type: string
-              const: application/epub+zip
-            - type: string
-              const: application/vnd.oasis.opendocument.text
-            - type: string
-              const: application/vnd.oasis.opendocument.spreadsheet
-            - type: string
-              const: application/vnd.oasis.opendocument.presentation
-            - type: string
-              const: application/rtf
-            - type: string
-              const: text/csv
-            - type: string
-              const: application/vnd.ms-word.document.macroEnabled.12
-            - type: string
-              const: application/vnd.ms-excel.sheet.macroEnabled.12
-            - type: string
-              const: application/vnd.ms-powerpoint.presentation.macroEnabled.12
-            - type: string
-              const: application/vnd.openxmlformats-officedocument.presentationml.slideshow
-            - type: string
-              const: application/vnd.ms-powerpoint.slideshow.macroEnabled.12
+          items:
+            type: string
+            enum:
+              - application/pdf
+              - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+              - application/msword
+              - application/vnd.openxmlformats-officedocument.presentationml.presentation
+              - application/vnd.ms-powerpoint
+              - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+              - application/vnd.ms-excel
+              - application/epub+zip
+              - application/vnd.oasis.opendocument.text
+              - application/vnd.oasis.opendocument.spreadsheet
+              - application/vnd.oasis.opendocument.presentation
+              - application/rtf
+              - text/csv
+              - application/vnd.ms-word.document.macroEnabled.12
+              - application/vnd.ms-excel.sheet.macroEnabled.12
+              - application/vnd.ms-powerpoint.presentation.macroEnabled.12
+              - application/vnd.openxmlformats-officedocument.presentationml.slideshow
+              - application/vnd.ms-powerpoint.slideshow.macroEnabled.12
+              - image/png
+              - image/jpeg
+              - image/webp
+              - image/tiff
+              - image/gif
+              - image/bmp
           minItems: 18
-          maxItems: 18
+          maxItems: 24
         outputFormats:
           type: array
           items:
@@ -512,28 +516,23 @@ components:
               available:
                 type: boolean
         engines:
+          description: >-
+            The engines running in this process, pdf-inspector then anydoc.
+            apple-vision is third and present only where it initialized; its
+            version is the host's macOS product version, because Vision ships
+            with the OS and has no version of its own.
           type: array
-          prefixItems:
-            - type: object
-              required: [name, version]
-              properties:
-                name:
-                  type: string
-                  const: pdf-inspector
-                version:
-                  type: string
-                  const: 1.15.0
-            - type: object
-              required: [name, version]
-              properties:
-                name:
-                  type: string
-                  const: anydoc
-                version:
-                  type: string
-                  const: "0.1.9"
+          items:
+            type: object
+            required: [name, version]
+            properties:
+              name:
+                type: string
+                enum: [pdf-inspector, anydoc, apple-vision]
+              version:
+                type: string
           minItems: 2
-          maxItems: 2
+          maxItems: 3
         limits:
           type: object
           required: [maxUploadBytes, maxOutputBytes, maxActiveJobs, maxConcurrentUploads]
@@ -574,6 +573,27 @@ components:
           format: uuid
         profile:
           $ref: "#/components/schemas/ConversionProfile"
+        languageCorrection:
+          type: boolean
+          description: >-
+            Whether local OCR applies language correction to the text it
+            recognizes. Omit the part to leave it on. A value other than
+            `true` or `false` is 422 `invalid_language_correction`.
+
+
+            Read only by the local image OCR engine and ignored by every other
+            route, so sending it with a PDF or an Office document changes
+            nothing.
+        customWords:
+          type: string
+          description: >-
+            Words local OCR should prefer when it is unsure, one per line.
+            Omit the part to send none. The field shares the 256-byte cap
+            every text part has, and exceeding it is 422 `metadata_too_large`.
+
+
+            Read only by the local image OCR engine and ignored by every other
+            route.
     ConversionProfile:
       type: string
       enum: [standard, local_only, best_quality]
@@ -695,7 +715,7 @@ components:
           properties:
             name:
               type: string
-              enum: [pdf-inspector, anydoc]
+              enum: [pdf-inspector, anydoc, apple-vision]
             version:
               type: string
             features:
@@ -708,10 +728,12 @@ components:
         document:
           description: >-
             Engine diagnostics. Inspection when engine.name is pdf-inspector,
-            AnyDocDiagnostics when it is anydoc.
+            AnyDocDiagnostics when it is anydoc, VisionDiagnostics when it is
+            apple-vision.
           oneOf:
             - $ref: "#/components/schemas/Inspection"
             - $ref: "#/components/schemas/AnyDocDiagnostics"
+            - $ref: "#/components/schemas/VisionDiagnostics"
         warnings:
           type: array
           items:
@@ -790,13 +812,14 @@ components:
       properties:
         kind:
           type: string
-          enum: [local_pdf, local_anydoc]
+          enum: [local_pdf, local_anydoc, local_vision]
         reasonCodes:
           description: >-
             Why the conversion routed the way it did, in decision order.
-            native_text_pdf, structured_document, and incomplete_local_text are
-            the policy's own codes. The rest are the reason an engine gave for
-            producing no Markdown, which always ends the job needs_remote.
+            native_text_pdf, structured_document, recognized_image_text, and
+            incomplete_local_text are the policy's own codes. The rest are the
+            reason an engine gave for producing no Markdown, which always ends
+            the job needs_remote.
 
 
             Open vocabulary, deliberately not an enum: the remote route adds
@@ -808,6 +831,7 @@ components:
             x-vocabulary:
               - native_text_pdf
               - structured_document
+              - recognized_image_text
               - scanned_pdf
               - image_based_pdf
               - mixed_pdf
@@ -838,6 +862,16 @@ components:
       properties:
         format:
           type: string
+        processingTimeMs:
+          type: integer
+          minimum: 0
+    VisionDiagnostics:
+      type: object
+      required: [processingTimeMs]
+      # Closed, because wall time is the whole of it and an open object here
+      # would also match the other two engines' diagnostics.
+      additionalProperties: false
+      properties:
         processingTimeMs:
           type: integer
           minimum: 0

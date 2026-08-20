@@ -24,6 +24,10 @@ const MARKDOWN_BODY_LIMIT: usize = 50 * 1024 * 1024;
 const SMALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const STREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_OUTPUT_COLLISIONS: u32 = 1000;
+/// The contract's ceiling on every multipart text part. Checking it here names
+/// the offending field; letting it through returns an opaque 422 on every job
+/// in the run instead.
+const MAX_METADATA_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConversionCapabilities {
@@ -102,6 +106,44 @@ struct ConversionSubmission {
     source: String,
     client_run_id: String,
     profile: String,
+    language_correction: bool,
+    custom_words: String,
+}
+
+/// The local-OCR settings a submission was made with. They travel together and
+/// the backend's image engine is the only thing that reads them. They are also
+/// part of the service's replay fingerprint, so a recovered job has to resubmit
+/// the values it was created with, not whatever Settings say now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OcrOptions {
+    pub(crate) language_correction: bool,
+    pub(crate) custom_words: Vec<String>,
+}
+
+impl Default for OcrOptions {
+    /// The values the contract treats as absent.
+    fn default() -> Self {
+        Self {
+            language_correction: true,
+            custom_words: Vec::new(),
+        }
+    }
+}
+
+impl OcrOptions {
+    /// One word per line: the wire form the contract documents, and the form
+    /// the in-flight ledger stores so recovery can rebuild the list.
+    pub(crate) fn custom_words_wire(&self) -> String {
+        self.custom_words.join("\n")
+    }
+
+    /// Rebuild from the stored wire form.
+    pub(crate) fn from_wire(language_correction: bool, custom_words: &str) -> Self {
+        Self {
+            language_correction,
+            custom_words: custom_words.lines().map(str::to_owned).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,12 +220,22 @@ pub(crate) async fn submit_conversion(
     source_path: &str,
     client_run_id: &str,
     profile: &str,
+    ocr: &OcrOptions,
     idempotency_key: &str,
 ) -> Result<ConversionJob, String> {
+    let custom_words = ocr.custom_words_wire();
+    if custom_words.len() > MAX_METADATA_BYTES {
+        return Err(format!(
+            "Custom words are too long ({} bytes, {MAX_METADATA_BYTES} maximum). Shorten them in Settings.",
+            custom_words.len()
+        ));
+    }
     let body = serde_json::to_string(&serde_json::json!({
         "source": source_path,
         "clientRunId": client_run_id,
         "profile": profile,
+        "languageCorrection": ocr.language_correction,
+        "customWords": custom_words,
     }))
     .map_err(|e| format!("Could not prepare conversion submission: {e}"))?;
     let response = send_service_request(
@@ -572,10 +624,20 @@ async fn send_conversion(
         .map_err(|e| format!("Could not open conversion source: {e}"))?
         .mime_str(&media_type)
         .map_err(|_| "Conversion source media type is invalid".to_string())?;
-    let form = multipart::Form::new()
+    let mut form = multipart::Form::new()
         .part("source", source_part)
         .text("clientRunId", submission.client_run_id)
         .text("profile", submission.profile);
+    // Absent is the documented default for both, and a service built before
+    // the OCR parts existed answers an unknown field with 422. The desktop and
+    // the container ship on their own cadences, so only a user who changed an
+    // OCR setting puts a part on the wire that an older service can reject.
+    if !submission.language_correction {
+        form = form.text("languageCorrection", "false");
+    }
+    if !submission.custom_words.is_empty() {
+        form = form.text("customWords", submission.custom_words);
+    }
 
     client
         .post(endpoint)
@@ -866,6 +928,36 @@ mod tests {
         }
     }
 
+    fn default_ocr() -> OcrOptions {
+        OcrOptions {
+            language_correction: true,
+            custom_words: Vec::new(),
+        }
+    }
+
+    /// A hand-edited settings.json can carry more custom words than the
+    /// contract's text-part budget, which would 422 every job in the run.
+    #[tokio::test]
+    async fn custom_words_over_the_metadata_budget_are_refused_by_name() {
+        let ocr = OcrOptions {
+            language_correction: true,
+            custom_words: vec!["Uniwise".into(); 40],
+        };
+        assert!(ocr.custom_words_wire().len() > MAX_METADATA_BYTES);
+        let error = submit_conversion(
+            "http://127.0.0.1:9",
+            "token",
+            "/tmp/does-not-matter.png",
+            UUID,
+            "standard",
+            &ocr,
+            "over-budget-key",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.starts_with("Custom words are too long"), "{error}");
+    }
+
     #[test]
     fn only_frozen_method_and_path_pairs_are_allowed() {
         assert_eq!(
@@ -1007,7 +1099,9 @@ mod tests {
                     serde_json::json!({
                         "source": source,
                         "clientRunId": UUID,
-                        "profile": "standard"
+                        "profile": "standard",
+                        "languageCorrection": false,
+                        "customWords": "Uniwise\nDatalab"
                     })
                     .to_string(),
                 ),
@@ -1030,6 +1124,10 @@ mod tests {
         assert!(request.contains(UUID));
         assert!(request.contains("name=\"profile\""));
         assert!(request.contains("standard"));
+        assert!(request.contains("name=\"languageCorrection\""));
+        assert!(request.contains("false"));
+        assert!(request.contains("name=\"customWords\""));
+        assert!(request.contains("Uniwise\nDatalab"));
         server.task.await.unwrap();
     }
 
@@ -1102,6 +1200,7 @@ mod tests {
             &source.to_string_lossy(),
             UUID,
             "standard",
+            &default_ocr(),
             "stable-invalid-id-key",
         )
         .await
@@ -1168,6 +1267,10 @@ mod tests {
             &source.to_string_lossy(),
             UUID,
             "standard",
+            &OcrOptions {
+                language_correction: false,
+                custom_words: vec!["Datalab".into(), "Rev.ai".into()],
+            },
             "stable-replay-key",
         )
         .await
@@ -1178,6 +1281,9 @@ mod tests {
         assert!(request
             .to_ascii_lowercase()
             .contains("idempotency-key: stable-replay-key\r\n"));
+        // The list reaches the wire as one part, one word per line.
+        assert!(request.contains("name=\"languageCorrection\"\r\n\r\nfalse"));
+        assert!(request.contains("name=\"customWords\"\r\n\r\nDatalab\nRev.ai"));
         server.task.await.unwrap();
     }
 
@@ -1209,6 +1315,7 @@ mod tests {
         });
         let base_url = format!("http://{address}");
         let source_path = source.to_string_lossy().into_owned();
+        let ocr = default_ocr();
         let submit = || {
             submit_conversion(
                 &base_url,
@@ -1216,6 +1323,7 @@ mod tests {
                 &source_path,
                 UUID,
                 "standard",
+                &ocr,
                 "same-key-after-loss",
             )
         };
@@ -1228,6 +1336,10 @@ mod tests {
             assert!(request
                 .to_ascii_lowercase()
                 .contains("idempotency-key: same-key-after-loss\r\n"));
+            // Default OCR settings put nothing on the wire, so a service built
+            // before those parts existed still accepts the submission.
+            assert!(!request.contains("name=\"languageCorrection\""));
+            assert!(!request.contains("name=\"customWords\""));
         }
         server.await.unwrap();
     }
