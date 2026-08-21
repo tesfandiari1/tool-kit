@@ -92,6 +92,19 @@ pub fn resolve(workspace: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(workspace.join(candidate))
 }
 
+/// The mtime one directory carries right now, in the same units `DirListing`
+/// reports.
+///
+/// The cheap half of the focus reconcile: one `stat`, where `list` costs a
+/// `read_dir` plus a `stat` per entry. `None` for a path that escapes, is gone,
+/// or is no longer a folder, which the caller reads as "changed" and answers
+/// with a real listing.
+pub fn modified(workspace: &Path, rel: &str) -> Option<u64> {
+    let dir = resolve(workspace, rel).ok()?;
+    let meta = std::fs::metadata(dir).ok()?;
+    meta.is_dir().then(|| modified_ms(&meta))
+}
+
 /// List one directory level under the workspace. `rel` is workspace-relative
 /// and is refused if it escapes.
 pub fn list(workspace: &Path, rel: &str, cfg: &Settings) -> Result<DirListing, String> {
@@ -569,5 +582,30 @@ mod tests {
         let listing = list(&root, "Inbox/data", &settings("markdown")).unwrap();
 
         assert_eq!(names(&listing), ["project.json"]);
+    }
+
+    /// The reconcile's cheap question has to answer with the same number the
+    /// listing carries, or every focus would look like a change and the stat
+    /// would buy nothing.
+    #[test]
+    fn the_folder_mtime_matches_the_one_its_listing_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.pdf"]);
+
+        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+
+        assert_eq!(modified(&root, "Inbox"), Some(listing.modified_ms));
+    }
+
+    /// A folder that is gone, a file, and a path out of the workspace all
+    /// answer the same way: ask the listing, which owns what those mean.
+    #[test]
+    fn nothing_that_is_not_a_folder_here_reports_an_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.pdf"]);
+
+        assert_eq!(modified(&root, "Inbox/gone"), None);
+        assert_eq!(modified(&root, "Inbox/deck.pdf"), None);
+        assert_eq!(modified(&root, "../elsewhere"), None);
     }
 }

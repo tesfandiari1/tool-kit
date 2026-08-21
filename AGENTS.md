@@ -1,7 +1,7 @@
 ## Learned User Preferences
 
 - Steal host, folder, and onboarding patterns from Yaak, OpenWork, Apple Setup Assistant, and Obsidian; do not fork those products or copy Electron, Tailwind/shadcn, Zustand, or TanStack Query/Router.
-- Product target is a local markdown workspace editor (library-first), not a batch converter; library shell keeps Run/Settings/History as primary nav; follow `docs/north-star.md`.
+- Product target is a local markdown workspace editor (library-first), not a batch converter; the title-bar nav is Library/Run/History and Settings is a sheet over the window at ⌘,; follow `docs/north-star.md`.
 - Workspace root plus projects as folders (Claude/ChatGPT desktop pattern); documents are durable in the project on import; export is copy-out only, never move.
 - No backend retention of customer files; conversion uses ephemeral local workers and discards scratch after each run; local vs cloud conversion mode is user-configurable in onboarding and settings.
 - Conversion HTTP and secrets stay in Tauri; never browser-fetch the remote service or put the bearer token in the webview.
@@ -9,7 +9,7 @@
 - Stage explicit paths only; never `git add .` or `git add -A`. Parallel sessions start from `docs/STATUS.md`.
 - Stay on latest stable dependencies except the documented pins; do not bump TypeScript 7 just to be current.
 - Operational milestones in `docs/STATUS.md`; product target in `docs/north-star.md`. Do not add separate phase execution-plan docs unless they encode critical patterns.
-- Launcher window should fit content height (`useFitWindow`); no page scroll in the compact launcher phase.
+- One window phase. The window opens at `tauri.conf.json`'s size, grows once into `ONBOARDING` or `WORKSPACE`, and is then resizable inside `WORKSPACE`'s bounds at the size the user last left it. Every number lives in `src/shell/geometry.ts`.
 - Keep job UX progress (Tauri poll → `job-updated`) separate from operator monitoring. M7 carried the metrics work and is cancelled, but the split still holds. See `docs/archive/MONITORING_AND_PROGRESS.md`.
 - Use Clippy with a small production deny-set and test exceptions in each crate's `clippy.toml`. Do not enable `pedantic` or blanket `unwrap_used`.
 

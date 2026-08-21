@@ -4,8 +4,11 @@
 
 /// The size the window opens at, before the settings load says where the
 /// workspace is. Not a phase: a beat later the window grows to `WORKSPACE` or
-/// to `ONBOARDING` and never comes back. `tauri.conf.json` carries the same
-/// three numbers, so change both together.
+/// to `ONBOARDING` and never comes back.
+///
+/// No code reads this, and none should. It is the record of what
+/// `tauri.conf.json` opens the window at, kept here because JSON cannot import
+/// a module and the two numbers still have to agree. Change one, change both.
 export const INITIAL = { width: 560, minWidth: 480, minHeight: 460 } as const;
 
 /// The workspace is resizable inside these bounds. `minWidth` is derived, not

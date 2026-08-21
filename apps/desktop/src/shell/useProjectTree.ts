@@ -22,8 +22,9 @@ const FOCUS_FLOOR_MS = 1500;
 /// - `click`: the user asked, so a failure gets a toast.
 /// - `refresh`: mount, and once per finished run. Silent, still marks busy.
 /// - `reconcile`: the window came back to the front. Silent, no busy flag, and
-///   the answer is dropped unless the folder's own mtime moved, so a ⌘Tab round
-///   trip over an untouched workspace costs no render at all.
+///   the answer is dropped unless the folder's own mtime moved. Only folders
+///   the host has already named as moved are read this way, so a ⌘Tab round
+///   trip over an untouched workspace costs one `stat` a folder and no render.
 type ReadMode = "click" | "refresh" | "reconcile";
 
 /// Every folder worth re-reading: each project root, plus whatever the user
@@ -179,6 +180,25 @@ export function useProjectTree({
     [keepFocusInside, setExpanded, showToast],
   );
 
+  /// Which of these folders are worth a listing: everything the cache has
+  /// never seen, plus everything the host says has moved.
+  ///
+  /// A failure answers "all of them". The stat is an optimisation, and a
+  /// reconcile that stops happening because the cheap call failed is a tree
+  /// that quietly stops telling the truth.
+  const staleAmong = useCallback(async (targets: string[]): Promise<string[]> => {
+    const known = targets
+      .filter((rel) => rel in cache.current)
+      .map((rel) => ({ rel, modifiedMs: cache.current[rel].modifiedMs }));
+    if (known.length === 0) return targets;
+    try {
+      const moved = new Set(await commands.changedProjectDirs(known));
+      return targets.filter((rel) => !(rel in cache.current) || moved.has(rel));
+    } catch {
+      return targets;
+    }
+  }, []);
+
   /// One level, or the whole subtree. Level by level rather than depth first,
   /// so a deep open costs one round of reads per level instead of one per
   /// folder.
@@ -214,10 +234,16 @@ export function useProjectTree({
     for (const rel of reconcileTargets(projects, expandedRef.current)) void read(rel, "refresh");
   }, [projects, read, refreshKey]);
 
-  // The window came back to the front, so re-read what is open. This is the
+  // The window came back to the front, so re-read what changed. This is the
   // reconcile the north star asks for instead of a watcher: a change the user
   // made in Finder while the app was in the background shows up the moment they
   // come back to it, and nothing has to run while it is not frontmost.
+  //
+  // Ask the cheap question first. A listing is a `read_dir` plus a `stat` per
+  // entry, and the answer is thrown away when the folder did not move, so a
+  // cancelled file picker over a large folder on a network volume was paying
+  // for a full walk to learn nothing. `changed_project_dirs` costs one `stat`
+  // a folder and names the ones worth reading.
   //
   // Deliberately not on `job-updated`: a 200-file run emits hundreds of those
   // events, and the tree would walk the disk hundreds of times per run. The
@@ -233,16 +259,17 @@ export function useProjectTree({
       timer = window.setTimeout(() => {
         timer = 0;
         last = Date.now();
-        for (const rel of reconcileTargets(projectsRef.current, expandedRef.current)) {
-          void read(rel, "reconcile");
-        }
+        const targets = reconcileTargets(projectsRef.current, expandedRef.current);
+        void (async () => {
+          for (const rel of await staleAmong(targets)) void read(rel, "reconcile");
+        })();
       }, wait);
     });
     return () => {
       window.clearTimeout(timer);
       void un.then((f) => f());
     };
-  }, [read]);
+  }, [read, staleAmong]);
 
   const toggle = useCallback(
     (rel: string, open: boolean, deep: boolean) => {

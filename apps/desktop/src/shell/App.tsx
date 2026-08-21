@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileTextIcon, PlayIcon } from "@phosphor-icons/react";
-import { Button, Label, Mono, Sheet, SplitPane, StatusDot } from "@ui";
-import { basename, fmtElapsed } from "@/app/format";
+import { Button, Mono, Sheet, SplitPane, StatusDot } from "@ui";
+import { fmtElapsed } from "@/app/format";
 import { barStatus, runCounter } from "./barStatus";
 import { conversionClient } from "@/app/api";
 import { commands } from "@/app/commands";
@@ -341,16 +341,15 @@ export default function App() {
     showToast,
   });
 
-  /// First run's answer, in one write: where the workspace is, which project
-  /// the library opens on, and how conversion runs. One write rather than
-  /// three, so a crash between them cannot leave a workspace with no route.
+  /// First run's answer, in one write: where the workspace is and how
+  /// conversion runs. One write rather than two, so a crash between them
+  /// cannot leave a workspace with no route.
   const completeOnboarding = useCallback(
     (workspace: WorkspaceInfo, mode: OnboardingConversionMode) => {
       persist({
         onboardingComplete: true,
         workspacePath: workspace.workspacePath,
         workspaceId: workspace.workspaceId,
-        activeProjectId: workspace.inboxProjectId,
         ...conversionPatch(mode),
       });
       // Grow here rather than leaving it to the effect below, so the library
@@ -500,14 +499,9 @@ export default function App() {
 
   const activeCount = jobs.filter((j) => ACTIVE.includes(j.status)).length;
 
-  /// What the title bar says: the live run while one is in flight, otherwise
-  /// the surface you are looking at.
-  const status = barStatus({
-    view,
-    jobs,
-    documentName: docs.find((d) => d.id === activeId)?.title ?? null,
-    workspaceName: workspacePath === null ? null : basename(workspacePath),
-  });
+  /// The live run, or null. The nav owns the centre of the title bar, so the
+  /// run reports from the corner.
+  const status = barStatus(jobs);
 
   useEffect(() => {
     if (!running) return;
@@ -945,7 +939,6 @@ export default function App() {
       onClose={() => {
         setSettingsOpen(false);
       }}
-      embedded={false}
     />
   );
 
@@ -1035,7 +1028,6 @@ export default function App() {
         onCreateProject={async (title) => {
           const created = await commands.createProject(title);
           setProjects((cur) => [...cur, created]);
-          persist({ activeProjectId: created.id });
           setView("library");
           try {
             setProjects(await commands.listProjects());
@@ -1141,7 +1133,7 @@ export default function App() {
   /// The live run, rendered in the one bar cell with room for it: the nav owns
   /// the centre for the whole length of the run.
   const runIndicator =
-    status.kind === "run" ? (
+    status !== null ? (
       <>
         <StatusDot tone="live" />
         <Mono size="sm">{runCounter(status.done, status.total)}</Mono>
@@ -1180,25 +1172,15 @@ export default function App() {
           too; Tauri's handler already exempts buttons. */}
       <header className="bar" data-tauri-drag-region="deep">
         <div className="bar-lights" aria-hidden />
+        {/* The nav, unconditionally: past the two early returns above, a
+            workspace is bound and the library is home. */}
         <div className="bar-status">
-          {libraryMode ? (
-            <WorkspaceViewNav
-              view={view}
-              onView={(next) => {
-                setView(next);
-              }}
-            />
-          ) : status.kind === "run" ? (
-            runIndicator
-          ) : status.variant === "view" ? (
-            <Label>{status.text}</Label>
-          ) : (
-            /* A document's file name and a workspace's folder name are both
-               names the user chose, so neither takes the label's uppercase. */
-            <Mono size="sm" tone="ink" truncate>
-              {status.text}
-            </Mono>
-          )}
+          <WorkspaceViewNav
+            view={view}
+            onView={(next) => {
+              setView(next);
+            }}
+          />
         </div>
         {/* Every panel lives in the centre Segmented nav, so the run reports
             in the corner instead: in the centre it displaced the nav and put

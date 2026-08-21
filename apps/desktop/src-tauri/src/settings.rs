@@ -104,8 +104,6 @@ pub struct Settings {
     /// Stable id from `.toolkit/workspace.json`, so a renamed folder is still
     /// the same workspace.
     pub workspace_id: Option<String>,
-    /// The project new documents land in.
-    pub active_project_id: Option<String>,
     /// Library tree rows the user left open, workspace-relative so a folder
     /// renamed in Finder does not strand every entry.
     ///
@@ -136,7 +134,6 @@ impl Default for Settings {
             onboarding_complete: false,
             workspace_path: None,
             workspace_id: None,
-            active_project_id: None,
             expanded_paths: Vec::new(),
         }
     }
@@ -246,7 +243,6 @@ mod tests {
         assert!(!settings.onboarding_complete);
         assert_eq!(settings.workspace_path, None);
         assert_eq!(settings.workspace_id, None);
-        assert_eq!(settings.active_project_id, None);
     }
 
     /// The library tree persists what the user left open. Every settings.json
@@ -265,6 +261,27 @@ mod tests {
         .expect("settings written before the tree should deserialize");
 
         assert!(settings.expanded_paths.is_empty());
+        assert_eq!(settings.output_dir.as_deref(), Some("/tmp/output"));
+        assert_eq!(settings.workspace_path.as_deref(), Some("/tmp/workspace"));
+    }
+
+    /// The library tree selects rows, so the project the sidebar used to
+    /// highlight is a field nothing reads any more. Every settings.json
+    /// written before it went carries the key, and `load()` answers a parse
+    /// failure by resetting the output folder, so it has to be ignored rather
+    /// than rejected. This is what proves the struct has no
+    /// `deny_unknown_fields`.
+    #[test]
+    fn a_settings_file_still_naming_the_active_project_loads() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "outputDir": "/tmp/output",
+                "activeProjectId": "01J0000000000000000000",
+                "workspacePath": "/tmp/workspace"
+            }"#,
+        )
+        .expect("a retired key should be ignored, not rejected");
+
         assert_eq!(settings.output_dir.as_deref(), Some("/tmp/output"));
         assert_eq!(settings.workspace_path.as_deref(), Some("/tmp/workspace"));
     }

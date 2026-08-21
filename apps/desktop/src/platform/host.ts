@@ -80,20 +80,15 @@ export async function setWindowMinSize(width: number, height: number): Promise<v
   await getCurrentWindow().setMinSize(new LogicalSize(width, height));
 }
 
-/// The launcher sizes itself to its content, so it stays fixed. A document
-/// pane has to be growable.
+/// The window opens fixed, because `tauri.conf.json` says so, and is unlocked
+/// once for good when the workspace arrives. A document pane has to be
+/// growable.
 export async function setWindowResizable(resizable: boolean): Promise<void> {
   await getCurrentWindow().setResizable(resizable);
 }
 
 export async function setWindowMaxSize(width: number, height: number): Promise<void> {
   await getCurrentWindow().setMaxSize(new LogicalSize(width, height));
-}
-
-/// macOS clamps `setSize` to the bounds in force at the time, so the launcher
-/// phase has to drop the workspace ceiling before it can shrink back down.
-export async function clearWindowMaxSize(): Promise<void> {
-  await getCurrentWindow().setMaxSize(null);
 }
 
 /// The screen area left after the menu bar and the Dock, in logical pixels:

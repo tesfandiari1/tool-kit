@@ -85,6 +85,14 @@ export interface DirListing {
   pending: number;
 }
 
+/// One folder the tree has listed, paired with the mtime that listing carried.
+/// The focus reconcile hands these back so the host can answer which of them
+/// moved without reading a single directory.
+export interface KnownDir {
+  rel: string;
+  modifiedMs: number;
+}
+
 export interface ScannedConversionFile {
   sourcePath: string;
   mediaType: string;
@@ -153,8 +161,6 @@ export interface Settings {
   /// The workspace folder. Null means first run.
   workspacePath: string | null;
   workspaceId: string | null;
-  /// The project the library opens on. Null until a workspace exists.
-  activeProjectId: string | null;
   inputs: string[];
   outputDir: string | null;
   jobType: JobId;
@@ -186,7 +192,6 @@ export const DEFAULT_SETTINGS: Settings = {
   onboardingComplete: false,
   workspacePath: null,
   workspaceId: null,
-  activeProjectId: null,
   inputs: [],
   outputDir: null,
   jobType: "convert",

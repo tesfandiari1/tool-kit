@@ -6,6 +6,7 @@ import type {
   HistoryEntry,
   Job,
   JobId,
+  KnownDir,
   ProjectSummary,
   RunResult,
   Scan,
@@ -53,6 +54,10 @@ export const commands = {
   scanInputs: (inputs: string[]) => invoke<Scan>("scan_inputs", { inputs }),
   runPipeline: (inputs: string[], outputDir: string, jobType: JobId) =>
     invoke<RunResult>("run_pipeline", { inputs, outputDir, jobType }),
+  /// Which of these folders moved since the tree listed them. One `stat` per
+  /// folder, against a `read_dir` plus a `stat` per entry for a listing, so the
+  /// focus reconcile asks this first and re-lists only what it names.
+  changedProjectDirs: (known: KnownDir[]) => invoke<string[]>("changed_project_dirs", { known }),
   /// Convert one file into the folder it already sits in. The host answers
   /// with a verdict, so the tree renders the answer rather than planning the
   /// conversion. Never joins a run that is already going.

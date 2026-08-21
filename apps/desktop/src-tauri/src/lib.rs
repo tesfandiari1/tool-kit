@@ -11,7 +11,7 @@ mod workspace;
 #[cfg(test)]
 mod live_smoke;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -119,6 +119,42 @@ async fn list_project_files(app: AppHandle, rel: String) -> Result<tree::DirList
     tauri::async_runtime::spawn_blocking(move || tree::list(Path::new(&workspace), &rel, &cfg))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// One folder the webview has already listed, and the mtime it holds for it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KnownDir {
+    rel: String,
+    modified_ms: u64,
+}
+
+/// Which of these folders moved since the webview last listed them.
+///
+/// The cheap question the focus reconcile asks before the expensive one. A
+/// window becomes key on every ⌘Tab return and after every file picker, and
+/// re-listing every open folder to find that none of them changed costs a
+/// `read_dir` plus a `stat` per entry, which is a visible pause on a network
+/// volume. This costs one `stat` per folder.
+///
+/// A folder that cannot be stat'd is reported as changed. The listing is the
+/// one place that decides what a missing folder means, and it already drops
+/// the row and closes it.
+#[tauri::command]
+async fn changed_project_dirs(app: AppHandle, known: Vec<KnownDir>) -> Result<Vec<String>, String> {
+    let workspace = settings::load(&app)
+        .workspace_path
+        .ok_or_else(|| "No workspace configured".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = Path::new(&workspace);
+        known
+            .into_iter()
+            .filter(|dir| tree::modified(root, &dir.rel) != Some(dir.modified_ms))
+            .map(|dir| dir.rel)
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// How deep a dropped folder is walked. Deep enough for real project trees,
@@ -807,6 +843,23 @@ impl ConvertOneOutcome {
     }
 }
 
+/// Whether `convert_one` may still append to the queue, given the generation
+/// it read before its preflight.
+///
+/// Two questions, one answer, because both mean the same thing to this
+/// command: a run owns `run_config` for its whole life and `log_history` reads
+/// it at finish time, so appending is safe only while nothing else is running
+/// and nothing else has started. A Stop moves the generation too, so this says
+/// no a little more often than it must, and the refusal says only that the
+/// queue moved.
+fn queue_is_free(state: &JobManager, since: u64) -> bool {
+    state.generation() == since
+        && !state
+            .list()
+            .iter()
+            .any(|job| matches!(job.status.as_str(), "queued" | "working" | "processing"))
+}
+
 /// Convert one file from the library tree, into the folder it already sits in.
 ///
 /// Modelled on `retry_job`, never on `run_pipeline`. It reads the generation
@@ -856,11 +909,11 @@ async fn convert_one(
     // finish time, so joining one would either convert under the batch's
     // format or overwrite a config a running task is reading. Refuse, and let
     // the frontend stage the file in Run.
-    if state
-        .list()
-        .iter()
-        .any(|job| matches!(job.status.as_str(), "queued" | "working" | "processing"))
-    {
+    //
+    // Read the generation first, so the re-check after the preflight below can
+    // tell whether a run began in between.
+    let generation = state.generation();
+    if !queue_is_free(&state, generation) {
         return Ok(ConvertOneOutcome::blocked(
             "run_in_progress",
             "A run is already going. This file is staged in Run, ready for when it finishes.",
@@ -937,10 +990,19 @@ async fn convert_one(
         }
     }
 
-    // Joining the current generation, so a later Stop cancels this too.
-    let generation = state.generation();
-    // Safe here and nowhere else in this command: the run-in-progress check
-    // above proved no task is reading it.
+    // The preflight above carries an HTTP round trip, so the refusal at the
+    // top of this command is as stale as that call was slow. A run started
+    // inside that window would be joined rather than refused, and the write
+    // below would land on the config its tasks are reading. Ask again.
+    if !queue_is_free(&state, generation) {
+        return Ok(ConvertOneOutcome::blocked(
+            "run_in_progress",
+            "The queue moved while this file was being checked. It is staged in Run, ready for when that finishes.",
+        ));
+    }
+    // Safe here and nowhere else in this command: the check above proved no
+    // task is reading it. `generation` is still the live one, so a later Stop
+    // cancels this job too.
     state.set_run_config(cfg.clone());
 
     // The tree pairs on siblings and is blind to a result the user moved, so
@@ -1349,6 +1411,7 @@ pub fn run() {
             list_projects,
             create_project,
             list_project_files,
+            changed_project_dirs,
             conversion_service::service_request,
             conversion_service::download_conversion_markdown,
             backend_host::app_owns_backend,
@@ -1758,6 +1821,57 @@ mod already_text_tests {
         assert_eq!(collect_input_files(&inputs, JobType::Transcribe).len(), 0);
         // ...but are counted so the UI can explain the skip.
         assert_eq!(count_matching(&inputs, ALREADY_TEXT), 3);
+    }
+}
+
+#[cfg(test)]
+mod convert_one_gate_tests {
+    use super::*;
+    use jobs::Job;
+
+    fn queued_job(state: &JobManager) -> Job {
+        Job::new(
+            state.next_id(),
+            "/tmp/deck.pdf".into(),
+            "/tmp".into(),
+            JobType::Convert,
+        )
+    }
+
+    #[test]
+    fn an_idle_queue_at_the_same_generation_is_free() {
+        let state = JobManager::default();
+        assert!(queue_is_free(&state, state.generation()));
+    }
+
+    #[test]
+    fn a_job_still_in_flight_closes_the_queue() {
+        let state = JobManager::default();
+        let generation = state.generation();
+        state.insert(queued_job(&state));
+        assert!(!queue_is_free(&state, generation));
+    }
+
+    /// The window `convert_one`'s preflight opens. A run started while the
+    /// preflight was in the air has bumped the generation and may not yet have
+    /// inserted a single row, so the queue alone still reads as idle.
+    #[test]
+    fn a_run_started_during_the_preflight_closes_the_queue() {
+        let state = JobManager::default();
+        let generation = state.generation();
+        state.new_generation();
+        assert!(state.list().is_empty());
+        assert!(!queue_is_free(&state, generation));
+    }
+
+    #[test]
+    fn a_finished_job_leaves_the_queue_free() {
+        let state = JobManager::default();
+        let generation = state.generation();
+        let mut job = queued_job(&state);
+        job.status = "done".into();
+        state.insert(job);
+        assert!(queue_is_free(&state, generation));
     }
 }
 

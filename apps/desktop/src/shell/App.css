@@ -935,8 +935,7 @@ svg {
   }
   .folder-hit,
   .ui-well.is-dropping,
-  .job-actions,
-  .lib-project {
+  .job-actions {
     transition: none;
   }
 }

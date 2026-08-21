@@ -150,9 +150,12 @@ of Library, Run, or History on the left, the document pane on the right.
 - The unreachable launcher window phase is gone, in its own commit:
   `useFitWindow.ts`, every `html.fit-window` rule, `LibraryShell`,
   `ProjectSidebar`, and `ProjectWorkspace`.
-- Freshness is a finished run plus a debounced window-focus reconcile that drops
-  the answer for any folder whose own mtime did not move. Nothing reacts to
-  `job-updated`, because a 200-file run emits hundreds of those events.
+- Freshness is a finished run plus a debounced window-focus reconcile. It asks
+  `changed_project_dirs` which open folders moved, one `stat` each, and re-lists
+  only those: a listing costs a `read_dir` plus a `stat` per entry, and a
+  cancelled file picker was paying that for every open folder to learn nothing.
+  Nothing reacts to `job-updated`, because a 200-file run emits hundreds of
+  those events.
 
 **This supersedes one line above.** The library lists what is on disk, not only
 what onboarding created. Nothing imports into a project yet, so that half of the

@@ -22,64 +22,29 @@ function job(status: Status, startedAt: number | null = null): Job {
   };
 }
 
-const idle = { view: "run", jobs: [], documentName: null, workspaceName: null } as const;
-
 describe("barStatus", () => {
-  it("names the surface when nothing is running", () => {
-    expect(barStatus(idle)).toEqual({ kind: "label", text: "Run", variant: "view" });
-    expect(barStatus({ ...idle, view: "history" })).toEqual({
-      kind: "label",
-      text: "History",
-      variant: "view",
-    });
+  it("says nothing when nothing is running", () => {
+    expect(barStatus([])).toBeNull();
   });
 
-  it("names the workspace in the library, and keeps its case", () => {
-    expect(barStatus({ ...idle, view: "library", workspaceName: "Tool-Kit" })).toEqual({
-      kind: "label",
-      text: "Tool-Kit",
-      variant: "workspace",
+  it("counts the finished files against the whole run", () => {
+    expect(barStatus([job("done"), job("processing", 100)])).toEqual({
+      done: 1,
+      total: 2,
+      since: 100,
     });
-  });
-
-  it("names the open document over the launcher", () => {
-    expect(barStatus({ ...idle, documentName: "Resume.md" })).toEqual({
-      kind: "label",
-      text: "Resume.md",
-      variant: "document",
-    });
-  });
-
-  it("a live run outranks the surface name", () => {
-    const status = barStatus({
-      ...idle,
-      view: "history",
-      documentName: "Resume.md",
-      jobs: [job("done"), job("processing", 100)],
-    });
-    expect(status).toEqual({ kind: "run", done: 1, total: 2, since: 100 });
   });
 
   it("times the run from its earliest start, not the first row", () => {
-    const status = barStatus({ ...idle, jobs: [job("done", 500), job("working", 200)] });
-    expect(status).toMatchObject({ since: 200 });
+    expect(barStatus([job("done", 500), job("working", 200)])).toMatchObject({ since: 200 });
   });
 
   it("survives a run whose jobs have not started yet", () => {
-    expect(barStatus({ ...idle, jobs: [job("queued")] })).toEqual({
-      kind: "run",
-      done: 0,
-      total: 1,
-      since: null,
-    });
+    expect(barStatus([job("queued")])).toEqual({ done: 0, total: 1, since: null });
   });
 
-  it("returns to the surface name once every job is terminal", () => {
-    expect(barStatus({ ...idle, jobs: [job("done"), job("failed")] })).toEqual({
-      kind: "label",
-      text: "Run",
-      variant: "view",
-    });
+  it("goes quiet once every job is terminal", () => {
+    expect(barStatus([job("done"), job("failed")])).toBeNull();
   });
 });
 

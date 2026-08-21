@@ -28,7 +28,6 @@ export function SettingsPanel({
   onSecrets,
   onToast,
   onClose,
-  embedded = false,
 }: {
   settings: Settings;
   secrets: SecretStatus;
@@ -40,9 +39,9 @@ export function SettingsPanel({
   onPersist: (patch: Partial<Settings>) => void;
   onSecrets: (s: SecretStatus) => void;
   onToast: (msg: string) => void;
+  /// The close control the sheet does not draw itself. Escape is the other way
+  /// out.
   onClose: () => void;
-  /// Hides the close row when the workspace nav already switches panels.
-  embedded?: boolean;
 }) {
   const [advanced, setAdvanced] = useState(false);
 
@@ -60,12 +59,10 @@ export function SettingsPanel({
     <FlowLayout
       className="settings-panel"
       head={
-        embedded ? undefined : (
-          <Row gap={2}>
-            <Spacer />
-            <Button variant="ghost" size="sm" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close settings" />
-          </Row>
-        )
+        <Row gap={2}>
+          <Spacer />
+          <Button variant="ghost" size="sm" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close settings" />
+        </Row>
       }
     >
       <div className="settings-body">
