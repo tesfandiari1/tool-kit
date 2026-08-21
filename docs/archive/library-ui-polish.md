@@ -1,5 +1,13 @@
 # Library UI polish (2026-08-20)
 
+**Closed 2026-08-21.** The library tree and the Settings sheet superseded items
+1, 2, 4, 5, and 6: the nav is three segments because Settings is a sheet, the
+launcher that kept the corner icons is deleted, and `ProjectWorkspace.tsx`,
+`LibraryShell.tsx`, and `ProjectSidebar.tsx` are gone along with the
+`.library-main__panel` overrides. Items 3 and 7 still hold: Library is a segment
+and it is the return path. Both CSS notes are dead, since `html.fit-window` and
+`.library-main__panel` were deleted with the centre column.
+
 Impeccable craft pass on the workspace shell after first-launch onboarding and
 library home landed. These were UX/UI issues identified in the code review
 status check, not north-star product gaps (import pipeline, real document tabs,

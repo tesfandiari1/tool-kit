@@ -5,7 +5,7 @@ It supersedes the four documents now in `docs/archive/`: `HANDOFF.md`,
 `CLOSEOUT_EXECUTION_PLAN.md`, `BACKEND_EPIC.md`, and `BACKEND_SERVICE_PLAN.md`. Read it before you touch the tree, then re-read
 the worktree. This file goes stale the moment someone lands a commit.
 
-**Last updated:** 2026-08-20
+**Last updated:** 2026-08-21
 
 Docs use **standard** STE voice: American spelling, active voice, no em dashes,
 no semicolons between independent sentences. Use a colon in section titles,
@@ -114,6 +114,56 @@ cannot leave it.
 onboarding created and no more. The gate writes `conversionRoute: backend` with
 no Settings control to change it back, which is the same missing surface the
 sidecar section names.
+
+### The library tree, the Settings sheet, and two columns, 2026-08-21
+
+The library was a flat list of project names beside a centre column. It is now a
+disclosure tree of the files actually on disk, and the window is two panes: one
+of Library, Run, or History on the left, the document pane on the right.
+
+**What landed.**
+
+- `tree.rs` lists one directory level from disk, on the blocking pool. Finder's
+  rules: case-insensitive natural sort with folders interleaved, dotfiles and
+  `project.json` hidden, symlinks listed and never followed, a 500-entry cap
+  that reports the remainder as one row, and a refusal for any `rel` that
+  escapes the workspace. It pairs a source with its sibling result through
+  `jobs::output_extension_for`, which is now the one extension rule both writers
+  read, so a row's "already converted" mark cannot disagree with what a run
+  writes. `write_output` numbers a collision, so the pairing also matches
+  `deck (1).md`.
+- `Tree` and `TreeRow` in `@ui`, hand-rolled, with Finder's key map: arrows
+  select, Right descends, Left climbs, type-to-select, Option-click opens a
+  whole subtree, Space raises the inspector card. The pure keyboard rules sit in
+  `treeKeys.ts` with their own tests.
+- `Sheet` in `@ui`, a native `<dialog>`. Settings left the `View` union and is a
+  sheet over the whole window now, opened by the sidebar gear, by
+  **Tool-Kit ▸ Settings…** at ⌘,, and by the run hint. Opening it no longer
+  evicts the Run column in the middle of a run.
+- `convert_one` converts one file into the folder it already sits in and answers
+  with a verdict rather than an error, so the tree renders the host's sentence
+  instead of planning a route of its own. Modelled on `retry_job`, so it cannot
+  wipe a queue the user is reading. `blocked` stages the file in Run and says
+  why.
+- `welcome.md` is a real file, written once into a new workspace's Inbox. Delete
+  it in Finder and it stays deleted.
+- The unreachable launcher window phase is gone, in its own commit:
+  `useFitWindow.ts`, every `html.fit-window` rule, `LibraryShell`,
+  `ProjectSidebar`, and `ProjectWorkspace`.
+- Freshness is a finished run plus a debounced window-focus reconcile that drops
+  the answer for any folder whose own mtime did not move. Nothing reacts to
+  `job-updated`, because a 200-file run emits hundreds of those events.
+
+**This supersedes one line above.** The library lists what is on disk, not only
+what onboarding created. Nothing imports into a project yet, so that half of the
+2026-08-20 note still stands.
+
+**Not built.** No rename, no delete, and no right-click menu, so the tree can
+create a project and not remove one. Nothing drops onto a project row. Open tabs
+do not come back on relaunch: a restored tab whose file changed on disk would
+reopen stale and the mtime handshake would refuse the first save. There is no
+FSEvents watcher, by decision. The project row's count is top-level unconverted
+convertibles only, and the row's `title` says so.
 
 ### The restructure, 2026-08-19
 

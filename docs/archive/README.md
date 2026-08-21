@@ -19,3 +19,4 @@ a live document, the live one wins.
 | `MONITORING_AND_PROGRESS.md` | Job UX vs operator monitoring recommendation. |
 | `YAAK_ARCHITECTURE_REFERENCE.md` | Host and IPC patterns to borrow. M6 shipped the relevant patterns. |
 | `M7_EXECUTION.md` | Remote deployment over a tailnet. Cancelled unstarted when the local-first pivot removed the reason. |
+| `library-ui-polish.md` | A craft pass on the centre-column workspace. Five of its seven items died with that column on 2026-08-21. |

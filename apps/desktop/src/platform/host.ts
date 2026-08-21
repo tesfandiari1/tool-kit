@@ -61,6 +61,17 @@ export function onWindowResized(handler: () => void): Promise<() => void> {
   });
 }
 
+/// The window became key. `getCurrentWindow()`, never `getCurrentWebview()`:
+/// a window focus event reaches only targets of kind Window and WebviewWindow,
+/// so a webview-registered listener subscribes cleanly and then never fires,
+/// with no error and no warning anywhere. The drag-drop subscription above uses
+/// the webview, which is what makes that the natural wrong move here.
+export function onWindowFocused(handler: () => void): Promise<() => void> {
+  return getCurrentWindow().onFocusChanged(({ payload }) => {
+    if (payload) handler();
+  });
+}
+
 export async function resizeWindow(width: number, height: number): Promise<void> {
   await getCurrentWindow().setSize(new LogicalSize(width, height));
 }

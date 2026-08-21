@@ -180,7 +180,23 @@ token layer and a type ramp, and none of those libraries supply either. Adding
 them would mean a build-system change to restyle a dozen components we already
 own.
 
-If accessible overlay behaviour is needed later (a real combobox, a modal with
-focus trapping), the cheapest correct answer is **Base UI** or **React Aria
+**No tree library, and three lost the argument.** `Tree` is hand-rolled.
+react-arborist sets `aria-expanded` on leaves, which makes every file announce
+as a folder nobody has opened, and it brings its own transitive dependencies.
+react-complex-tree owns the render tree and its own custom properties, so the
+token layer stops deciding how a row looks. react-aria-components is Apache-2.0
+against this package's MIT, and it emits treegrid roles, which changes what
+VoiceOver says about every row. What the library actually needed was list
+navigation, and this repo had already hand-rolled a roving tabindex twice, in
+`RunView` and in `Tabs`. The keyboard rules live in `treeKeys.ts` and are tested
+there.
+
+**No dialog library either.** `Sheet` is a native `<dialog>` with
+`showModal()`, which gives the focus trap, Escape through `cancel`, inertness,
+and the top layer with no dependency at all.
+
+If accessible overlay behaviour is needed later (a real combobox, a listbox that
+has to float), the cheapest correct answer is **Base UI** or **React Aria
 Components**: both are headless, both work with this CSS, and neither drags a
-utility framework in behind it.
+utility framework in behind it. That escape hatch is for overlays. It is not a
+reason to import list navigation.
