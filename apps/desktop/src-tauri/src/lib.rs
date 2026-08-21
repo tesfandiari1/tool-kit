@@ -91,6 +91,11 @@ fn list_projects(app: AppHandle) -> Result<Vec<workspace::ProjectSummary>, Strin
     workspace::list_projects(&app)
 }
 
+#[tauri::command]
+fn create_project(app: AppHandle, title: String) -> Result<workspace::ProjectSummary, String> {
+    workspace::create_project(&app, &title)
+}
+
 /// How deep a dropped folder is walked. Deep enough for real project trees,
 /// shallow enough that dropping a home folder can't wander forever.
 const MAX_SCAN_DEPTH: usize = 8;
@@ -1053,6 +1058,7 @@ pub fn run() {
             inspect_workspace_path,
             setup_workspace,
             list_projects,
+            create_project,
             conversion_service::service_request,
             conversion_service::download_conversion_markdown,
             backend_host::backend_status,

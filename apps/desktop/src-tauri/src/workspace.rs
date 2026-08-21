@@ -133,6 +133,73 @@ pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
     })
 }
 
+/// Creates a project folder under the workspace and registers it in the index.
+pub fn create_project(app: &AppHandle, title: &str) -> Result<ProjectSummary, String> {
+    let workspace = settings::load(app)
+        .workspace_path
+        .ok_or_else(|| "No workspace configured".to_string())?;
+    create_project_at(Path::new(&workspace), title)
+}
+
+fn create_project_at(workspace: &Path, title: &str) -> Result<ProjectSummary, String> {
+    let folder = folder_name_for_title(title)?;
+    let project_dir = workspace.join(&folder);
+    if project_dir.exists() {
+        return Err(format!("A project named “{folder}” already exists"));
+    }
+    std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
+
+    let meta = ProjectMeta {
+        schema_version: 1,
+        id: format!("p_{}", uuid::Uuid::new_v4()),
+        title: title.trim().to_string(),
+        created_at: iso_utc_now(),
+    };
+    if let Err(e) = write_json(&project_dir.join("project.json"), &meta) {
+        let _ = std::fs::remove_dir_all(&project_dir);
+        return Err(e);
+    }
+
+    let index = open_index(&workspace.join(".toolkit").join("index.db"))?;
+    if let Err(e) = index.execute(
+        "INSERT INTO projects (id, title, path, created_at) VALUES (?1, ?2, ?3, ?4)",
+        (&meta.id, &meta.title, &folder, &meta.created_at),
+    ) {
+        let _ = std::fs::remove_dir_all(&project_dir);
+        return Err(e.to_string());
+    }
+
+    Ok(ProjectSummary {
+        id: meta.id,
+        title: meta.title,
+        path: folder,
+        created_at: meta.created_at,
+    })
+}
+
+fn folder_name_for_title(title: &str) -> Result<String, String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err("Project name cannot be empty".into());
+    }
+    if trimmed.eq_ignore_ascii_case(INBOX_TITLE) {
+        return Err(format!("{INBOX_TITLE} is reserved"));
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("Project name cannot be . or ..".into());
+    }
+    if trimmed.starts_with('.') {
+        return Err("Project name cannot start with .".into());
+    }
+    if trimmed.eq_ignore_ascii_case(".toolkit") {
+        return Err(".toolkit is reserved".into());
+    }
+    if trimmed.chars().any(|c| matches!(c, '/' | ':' | '\0')) {
+        return Err("Project name cannot contain / or :".into());
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Every project in the configured workspace's index. `index.db` is derived,
 /// so a missing file reads as an empty list rather than an error.
 pub fn list_projects(app: &AppHandle) -> Result<Vec<ProjectSummary>, String> {
@@ -333,6 +400,36 @@ mod tests {
     fn a_workspace_without_an_index_lists_no_projects() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(list_projects_at(dir.path()).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn create_project_adds_a_folder_and_index_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = workspace_path(&dir);
+        setup_workspace(&path).unwrap();
+
+        let summary = create_project_at(Path::new(&path), "Acme Acquisition").unwrap();
+        assert_eq!(summary.title, "Acme Acquisition");
+        assert_eq!(summary.path, "Acme Acquisition");
+        assert!(summary.id.starts_with("p_"));
+        assert!(Path::new(&path).join("Acme Acquisition/project.json").is_file());
+        assert_eq!(list_projects_at(Path::new(&path)).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn create_project_rejects_inbox_and_empty_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = workspace_path(&dir);
+        setup_workspace(&path).unwrap();
+        let root = Path::new(&path);
+
+        assert!(create_project_at(root, "").is_err());
+        assert!(create_project_at(root, "Inbox").is_err());
+        assert!(create_project_at(root, "inbox").is_err());
+        assert!(create_project_at(root, ".").is_err());
+        assert!(create_project_at(root, "..").is_err());
+        assert!(create_project_at(root, ".toolkit").is_err());
+        assert!(create_project_at(root, ".hidden").is_err());
     }
 
     #[test]

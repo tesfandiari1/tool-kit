@@ -16,6 +16,7 @@ export function HistoryPanel({
   onOpen,
   onToast,
   onClose,
+  embedded = false,
 }: {
   refreshKey: number;
   /// Call after anything that changes what the history says, so the
@@ -24,6 +25,7 @@ export function HistoryPanel({
   onOpen: (entry: HistoryEntry) => void;
   onToast: (msg: string) => void;
   onClose: () => void;
+  embedded?: boolean;
 }) {
   const [query, setQuery] = useState("");
   // null while the first read is in flight, so an empty history and a pending
@@ -76,6 +78,7 @@ export function HistoryPanel({
 
   return (
     <FlowLayout
+      className="history-panel"
       head={
         <>
           <Row gap={2}>
@@ -94,12 +97,11 @@ export function HistoryPanel({
             >
               Clear history
             </Button>
-            <Button variant="ghost" size="sm" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close history" />
+            {!embedded && (
+              <Button variant="ghost" size="sm" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close history" />
+            )}
           </Row>
 
-          {/* aria-label rather than a visible Label: the placeholder carries the
-              meaning visually, but a placeholder disappears on first keystroke and
-              is not a reliable accessible name. */}
           <Input
             type="search"
             aria-label="Search history by file or folder"

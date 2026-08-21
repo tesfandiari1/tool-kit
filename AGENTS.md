@@ -1,9 +1,9 @@
 ## Learned User Preferences
 
-- Steal host and folder patterns from Yaak and OpenWork; do not fork those products or copy Electron, Tailwind/shadcn, Zustand, or TanStack Query/Router.
-- Product target is a local markdown workspace editor (library-first), not a batch converter; follow `docs/north-star.md`.
+- Steal host, folder, and onboarding patterns from Yaak, OpenWork, Apple Setup Assistant, and Obsidian; do not fork those products or copy Electron, Tailwind/shadcn, Zustand, or TanStack Query/Router.
+- Product target is a local markdown workspace editor (library-first), not a batch converter; library shell keeps Run/Settings/History as primary nav; follow `docs/north-star.md`.
 - Workspace root plus projects as folders (Claude/ChatGPT desktop pattern); documents are durable in the project on import; export is copy-out only, never move.
-- No backend retention of customer files; conversion uses ephemeral local workers and discards scratch after each run.
+- No backend retention of customer files; conversion uses ephemeral local workers and discards scratch after each run; local vs cloud conversion mode is user-configurable in onboarding and settings.
 - Conversion HTTP and secrets stay in Tauri; never browser-fetch the remote service or put the bearer token in the webview.
 - Prefer type-aware ESLint (`strictTypeChecked`, exhaustive switches, official React hooks) and Vitest on plan/billing math over Biome, Prettier, Playwright, or coverage theater.
 - Stage explicit paths only; never `git add .` or `git add -A`. Parallel sessions start from `docs/STATUS.md`.
@@ -15,7 +15,7 @@
 
 ## Learned Workspace Facts
 
-- Frontend layout, under `apps/desktop/`: `src/app` (types, commands, OpenAPI client), `src/platform/host.ts` (only Tauri/host imports), `src/domains/{run,settings,history,thread}`, `src/shell` (App + its hooks), `src/ui` (design system).
+- Frontend layout, under `apps/desktop/`: `src/app` (types, commands, OpenAPI client), `src/platform/host.ts` (only Tauri/host imports), `src/domains/{library,onboarding,run,settings,history,thread}`, `src/shell` (App + its hooks), `src/ui` (design system); workspace commands in `src-tauri/src/workspace.rs`.
 - `pnpm generate:api` writes `apps/desktop/src/app/api/schema.ts` from `contract/http/openapi.yaml`; import the generated schema only from `src/app/api`.
 - Repo layout: `apps/{desktop,converter}`, `crates/worker-protocol`, `workers/vision` (Swift, macOS only), `contract/http`, `deploy/docker`. The image builds from the repo root because the converter path-depends on `crates/worker-protocol`.
 - Conversion backend lives in `apps/converter/`. Milestones and session state live in `docs/STATUS.md`; product direction in `docs/north-star.md`. Desktop HTTP to that service is M6. Backend sessions own `apps/converter/**`. Desktop sessions own `apps/desktop/**`.

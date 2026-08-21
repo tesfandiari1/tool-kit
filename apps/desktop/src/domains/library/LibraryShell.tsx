@@ -1,29 +1,56 @@
+import type { ReactNode } from "react";
 import { basename } from "@/app/format";
 import type { ProjectSummary } from "@/app/types";
-import { EmptyInbox } from "./EmptyInbox";
 import { ProjectSidebar } from "./ProjectSidebar";
+import { ProjectWorkspace } from "./ProjectWorkspace";
 
-/// The home surface: projects on the left, the selected project's documents in
-/// the centre. This is what the app opens on, in place of the run queue.
+/// The workspace chrome: projects stay on the left while Run, Settings, and
+/// History swap the main column without hiding the library.
 export function LibraryShell({
   workspacePath,
   projects,
   activeProjectId,
+  libraryHome,
+  panel,
   onSelectProject,
   onOpenSettings,
+  onOpenLibrary,
+  onOpenRun,
+  onCreateProject,
+  onRevealPath,
+  onToast,
 }: {
   workspacePath: string;
   projects: ProjectSummary[];
   activeProjectId: string | null;
+  /// True when the main column shows the library home rather than a panel.
+  libraryHome: boolean;
+  /// Run, Settings, or History when the nav selects them. Null on library home.
+  panel: ReactNode | null;
   onSelectProject: (id: string) => void;
   onOpenSettings: () => void;
+  onOpenLibrary: () => void;
+  onOpenRun: () => void;
+  onCreateProject: (title: string) => Promise<void>;
+  onRevealPath: (path: string) => void;
+  onToast: (message: string) => void;
 }) {
-  /// The remembered project, or the first one the workspace has. A saved id
-  /// can name a project the user deleted in Finder, so the fallback is not
-  /// defensive: it is the normal answer after a reconcile.
   const active =
     projects.find((p) => p.id === activeProjectId) ??
     (projects.length > 0 ? projects[0] : null);
+
+  const main =
+    panel ??
+    (active ? (
+      <ProjectWorkspace
+        workspacePath={workspacePath}
+        project={active}
+        onOpenRun={onOpenRun}
+        onRevealProject={() => {
+          onRevealPath(`${workspacePath}/${active.path}`);
+        }}
+      />
+    ) : null);
 
   return (
     <div className="library-shell">
@@ -32,14 +59,21 @@ export function LibraryShell({
         workspacePath={workspacePath}
         projects={projects}
         activeProjectId={active?.id ?? null}
-        onSelectProject={onSelectProject}
+        libraryHome={libraryHome}
+        onSelectProject={(id) => {
+          onSelectProject(id);
+          onOpenLibrary();
+        }}
+        onOpenWorkspace={() => {
+          onOpenLibrary();
+        }}
         onOpenSettings={onOpenSettings}
+        onCreateProject={onCreateProject}
+        onRevealPath={onRevealPath}
+        onToast={onToast}
       />
-      {/* The document list belongs in this slot. Nothing can reach a project
-          yet — import is the next milestone — so a project has nothing to
-          list and the empty state is the whole centre. */}
       <main className="library-main">
-        <EmptyInbox projectTitle={active?.title ?? "Inbox"} />
+        {main && <div className="library-main__panel">{main}</div>}
       </main>
     </div>
   );

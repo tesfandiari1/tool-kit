@@ -1,10 +1,9 @@
-import { FolderIcon, GearSixIcon, TrayIcon } from "@phosphor-icons/react";
-import { Button, Label, Mono, Spacer } from "@ui";
+import { useState } from "react";
+import { FolderIcon, FolderOpenIcon, GearSixIcon, PlusIcon, TrayIcon } from "@phosphor-icons/react";
+import { Button, Input, Label, Mono, Path, Row, Spacer, Stack } from "@ui";
 import type { ProjectSummary } from "@/app/types";
+import { tildePath } from "@/app/format";
 
-/// Inbox is where every import lands, so it sits above the list rather than
-/// wherever the host happened to return it. Identified by title because that
-/// is what the workspace guarantees on disk.
 const INBOX = "Inbox";
 
 function pinned(projects: ProjectSummary[]): ProjectSummary[] {
@@ -16,31 +15,69 @@ function pinned(projects: ProjectSummary[]): ProjectSummary[] {
   });
 }
 
-/// The workspace, its projects, and the way out to Settings. Nothing here
-/// creates anything: this is where you are, not what you can do.
+/// The workspace, its projects, and the way out to Settings.
 export function ProjectSidebar({
   workspaceName,
   workspacePath,
   projects,
   activeProjectId,
+  libraryHome,
   onSelectProject,
+  onOpenWorkspace,
   onOpenSettings,
+  onCreateProject,
+  onRevealPath,
+  onToast,
 }: {
   workspaceName: string;
   workspacePath: string;
   projects: ProjectSummary[];
   activeProjectId: string | null;
+  /// On library home no project row is the current place; the workspace head is.
+  libraryHome: boolean;
   onSelectProject: (id: string) => void;
+  onOpenWorkspace: () => void;
   onOpenSettings: () => void;
+  onCreateProject: (title: string) => Promise<void>;
+  onRevealPath: (path: string) => void;
+  onToast: (message: string) => void;
 }) {
+  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const commitProject = async () => {
+    const title = draft.trim();
+    if (!title) {
+      setCreating(false);
+      setDraft("");
+      return;
+    }
+    setBusy(true);
+    try {
+      await onCreateProject(title);
+      setDraft("");
+      setCreating(false);
+    } catch (e) {
+      onToast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <aside className="lib-side">
-      <div className="lib-side__head">
+      <button
+        type="button"
+        className={`lib-side__head lib-side__workspace${libraryHome ? " is-active" : ""}`}
+        onClick={onOpenWorkspace}
+      >
         <Label>Workspace</Label>
         <Mono size="sm" tone="ink" truncate title={workspacePath}>
           {workspaceName}
         </Mono>
-      </div>
+        <Path path={tildePath(workspacePath)} className="lib-side__path" />
+      </button>
 
       <nav className="lib-side__list" aria-label="Projects">
         {pinned(projects).map((p) => {
@@ -61,17 +98,78 @@ export function ProjectSidebar({
                 {p.title}
               </Mono>
               <Spacer />
-              {/* The document count's slot, held open at its own width and
-                  empty until the host reports one. Reserved rather than added
-                  later, so the first import lights the number up instead of
-                  shifting every row that has one. */}
               <Mono size="xs" tone="ghost" className="lib-project__count" aria-hidden />
             </button>
           );
         })}
       </nav>
 
+      <div className="lib-side__actions">
+        {creating ? (
+          <Stack gap={2}>
+            <Input
+              autoFocus
+              placeholder="Project name"
+              value={draft}
+              disabled={busy}
+              onChange={(e) => {
+                setDraft(e.target.value);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void commitProject();
+                if (e.key === "Escape") {
+                  e.stopPropagation();
+                  setCreating(false);
+                  setDraft("");
+                }
+              }}
+              onBlur={() => {
+                if (!draft.trim()) setCreating(false);
+              }}
+            />
+            <Row gap={2}>
+              <Button size="sm" disabled={busy || !draft.trim()} onClick={() => void commitProject()}>
+                Create
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  setCreating(false);
+                  setDraft("");
+                }}
+              >
+                Cancel
+              </Button>
+            </Row>
+          </Stack>
+        ) : (
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<PlusIcon />}
+            onClick={() => {
+              setCreating(true);
+            }}
+          >
+            New project
+          </Button>
+        )}
+      </div>
+
       <div className="lib-side__foot">
+        <Button
+          variant="ghost"
+          size="sm"
+          icon={<FolderOpenIcon />}
+          onClick={() => {
+            onRevealPath(workspacePath);
+          }}
+        >
+          Reveal
+        </Button>
+        <Spacer />
         <Button variant="ghost" size="sm" icon={<GearSixIcon />} onClick={onOpenSettings}>
           Settings
         </Button>

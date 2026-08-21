@@ -182,6 +182,12 @@ html.fit-window.is-scrolled .bar {
      mono counter. */
   min-height: var(--s5);
 }
+/* Outside the launcher the centre cell also holds the sm Segmented, which is
+   30px tall, so the reservation steps to the first rung that clears it. The
+   launcher keeps --s5: its window is fit to content and never shows the nav. */
+html:not(.fit-window) .bar-status {
+  min-height: var(--s6);
+}
 /* View names wear the label treatment, document names stay in mixed case. */
 .bar-status .ui-label,
 .bar-status .ui-mono {
@@ -200,6 +206,15 @@ html.fit-window.is-scrolled .bar {
   align-items: center;
   gap: var(--s2);
   justify-self: end;
+}
+
+/* Workspace nav in the title bar: Library, Run, Settings, History as one
+   Segmented. The primitive is built to stretch — its items are flex: 1 with no
+   inline padding — and the bar's centre column has no width to fill, so each
+   item hugs its label instead. */
+.bar-nav .ui-seg__item {
+  flex: none;
+  padding-inline: var(--s3);
 }
 
 /* --- Vertical flow --------------------------------------------------------
@@ -456,17 +471,90 @@ html.fit-window.is-scrolled .bar {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
+}
+.library-main__panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.library-main__panel > .flow,
+.library-main__panel > .settings-panel.flow {
+  flex: 1;
+  min-height: 0;
+  max-width: none;
+  margin: 0;
+}
+/* Embedded in the library column, the --s5 window-edge inset is already paid
+   by the sidebar, so the scroll region steps down to --s3 — and the settings
+   measure unlocks, because 34rem plus --s5 gutters is wider than the column
+   at the window's minimum width. */
+.library-main__panel > .settings-panel .flow-scroll {
+  padding-inline: var(--s3);
+}
+.library-main__panel > .settings-panel .settings-body {
+  max-width: none;
+}
+.library-main__panel > .history-panel {
+  padding-inline: var(--s3);
+}
+.library-workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.library-main__head {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s2) var(--s4) 0;
+  border-bottom: 1px solid var(--rule);
+}
+.library-main__meta {
+  padding-bottom: var(--s3);
+}
+.library-workspace__body {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
-/* Empty-state optical padding, which is the one job --s6 has. */
-.library-empty {
-  flex: 1;
-  display: grid;
-  place-content: center;
-  justify-items: center;
+.library-main__foot {
+  flex: none;
+  padding: var(--s3) var(--s4) var(--s4);
+  border-top: 1px solid var(--rule);
+}
+.lib-side__workspace {
+  display: flex;
+  flex-direction: column;
   gap: var(--s1);
-  padding: var(--s6);
-  text-align: center;
+  min-width: 0;
+  border: 0;
+  background: none;
+  padding: 0;
+  border-radius: var(--r-control);
+  text-align: left;
+  width: 100%;
+  color: inherit;
+  transition: color var(--dur-fast) var(--ease);
+}
+.lib-side__workspace:hover {
+  color: var(--ink);
+}
+/* Library home is a place like any selected project row, so the workspace
+   head wears the same raised surface. Not cobalt: that is the control you
+   press, and this is a statement of place. */
+.lib-side__workspace.is-active {
+  background: var(--surface-raised);
+}
+.lib-side__path {
+  opacity: 0.85;
+}
+.lib-side__actions {
+  flex: none;
 }
 
 /* --- Workspace re-rank ----------------------------------------------------
@@ -616,12 +704,54 @@ html.fit-window.is-scrolled .bar {
   flex-shrink: 0;
 }
 
-/* --- Key field ------------------------------------------------------------
-   The box shares its row with Save and Remove in a column that can be a third
+/* --- Settings -------------------------------------------------------------
+   A scroll column with a fixed measure. Horizontal padding lives on the
+   scrollport so the gutter sits beside the fields, not an arm's length away
+   from them. Sections step down the spacing ladder: --s4 between groups,
+   --s3 between fields, --s2 inside each control (owned by @ui Field). */
+.settings-panel.flow {
+  padding-inline: 0;
+  padding-bottom: 0;
+}
+.settings-panel .flow-head {
+  padding-inline: var(--s5);
+}
+.settings-panel .flow-scroll {
+  padding: var(--s4) var(--s5) var(--s5);
+  scrollbar-gutter: stable;
+}
+.settings-panel .settings-body {
+  width: 100%;
+  max-width: 34rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+.settings-panel .settings-section {
+  min-width: 0;
+}
+/* Fields revealed by a parent choice read as belonging to it: one step closer
+   than the section gap, not another full panel apart. */
+.settings-panel .settings-nest {
+  padding-top: var(--s1);
+}
+/* The box shares its row with Save and Remove in a column that can be a third
    of the window. A native input carries an intrinsic min-width, so without this
    the box refuses to shrink and pushes both buttons past the column. */
-.key-row .ui-input {
+.settings-key {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s2);
+  align-items: center;
+}
+.settings-key .ui-input {
   min-width: 0;
+}
+.settings-key__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s2);
 }
 
 /* --- Blocking hint --------------------------------------------------------

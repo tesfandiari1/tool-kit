@@ -35,6 +35,7 @@ export const commands = {
   /// Inbox project either way.
   setupWorkspace: (path: string) => invoke<WorkspaceInfo>("setup_workspace", { path }),
   listProjects: () => invoke<ProjectSummary[]>("list_projects"),
+  createProject: (title: string) => invoke<ProjectSummary>("create_project", { title }),
   secretStatus: () => invoke<SecretStatus>("secret_status"),
   setSecret: async (provider: SecretId, value: string): Promise<void> => {
     await invoke("set_secret", { provider, value });

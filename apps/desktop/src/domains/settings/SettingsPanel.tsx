@@ -4,9 +4,11 @@ import {
   Badge,
   Button,
   Disclosure,
+  Divider,
   Field,
   Input,
   Label,
+  Mono,
   Row,
   Select,
   Spacer,
@@ -25,6 +27,7 @@ export function SettingsPanel({
   onSecrets,
   onToast,
   onClose,
+  embedded = false,
 }: {
   settings: Settings;
   secrets: SecretStatus;
@@ -32,6 +35,8 @@ export function SettingsPanel({
   onSecrets: (s: SecretStatus) => void;
   onToast: (msg: string) => void;
   onClose: () => void;
+  /// Hides the close row when the workspace nav already switches panels.
+  embedded?: boolean;
 }) {
   const [advanced, setAdvanced] = useState(false);
 
@@ -47,140 +52,154 @@ export function SettingsPanel({
 
   return (
     <FlowLayout
+      className="settings-panel"
       head={
-        <Row gap={2}>
-          <Spacer />
-          <Button variant="ghost" size="sm" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close settings" />
-        </Row>
+        embedded ? undefined : (
+          <Row gap={2}>
+            <Spacer />
+            <Button variant="ghost" size="sm" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close settings" />
+          </Row>
+        )
       }
     >
-      {/* Grouped, so the fields the route reveals read as belonging to it.
-          --s2 attaches them to the control, --s3 separates them from each
-          other, and the column's own --s4 keeps the group apart from what
-          follows. */}
-      <Stack gap={2}>
-        <Select
-          label="Conversion route"
-          hint="Direct keeps today's Datalab path. Backend will route each supported file through the local conversion service."
-          value={settings.conversionRoute}
-          onChange={(e) => {
-            onPersist({ conversionRoute: e.target.value === "backend" ? "backend" : "direct" });
-          }}
-          options={[
-            { value: "direct", label: "Direct provider" },
-            { value: "backend", label: "Conversion backend" },
-          ]}
-        />
-
-        {settings.conversionRoute === "backend" && (
+      <div className="settings-body">
+        <section className="settings-section">
           <Stack gap={3}>
-            <BackendUrlField
-              value={settings.backendUrl}
-              onCommit={(backendUrl) => {
-                onPersist({ backendUrl });
-              }}
-            />
             <Select
-              label="Conversion profile"
-              hint="Standard may use the configured fallback. Local only keeps document bytes on this machine."
-              value={settings.conversionProfile}
+              label="Conversion route"
+              hint="Direct keeps today's Datalab path. Backend will route each supported file through the local conversion service."
+              value={settings.conversionRoute}
               onChange={(e) => {
-                onPersist({
-                  conversionProfile: e.target.value === "local_only" ? "local_only" : "standard",
-                });
+                onPersist({ conversionRoute: e.target.value === "backend" ? "backend" : "direct" });
               }}
               options={[
-                { value: "standard", label: "Standard" },
-                { value: "local_only", label: "Local only" },
+                { value: "direct", label: "Direct provider" },
+                { value: "backend", label: "Conversion backend" },
               ]}
             />
-            <Switch
-              label="OCR language correction"
-              hint="Lets local OCR correct what it reads against a dictionary. Turn it off for part numbers, codes, and names it keeps rewriting."
-              checked={settings.languageCorrection}
-              onChange={(e) => {
-                onPersist({ languageCorrection: e.target.checked });
-              }}
-            />
-            <CustomWordsField
-              value={settings.customWords}
-              onCommit={(customWords) => {
-                onPersist({ customWords });
-              }}
+
+            {settings.conversionRoute === "backend" && (
+              <Stack gap={3} className="settings-nest">
+                <BackendUrlField
+                  value={settings.backendUrl}
+                  onCommit={(backendUrl) => {
+                    onPersist({ backendUrl });
+                  }}
+                />
+                <Select
+                  label="Conversion profile"
+                  hint="Standard may use the configured fallback. Local only keeps document bytes on this machine."
+                  value={settings.conversionProfile}
+                  onChange={(e) => {
+                    onPersist({
+                      conversionProfile: e.target.value === "local_only" ? "local_only" : "standard",
+                    });
+                  }}
+                  options={[
+                    { value: "standard", label: "Standard" },
+                    { value: "local_only", label: "Local only" },
+                  ]}
+                />
+                <Switch
+                  label="OCR language correction"
+                  hint="Lets local OCR correct what it reads against a dictionary. Turn it off for part numbers, codes, and names it keeps rewriting."
+                  checked={settings.languageCorrection}
+                  onChange={(e) => {
+                    onPersist({ languageCorrection: e.target.checked });
+                  }}
+                />
+                <CustomWordsField
+                  value={settings.customWords}
+                  onCommit={(customWords) => {
+                    onPersist({ customWords });
+                  }}
+                />
+                <KeyField
+                  label="Backend token"
+                  hint="Bearer token"
+                  saved={secrets.backend}
+                  onSave={(v) => void saveKey("backend", v)}
+                />
+              </Stack>
+            )}
+          </Stack>
+        </section>
+
+        <Divider />
+
+        <section className="settings-section">
+          <Stack gap={3}>
+            <Label tone="strong">Provider keys</Label>
+            <KeyField
+              label="Datalab"
+              hint="X-API-Key"
+              saved={secrets.datalab}
+              onSave={(v) => void saveKey("datalab", v)}
             />
             <KeyField
-              label="Backend token"
-              hint="Bearer token"
-              saved={secrets.backend}
-              onSave={(v) => void saveKey("backend", v)}
+              label="Rev.ai"
+              hint="Access token"
+              saved={secrets.revai}
+              onSave={(v) => void saveKey("revai", v)}
             />
           </Stack>
-        )}
-      </Stack>
+        </section>
 
-      <Stack gap={2}>
-        <Label tone="strong">Provider keys</Label>
-        <Stack gap={3}>
-          <KeyField
-            label="Datalab"
-            hint="X-API-Key"
-            saved={secrets.datalab}
-            onSave={(v) => void saveKey("datalab", v)}
-          />
-          <KeyField
-            label="Rev.ai"
-            hint="Access token"
-            saved={secrets.revai}
-            onSave={(v) => void saveKey("revai", v)}
-          />
-        </Stack>
-      </Stack>
+        <Divider />
 
-      <Switch
-        label="Skip files already done"
-        hint="Leaves a file alone when its result is still on disk. Edit the file, delete the result, or switch output format and it runs again."
-        checked={settings.skipAlreadyDone}
-        onChange={(e) => {
-          onPersist({ skipAlreadyDone: e.target.checked });
-        }}
-      />
-
-      <Switch
-        label="High-accuracy convert"
-        hint="Re-OCRs every page and runs an LLM pass. Best for scans and tables; slower and costs more credits."
-        checked={settings.datalabHighAccuracy}
-        onChange={(e) => {
-          onPersist({ datalabHighAccuracy: e.target.checked });
-        }}
-      />
-
-      <Stack gap={2}>
-        <Disclosure open={advanced} onToggle={setAdvanced}>
-          Advanced
-        </Disclosure>
-        {advanced && (
+        <section className="settings-section">
           <Stack gap={3}>
-            <Select
-              label="Convert output format"
-              value={settings.datalabFormat}
+            <Switch
+              label="Skip files already done"
+              hint="Leaves a file alone when its result is still on disk. Edit the file, delete the result, or switch output format and it runs again."
+              checked={settings.skipAlreadyDone}
               onChange={(e) => {
-                onPersist({ datalabFormat: e.target.value });
+                onPersist({ skipAlreadyDone: e.target.checked });
               }}
-              options={[
-                { value: "markdown", label: "Markdown (.md)" },
-                { value: "html", label: "HTML (.html)" },
-                { value: "json", label: "JSON (.json)" },
-              ]}
             />
-            <PipelineField
-              value={settings.datalabPipelineId}
-              onCommit={(datalabPipelineId) => {
-                onPersist({ datalabPipelineId });
+            <Switch
+              label="High-accuracy convert"
+              hint="Re-OCRs every page and runs an LLM pass. Best for scans and tables; slower and costs more credits."
+              checked={settings.datalabHighAccuracy}
+              onChange={(e) => {
+                onPersist({ datalabHighAccuracy: e.target.checked });
               }}
             />
           </Stack>
-        )}
-      </Stack>
+        </section>
+
+        <Divider />
+
+        <section className="settings-section">
+          <Stack gap={3}>
+            <Disclosure open={advanced} onToggle={setAdvanced}>
+              Advanced
+            </Disclosure>
+            {advanced && (
+              <Stack gap={3} className="settings-nest">
+                <Select
+                  label="Convert output format"
+                  value={settings.datalabFormat}
+                  onChange={(e) => {
+                    onPersist({ datalabFormat: e.target.value });
+                  }}
+                  options={[
+                    { value: "markdown", label: "Markdown (.md)" },
+                    { value: "html", label: "HTML (.html)" },
+                    { value: "json", label: "JSON (.json)" },
+                  ]}
+                />
+                <PipelineField
+                  value={settings.datalabPipelineId}
+                  onCommit={(datalabPipelineId) => {
+                    onPersist({ datalabPipelineId });
+                  }}
+                />
+              </Stack>
+            )}
+          </Stack>
+        </section>
+      </div>
     </FlowLayout>
   );
 }
@@ -286,7 +305,15 @@ function CustomWordsField({
   return (
     <TextInput
       label="Custom words (optional)"
-      hint={`Words local OCR should prefer when it is unsure. Worth setting for names and jargon it keeps getting wrong. ${String(left)} of ${String(CUSTOM_WORDS_MAX_BYTES)} bytes left.`}
+      hint={
+        <>
+          Words local OCR should prefer when it is unsure. Worth setting for names and jargon it keeps
+          getting wrong.{" "}
+          <Mono as="span" size="xs" tone="ghost">
+            {left} of {CUSTOM_WORDS_MAX_BYTES} bytes left
+          </Mono>
+        </>
+      }
       type="text"
       value={draft}
       placeholder="Comma separated"
@@ -332,7 +359,7 @@ function KeyField({
         </>
       }
     >
-      <Row gap={2} align="center" className="key-row">
+      <div className="settings-key">
         <Input
           id={inputId}
           type="password"
@@ -344,23 +371,25 @@ function KeyField({
             if (e.key === "Enter" && typed) commit();
           }}
         />
-        {/* Save is disabled on an empty box: it used to delete the stored key,
-            which looked identical to a no-op because of the masked placeholder. */}
-        <Button disabled={!typed} onClick={commit}>
-          Save
-        </Button>
-        {saved && !typed && (
-          <Button
-            variant="ghost"
-            onClick={() => {
-              onSave("");
-            }}
-            title={`Remove the ${label} key`}
-          >
-            Remove
+        <div className="settings-key__actions">
+          {/* Save is disabled on an empty box: it used to delete the stored key,
+              which looked identical to a no-op because of the masked placeholder. */}
+          <Button disabled={!typed} onClick={commit}>
+            Save
           </Button>
-        )}
-      </Row>
+          {saved && !typed && (
+            <Button
+              variant="ghost"
+              onClick={() => {
+                onSave("");
+              }}
+              title={`Remove the ${label} key`}
+            >
+              Remove
+            </Button>
+          )}
+        </div>
+      </div>
     </Field>
   );
 }

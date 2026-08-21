@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowLeftIcon, ClockCounterClockwiseIcon, GearSixIcon } from "@phosphor-icons/react";
+import { ClockCounterClockwiseIcon, GearSixIcon } from "@phosphor-icons/react";
 import { Button, Label, Mono, SplitPane, StatusDot } from "@ui";
 import { basename, fmtElapsed } from "@/app/format";
 import { barStatus, runCounter } from "./barStatus";
@@ -18,6 +18,7 @@ import type {
   WorkspaceInfo,
 } from "@/app/types";
 import { LibraryShell } from "@/domains/library/LibraryShell";
+import { WorkspaceViewNav } from "@/domains/library/WorkspaceViewNav";
 import { OnboardingGate } from "@/domains/onboarding/OnboardingGate";
 import { conversionPatch } from "@/domains/onboarding/conversionMode";
 import { RunView } from "@/domains/run/RunView";
@@ -96,6 +97,7 @@ export default function App() {
   const [runsFinished, setRunsFinished] = useState(0);
   const [starting, setStarting] = useState(false);
   const wasRunning = useRef(false);
+  const wasWorkspace = useRef(false);
   const autoClear = useRef(false);
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS);
   const settingsSave = useRef<Promise<void>>(Promise.resolve());
@@ -291,6 +293,20 @@ export default function App() {
         activeProjectId: workspace.inboxProjectId,
         ...conversionPatch(mode),
       });
+      // Open at workspace size so the library does not bounce up from the
+      // launcher's fixed width on the first frame after onboarding.
+      wasWorkspace.current = true;
+      void (async () => {
+        try {
+          await setWindowResizable(true);
+          await setWindowMinSize(WORKSPACE.minWidth, WORKSPACE.minHeight);
+          const area = await workArea().catch(() => null);
+          if (area) await setWindowMaxSize(area.width, area.height);
+          await resizeWindow(WORKSPACE.width, WORKSPACE.height);
+        } catch {
+          // No window to size off a real host.
+        }
+      })();
       setView("library");
     },
     [persist],
@@ -332,6 +348,11 @@ export default function App() {
   const addFiles = async () => {
     addPaths(await pickFiles());
   };
+
+  const importFiles = useCallback(async () => {
+    addPaths(await pickFiles());
+    setView("run");
+  }, [addPaths]);
 
   const addFolders = async () => {
     addPaths(await pickFolders());
@@ -411,7 +432,6 @@ export default function App() {
   // Zoom decides how many logical pixels the launcher's content wants, so the
   // fit has to know it.
   useFitWindow(launcher, zoom);
-  const wasWorkspace = useRef(false);
   /// The launcher's size, read the moment before it grows. Only ever
   /// `LAUNCHER.width` now that the launcher is fixed, but measured rather than
   /// assumed, so a collapse cannot disagree with the window on screen.
@@ -502,12 +522,15 @@ export default function App() {
 
   // Escape closes the document you are reading, not the window and not the
   // panel beside it. Bound only while something is open, so an app with no
-  // document never swallows the key. `requestClose` saves an edit first, then
-  // asks before discarding if the write was refused.
+  // document never swallows the key. Fields keep their own Escape semantics.
   useEffect(() => {
     if (!activeId) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      const el = document.activeElement;
+      if (el instanceof HTMLElement && el.closest("input, textarea, select, [contenteditable]")) {
+        return;
+      }
       e.preventDefault();
       void requestClose(activeId);
     };
@@ -516,6 +539,24 @@ export default function App() {
       window.removeEventListener("keydown", onKey);
     };
   }, [activeId, requestClose]);
+
+  // ⌘O in workspace mode: same path as a drop — stage files and open Run.
+  useEffect(() => {
+    if (!libraryMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey || e.key.toLowerCase() !== "o" || e.shiftKey || e.altKey) return;
+      const el = document.activeElement;
+      if (el instanceof HTMLElement && el.closest("input, textarea, select, [contenteditable]")) {
+        return;
+      }
+      e.preventDefault();
+      void importFiles();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [importFiles, libraryMode]);
 
   // When a run finishes, clear the input selection so the same files can't be
   // re-run by accident — Run greys out until new inputs are added. Gated on a
@@ -772,99 +813,132 @@ export default function App() {
   }
   const note = noteParts.length > 0 ? noteParts.join(" · ") : null;
 
-  // The left column, and the whole body when nothing is open. Settings and
-  // History replace this column only: a document is a place you are reading,
-  // and changing a setting is not a reason to lose it.
+  const settingsPanel = (
+    <SettingsPanel
+      settings={settings}
+      secrets={secrets}
+      onPersist={persist}
+      onSecrets={setSecrets}
+      onToast={showToast}
+      onClose={() => setView(home)}
+      embedded={libraryMode}
+    />
+  );
+
+  const historyPanel = (
+    <HistoryPanel
+      refreshKey={runsFinished}
+      onChanged={() => setRunsFinished((n) => n + 1)}
+      onOpen={(e) => void openHistory(e)}
+      onToast={showToast}
+      onClose={() => setView(home)}
+      embedded={libraryMode}
+    />
+  );
+
+  const runPanel = (
+    <RunView
+      settings={settings}
+      scan={scan}
+      jobs={jobs}
+      dragging={dragging}
+      now={now}
+      running={running}
+      canRun={canRun}
+      runLabel={runLabel}
+      hint={hint}
+      hintActionable={hintActionable}
+      note={note}
+      finished={finished}
+      total={total}
+      doneCount={doneCount}
+      failedCount={failedCount}
+      job={job}
+      selectedId={activeId}
+      expanded={expanded}
+      persist={persist}
+      onAddFiles={() => void addFiles()}
+      onAddFolders={() => void addFolders()}
+      onPickOutput={() => void pickOutput()}
+      onRemoveInput={(p) => mutateInputs((cur) => cur.filter((x) => x !== p))}
+      onClearInputs={() => mutateInputs(() => [])}
+      onRun={() => void run()}
+      onStop={() => void stop()}
+      onRetryFailed={() => void call(() => commands.retryFailed())}
+      onRevealOutput={() => {
+        const dir = settings.outputDir;
+        if (dir) void call(() => commands.revealPath(dir));
+      }}
+      onPreview={(j) => void openJob(j)}
+      onCopy={(j) => void copyText(j)}
+      onRevealJob={(j) => {
+        const path = j.outputPath;
+        if (path) void call(() => commands.revealPath(path));
+      }}
+      onRetryJob={(id) => void call(() => commands.retryJob(id))}
+      onHint={() => {
+        if (hintOpensSettings) setView("settings");
+        else if (!settings.outputDir) void pickOutput();
+      }}
+    />
+  );
+
+  const libraryPanel =
+    view === "run" ? runPanel : view === "settings" ? settingsPanel : view === "history" ? historyPanel : null;
+
+  // The left column, and the whole body when nothing is open. In workspace
+  // mode the project sidebar stays put while Run, Settings, and History swap
+  // the main column beside it.
   let left: ReactNode;
-  switch (view) {
-    case "library":
-      left =
-        workspacePath === null ? null : (
-          <LibraryShell
-            workspacePath={workspacePath}
-            projects={projects}
-            activeProjectId={settings.activeProjectId}
-            onSelectProject={(activeProjectId) => {
-              persist({ activeProjectId });
-            }}
-            onOpenSettings={() => setView("settings")}
-          />
-        );
-      break;
-    case "settings":
-      left = (
-        <SettingsPanel
-          settings={settings}
-          secrets={secrets}
-          onPersist={persist}
-          onSecrets={setSecrets}
-          onToast={showToast}
-          onClose={() => setView(home)}
-        />
-      );
-      break;
-    case "history":
-      left = (
-        <HistoryPanel
-          refreshKey={runsFinished}
-          onChanged={() => setRunsFinished((n) => n + 1)}
-          onOpen={(e) => void openHistory(e)}
-          onToast={showToast}
-          onClose={() => setView(home)}
-        />
-      );
-      break;
-    case "run":
-      left = (
-        <RunView
-          settings={settings}
-          scan={scan}
-          jobs={jobs}
-          dragging={dragging}
-          now={now}
-          running={running}
-          canRun={canRun}
-          runLabel={runLabel}
-          hint={hint}
-          hintActionable={hintActionable}
-          note={note}
-          finished={finished}
-          total={total}
-          doneCount={doneCount}
-          failedCount={failedCount}
-          job={job}
-          selectedId={activeId}
-          expanded={expanded}
-          persist={persist}
-          onAddFiles={() => void addFiles()}
-          onAddFolders={() => void addFolders()}
-          onPickOutput={() => void pickOutput()}
-          onRemoveInput={(p) => mutateInputs((cur) => cur.filter((x) => x !== p))}
-          onClearInputs={() => mutateInputs(() => [])}
-          onRun={() => void run()}
-          onStop={() => void stop()}
-          onRetryFailed={() => void call(() => commands.retryFailed())}
-          onRevealOutput={() => {
-            const dir = settings.outputDir;
-            if (dir) void call(() => commands.revealPath(dir));
-          }}
-          onPreview={(j) => void openJob(j)}
-          onCopy={(j) => void copyText(j)}
-          onRevealJob={(j) => {
-            const path = j.outputPath;
-            if (path) void call(() => commands.revealPath(path));
-          }}
-          onRetryJob={(id) => void call(() => commands.retryJob(id))}
-          onHint={() => {
-            if (hintOpensSettings) setView("settings");
-            else if (!settings.outputDir) void pickOutput();
-          }}
-        />
-      );
-      break;
-    default: {
-      const _exhaustive: never = view;
-      left = _exhaustive;
+  if (libraryMode) {
+    left = (
+      <LibraryShell
+        workspacePath={workspacePath}
+        projects={projects}
+        activeProjectId={settings.activeProjectId}
+        libraryHome={view === "library"}
+        panel={libraryPanel}
+        onSelectProject={(activeProjectId) => {
+          persist({ activeProjectId });
+        }}
+        onOpenSettings={() => setView("settings")}
+        onOpenLibrary={() => setView("library")}
+        onOpenRun={() => setView("run")}
+        onCreateProject={async (title) => {
+          const created = await commands.createProject(title);
+          setProjects((cur) => [...cur, created]);
+          persist({ activeProjectId: created.id });
+          setView("library");
+          try {
+            setProjects(await commands.listProjects());
+          } catch {
+            // The project exists; a stale list is better than an error toast.
+          }
+        }}
+        onRevealPath={(path) => {
+          void call(() => commands.revealPath(path));
+        }}
+        onToast={showToast}
+      />
+    );
+  } else {
+    switch (view) {
+      case "library":
+        left = null;
+        break;
+      case "settings":
+        left = settingsPanel;
+        break;
+      case "history":
+        left = historyPanel;
+        break;
+      case "run":
+        left = runPanel;
+        break;
+      default: {
+        const _exhaustive: never = view;
+        left = _exhaustive;
+      }
     }
   }
 
@@ -935,6 +1009,13 @@ export default function App() {
                 </>
               )}
             </>
+          ) : libraryMode && (view !== "library" || activeId === null) ? (
+            <WorkspaceViewNav
+              view={view}
+              onView={(next) => {
+                setView(next);
+              }}
+            />
           ) : status.variant === "view" ? (
             <Label>{status.text}</Label>
           ) : (
@@ -946,42 +1027,32 @@ export default function App() {
           )}
         </div>
         <div className="bar-actions">
-          {/* The run flow is off the default nav in a workspace, but a drop
-              still lands there, so it needs a way back that is not the gear. */}
-          {libraryMode && view === "run" && (
-            <Button
-              variant="ghost"
-              iconOnly
-              icon={<ArrowLeftIcon />}
-              onClick={() => setView("library")}
-              title="Library"
-              aria-label="Library"
-            />
-          )}
-          {/* History belongs to the run flow's output folder, which the
-              library has replaced. Hidden until it means something here. */}
+          {/* In a workspace, all panels live in the centre Segmented nav, so
+              the corner icons belong to the launcher alone. */}
           {!libraryMode && (
-            <Button
-              variant="ghost"
-              iconOnly
-              icon={<ClockCounterClockwiseIcon weight={view === "history" ? "fill" : "regular"} />}
-              onClick={() => {
-                setView((v) => (v === "history" ? home : "history"));
-              }}
-              title="History"
-              aria-label="History"
-            />
+            <>
+              <Button
+                variant="ghost"
+                iconOnly
+                icon={<ClockCounterClockwiseIcon weight={view === "history" ? "fill" : "regular"} />}
+                onClick={() => {
+                  setView((v) => (v === "history" ? home : "history"));
+                }}
+                title="History"
+                aria-label="History"
+              />
+              <Button
+                variant="ghost"
+                iconOnly
+                icon={<GearSixIcon weight={view === "settings" ? "fill" : "regular"} />}
+                onClick={() => {
+                  setView((v) => (v === "settings" ? home : "settings"));
+                }}
+                title="Settings"
+                aria-label="Settings"
+              />
+            </>
           )}
-          <Button
-            variant="ghost"
-            iconOnly
-            icon={<GearSixIcon weight={view === "settings" ? "fill" : "regular"} />}
-            onClick={() => {
-              setView((v) => (v === "settings" ? home : "settings"));
-            }}
-            title="Settings"
-            aria-label="Settings"
-          />
         </div>
       </header>
 
