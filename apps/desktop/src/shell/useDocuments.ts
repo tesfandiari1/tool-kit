@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { commands } from "@/app/commands";
-import type { HistoryEntry, Job } from "@/app/types";
+import { basename } from "@/app/format";
+import type { FileRow, HistoryEntry, Job } from "@/app/types";
 import { isDirty, type DocMode, type OpenDoc, type SaveState } from "@/domains/thread/model";
 import { confirm } from "@/platform/host";
 import { activateOrInsert, NO_DOCS, removeDoc } from "./documents";
@@ -16,6 +17,11 @@ import { activateOrInsert, NO_DOCS, removeDoc } from "./documents";
 export function useDocuments({ showToast }: { showToast: (msg: string) => void }) {
   const [{ docs, activeId }, setList] = useState(NO_DOCS);
   const [mode, setMode] = useState<DocMode>("read");
+  /// The file the inspector card is reporting on, layered over the pane. It
+  /// lives here because this hook already owns what the pane shows, which makes
+  /// "opening a document dismisses the card" an invariant of the pane's owner
+  /// rather than three call sites that have to remember.
+  const [preview, setPreview] = useState<FileRow | null>(null);
 
   const open = useCallback(
     async (title: string, outputPath: string | null) => {
@@ -23,6 +29,7 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
         showToast("No result file to open");
         return;
       }
+      setPreview(null);
       // An open document is already the file on disk, plus any unsaved edit.
       // Re-reading it here would throw that edit away to learn nothing.
       if (docs.some((d) => d.id === outputPath)) {
@@ -55,7 +62,14 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
     [open],
   );
 
+  /// The library tree's door. The doc id is the path and `activateOrInsert`
+  /// dedupes on it, so a file opened from the tree, a job row and the history
+  /// is one tab, with the autosave, ⌘S, the mtime handshake and the close
+  /// confirm all coming free.
+  const openPath = useCallback((path: string) => open(basename(path), path), [open]);
+
   const select = useCallback((id: string) => {
+    setPreview(null);
     setList((cur) => ({ ...cur, activeId: id }));
   }, []);
 
@@ -117,8 +131,11 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
     docs,
     activeId,
     mode,
+    preview,
+    showPreview: setPreview,
     openJob,
     openHistory,
+    openPath,
     select,
     closeDoc,
     edit,

@@ -39,7 +39,9 @@ export function barStatus({ view, jobs, documentName, workspaceName }: BarStatus
   }
 
   if (view === "history") return { kind: "label", text: "History", variant: "view" };
-  if (view === "settings") return { kind: "label", text: "Settings", variant: "view" };
+  // Settings has no case here on purpose. It is a sheet over the window, and a
+  // real sheet does not rename the window it hangs off, so the strip keeps
+  // naming the surface underneath.
   if (documentName) return { kind: "label", text: documentName, variant: "document" };
   // The library is a place rather than a panel, so the strip names the
   // workspace you are in.

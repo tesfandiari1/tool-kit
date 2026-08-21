@@ -4,12 +4,12 @@ import type { View } from "@/app/types";
 const ITEMS = [
   { value: "library", label: "Library" },
   { value: "run", label: "Run" },
-  { value: "settings", label: "Settings" },
   { value: "history", label: "History" },
 ] satisfies { value: View; label: string }[];
 
-/// The workspace's four views, in the title bar so conversion, settings, and
-/// history stay one click away without duplicating Settings in the corner.
+/// The three surfaces the left column holds, in the title bar so conversion and
+/// history stay one click away. Settings is not among them: it is a sheet over
+/// the whole window, reached from the sidebar gear or ⌘,.
 export function WorkspaceViewNav({
   view,
   onView,

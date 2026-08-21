@@ -45,6 +45,15 @@ svg {
    `.job-time` render through `Mono`, which already sets tabular numerals. */
 
 .app {
+  /* The title bar's height as one expression, derived from the two rules that
+     actually set it: `.bar`'s own top and bottom padding, and `.bar-status`'s
+     min-height. The Settings sheet hangs off this edge, so a change to either
+     term moves both and they cannot drift.
+
+     The top term divides by --zoom for the same reason `.bar` and `.bar-lights`
+     do: macOS draws the traffic lights in logical pixels, so the band above the
+     content does not scale with the page. */
+  --bar-h: calc(var(--s3) / var(--zoom, 1) + var(--s6) + var(--s2));
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -163,10 +172,16 @@ svg {
   flex-direction: column;
   gap: var(--s4);
 }
-/* The 620px measure is the compact launcher's answer to a wide screen. It
-   applies only when the split is collapsed; inside an open pane the column
-   is the pane and must not centre itself away from the seam. */
-.ui-split--collapsed .flow {
+/* One measure for the whole window when the split is collapsed, whichever view
+   the pane holds. It applies only there; inside an open pane the column is the
+   pane and must not centre itself away from the seam.
+
+   620px clears the widest row the tree can draw: the depth-4 indent and the
+   row's own chrome are about 116px, and a 40-character name beside a paired
+   result name comes to roughly 400px more. Run and History are `.flow` and were
+   already sized by it. */
+.ui-split--collapsed .flow,
+.ui-split--collapsed .lib-side {
   max-width: 620px;
   margin: 0 auto;
 }
@@ -317,30 +332,19 @@ svg {
 }
 
 /* --- Library --------------------------------------------------------------
-   Home. Projects on the left, the selected project's documents in the centre.
-   A grid rather than a split: the sidebar is chrome at a width the content
-   does not get a say in. */
-.library-shell {
-  flex: 1;
-  min-height: 0;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(160px, 200px) minmax(0, 1fr);
-}
-/* Beside an open document the shell is the split's start pane, whose floor is
-   sized for the run column alone (see SPLIT.minStart in geometry.ts). The
-   sidebar is not rendered there, so the main column takes the whole track. */
-.library-shell.is-compact {
-  grid-template-columns: minmax(0, 1fr);
-}
+   The whole left pane: the workspace it belongs to, its projects as a tree, and
+   the two ways out. Run and History take the same pane when the nav asks for
+   them, so the insets here match `.flow`'s exactly or the left edge would shift
+   8px on every view switch. The split's own hairline is the divider, so this
+   carries no border of its own. */
 .lib-side {
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: var(--s4);
   /* The title bar already pays --s2 below itself, so the top inset here makes
      the same --s4 the panels get in the run column. */
-  padding: var(--s2) var(--s4) var(--s4);
-  border-right: 1px solid var(--rule);
+  padding: var(--s2) var(--s5) var(--s5);
   min-height: 0;
   min-width: 0;
 }
@@ -350,154 +354,59 @@ svg {
   gap: var(--s1);
   min-width: 0;
 }
-/* One object, so the rows sit at the atom step from each other and the list
-   reads as a block rather than as five separate controls. */
+/* The tree's scrollport. The rows own their own rhythm, so this sets no gap:
+   `.ui-tree` already keeps them --s1 apart. */
 .lib-side__list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s1);
-}
-.lib-project {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  min-width: 0;
-  min-height: 32px;
-  padding: 0 var(--s2);
-  border: 0;
-  border-radius: var(--r-control);
-  background: none;
-  color: inherit;
-  text-align: left;
-  transition: background var(--dur-fast) var(--ease);
-}
-.lib-project:hover:not(.is-active) {
-  background: color-mix(in oklch, var(--ink) 4%, transparent);
-}
-/* Where you are, said with a step up in surface. Not cobalt: that is the
-   control you press, and this is a statement of place — the same answer the
-   queue's selected row gives. */
-.lib-project.is-active {
-  background: var(--surface-raised);
-}
-/* Two characters wide whether or not it reads, the same reservation the
-   segmented control's count keeps. */
-.lib-project__count {
-  min-width: 2ch;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-.lib-project svg {
-  color: var(--ink-3);
-}
-.lib-project.is-active svg {
-  color: var(--ink-2);
 }
 .lib-side__foot {
   flex: none;
   display: flex;
-}
-
-.library-main {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-.library-main__panel {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-/* Empty-state optical padding, which is the one job --s6 has. */
-.library-main__empty {
-  flex: 1;
-  display: grid;
-  place-content: center;
-  justify-items: center;
-  gap: var(--s1);
-}
-.library-main__panel > .flow,
-.library-main__panel > .settings-panel.flow {
-  flex: 1;
-  min-height: 0;
-  max-width: none;
-  margin: 0;
-}
-/* Embedded in the library column, the --s5 window-edge inset is already paid
-   by the sidebar, so the scroll region steps down to --s3 — and the settings
-   measure unlocks, because 34rem plus --s5 gutters is wider than the column
-   at the window's minimum width. */
-.library-main__panel > .settings-panel .flow-scroll {
-  padding-inline: var(--s3);
-}
-.library-main__panel > .settings-panel .settings-body {
-  max-width: none;
-}
-.library-main__panel > .history-panel {
-  padding-inline: var(--s3);
-}
-.library-workspace {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.library-main__head {
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s3);
-  padding: var(--s2) var(--s4) 0;
-  border-bottom: 1px solid var(--rule);
-}
-.library-main__meta {
-  padding-bottom: var(--s3);
-}
-.library-workspace__body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-.library-main__foot {
-  flex: none;
-  padding: var(--s3) var(--s4) var(--s4);
-  border-top: 1px solid var(--rule);
-}
-.lib-side__workspace {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s1);
-  min-width: 0;
-  border: 0;
-  background: none;
-  padding: 0;
-  border-radius: var(--r-control);
-  text-align: left;
-  width: 100%;
-  color: inherit;
-  transition: color var(--dur-fast) var(--ease);
-}
-.lib-side__workspace:hover {
-  color: var(--ink);
-}
-/* Library home is a place like any selected project row, so the workspace
-   head wears the same raised surface. Not cobalt: that is the control you
-   press, and this is a statement of place. */
-.lib-side__workspace.is-active {
-  background: var(--surface-raised);
 }
 .lib-side__path {
   opacity: 0.85;
 }
 .lib-side__actions {
   flex: none;
+}
+
+/* --- Project tree ---------------------------------------------------------
+   Layout only. Every colour on a row is the primitive's, so a rule here that
+   set one would silently beat a `tone` at the call site — App.css loads after
+   @ui, and this file already records that happening twice. */
+
+/* Two characters wide whether or not it reads, the same reservation the
+   segmented control's count keeps (UI.md rule 2). */
+.lib-tree__count {
+  min-width: 2ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* The paired result's name yields to the source name it belongs to: at the
+   pane's floor the source is what the row is about, and a long result name
+   would push it out of the column. */
+.lib-tree__result {
+  max-width: 40%;
+}
+/* The Tabs mark-slot idiom: the control holds its width at rest, so the row is
+   the same size hovered, focused and converting. Cobalt enters a tree row only
+   under the pointer, which is what this reveal is for.
+
+   `pointer-events` moves with the opacity or an invisible control would answer
+   a click on empty space, and the only way to reach it is over the row that
+   reveals it. */
+.lib-tree__convert {
+  display: flex;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+.ui-tree__item:hover > .ui-tree__row .lib-tree__convert,
+.ui-tree__item:focus-within > .ui-tree__row .lib-tree__convert {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 /* --- Workspace re-rank ----------------------------------------------------
@@ -1082,12 +991,86 @@ svg {
   min-height: 0;
 }
 
+/* The document and the card that covers it, in one box. The card is absolute
+   inside it, so the document keeps its own scroll position underneath instead
+   of unmounting, and the tab strip above stays out of the covered area. */
+.doc-stack {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .doc-empty {
   align-items: center;
   justify-content: center;
   gap: var(--s1);
   text-align: center;
   padding: var(--s6);
+}
+
+/* --- File inspector -------------------------------------------------------
+   A Quick Look card over the document pane. It follows the tree's selection, so
+   it reports and the caller acts.
+
+   The tab strip stays live above it, which is why this covers `.doc-stack` and
+   not `.doc`: the strip is the way back to the document the card is sitting
+   on. */
+.doc-inspect {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  padding: var(--s5);
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--surface-well) 88%, transparent);
+  animation: doc-inspect-in var(--dur-fast) var(--ease-out);
+}
+@keyframes doc-inspect-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--s2));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* A card, not a panel filling the pane: it is one file's worth of facts, and a
+   measure that grows with the window would make four short lines read as a
+   page. */
+.doc-inspect__card {
+  width: 100%;
+  max-width: 44ch;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-solid);
+  border: 1px solid var(--rule-lit);
+  border-radius: var(--r-panel);
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--warm-950) 50%, transparent);
+}
+.doc-inspect__head {
+  padding: var(--s2) var(--s3) var(--s2) var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+.doc-inspect__body {
+  padding: var(--s4);
+}
+.doc-inspect__foot {
+  padding: var(--s3) var(--s4);
+  border-top: 1px solid var(--rule);
+}
+/* The opening lines, as they sit in the file. Wrapped rather than scrolled: the
+   card shows a dozen lines and stops. */
+.doc-inspect__peek {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* The strip must not claim to be showing a document the reader is not looking
+   at, so the covered tab drops one step of ink while the card is up. */
+.doc.is-covered .ui-tabs__tab[aria-selected="true"] {
+  color: var(--ink-3);
 }
 
 /* The measure has to answer the window. Unbounded, the prose runs the full pane

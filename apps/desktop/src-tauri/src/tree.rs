@@ -52,6 +52,10 @@ pub struct FileRow {
     /// `MAX_PREVIEW_BYTES`. Decided here so a click can never round-trip into
     /// a `read_document` failure toast.
     pub openable: bool,
+    /// The same test, applied to `result_path`. A click on a paired source
+    /// opens its result, and an `html` result is not a document this pane
+    /// reads, so the answer cannot be inferred from the source row.
+    pub result_openable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,9 +125,8 @@ pub fn list(workspace: &Path, rel: &str, cfg: &Settings) -> Result<DirListing, S
                 .map(|jt| jt.id().to_string()),
             result_path: result.map(|hit| hit.path.to_string_lossy().into_owned()),
             result_name: result.map(|hit| hit.name.clone()),
-            openable: !raw.is_dir
-                && raw.size <= crate::MAX_PREVIEW_BYTES
-                && crate::ALREADY_TEXT.contains(&raw.ext.as_str()),
+            openable: opens_in_pane(raw),
+            result_openable: result.is_some_and(opens_in_pane),
             name: raw.name.clone(),
             ext: raw.ext.clone(),
             size: raw.size,
@@ -143,6 +146,15 @@ pub fn list(workspace: &Path, rel: &str, cfg: &Settings) -> Result<DirListing, S
         truncated,
         pending,
     })
+}
+
+/// Whether the document pane can read this file: a text extension under the
+/// preview cap. One rule, so a source row and the result it pairs with answer
+/// it the same way.
+fn opens_in_pane(raw: &Raw) -> bool {
+    !raw.is_dir
+        && raw.size <= crate::MAX_PREVIEW_BYTES
+        && crate::ALREADY_TEXT.contains(&raw.ext.as_str())
 }
 
 /// One directory entry, before sorting and pairing decide what it becomes.
@@ -516,6 +528,22 @@ mod tests {
         assert_eq!(row(&listing, "deck.pdf").job.as_deref(), Some("convert"));
         assert_eq!(row(&listing, "notes.md").job, None);
         assert_eq!(row(&listing, "notes.md").rel, "Inbox/notes.md");
+    }
+
+    #[test]
+    fn a_markdown_result_opens_and_an_html_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.pdf", "deck.md", "slides.pdf", "slides.html"]);
+
+        let markdown = list(&root, "Inbox", &settings("markdown")).unwrap();
+        assert!(row(&markdown, "deck.pdf").result_openable);
+
+        let html = list(&root, "Inbox", &settings("html")).unwrap();
+        assert!(!row(&html, "slides.pdf").result_openable);
+        assert_eq!(
+            row(&html, "slides.pdf").result_name.as_deref(),
+            Some("slides.html")
+        );
     }
 
     #[test]

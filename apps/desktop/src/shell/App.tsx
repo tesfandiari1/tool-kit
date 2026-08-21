@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Label, Mono, SplitPane, StatusDot } from "@ui";
+import { FileTextIcon, PlayIcon } from "@phosphor-icons/react";
+import { Button, Label, Mono, Sheet, SplitPane, StatusDot } from "@ui";
 import { basename, fmtElapsed } from "@/app/format";
 import { barStatus, runCounter } from "./barStatus";
 import { conversionClient } from "@/app/api";
 import { commands } from "@/app/commands";
 import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
 import type {
+  FileRow,
   Job,
   OnboardingConversionMode,
   ProjectSummary,
@@ -15,7 +17,7 @@ import type {
   View,
   WorkspaceInfo,
 } from "@/app/types";
-import { LibraryShell } from "@/domains/library/LibraryShell";
+import { LibraryPane } from "@/domains/library/LibraryPane";
 import { WorkspaceViewNav } from "@/domains/library/WorkspaceViewNav";
 import { OnboardingGate } from "@/domains/onboarding/OnboardingGate";
 import { conversionPatch } from "@/domains/onboarding/conversionMode";
@@ -37,6 +39,7 @@ import {
 import { HistoryPanel } from "@/domains/history/HistoryPanel";
 import { SettingsPanel } from "@/domains/settings/SettingsPanel";
 import { DocumentPane } from "@/domains/thread/DocumentPane";
+import { FileInspector } from "@/domains/thread/FileInspector";
 import { isDirty, type OpenDoc } from "@/domains/thread/model";
 import {
   confirm,
@@ -55,6 +58,7 @@ import {
 import { ONBOARDING, SPLIT, WORKSPACE, ZOOM } from "./geometry";
 import { useToast } from "./useToast";
 import { useDocuments } from "./useDocuments";
+import { useProjectTree } from "./useProjectTree";
 import { useDocumentSave } from "./useDocumentSave";
 import { useCloseConfirm, useDragDrop, useWindowFocusClass } from "./useHostWindow";
 import { useZoom, zoomLabel } from "./useZoom";
@@ -96,6 +100,9 @@ export default function App() {
   const [capabilities, setCapabilities] = useState<ConversionCapabilities>({ state: "idle" });
   const [now, setNow] = useState(() => Date.now());
   const [view, setView] = useState<View>("library");
+  /// Settings is a sheet over the whole window rather than a view, so opening
+  /// it no longer evicts the Run column in the middle of a run.
+  const [settingsOpen, setSettingsOpen] = useState(false);
   /// Bumped once when a run finishes. Refreshes the already-done counts and an
   /// open History panel — a 200-file run emits hundreds of job-updated events,
   /// so reacting to those instead would re-scan the disk hundreds of times.
@@ -110,8 +117,21 @@ export default function App() {
   const settingsSave = useRef<Promise<void>>(Promise.resolve());
 
   const { toast, showToast } = useToast();
-  const { docs, activeId, mode, openJob, openHistory, select, closeDoc, edit, setMode, setDocMeta } =
-    useDocuments({ showToast });
+  const {
+    docs,
+    activeId,
+    mode,
+    preview,
+    showPreview,
+    openJob,
+    openHistory,
+    openPath,
+    select,
+    closeDoc,
+    edit,
+    setMode,
+    setDocMeta,
+  } = useDocuments({ showToast });
   const { saveDoc, requestClose } = useDocumentSave({ docs, activeId, closeDoc, setDocMeta });
 
   const scanKey = JSON.stringify([
@@ -301,6 +321,26 @@ export default function App() {
     applySettings({ ...settingsRef.current, ...patch });
   }, [applySettings]);
 
+  /// Stable, because the tree's fetch effects depend on it. An inline arrow
+  /// would re-run them on every render.
+  const setExpandedPaths = useCallback(
+    (expandedPaths: string[]) => {
+      persist({ expandedPaths });
+    },
+    [persist],
+  );
+
+  /// The library tree's session state. It lives up here rather than in the
+  /// pane, because `left` swaps the pane out on every trip to Run and the
+  /// children cache and the selection have to outlive that.
+  const tree = useProjectTree({
+    projects,
+    expandedPaths: settings.expandedPaths,
+    onExpandedChange: setExpandedPaths,
+    refreshKey: runsFinished,
+    showToast,
+  });
+
   /// First run's answer, in one write: where the workspace is, which project
   /// the library opens on, and how conversion runs. One write rather than
   /// three, so a crash between them cannot leave a workspace with no route.
@@ -329,8 +369,11 @@ export default function App() {
         }
       })();
       setView("library");
+      // Only a brand-new workspace carries one. A user who deletes the file
+      // never sees it again, because the host writes it once and says so here.
+      if (workspace.welcomePath !== null) void openPath(workspace.welcomePath);
     },
-    [persist],
+    [openPath, persist],
   );
 
   // Match the job to what was dropped, and put results beside the input.
@@ -376,6 +419,43 @@ export default function App() {
     [mutateInputs]
   );
 
+  /// One file from the library, converted into the folder it already sits in.
+  ///
+  /// The host answers with a verdict and this renders it. Nothing here plans a
+  /// route: the route plan, the key checks and the reuse rule all live in Rust,
+  /// and a second planner in the webview would eventually disagree with the one
+  /// a run uses.
+  const convertOne = useCallback(
+    async (row: FileRow) => {
+      showPreview((cur) => (cur?.rel === row.rel ? null : cur));
+      let out;
+      try {
+        out = await commands.convertOne(row.rel);
+      } catch (e) {
+        showToast(String(e));
+        return;
+      }
+      if (out.kind === "blocked") {
+        // Staging is not optional. The Run view's hint chain is gated on a
+        // non-empty selection, so bouncing without it lands the user on an
+        // empty Run view with no hint and a disabled button.
+        addPaths([row.path]);
+        showToast(out.message ?? "Cannot convert this file yet");
+        setView("run");
+        return;
+      }
+      if (out.kind === "copied") {
+        showToast(out.message ?? "Copied a result from an earlier run — no charge");
+        // A copy finishes inside the command, so no job ever runs and the
+        // run-finished effect never fires. Refresh the tree so the row pairs.
+        setRunsFinished((n) => n + 1);
+      }
+      // Queued needs nothing: the row's status arrives on the job-updated
+      // stream, and `runsFinished` bumps when the run ends.
+    },
+    [addPaths, showPreview, showToast],
+  );
+
   const addFiles = async () => {
     addPaths(await pickFiles());
   };
@@ -399,8 +479,12 @@ export default function App() {
   // all. Switch back so the drop has a visible result. Only on drop, never on
   // enter/over: yanking the user out of Settings because a drag passed over
   // the window would be worse than the bug.
+  //
+  // The sheet closes first, or the drop stages files and switches the view
+  // behind a scrim, which is that same bug through the new door.
   const onDrop = useCallback(
     (paths: string[]) => {
+      setSettingsOpen(false);
       addPaths(paths);
       setView("run");
     },
@@ -453,7 +537,10 @@ export default function App() {
   );
   useZoom(zoom, onZoom);
 
-  const expanded = docs.length > 0;
+  /// Something is in the right pane. The split still collapses to one column
+  /// when there is not, which is the resting state on every launch, and the
+  /// card counts because it has nowhere else to live.
+  const expanded = docs.length > 0 || preview !== null;
   const sizesRef = useRef(settings);
 
   useEffect(() => {
@@ -531,13 +618,24 @@ export default function App() {
     };
   }, [libraryMode, persist]);
 
-  // Escape closes the document you are reading, not the window and not the
-  // panel beside it. Bound only while something is open, so an app with no
-  // document never swallows the key. Fields keep their own Escape semantics.
+  // Escape, in one ordered handler. Several surfaces answer this key and each
+  // one binding its own listener is a race with no error and no test, so the
+  // order lives here: the sheet outranks the document you are reading, and
+  // neither closes the window. Fields keep their own Escape semantics.
   useEffect(() => {
-    if (!activeId) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // The sheet is a modal <dialog>. Its own `cancel` event owns the key,
+      // and answering here as well would close the document behind it.
+      if (settingsOpen) return;
+      // The card is the top surface while it is up, so it goes before the
+      // document it covers.
+      if (preview !== null) {
+        e.preventDefault();
+        showPreview(null);
+        return;
+      }
+      if (!activeId) return;
       const el = document.activeElement;
       if (el instanceof HTMLElement && el.closest("input, textarea, select, [contenteditable]")) {
         return;
@@ -549,7 +647,16 @@ export default function App() {
     return () => {
       window.removeEventListener("keydown", onKey);
     };
-  }, [activeId, requestClose]);
+  }, [activeId, preview, requestClose, settingsOpen, showPreview]);
+
+  // ⌘, from the app menu. A real menu item rather than a webview keydown,
+  // which would compete with the editor in the same window.
+  useEffect(() => {
+    const un = commands.onOpenSettings(() => {
+      setSettingsOpen(true);
+    });
+    return () => void un.then((f) => f());
+  }, []);
 
   // ⌘O in workspace mode: same path as a drop — stage files and open Run.
   useEffect(() => {
@@ -835,8 +942,10 @@ export default function App() {
       onPersist={persist}
       onSecrets={setSecrets}
       onToast={showToast}
-      onClose={() => setView("library")}
-      embedded={libraryMode}
+      onClose={() => {
+        setSettingsOpen(false);
+      }}
+      embedded={false}
     />
   );
 
@@ -890,37 +999,39 @@ export default function App() {
       }}
       onRetryJob={(id) => void call(() => commands.retryJob(id))}
       onHint={() => {
-        if (hintOpensSettings) setView("settings");
+        if (hintOpensSettings) setSettingsOpen(true);
         else if (!settings.outputDir) void pickOutput();
       }}
     />
   );
 
-  const libraryPanel =
-    view === "run" ? runPanel : view === "settings" ? settingsPanel : view === "history" ? historyPanel : null;
-
-  // The left column, and the whole body when nothing is open. The project
-  // sidebar stays put while Run, Settings, and History swap the main column
-  // beside it.
-  //
   // The null arm never renders: the two early returns above prove `loaded` and
   // `!onboarding`, which together bind the workspace path. TypeScript cannot
   // see through a return, so the guard stays.
-  const left =
+  const libraryPane =
     workspacePath === null ? null : (
-      <LibraryShell
+      <LibraryPane
         workspacePath={workspacePath}
         projects={projects}
-        activeProjectId={settings.activeProjectId}
-        libraryHome={view === "library"}
-        compact={expanded}
-        panel={libraryPanel}
-        onSelectProject={(activeProjectId) => {
-          persist({ activeProjectId });
+        tree={tree}
+        jobs={jobs}
+        /* One click rule: open the best openable thing on the row, and inspect
+           when there is none. A plain .md opens. A paired deck.pdf opens its
+           deck.md. An unpaired convertible and a binary raise the card. The
+           host decides `openable`, so a click can never round-trip into a
+           `read_document` failure toast. */
+        onActivate={(row) => {
+          if (row.openable) void openPath(row.path);
+          else if (row.resultOpenable && row.resultPath !== null) void openPath(row.resultPath);
+          else showPreview(row);
         }}
-        onOpenSettings={() => setView("settings")}
-        onOpenLibrary={() => setView("library")}
-        onOpenRun={() => setView("run")}
+        onInspect={(row) => {
+          showPreview(preview?.rel === row.rel ? null : row);
+        }}
+        onConvert={(row) => void convertOne(row)}
+        onOpenSettings={() => {
+          setSettingsOpen(true);
+        }}
         onCreateProject={async (title) => {
           const created = await commands.createProject(title);
           setProjects((cur) => [...cur, created]);
@@ -939,6 +1050,11 @@ export default function App() {
       />
     );
 
+  // One view at a time, at the pane's full width. No shell wrapper: the tree,
+  // the run column and the history all want the whole column, and the sidebar
+  // that used to sit in front of them was what forced Run under its floor.
+  const left = view === "run" ? runPanel : view === "history" ? historyPanel : libraryPane;
+
   // Always the same element in the same slot, collapsed to one pane when
   // nothing is open. Swapping between `<SplitPane>` and a bare `left` moves the
   // column to a different position in the tree, and React answers a move by
@@ -954,6 +1070,46 @@ export default function App() {
           docs={docs}
           activeId={activeId}
           mode={mode}
+          inspector={
+            preview === null ? undefined : (
+              <FileInspector
+                row={preview}
+                /* The card is the Convert control's primary home: the row's is
+                   under the pointer only, and Enter on a row is what raises
+                   this. */
+                primary={
+                  preview.resultOpenable && preview.resultPath !== null ? (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      icon={<FileTextIcon />}
+                      onClick={() => {
+                        const path = preview.resultPath;
+                        if (path) void openPath(path);
+                      }}
+                    >
+                      Open result
+                    </Button>
+                  ) : preview.job !== null && preview.resultName === null ? (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      icon={<PlayIcon weight="fill" />}
+                      onClick={() => void convertOne(preview)}
+                    >
+                      {preview.job === "transcribe" ? "Transcribe" : "Convert"}
+                    </Button>
+                  ) : undefined
+                }
+                onReveal={(path) => {
+                  void call(() => commands.revealPath(path));
+                }}
+                onClose={() => {
+                  showPreview(null);
+                }}
+              />
+            )
+          }
           onSelect={(id) => {
             if (activeId && id !== activeId) void saveDoc(activeId);
             select(id);
@@ -1002,6 +1158,20 @@ export default function App() {
       </>
     ) : null;
 
+  /* The only channel for errors that never reach a job row (key saves, reveal
+     failures, clipboard). It must announce itself: role="status" so a screen
+     reader hears it without stealing focus.
+
+     Hoisted into a const because it renders in one of two places. A modal
+     <dialog> draws in the top layer, above every z-index, so this region at
+     the app root is invisible while the sheet is up — and saving an API key is
+     the most common thing Settings does. */
+  const toastRegion = (
+    <div className="toast-region" role="status" aria-live="polite">
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+
   return (
     <div className="app">
       {/* `data-tauri-drag-region="deep"` is what makes the window draggable —
@@ -1038,12 +1208,23 @@ export default function App() {
 
       {body}
 
-      {/* The only channel for errors that never reach a job row (key saves,
-          reveal failures, clipboard). It must announce itself: role="status"
-          so a screen reader hears it without stealing focus. */}
-      <div className="toast-region" role="status" aria-live="polite">
-        {toast && <div className="toast">{toast}</div>}
-      </div>
+      <Sheet
+        open={settingsOpen}
+        onClose={() => {
+          setSettingsOpen(false);
+        }}
+        title="Settings"
+        /* A modal dialog makes the rest of the window inert, and macOS drags a
+           window by hit-testing this attribute rather than by a CSS state. With
+           no strip inside the dialog the window cannot be moved while Settings
+           is open. */
+        head={<div data-tauri-drag-region="deep" />}
+        overlay={toastRegion}
+      >
+        {settingsPanel}
+      </Sheet>
+
+      {!settingsOpen && toastRegion}
     </div>
   );
 }

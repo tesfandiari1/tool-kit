@@ -32,11 +32,6 @@ describe("barStatus", () => {
       text: "History",
       variant: "view",
     });
-    expect(barStatus({ ...idle, view: "settings" })).toEqual({
-      kind: "label",
-      text: "Settings",
-      variant: "view",
-    });
   });
 
   it("names the workspace in the library, and keeps its case", () => {
@@ -58,7 +53,7 @@ describe("barStatus", () => {
   it("a live run outranks the surface name", () => {
     const status = barStatus({
       ...idle,
-      view: "settings",
+      view: "history",
       documentName: "Resume.md",
       jobs: [job("done"), job("processing", 100)],
     });

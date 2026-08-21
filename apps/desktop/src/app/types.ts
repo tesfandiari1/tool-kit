@@ -12,9 +12,10 @@ export type ReuseDisposition = "pending" | "already_here" | "reusable";
 /// The one conversion question first run asks. It maps onto a route, a
 /// profile, and a backend mode; see `domains/onboarding/conversionMode`.
 export type OnboardingConversionMode = "local" | "cloud";
-/// The library, or a panel that replaces the left column. Documents open
-/// beside it and are not a view.
-export type View = "library" | "run" | "settings" | "history";
+/// What the left column holds. Documents open beside it and are not a view,
+/// and Settings is a sheet over the whole window rather than a fourth member:
+/// it used to evict the Run column mid-run.
+export type View = "library" | "run" | "history";
 
 /// The workspace `setup_workspace` created or adopted.
 export interface WorkspaceInfo {
@@ -67,6 +68,9 @@ export interface FileRow {
   /// This file opens in the document pane. Decided by the host, so a click can
   /// never end in a `read_document` failure toast.
   openable: boolean;
+  /// The same answer for `resultPath`. An `html` result is not a document this
+  /// pane reads, so the source row cannot imply it.
+  resultOpenable: boolean;
 }
 
 /// One directory level.

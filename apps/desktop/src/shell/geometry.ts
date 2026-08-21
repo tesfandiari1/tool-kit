@@ -22,16 +22,17 @@ export const ONBOARDING = { width: 720, height: 520, minWidth: 640, minHeight: 4
 /// The document owns two thirds. `minEnd` is a floor, not a preference: the
 /// pane exists to be read.
 ///
-/// `minStart` is what the run column's widest row actually needs. The job
-/// segmented sets CONVERT and TRANSCRIBE in tracked mono uppercase, about
-/// 185px together, plus the panel's --s4 padding and the column's --s5 inset.
-/// Below 300px that control clips, which is what a narrower floor produced.
+/// The start pane holds one view at a time at its full width, so `minStart` is
+/// the larger of the two things that go in it.
 ///
-/// It budgets for that column and nothing else, so the start pane must hold
-/// nothing else. That is why `LibraryShell` drops the project sidebar while a
-/// document is open: 200px of chrome in front of the column would leave it
-/// under 190px at the default width, and re-deriving `WORKSPACE.minWidth`
-/// around a 500px floor would put the minimum window past 1500px.
+/// The run column is the binding one. Its job segmented sets CONVERT and
+/// TRANSCRIBE in tracked mono uppercase, about 185px together, plus the panel's
+/// --s4 padding and the column's --s5 inset. Below 300px that control clips,
+/// which is what a narrower floor produced.
+///
+/// The tree stays under that, and the indent cap is what keeps it there: four
+/// levels of --s3 is 48px, which leaves about 200px of name column at this
+/// floor. Uncapped, a deep folder would walk its label off the edge instead.
 export const SPLIT = { start: 33, minStart: "300px", minEnd: "50%" } as const;
 
 /// Ten points a step. `useZoom` walks these as a ladder of fixed rungs.
