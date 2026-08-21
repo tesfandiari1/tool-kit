@@ -16,7 +16,10 @@ const PERMANENT_DIRECT_EXTENSIONS = new Set(["html", "htm"]);
 
 export type ConversionCapabilities =
   | { state: "idle" | "loading" }
-  | { state: "unavailable" }
+  /// `message` is what the host said when the probe failed. Nothing in
+  /// Settings moves the service, so that sentence is the only thing the run
+  /// hint has to offer the user.
+  | { state: "unavailable"; message?: string }
   | { state: "ready"; acceptingJobs: boolean; inputFormats: readonly string[] };
 
 export type RouteBlockReason =

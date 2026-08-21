@@ -43,7 +43,11 @@ CARGO_PROFILE_ARGS=("--release")
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --debug) PROFILE="debug"; CARGO_PROFILE_ARGS=(); shift ;;
+    # An empty array here would abort the script: macOS ships bash 3.2, and
+    # 3.2's `set -u` treats "${CARGO_PROFILE_ARGS[@]}" on an empty array as an
+    # unbound variable. --profile dev names the same build cargo already does
+    # by default, so the array stays non-empty on both branches.
+    --debug) PROFILE="debug"; CARGO_PROFILE_ARGS=("--profile" "dev"); shift ;;
     -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac

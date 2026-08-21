@@ -52,6 +52,15 @@ export async function windowSize(): Promise<WindowSize> {
   return { width, height };
 }
 
+/// Fires on every step of a live drag as well as on our own `resizeWindow`.
+/// The size is deliberately not passed through: the event carries physical
+/// pixels, and `windowSize` above is the one place that conversion lives.
+export function onWindowResized(handler: () => void): Promise<() => void> {
+  return getCurrentWindow().onResized(() => {
+    handler();
+  });
+}
+
 export async function resizeWindow(width: number, height: number): Promise<void> {
   await getCurrentWindow().setSize(new LogicalSize(width, height));
 }

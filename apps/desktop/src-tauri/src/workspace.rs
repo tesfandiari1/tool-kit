@@ -1,9 +1,14 @@
 //! Workspace foundation: the one user-chosen folder the library lives in.
 //!
-//! On disk (docs/north-star.md): `.toolkit/workspace.json` and
-//! `.toolkit/index.db` are derived state, safe to delete and rebuild; a
-//! project's identity is its `project.json`, so renaming a folder in Finder
-//! changes nothing. `index.db` is only the fast lookup over the projects.
+//! On disk (docs/north-star.md): a project's identity is its `project.json`,
+//! and `.toolkit/index.db` is only the fast lookup over those files, so it is
+//! derived state. A missing one is rebuilt by `rebuild_index` from the folders
+//! themselves rather than read as a workspace with no projects.
+//!
+//! `.toolkit/workspace.json` is the one file that is not derived. It is the
+//! marker that says this folder is the workspace, so its absence means the
+//! folder was moved, renamed, or unmounted, and every entry point here answers
+//! that with an error instead of an empty library.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -143,10 +148,17 @@ pub fn create_project(app: &AppHandle, title: &str) -> Result<ProjectSummary, St
 
 fn create_project_at(workspace: &Path, title: &str) -> Result<ProjectSummary, String> {
     let folder = folder_name_for_title(title)?;
+    let toolkit = require_workspace(workspace)?;
     let project_dir = workspace.join(&folder);
     if project_dir.exists() {
         return Err(format!("A project named “{folder}” already exists"));
     }
+    // The index is opened before anything lands on disk. Opening it after the
+    // folder exists means an index failure returns through `?` past the two
+    // rollbacks below, and the orphan folder it leaves blocks that name for
+    // good: every retry answers "already exists" for a project the app has
+    // never listed.
+    let index = open_index(&toolkit.join("index.db"))?;
     std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
 
     let meta = ProjectMeta {
@@ -160,7 +172,6 @@ fn create_project_at(workspace: &Path, title: &str) -> Result<ProjectSummary, St
         return Err(e);
     }
 
-    let index = open_index(&workspace.join(".toolkit").join("index.db"))?;
     if let Err(e) = index.execute(
         "INSERT INTO projects (id, title, path, created_at) VALUES (?1, ?2, ?3, ?4)",
         (&meta.id, &meta.title, &folder, &meta.created_at),
@@ -200,8 +211,8 @@ fn folder_name_for_title(title: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-/// Every project in the configured workspace's index. `index.db` is derived,
-/// so a missing file reads as an empty list rather than an error.
+/// Every project in the configured workspace's index, rebuilding the index
+/// first when it is gone. A workspace folder that is gone is an error.
 pub fn list_projects(app: &AppHandle) -> Result<Vec<ProjectSummary>, String> {
     let workspace = settings::load(app)
         .workspace_path
@@ -210,11 +221,13 @@ pub fn list_projects(app: &AppHandle) -> Result<Vec<ProjectSummary>, String> {
 }
 
 fn list_projects_at(workspace: &Path) -> Result<Vec<ProjectSummary>, String> {
-    let db_path = workspace.join(".toolkit").join("index.db");
-    if !db_path.is_file() {
-        return Ok(Vec::new());
+    let toolkit = require_workspace(workspace)?;
+    let db_path = toolkit.join("index.db");
+    let missing = !db_path.is_file();
+    let conn = open_index(&db_path)?;
+    if missing {
+        rebuild_index(workspace, &conn)?;
     }
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare("SELECT id, title, path, created_at FROM projects ORDER BY created_at, id")
         .map_err(|e| e.to_string())?;
@@ -233,6 +246,51 @@ fn list_projects_at(workspace: &Path) -> Result<Vec<ProjectSummary>, String> {
         projects.push(row.map_err(|e| e.to_string())?);
     }
     Ok(projects)
+}
+
+/// The workspace's `.toolkit` directory, or an error naming the folder that is
+/// no longer there. Without this, a workspace moved in Finder or on an
+/// unplugged drive reads as a workspace holding nothing, and `create_dir_all`
+/// then resurrects an empty decoy at the abandoned path.
+fn require_workspace(workspace: &Path) -> Result<PathBuf, String> {
+    let toolkit = workspace.join(".toolkit");
+    if !toolkit.join("workspace.json").is_file() {
+        return Err(format!(
+            "Workspace not found at {}. Move it back or pick it again.",
+            workspace.display()
+        ));
+    }
+    Ok(toolkit)
+}
+
+/// Rebuilds the index from the project folders themselves. A project's
+/// identity is its `project.json`, so the rows are always recoverable, which
+/// is what makes `index.db` derived state rather than the only copy.
+fn rebuild_index(workspace: &Path, index: &Connection) -> Result<(), String> {
+    for entry in std::fs::read_dir(workspace).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        // A folder the user dropped in by hand carries no project.json and is
+        // not a project, so it is skipped rather than failing the rebuild.
+        let Ok(meta) = read_json::<ProjectMeta>(&entry.path().join("project.json")) else {
+            continue;
+        };
+        index
+            .execute(
+                "INSERT OR IGNORE INTO projects (id, title, path, created_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                (
+                    &meta.id,
+                    &meta.title,
+                    &entry.file_name().to_string_lossy().into_owned(),
+                    &meta.created_at,
+                ),
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn open_index(path: &Path) -> Result<Connection, String> {
@@ -397,9 +455,59 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_without_an_index_lists_no_projects() {
+    fn a_workspace_that_is_gone_is_an_error_not_an_empty_library() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(list_projects_at(dir.path()).unwrap(), Vec::new());
+        let err = list_projects_at(&dir.path().join("moved")).unwrap_err();
+        assert!(err.contains("Workspace not found"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn a_deleted_index_is_rebuilt_from_the_project_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = workspace_path(&dir);
+        let info = setup_workspace(&path).unwrap();
+        let root = Path::new(&path);
+        let acme = create_project_at(root, "Acme").unwrap();
+
+        // The header calls index.db derived state, so deleting it has to cost
+        // nothing but the time to walk the folders again.
+        std::fs::remove_file(root.join(".toolkit/index.db")).unwrap();
+        let projects = list_projects_at(root).unwrap();
+        let mut ids: Vec<&str> = projects.iter().map(|p| p.id.as_str()).collect();
+        ids.sort_unstable();
+        let mut want = vec![info.inbox_project_id.as_str(), acme.id.as_str()];
+        want.sort_unstable();
+        assert_eq!(ids, want);
+        assert!(projects.iter().any(|p| p.path == "Acme" && p.title == "Acme"));
+    }
+
+    #[test]
+    fn create_project_leaves_no_folder_behind_when_the_index_will_not_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = workspace_path(&dir);
+        setup_workspace(&path).unwrap();
+        let root = Path::new(&path);
+
+        // A directory where the database file belongs is the cheapest way to
+        // make SQLite refuse to open it.
+        std::fs::remove_file(root.join(".toolkit/index.db")).unwrap();
+        std::fs::create_dir(root.join(".toolkit/index.db")).unwrap();
+
+        assert!(create_project_at(root, "Acme").is_err());
+        assert!(!root.join("Acme").exists(), "an orphan folder was left behind");
+        // So the same name is still free once the index is reachable again.
+        std::fs::remove_dir(root.join(".toolkit/index.db")).unwrap();
+        assert!(create_project_at(root, "Acme").is_ok());
+    }
+
+    #[test]
+    fn create_project_refuses_a_workspace_that_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let moved = dir.path().join("moved");
+
+        let err = create_project_at(&moved, "Acme").unwrap_err();
+        assert!(err.contains("Workspace not found"), "unexpected: {err}");
+        assert!(!moved.exists(), "a decoy workspace was created");
     }
 
     #[test]

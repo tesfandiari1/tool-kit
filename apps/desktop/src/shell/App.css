@@ -207,6 +207,14 @@ html:not(.fit-window) .bar-status {
   gap: var(--s2);
   justify-self: end;
 }
+/* The workspace reports its run here rather than in the centre. Same two rules
+   as `.bar-status .ui-mono`, and for the same reason: `runCounter` pads with a
+   space, so the timer beside it only holds still with `pre` and tabular
+   numerals. */
+.bar-actions .ui-mono {
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+}
 
 /* Workspace nav in the title bar: Library, Run, Settings, History as one
    Segmented. The primitive is built to stretch — its items are flex: 1 with no
@@ -398,6 +406,12 @@ html:not(.fit-window) .bar-status {
   display: grid;
   grid-template-columns: minmax(160px, 200px) minmax(0, 1fr);
 }
+/* Beside an open document the shell is the split's start pane, whose floor is
+   sized for the run column alone (see SPLIT.minStart in geometry.ts). The
+   sidebar is not rendered there, so the main column takes the whole track. */
+.library-shell.is-compact {
+  grid-template-columns: minmax(0, 1fr);
+}
 .lib-side {
   display: flex;
   flex-direction: column;
@@ -479,6 +493,14 @@ html:not(.fit-window) .bar-status {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+/* Empty-state optical padding, which is the one job --s6 has. */
+.library-main__empty {
+  flex: 1;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--s1);
 }
 .library-main__panel > .flow,
 .library-main__panel > .settings-panel.flow {

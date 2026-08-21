@@ -170,6 +170,11 @@ struct Shared {
     /// False while a supervisor owns a child. `stop` waits on this rather than
     /// on the process, because the supervisor is the only holder of the `Child`.
     idle: watch::Sender<bool>,
+    /// Mirrors `Inner::epoch` so the supervisor can wait on a bump rather than
+    /// only read it between awaits. The restart backoff races this, which is
+    /// what stops a quit during the delay from spending `EXIT_BUDGET` waiting
+    /// on a child that no longer exists.
+    epoch_bumped: watch::Sender<u64>,
 }
 
 #[derive(Clone)]
@@ -183,6 +188,7 @@ impl BackendHost {
             shared: Arc::new(Shared {
                 inner: Mutex::new(Inner::default()),
                 idle: watch::channel(true).0,
+                epoch_bumped: watch::channel(0).0,
             }),
         }
     }
@@ -228,7 +234,29 @@ impl BackendHost {
     fn request_stop(&self) -> (Option<u32>, Option<ChildStdin>) {
         let mut inner = self.lock();
         inner.epoch += 1;
+        let _ = self.shared.epoch_bumped.send(inner.epoch);
         (inner.pid.take(), inner.stdin.take())
+    }
+
+    /// Wait out a restart backoff, or return the moment a stop bumps the epoch.
+    ///
+    /// A plain sleep here reads the epoch only after it returns, so a stop
+    /// during the delay finds no pid to signal and waits its whole budget on a
+    /// supervisor that is asleep with no child. On the `RunEvent::Exit` path
+    /// that budget is spent inside `applicationWillTerminate`, which is the
+    /// hang it was sized to bound.
+    async fn backoff(&self, delay: Duration, epoch: u64) {
+        let mut bumped = self.shared.epoch_bumped.subscribe();
+        let _ = tokio::time::timeout(delay, async {
+            // The current value first: the bump may have landed before the
+            // subscribe, and then no change is ever delivered.
+            while *bumped.borrow_and_update() == epoch {
+                if bumped.changed().await.is_err() {
+                    return;
+                }
+            }
+        })
+        .await;
     }
 
     fn finish(&self) {
@@ -332,8 +360,10 @@ pub(crate) async fn stop(app: &AppHandle, budget: Duration) {
     }
 
     let Some(pid) = pid else {
-        // The supervisor is mid-launch and has no pid to signal yet. It checks
-        // the epoch the moment the child is up and terminates it there.
+        // The supervisor is mid-launch or waiting out a restart backoff, and
+        // has no pid to signal in either state. It checks the epoch the moment
+        // the child is up and terminates it there, and `backoff` wakes on the
+        // bump `request_stop` just published, so neither wait is the budget.
         let _ = tokio::time::timeout(budget, wait_idle(&mut idle)).await;
         return;
     };
@@ -573,7 +603,7 @@ async fn supervise(app: AppHandle, host: BackendHost) {
                 message: last_message.clone(),
             },
         );
-        tokio::time::sleep(restart_delay(failures.len() - 1)).await;
+        host.backoff(restart_delay(failures.len() - 1), epoch).await;
         if host.stale(epoch) {
             break;
         }
@@ -1017,12 +1047,14 @@ fn write_token_file(path: &Path, token: &str) -> Result<(), String> {
     use std::os::unix::fs::OpenOptionsExt;
 
     // The mode is applied at creation, so an existing file would keep whatever
-    // bits it already had.
+    // bits it already had. `create_new` is what makes the unlink safe: a path
+    // that is back by the time we open it is a symlink somebody planted in the
+    // window, and following it would truncate its target and write the token
+    // there under the target's own permissions. Failing by name beats that.
     let _ = std::fs::remove_file(path);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(path)
         .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
@@ -1082,6 +1114,18 @@ pub(crate) fn backend_status(app: AppHandle) -> BackendStatus {
         Some(host) => host.status(),
         None => BackendStatus::from(&BackendState::Stopped),
     }
+}
+
+/// Whether this app owns the conversion service process, which is what decides
+/// whether the bearer token is anybody's business but its own. Settings hides
+/// the token field on a true answer: the app mints that token for its own child
+/// once per launch, so a value typed there only breaks the running service.
+///
+/// A broken override answers false. Nothing was spawned, so the token has to
+/// come from the user.
+#[tauri::command]
+pub(crate) fn app_owns_backend(app: AppHandle) -> bool {
+    deployment(&app).is_ok_and(|which| which.is_sidecar())
 }
 
 #[tauri::command]
@@ -1273,6 +1317,58 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(std::fs::read_to_string(&path).expect("token"), token);
+    }
+
+    /// The unlink can lose the race, and a symlink that is back before the open
+    /// must not be followed. The read-only parent is how the test loses that
+    /// race on purpose: `remove_file` cannot delete the link, so the open sees
+    /// exactly what a planted one would leave behind.
+    #[test]
+    fn a_token_path_that_is_back_before_the_open_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let victim = dir.path().join("notes.md");
+        std::fs::write(&victim, "keep me").expect("victim");
+
+        let sealed = dir.path().join("sealed");
+        std::fs::create_dir(&sealed).expect("sealed dir");
+        let path = sealed.join("converter.token");
+        std::os::unix::fs::symlink(&victim, &path).expect("planted link");
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o500))
+            .expect("seal the directory");
+
+        let refused = write_token_file(&path, &mint_token());
+
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o700))
+            .expect("unseal the directory");
+        assert!(refused.is_err(), "the planted link should fail the write");
+        assert_eq!(std::fs::read_to_string(&victim).expect("victim"), "keep me");
+    }
+
+    /// A stop during the restart backoff has no pid to signal, so the only
+    /// thing that can end its wait is the supervisor waking up. Left as a plain
+    /// sleep this takes the whole delay, and on the exit path that is a hang
+    /// inside `applicationWillTerminate`.
+    #[tokio::test]
+    async fn a_stop_during_the_backoff_wakes_the_supervisor_at_once() {
+        let host = BackendHost::new();
+        let epoch = host.epoch();
+
+        let stopper = host.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = stopper.request_stop();
+        });
+
+        let started = Instant::now();
+        host.backoff(Duration::from_secs(30), epoch).await;
+
+        assert!(host.stale(epoch));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the backoff should end with the stop, not with the delay"
+        );
     }
 
     #[test]

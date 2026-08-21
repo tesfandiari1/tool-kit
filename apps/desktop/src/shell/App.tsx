@@ -8,7 +8,6 @@ import { commands } from "@/app/commands";
 import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
 import type {
   Job,
-  JobId,
   OnboardingConversionMode,
   ProjectSummary,
   Scan,
@@ -24,6 +23,7 @@ import { conversionPatch } from "@/domains/onboarding/conversionMode";
 import { RunView } from "@/domains/run/RunView";
 import { JOBS } from "@/domains/run/jobs";
 import {
+  autodetectJob,
   canStartRun,
   effectiveSkipAlreadyDone,
   largeRunConfirmation,
@@ -43,6 +43,7 @@ import {
   clearWindowMaxSize,
   confirm,
   copyToClipboard,
+  onWindowResized,
   pickDirectory,
   pickFiles,
   pickFolders,
@@ -67,6 +68,10 @@ import "./App.css";
 /// route is selected.
 const CAPABILITY_PROBE_INTERVAL_MS = 15_000;
 
+/// How long the window has to sit still before its size is written back. A
+/// live drag reports every frame, and each write is a settings save.
+const RESIZE_SETTLE_MS = 400;
+
 /// The persisted factor is not trusted. A hand-edited settings.json can hold
 /// anything, and handing that to the webview scales the app to nothing.
 function clampZoom(factor: number): number {
@@ -83,6 +88,10 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [secrets, setSecrets] = useState<SecretStatus>({ datalab: false, revai: false, backend: false });
+  /// Starts true because that is the safe answer while the host is being
+  /// asked. A backend token field shown by mistake is what breaks the session.
+  /// One that appears a beat late costs nothing.
+  const [appOwnsBackend, setAppOwnsBackend] = useState(true);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [scanResult, setScanResult] = useState<{ key: string; value: Scan }>({
     key: "",
@@ -99,6 +108,8 @@ export default function App() {
   const wasRunning = useRef(false);
   const wasWorkspace = useRef(false);
   const autoClear = useRef(false);
+  /// The selection autodetect has already answered. See the effect below.
+  const answered = useRef<string | null>(null);
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS);
   const settingsSave = useRef<Promise<void>>(Promise.resolve());
 
@@ -115,7 +126,6 @@ export default function App() {
     // The route decides which extensions `scan_inputs` counts, so leaving
     // these out lets the Run button promise a count from the other route.
     settings.conversionRoute,
-    settings.backendUrl,
     runsFinished,
   ]);
   const scanCurrent = scanResult.key === scanKey;
@@ -174,10 +184,11 @@ export default function App() {
 
   useEffect(() => {
     void (async () => {
-      const [s, k, j] = await Promise.all([
+      const [s, k, j, owns] = await Promise.all([
         commands.getSettings(),
         commands.secretStatus(),
         commands.listJobs(),
+        commands.appOwnsBackend(),
       ]);
       // Spread over the defaults rather than trusting the host's shape: a key
       // the stored settings.json predates arrives absent, and `undefined` is
@@ -187,6 +198,7 @@ export default function App() {
       setSettings(merged);
       setSecrets(k);
       setJobs(j);
+      setAppOwnsBackend(owns);
       setLoaded(true);
     })();
   }, []);
@@ -201,16 +213,26 @@ export default function App() {
   useEffect(() => {
     if (!libraryMode) return;
     let live = true;
-    void commands
-      .listProjects()
+    // Behind the pending settings save. Onboarding's last beat is what binds
+    // the workspace, and the host answers this from that same file, so asking
+    // ahead of the write returns "No workspace configured" and the sidebar
+    // opens empty.
+    const pendingSave = settingsSave.current;
+    void pendingSave
+      .then(() => commands.listProjects())
       .then((p) => {
         if (live) setProjects(p);
       })
-      .catch(() => undefined);
+      .catch((e: unknown) => {
+        // A workspace folder moved or unmounted in Finder fails here. Saying
+        // so is the difference between "your workspace is gone" and a sidebar
+        // that silently lists nothing.
+        if (live) showToast(String(e));
+      });
     return () => {
       live = false;
     };
-  }, [libraryMode, workspacePath, runsFinished]);
+  }, [libraryMode, workspacePath, runsFinished, showToast]);
 
   // Rescan whenever the selection changes: the counts drive the run label, the
   // job autodetect, and the suggested output folder.
@@ -236,9 +258,8 @@ export default function App() {
     };
   }, [scanKey, settings.inputs]);
 
-  // A backend URL is persisted before the host probes it. The host resolves
-  // the URL from its own Settings on every request, so issuing the GET first
-  // would race the save and occasionally inspect the previous server.
+  // Behind the pending settings save, so the route the user just switched on
+  // is on disk before the probe reports on it.
   useEffect(() => {
     if (settings.conversionRoute !== "backend") {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- reset external probe state when its route is disabled
@@ -261,8 +282,12 @@ export default function App() {
           inputFormats: data.data.conversion.inputFormats,
         });
         return true;
-      } catch {
-        if (!probe.cancelled) setCapabilities({ state: "unavailable" });
+      } catch (e) {
+        // Carry the host's reason through. It names what actually went wrong,
+        // from "the service is starting" to a failed start, and the run hint
+        // has nothing else to tell the user.
+        const message = e instanceof Error ? e.message : String(e);
+        if (!probe.cancelled) setCapabilities({ state: "unavailable", message });
         return false;
       }
     };
@@ -275,7 +300,7 @@ export default function App() {
       probe.cancelled = true;
       window.clearInterval(retry);
     };
-  }, [settings.backendUrl, settings.conversionRoute, runsFinished]);
+  }, [settings.conversionRoute, runsFinished]);
 
   const persist = useCallback((patch: Partial<Settings>) => {
     applySettings({ ...settingsRef.current, ...patch });
@@ -315,22 +340,32 @@ export default function App() {
   // Match the job to what was dropped, and put results beside the input.
   //
   // Deliberately depends on the three values it actually reads, not on the
-  // `scan` object. That is what makes it deterministic: it re-runs when the
-  // selection changes and at no other time, so a new drop always re-detects,
-  // and clicking a job by hand sticks until the next drop. Depending on
-  // settings.jobType would make a manual click un-clickable — the effect would
-  // switch it straight back — and depending on the whole object would re-fire
-  // on an already-done refresh, which is the same bug by a longer route.
+  // `scan` object. Depending on settings.jobType would make a manual click
+  // un-clickable — the effect would switch it straight back — and depending on
+  // the whole object would re-fire on an already-done refresh, which is the
+  // same bug by a longer route.
+  //
+  // The three values are not enough on their own, which is what `answered` is
+  // for: the scan drops to EMPTY_SCAN and back on every unrelated refresh, and
+  // the counts returning read as a change. `autodetectJob` holds the rule that
+  // one selection gets one answer.
   useEffect(() => {
-    if (scan.convert === 0 && scan.transcribe === 0) return;
-    const jobType: JobId = scan.transcribe > scan.convert ? "transcribe" : "convert";
     // Autodetect must run in an effect: it persists, and it must not depend on
     // jobType or a manual click is undone on the next render. See CLAUDE.md.
     const current = settingsRef.current;
+    const detected = autodetectJob(current.inputs, answered.current, {
+      convert: scan.convert,
+      transcribe: scan.transcribe,
+    });
+    if (!detected) return;
+    answered.current = detected.selection;
     // Read outputDir from the ref rather than a dependency, so defaulting it
     // can't retrigger this effect.
-    const next = { ...current, jobType, outputDir: current.outputDir ?? scan.suggestedOutput };
-    applySettings(next);
+    applySettings({
+      ...current,
+      jobType: detected.jobType,
+      outputDir: current.outputDir ?? scan.suggestedOutput,
+    });
   }, [applySettings, scan.convert, scan.transcribe, scan.suggestedOutput]);
 
   const mutateInputs = useCallback((fn: (cur: string[]) => string[]) => {
@@ -518,6 +553,35 @@ export default function App() {
         await setWindowResizable(false);
       }
     })();
+  }, [wantsWorkspace, persist]);
+
+  // Remember the workspace size while the user is in it. The collapse branch
+  // above writes it too, but binding a workspace makes `wantsWorkspace`
+  // permanent, so that branch stops running after first run and the window came
+  // back at the default on every launch.
+  //
+  // Our own `resizeWindow` reports through this same event. Writing that back
+  // records the size actually on screen, which is what "where you left it"
+  // means, ceiling clamp included.
+  useEffect(() => {
+    if (!wantsWorkspace) return;
+    let live = true;
+    let settle = 0;
+    const un = onWindowResized(() => {
+      window.clearTimeout(settle);
+      settle = window.setTimeout(() => {
+        void windowSize()
+          .then((size) => {
+            if (live) persist({ expandedWidth: size.width, expandedHeight: size.height });
+          })
+          .catch(() => undefined);
+      }, RESIZE_SETTLE_MS);
+    });
+    return () => {
+      live = false;
+      window.clearTimeout(settle);
+      void un.then((f) => f());
+    };
   }, [wantsWorkspace, persist]);
 
   // Escape closes the document you are reading, not the window and not the
@@ -758,8 +822,11 @@ export default function App() {
     if (reason === "capabilities_pending") {
       hint = "Checking conversion service capabilities…";
     } else if (reason === "backend_unavailable") {
-      hint = `Conversion service unavailable for ${count} file${count > 1 ? "s" : ""} — check the backend URL in Settings`;
-      hintOpensSettings = true;
+      // Settings holds no control that moves the service. Where it lives is a
+      // deployment file the app never writes, so this hint carries the host's
+      // own reason rather than pointing at a field that cannot help.
+      const detail = capabilities.state === "unavailable" ? capabilities.message : undefined;
+      hint = detail ?? `Conversion service unavailable for ${count} file${count > 1 ? "s" : ""}`;
     } else if (reason === "backend_not_accepting") {
       hint = `Conversion service is not accepting jobs for ${count} file${count > 1 ? "s" : ""} right now`;
       hintOpensSettings = true;
@@ -817,6 +884,7 @@ export default function App() {
     <SettingsPanel
       settings={settings}
       secrets={secrets}
+      appOwnsBackend={appOwnsBackend}
       onPersist={persist}
       onSecrets={setSecrets}
       onToast={showToast}
@@ -897,6 +965,7 @@ export default function App() {
         projects={projects}
         activeProjectId={settings.activeProjectId}
         libraryHome={view === "library"}
+        compact={expanded}
         panel={libraryPanel}
         onSelectProject={(activeProjectId) => {
           persist({ activeProjectId });
@@ -985,6 +1054,27 @@ export default function App() {
     />
   );
 
+  /// The live run, rendered in whichever bar cell has room for it: the centre
+  /// in the launcher, the actions corner in a workspace, where the nav owns the
+  /// centre for the whole length of the run.
+  const runIndicator =
+    status.kind === "run" ? (
+      <>
+        <StatusDot tone="live" />
+        <Mono size="sm">{runCounter(status.done, status.total)}</Mono>
+        {status.since !== null && (
+          <>
+            <Mono size="sm" tone="ghost" aria-hidden>
+              ·
+            </Mono>
+            <Mono size="sm" tone="ghost">
+              {fmtElapsed(now, status.since)}
+            </Mono>
+          </>
+        )}
+      </>
+    ) : null;
+
   return (
     <div className="app">
       {/* `data-tauri-drag-region="deep"` is what makes the window draggable —
@@ -994,28 +1084,15 @@ export default function App() {
       <header className="bar" data-tauri-drag-region="deep">
         <div className="bar-lights" aria-hidden />
         <div className="bar-status">
-          {status.kind === "run" ? (
-            <>
-              <StatusDot tone="live" />
-              <Mono size="sm">{runCounter(status.done, status.total)}</Mono>
-              {status.since !== null && (
-                <>
-                  <Mono size="sm" tone="ghost" aria-hidden>
-                    ·
-                  </Mono>
-                  <Mono size="sm" tone="ghost">
-                    {fmtElapsed(now, status.since)}
-                  </Mono>
-                </>
-              )}
-            </>
-          ) : libraryMode && (view !== "library" || activeId === null) ? (
+          {libraryMode ? (
             <WorkspaceViewNav
               view={view}
               onView={(next) => {
                 setView(next);
               }}
             />
+          ) : status.kind === "run" ? (
+            runIndicator
           ) : status.variant === "view" ? (
             <Label>{status.text}</Label>
           ) : (
@@ -1028,8 +1105,12 @@ export default function App() {
         </div>
         <div className="bar-actions">
           {/* In a workspace, all panels live in the centre Segmented nav, so
-              the corner icons belong to the launcher alone. */}
-          {!libraryMode && (
+              the corner icons belong to the launcher alone. The run reports
+              here instead, because in the centre it displaced the nav and put
+              History out of reach for the length of the run. */}
+          {libraryMode ? (
+            runIndicator
+          ) : (
             <>
               <Button
                 variant="ghost"

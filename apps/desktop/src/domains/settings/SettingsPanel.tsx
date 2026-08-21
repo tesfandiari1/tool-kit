@@ -17,12 +17,13 @@ import {
   TextInput,
 } from "@ui";
 import { commands } from "@/app/commands";
-import { DEFAULT_BACKEND_URL, type SecretId, type SecretStatus, type Settings } from "@/app/types";
+import { type SecretId, type SecretStatus, type Settings } from "@/app/types";
 import { FlowLayout } from "@/shell/FlowLayout";
 
 export function SettingsPanel({
   settings,
   secrets,
+  appOwnsBackend,
   onPersist,
   onSecrets,
   onToast,
@@ -31,6 +32,11 @@ export function SettingsPanel({
 }: {
   settings: Settings;
   secrets: SecretStatus;
+  /// The app runs the conversion service itself, so the bearer token is its
+  /// own business: it mints one per launch and hands it to nothing but its
+  /// child. A token typed here would replace that one and 401 every
+  /// conversion until the next launch, so the field is not offered.
+  appOwnsBackend: boolean;
   onPersist: (patch: Partial<Settings>) => void;
   onSecrets: (s: SecretStatus) => void;
   onToast: (msg: string) => void;
@@ -80,12 +86,6 @@ export function SettingsPanel({
 
             {settings.conversionRoute === "backend" && (
               <Stack gap={3} className="settings-nest">
-                <BackendUrlField
-                  value={settings.backendUrl}
-                  onCommit={(backendUrl) => {
-                    onPersist({ backendUrl });
-                  }}
-                />
                 <Select
                   label="Conversion profile"
                   hint="Standard may use the configured fallback. Local only keeps document bytes on this machine."
@@ -114,12 +114,14 @@ export function SettingsPanel({
                     onPersist({ customWords });
                   }}
                 />
-                <KeyField
-                  label="Backend token"
-                  hint="Bearer token"
-                  saved={secrets.backend}
-                  onSave={(v) => void saveKey("backend", v)}
-                />
+                {!appOwnsBackend && (
+                  <KeyField
+                    label="Backend token"
+                    hint="Bearer token"
+                    saved={secrets.backend}
+                    onSave={(v) => void saveKey("backend", v)}
+                  />
+                )}
               </Stack>
             )}
           </Stack>
@@ -201,37 +203,6 @@ export function SettingsPanel({
         </section>
       </div>
     </FlowLayout>
-  );
-}
-
-function BackendUrlField({
-  value,
-  onCommit,
-}: {
-  value: string;
-  onCommit: (value: string) => void;
-}) {
-  const [draft, setDraft] = useState(value);
-  const commit = () => {
-    const backendUrl = draft.trim() || DEFAULT_BACKEND_URL;
-    setDraft(backendUrl);
-    onCommit(backendUrl);
-  };
-
-  return (
-    <TextInput
-      label="Backend URL"
-      type="url"
-      value={draft}
-      placeholder={DEFAULT_BACKEND_URL}
-      onChange={(e) => {
-        setDraft(e.target.value);
-      }}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") commit();
-      }}
-    />
   );
 }
 

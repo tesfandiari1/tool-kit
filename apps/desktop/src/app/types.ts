@@ -116,7 +116,6 @@ export interface Settings {
   datalabPipelineId: string | null;
   datalabHighAccuracy: boolean;
   conversionRoute: ConversionRoute;
-  backendUrl: string;
   conversionProfile: ConversionProfile;
   languageCorrection: boolean;
   /// Words local OCR should prefer when it is unsure.
@@ -134,8 +133,6 @@ export interface Settings {
 
 export type SecretStatus = Record<SecretId, boolean>;
 
-export const DEFAULT_BACKEND_URL = "http://127.0.0.1:8080";
-
 export const DEFAULT_SETTINGS: Settings = {
   onboardingComplete: false,
   workspacePath: null,
@@ -148,7 +145,6 @@ export const DEFAULT_SETTINGS: Settings = {
   datalabPipelineId: null,
   datalabHighAccuracy: true,
   conversionRoute: "backend",
-  backendUrl: DEFAULT_BACKEND_URL,
   conversionProfile: "standard",
   languageCorrection: true,
   customWords: [],

@@ -1,5 +1,26 @@
 import type { ConversionProfile, ConversionRoute, JobId, Scan } from "@/app/types";
 
+/// The job a selection implies, paired with the selection that answer belongs
+/// to. Null when nothing should change.
+///
+/// `answered` is the selection the caller last acted on, and it is the whole
+/// point of this function. The scan round-trips through an empty result every
+/// time something unrelated refreshes it — a new output folder, a format
+/// change, a finished run — and the counts coming back afterwards read as a
+/// change. Detecting again there wrote the guess over a job the user had
+/// clicked by hand, which is the one thing autodetect must never do. One
+/// answer per selection, so a new drop still re-detects.
+export function autodetectJob(
+  inputs: readonly string[],
+  answered: string | null,
+  scan: Pick<Scan, "convert" | "transcribe">,
+): { selection: string; jobType: JobId } | null {
+  if (scan.convert === 0 && scan.transcribe === 0) return null;
+  const selection = JSON.stringify(inputs);
+  if (selection === answered) return null;
+  return { selection, jobType: scan.transcribe > scan.convert ? "transcribe" : "convert" };
+}
+
 /// The buckets a selection costs. Extracted so the numbers the Run button
 /// promises can be tested without mounting the app — getting them wrong
 /// either over-bills or silently skips work.

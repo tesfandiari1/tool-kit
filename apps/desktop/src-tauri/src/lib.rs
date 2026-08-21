@@ -36,8 +36,16 @@ fn secret_status() -> SecretStatus {
 }
 
 #[tauri::command]
-fn set_secret(provider: String, value: String) -> Result<(), String> {
+fn set_secret(app: AppHandle, provider: String, value: String) -> Result<(), String> {
     match provider.as_str() {
+        // The keychain slot is shared with the sidecar handshake, and the child
+        // validates against the token `ensure_token` minted at launch. Writing
+        // it here 401s every conversion for the rest of the session, and the
+        // mint runs once per process, so nothing re-mints. Settings hides the
+        // field in this mode. This is the door it cannot be reached through.
+        "backend" if backend_host::app_owns_backend(app) => Err(
+            "Tool-Kit mints the backend token itself while it runs the conversion service".into(),
+        ),
         "datalab" | "revai" | "backend" => secrets::set_key(&provider, value.trim()),
         _ => Err("Unknown provider".into()),
     }
@@ -71,19 +79,17 @@ fn inspect_workspace_path(path: String) -> bool {
     workspace::inspect_workspace_path(&path)
 }
 
-/// First-launch setup. The folder is created or adopted, and the settings
-/// that bind this install to it are saved here — the webview can lose a race
-/// against `save_settings`, so the host persists rather than trusting it to.
+/// First-launch setup: the folder is created or adopted and its ids come back
+/// for the gate to carry. Nothing is persisted here.
+///
+/// Binding this install to the workspace is one write at the gate's last beat,
+/// together with the conversion answer. Writing it here bound the workspace
+/// before that question was asked, and the gate is keyed on the workspace
+/// path, so quitting between the two beats skipped the question forever and
+/// left the route and profile on defaults nobody chose.
 #[tauri::command]
-fn setup_workspace(app: AppHandle, path: String) -> Result<workspace::WorkspaceInfo, String> {
-    let info = workspace::setup_workspace(&path)?;
-    let mut cfg = settings::load(&app);
-    cfg.workspace_path = Some(info.workspace_path.clone());
-    cfg.workspace_id = Some(info.workspace_id.clone());
-    cfg.active_project_id = Some(info.inbox_project_id.clone());
-    cfg.onboarding_complete = true;
-    settings::save(&app, &cfg)?;
-    Ok(info)
+fn setup_workspace(path: String) -> Result<workspace::WorkspaceInfo, String> {
+    workspace::setup_workspace(&path)
 }
 
 #[tauri::command]
@@ -628,10 +634,17 @@ async fn run_pipeline(
 
     let backend_needed = files.iter().any(|file| backend_files.contains(file));
     let direct_needed = files.iter().any(|file| !backend_files.contains(file));
+    // What the ledger records a backend row against, read once for the run.
+    // Re-reading the override per file would let a half-written one split a run
+    // across two recorded origins, and reading it below, after the queue is
+    // cleared and the copies are done, made a malformed override abort a
+    // transcription that never touches the service.
+    let mut ledger_origin = String::new();
     if backend_needed {
         // Through the accessor, so Sidecar mode says the service is starting
         // rather than telling the user to paste a token it mints itself.
         backend_host::backend_token(&app)?;
+        ledger_origin = backend_host::ledger_origin(&backend_host::deployment(&app)?).to_string();
     }
     if direct_needed {
         let provider = jt.provider();
@@ -667,10 +680,6 @@ async fn run_pipeline(
         }
     }
 
-    // Once per run, beside the origin. Which deployment this is decides only
-    // what the ledger records, and re-reading the file per file would let a
-    // half-written override split one run across two recorded origins.
-    let deployment = backend_host::deployment(&app)?;
     let client_run_id = uuid::Uuid::new_v4().to_string();
     // From the run snapshot, so editing the OCR settings mid-run cannot split
     // one run across two recognizers. Carried on each job and recorded on its
@@ -696,7 +705,7 @@ async fn run_pipeline(
                     source_path: &source_path,
                     file_name: &file_name,
                     output_dir: &output_dir,
-                    backend_url: backend_host::ledger_origin(&deployment),
+                    backend_url: &ledger_origin,
                     client_run_id: &client_run_id,
                     idempotency_key: &idempotency_key,
                     conversion_profile: cfg.conversion_profile.id(),
@@ -1061,6 +1070,7 @@ pub fn run() {
             create_project,
             conversion_service::service_request,
             conversion_service::download_conversion_markdown,
+            backend_host::app_owns_backend,
             backend_host::backend_status,
             backend_host::restart_backend,
             backend_host::open_backend_log

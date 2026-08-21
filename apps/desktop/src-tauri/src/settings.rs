@@ -5,8 +5,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
-const DEFAULT_BACKEND_URL: &str = "http://127.0.0.1:8080";
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversionRoute {
@@ -76,12 +74,6 @@ pub struct Settings {
     /// Reversible M6 route selection. Routing remains per-file when the
     /// backend path is wired; unsupported formats continue to use Datalab.
     pub conversion_route: ConversionRoute,
-    /// Base URL for the Rust conversion service. The bearer token is stored
-    /// separately in Keychain and never serialized with these settings.
-    /// Vestigial. `backend_host::Deployment` carries the Manual URL now, read
-    /// from the file a deployment drops, and nothing reads this. It stays only
-    /// until the Settings field that writes it goes with it.
-    pub backend_url: String,
     /// Backend routing profile. `best_quality` is intentionally unavailable
     /// until the backend implements it instead of returning 409.
     pub conversion_profile: ConversionProfile,
@@ -126,7 +118,6 @@ impl Default for Settings {
             datalab_pipeline_id: None,
             datalab_high_accuracy: true,
             conversion_route: ConversionRoute::Backend,
-            backend_url: DEFAULT_BACKEND_URL.into(),
             conversion_profile: ConversionProfile::Standard,
             language_correction: true,
             custom_words: Vec::new(),
@@ -179,8 +170,27 @@ mod tests {
         let settings = Settings::default();
 
         assert_eq!(settings.conversion_route, ConversionRoute::Backend);
-        assert_eq!(settings.backend_url, "http://127.0.0.1:8080");
         assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
+    }
+
+    /// `backend_url` is gone: `backend_host::Deployment` carries the Manual
+    /// origin. Every install that ever used the Settings field has the key in
+    /// its file, and `load()` answers a parse failure by resetting the user's
+    /// output folder and job, so the stale key has to be ignored rather than
+    /// rejected.
+    #[test]
+    fn a_settings_file_naming_the_removed_backend_url_still_loads() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "outputDir": "/tmp/output",
+                "jobType": "transcribe",
+                "backendUrl": "http://127.0.0.1:8080"
+            }"#,
+        )
+        .expect("settings written before the field was removed should deserialize");
+
+        assert_eq!(settings.output_dir.as_deref(), Some("/tmp/output"));
+        assert_eq!(settings.job_type, "transcribe");
     }
 
     #[test]
@@ -188,7 +198,7 @@ mod tests {
         let value = serde_json::to_value(Settings::default()).expect("settings should serialize");
 
         assert_eq!(value["conversionRoute"], "backend");
-        assert_eq!(value["backendUrl"], "http://127.0.0.1:8080");
+        assert!(value.get("backendUrl").is_none());
         assert_eq!(value["conversionProfile"], "standard");
         assert_eq!(value["languageCorrection"], true);
         assert_eq!(value["customWords"], serde_json::json!([]));
@@ -220,7 +230,6 @@ mod tests {
         // Safe because the same file has no workspace_path, so onboarding runs
         // and asks before a single conversion goes anywhere.
         assert_eq!(settings.conversion_route, ConversionRoute::Backend);
-        assert_eq!(settings.backend_url, "http://127.0.0.1:8080");
         assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
         // A file written before `zoom` existed must load at 100%, not at 0.0.
         assert_eq!(settings.zoom, 1.0);

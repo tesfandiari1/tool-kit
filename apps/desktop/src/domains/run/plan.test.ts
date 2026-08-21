@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  autodetectJob,
   canStartRun,
   effectiveSkipAlreadyDone,
   largeRunConfirmation,
@@ -16,6 +17,40 @@ const scan = {
   alreadyHereTranscribe: 1,
   reusableTranscribe: 4,
 };
+
+describe("autodetectJob", () => {
+  const inputs = ["/drop"];
+
+  it("picks the job with more matches", () => {
+    expect(autodetectJob(inputs, null, { convert: 3, transcribe: 5 })?.jobType).toBe("transcribe");
+    expect(autodetectJob(inputs, null, { convert: 5, transcribe: 3 })?.jobType).toBe("convert");
+  });
+
+  it("stays out of the way when the selection matches nothing", () => {
+    expect(autodetectJob(inputs, null, { convert: 0, transcribe: 0 })).toBeNull();
+  });
+
+  it("answers the same selection only once", () => {
+    const first = autodetectJob(inputs, null, { convert: 3, transcribe: 5 });
+    expect(first).not.toBeNull();
+    expect(autodetectJob(inputs, first?.selection ?? null, { convert: 3, transcribe: 5 })).toBeNull();
+  });
+
+  it("answers again after a new drop", () => {
+    const first = autodetectJob(inputs, null, { convert: 3, transcribe: 5 });
+    expect(autodetectJob(["/drop", "/other"], first?.selection ?? null, { convert: 5, transcribe: 3 })
+      ?.jobType).toBe("convert");
+  });
+
+  it("survives the empty scan an unrelated refresh round-trips through", () => {
+    // The bug this guards: an output-folder change zeroes the counts for one
+    // commit, and the identical counts landing afterwards used to read as a new
+    // drop and overwrite a job the user had clicked by hand.
+    const answered = autodetectJob(inputs, null, { convert: 3, transcribe: 5 })?.selection ?? null;
+    expect(autodetectJob(inputs, answered, { convert: 0, transcribe: 0 })).toBeNull();
+    expect(autodetectJob(inputs, answered, { convert: 3, transcribe: 5 })).toBeNull();
+  });
+});
 
 describe("planRun", () => {
   it("sends every match when skip-already-done is off", () => {

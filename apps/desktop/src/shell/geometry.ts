@@ -26,6 +26,12 @@ export const SCREEN_MARGIN = 48;
 /// segmented sets CONVERT and TRANSCRIBE in tracked mono uppercase, about
 /// 185px together, plus the panel's --s4 padding and the column's --s5 inset.
 /// Below 300px that control clips, which is what a narrower floor produced.
+///
+/// It budgets for that column and nothing else, so the start pane must hold
+/// nothing else. That is why `LibraryShell` drops the project sidebar while a
+/// document is open: 200px of chrome in front of the column would leave it
+/// under 190px at the default width, and re-deriving `WORKSPACE.minWidth`
+/// around a 500px floor would put the minimum window past 1500px.
 export const SPLIT = { start: 33, minStart: "300px", minEnd: "50%" } as const;
 
 /// Ten points a step. `useZoom` walks these as a ladder of fixed rungs.

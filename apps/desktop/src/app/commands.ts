@@ -36,6 +36,10 @@ export const commands = {
   setupWorkspace: (path: string) => invoke<WorkspaceInfo>("setup_workspace", { path }),
   listProjects: () => invoke<ProjectSummary[]>("list_projects"),
   createProject: (title: string) => invoke<ProjectSummary>("create_project", { title }),
+  /// True while the app runs the conversion service itself. The bearer token
+  /// is then the host's own, minted per launch for its child, so Settings
+  /// offers no field for it and `setSecret("backend", …)` is refused.
+  appOwnsBackend: () => invoke<boolean>("app_owns_backend"),
   secretStatus: () => invoke<SecretStatus>("secret_status"),
   setSecret: async (provider: SecretId, value: string): Promise<void> => {
     await invoke("set_secret", { provider, value });

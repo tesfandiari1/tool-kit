@@ -57,7 +57,7 @@ IDENTIFIER="$(sed -n 's/^[[:space:]]*"identifier"[[:space:]]*:[[:space:]]*"\([^"
 # plutil keypaths split on ".", so the reverse-DNS keys need escaping.
 ENTITLEMENTS_SRC="${CRATE_DIR}/entitlements.plist"
 [ -f "$ENTITLEMENTS_SRC" ] || fail "missing ${ENTITLEMENTS_SRC}"
-want() { plutil -extract "$1" raw -o - "$ENTITLEMENTS_SRC" 2>/dev/null; }
+want() { plutil -extract "$1" raw -o - "$ENTITLEMENTS_SRC" 2>/dev/null || true; }
 WANT_APP_ID="$(want 'com\.apple\.application-identifier')"
 WANT_TEAM="$(want 'com\.apple\.developer\.team-identifier')"
 WANT_GROUP="$(want 'keychain-access-groups.0')"

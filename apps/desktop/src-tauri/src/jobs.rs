@@ -68,6 +68,9 @@ const DATALAB_PIPELINE_PROVIDER: &str = "datalab_pipeline";
 
 #[derive(Clone, Debug)]
 pub(crate) struct BackendContext {
+    /// The origin this job was queued against, kept as the stand-in for the
+    /// instant the host cannot answer. Every request resolves the live one
+    /// through `request_origin`, because the sidecar's port moves on a restart.
     pub(crate) backend_url: String,
     pub(crate) client_run_id: String,
     pub(crate) idempotency_key: String,
@@ -751,6 +754,17 @@ fn backend_action(view: &ConversionJob) -> BackendAction {
     }
 }
 
+/// The origin one request goes to, resolved at the moment of the request.
+///
+/// The kernel hands the sidecar a new port at every restart, so the origin a
+/// job was queued with is refused for the rest of the run once the supervisor
+/// relaunches the child. `held` is only the answer for the instant the host has
+/// none, mid-restart: the request then fails the way it fails today and the
+/// caller's error tolerance carries it to the next attempt.
+fn request_origin(live: Result<String, String>, held: &str) -> String {
+    live.unwrap_or_else(|_| held.to_string())
+}
+
 async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
     let stale = |app: &AppHandle| app.state::<JobManager>().generation() != generation;
     let Some(mut backend) = job.backend.clone() else {
@@ -815,9 +829,9 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         // is holding and has already done the work for.
         let mut attempts = 0u32;
         loop {
+            let origin = request_origin(backend_host::backend_origin(&app), &backend.backend_url);
             let result =
-                conversion_service::poll_conversion(&backend.backend_url, &token, &backend_job_id)
-                    .await;
+                conversion_service::poll_conversion(&origin, &token, &backend_job_id).await;
             if stale(&app) {
                 return;
             }
@@ -846,8 +860,9 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         ) {
             return;
         }
+        let origin = request_origin(backend_host::backend_origin(&app), &backend.backend_url);
         let result = conversion_service::submit_conversion(
-            &backend.backend_url,
+            &origin,
             &token,
             &job.source_path,
             &backend.client_run_id,
@@ -897,8 +912,10 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                 if !set_status(&app, id, generation, "processing", "Saving Markdown…") {
                     return;
                 }
+                let origin =
+                    request_origin(backend_host::backend_origin(&app), &backend.backend_url);
                 let output = conversion_service::download_markdown(
-                    &backend.backend_url,
+                    &origin,
                     &token,
                     &view.id,
                     &job.output_dir,
@@ -977,8 +994,8 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
             );
             return;
         };
-        let result =
-            conversion_service::poll_conversion(&backend.backend_url, &token, backend_job_id).await;
+        let origin = request_origin(backend_host::backend_origin(&app), &backend.backend_url);
+        let result = conversion_service::poll_conversion(&origin, &token, backend_job_id).await;
         if stale(&app) {
             return;
         }
@@ -2181,6 +2198,31 @@ mod backend_tests {
         assert!(validate_recovery_entry(&entry, "http://127.0.0.1:64707")
             .unwrap_err()
             .contains("source changed or is missing"));
+    }
+
+    #[test]
+    fn a_request_follows_the_service_to_the_port_it_restarted_on() {
+        // The supervisor relaunched the child on a fresh ephemeral port. A job
+        // queued against the old one has to follow, or a run that is minutes
+        // from finishing dies against a service that is up and healthy.
+        assert_eq!(
+            request_origin(
+                Ok("http://127.0.0.1:64707".into()),
+                "http://127.0.0.1:51001"
+            ),
+            "http://127.0.0.1:64707"
+        );
+
+        // Mid-restart the host has no port to give. The queued origin keeps the
+        // request shaped the way it is today, and the caller counts the refusal
+        // as one more transient error.
+        assert_eq!(
+            request_origin(
+                Err("The conversion service is starting.".into()),
+                "http://127.0.0.1:51001"
+            ),
+            "http://127.0.0.1:51001"
+        );
     }
 
     #[test]

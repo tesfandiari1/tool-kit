@@ -55,9 +55,12 @@ case "${1:-}" in
 esac
 
 URL="${1:-$DEFAULT_URL}"
+# ?* requires a host after the scheme. A bare "http://" would otherwise pass
+# this check and write an override parse_override rejects, so the script would
+# report success on a url the app refuses.
 case "$URL" in
-  http://*|https://*) : ;;
-  *) echo "the backend url must start with http:// or https://, got '${URL}'" >&2; exit 2 ;;
+  http://?*|https://?*) : ;;
+  *) echo "the backend url must start with http:// or https:// and name a host, got '${URL}'" >&2; exit 2 ;;
 esac
 # Trailing slash trimmed on this side too. The ledger compares origins by exact
 # string, so the app trims as well, and matching here keeps --show honest about

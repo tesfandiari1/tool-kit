@@ -83,8 +83,9 @@ rather than nominal: it used to default to `direct`, so the sidecar ran and
 converted nothing.
 
 **Not built.** The live backend status row. `settings.backend_url` and the
-Settings field that writes it are vestigial and should go together: nothing
-reads the value now, and the Manual URL comes from the override file.
+Settings field that wrote it are gone: the Manual URL comes from the override
+file, and the Backend token field is offered only when a deployment owns the
+service, because the app mints its own.
 
 ### The workspace and first run, 2026-08-20
 
@@ -149,7 +150,7 @@ running log. `git log` is the source of truth.
 | `a337594` | Consolidation of every planning doc into this file |
 
 **Sprint 0, Sprint 1, Sprint A, and the Phase 1 closeout are done.** `scanKey`
-in `apps/desktop/src/shell/App.tsx` includes `conversionRoute` and `backendUrl` (S0.7). The
+in `apps/desktop/src/shell/App.tsx` includes `conversionRoute` (S0.7). The
 capability probe retries on an interval instead of latching Run off for the
 session (S0.8).
 
