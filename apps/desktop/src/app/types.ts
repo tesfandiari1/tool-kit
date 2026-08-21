@@ -26,6 +26,10 @@ export interface WorkspaceInfo {
   /// writing a new one. It is what makes first run say "Open" instead of
   /// "Create".
   adopted: boolean;
+  /// The `Inbox/welcome.md` this call wrote, or null when it wrote none. Set
+  /// on a brand-new workspace only, so first run opens it as a real tab and a
+  /// user who deletes it never sees it again.
+  welcomePath: string | null;
 }
 
 /// One project folder, as the sidebar lists it.
@@ -37,6 +41,44 @@ export interface ProjectSummary {
   path: string;
   /// RFC 3339 UTC.
   createdAt: string;
+}
+
+/// One entry in a project folder, as `list_project_files` reports it. The host
+/// decides everything a row renders, so the tree never mirrors the extension
+/// table or the preview cap.
+export interface FileRow {
+  /// Absolute. The only path handed back to a command that opens or reveals.
+  path: string;
+  /// Workspace-relative. Expansion and selection are keyed on this, so a
+  /// workspace renamed in Finder does not strand every entry.
+  rel: string;
+  name: string;
+  isDir: boolean;
+  /// Lowercase, no dot. Empty when the name carries none.
+  ext: string;
+  mediaType: string;
+  size: number;
+  modifiedMs: number;
+  /// The job that takes this file. Null means neither one does.
+  job: JobId | null;
+  /// The sibling result this source already has, folded into its row.
+  resultPath: string | null;
+  resultName: string | null;
+  /// This file opens in the document pane. Decided by the host, so a click can
+  /// never end in a `read_document` failure toast.
+  openable: boolean;
+}
+
+/// One directory level.
+export interface DirListing {
+  /// The directory's own mtime, so a focus reconcile can skip a folder that
+  /// did not change.
+  modifiedMs: number;
+  entries: FileRow[];
+  /// Entries past the host's cap, dropped from `entries`.
+  truncated: number;
+  /// Files with a job and no result. The project row's count.
+  pending: number;
 }
 
 export interface ScannedConversionFile {
@@ -129,6 +171,9 @@ export interface Settings {
   /// Webview page-zoom factor, not a font size: it scales the whole app,
   /// chrome included. 1 is 100%.
   zoom: number;
+  /// Library tree rows left open, workspace-relative. Never null: this object
+  /// is spread over `DEFAULT_SETTINGS`, where an explicit null would win.
+  expandedPaths: string[];
 }
 
 export type SecretStatus = Record<SecretId, boolean>;
@@ -153,6 +198,7 @@ export const DEFAULT_SETTINGS: Settings = {
   expandedWidth: null,
   expandedHeight: null,
   zoom: 1,
+  expandedPaths: [],
 };
 
 export const ACTIVE: Status[] = ["queued", "working", "processing"];
@@ -172,6 +218,26 @@ export const EMPTY_SCAN: Scan = {
   alreadyText: 0,
   suggestedOutput: null,
 };
+
+/// Why the host refused to convert one file. Every reason maps to something
+/// the tree can do about it, which is why they are codes and not sentences.
+export type ConvertBlockReason =
+  | "not_convertible"
+  | "run_in_progress"
+  | "backend_unavailable"
+  | "backend_not_accepting"
+  | "local_only_requires_remote"
+  | "missing_key";
+
+/// The host's verdict on a one-file convert. The tree renders this rather than
+/// planning the conversion itself: the route plan, the key checks and the
+/// reuse rule all live in Rust.
+export interface ConvertOneOutcome {
+  kind: "queued" | "copied" | "blocked";
+  reason: ConvertBlockReason | null;
+  /// Shown verbatim. Never parsed.
+  message: string | null;
+}
 
 export interface RunResult {
   /// Files sent to the provider — the only ones that cost anything.

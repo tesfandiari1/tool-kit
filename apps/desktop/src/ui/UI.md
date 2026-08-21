@@ -62,6 +62,13 @@ taste difference. The gap is inversely proportional to the relationship:
 | `--s6` | 32 | empty-state optical padding only |
 | `--s7` `--s8` | 40 48 | not used in chrome at all |
 
+**Indent is a rung, not a new value.** `Tree` steps `--s3` a level, which is
+both the "items in a list" rung and AppKit's measured `indentationPerLevel`, and
+it stops at four:
+`calc(var(--s2) + var(--s3) * min(var(--tree-depth), 4))`. Uncapped, a deep
+folder walks its own name off the left pane's 300px floor, with no error
+anywhere to say so.
+
 **The outer margin is the largest gap on screen.** A column whose edge inset
 equals its internal gaps has no frame and reads as content spilling to the
 glass, so nested containers step *down* the ladder, never up. `.flow` insets at
@@ -119,6 +126,8 @@ src/ui/
     Meter             Meter
     Segmented         Segmented
     Disclosure        Disclosure
+    Sheet             Sheet (a modal card on a native <dialog>)
+    Tree              Tree · TreeRow, with treeKeys.ts beside them
   gallery/            the specimen page
 ```
 

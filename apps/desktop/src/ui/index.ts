@@ -71,6 +71,14 @@ export type { SegmentedProps, SegmentedOption } from "./primitives/Segmented";
 export { Disclosure } from "./primitives/Disclosure";
 export type { DisclosureProps } from "./primitives/Disclosure";
 
+/// A modal card over the whole window, on a native `<dialog>`.
+export { Sheet } from "./primitives/Sheet";
+export type { SheetProps } from "./primitives/Sheet";
+
+/// A disclosure tree with Finder's key map.
+export { Tree, TreeRow } from "./primitives/Tree";
+export type { TreeProps, TreeRowProps } from "./primitives/Tree";
+
 export { Field, Input, TextInput, Select, Switch } from "./primitives/Field";
 export type {
   FieldProps,

@@ -423,6 +423,24 @@ pub fn output_format_for(jt: JobType, cfg: &settings::Settings) -> String {
     }
 }
 
+/// The extension a finished result carries. Read by both writers and by the
+/// tree's pairing rule, which is what makes "a sibling .md means already
+/// converted" true. A third copy would let the tree's mark disagree with what
+/// a run writes.
+///
+/// Deliberately not `output_format_for`: that folds the pipeline id into the
+/// history key, and an extension has no room for one.
+pub fn output_extension_for(jt: JobType, cfg: &settings::Settings) -> &'static str {
+    match jt {
+        JobType::Transcribe => "txt",
+        JobType::Convert => match cfg.datalab_format.as_str() {
+            "html" => "html",
+            "json" | "chunks" => "json",
+            _ => "md",
+        },
+    }
+}
+
 fn emit(app: &AppHandle, job: Job) {
     let _ = app.emit("job-updated", job);
 }
@@ -1264,11 +1282,7 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
         }
     };
 
-    let extension = match cfg.datalab_format.as_str() {
-        "html" => "html",
-        "json" | "chunks" => "json",
-        _ => "md",
-    };
+    let extension = output_extension_for(JobType::Convert, &cfg);
     if stale(app) {
         return;
     }
@@ -1616,14 +1630,7 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
                 }
             };
 
-            let ext = match job.job_type {
-                JobType::Convert => match datalab_format.as_str() {
-                    "html" => "html",
-                    "json" | "chunks" => "json",
-                    _ => "md",
-                },
-                JobType::Transcribe => "txt",
-            };
+            let ext = output_extension_for(job.job_type, &cfg);
             if stale(&app) {
                 return;
             }

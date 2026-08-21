@@ -31,6 +31,10 @@ pub struct WorkspaceInfo {
     /// True when the folder already held a `.toolkit/workspace.json` and we
     /// took it over rather than minting a new identity.
     pub adopted: bool,
+    /// Set only when this call actually wrote `Inbox/welcome.md`. The host is
+    /// the only thing that knows, and first run opens it as a real document
+    /// tab.
+    pub welcome_path: Option<String>,
 }
 
 /// One project, as the UI lists it.
@@ -121,6 +125,22 @@ pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
         meta
     };
 
+    // The first thing a new user reads, and a file they own from the moment it
+    // lands. Gated on `adopted` rather than on the Inbox mint: a folder
+    // renamed in Finder makes a fresh Inbox on the next launch, and gating
+    // there would resurrect a file the user deleted for good.
+    //
+    // A write failure degrades to `None`. A workspace with no welcome file is
+    // a working workspace.
+    let welcome = inbox_dir.join("welcome.md");
+    let welcome_path = if !adopted && !welcome.exists() {
+        std::fs::write(&welcome, include_str!("welcome.md"))
+            .ok()
+            .map(|_| welcome.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+
     let index = open_index(&toolkit.join("index.db"))?;
     index
         .execute(
@@ -135,6 +155,7 @@ pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
         workspace_id: workspace.id,
         inbox_project_id: inbox.id,
         adopted,
+        welcome_path,
     })
 }
 
@@ -437,6 +458,57 @@ mod tests {
         // A fresh Inbox is created because the old one is no longer at
         // "Inbox"; the renamed folder is adopted by a scan, not by setup.
         assert_ne!(info.inbox_project_id, first.inbox_project_id);
+    }
+
+    #[test]
+    fn a_new_workspace_gets_a_welcome_file_and_a_second_setup_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = workspace_path(&dir);
+
+        let first = setup_workspace(&path).unwrap();
+        let welcome = Path::new(&path).join("Inbox/welcome.md");
+        assert_eq!(first.welcome_path.as_deref(), Some(welcome.to_string_lossy().as_ref()));
+        assert!(welcome.is_file());
+
+        let second = setup_workspace(&path).unwrap();
+        assert_eq!(second.welcome_path, None);
+    }
+
+    /// The file belongs to the user, so deleting it is a decision the app has
+    /// to respect. A gate on "is it there" would write it again on the next
+    /// launch and read as the app arguing.
+    #[test]
+    fn a_deleted_welcome_file_is_not_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = workspace_path(&dir);
+        setup_workspace(&path).unwrap();
+
+        let welcome = Path::new(&path).join("Inbox/welcome.md");
+        std::fs::remove_file(&welcome).unwrap();
+        let second = setup_workspace(&path).unwrap();
+
+        assert_eq!(second.welcome_path, None);
+        assert!(!welcome.exists());
+    }
+
+    /// Renaming the Inbox in Finder makes setup mint a fresh one. That is a
+    /// new folder, but not a new workspace, so it carries no welcome file.
+    #[test]
+    fn the_fresh_inbox_a_finder_rename_produces_carries_no_welcome_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = workspace_path(&dir);
+        setup_workspace(&path).unwrap();
+
+        std::fs::rename(
+            Path::new(&path).join("Inbox"),
+            Path::new(&path).join("Unsorted"),
+        )
+        .unwrap();
+        let info = setup_workspace(&path).unwrap();
+
+        assert!(info.adopted);
+        assert_eq!(info.welcome_path, None);
+        assert!(!Path::new(&path).join("Inbox/welcome.md").exists());
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod jobs;
 mod providers;
 mod secrets;
 mod settings;
+mod tree;
 mod workspace;
 
 #[cfg(test)]
@@ -100,6 +101,24 @@ fn list_projects(app: AppHandle) -> Result<Vec<workspace::ProjectSummary>, Strin
 #[tauri::command]
 fn create_project(app: AppHandle, title: String) -> Result<workspace::ProjectSummary, String> {
     workspace::create_project(&app, &title)
+}
+
+/// One directory level of the library, lazily. `rel` is workspace-relative.
+///
+/// The walk runs on the blocking pool because the tree calls this on every
+/// disclosure click, and `read_dir` plus one `stat` per entry is a per-file
+/// round trip on a network volume. A sync command would run it inline on the
+/// AppKit main thread and freeze the window while it went.
+#[tauri::command]
+async fn list_project_files(app: AppHandle, rel: String) -> Result<tree::DirListing, String> {
+    let cfg = settings::load(&app);
+    let workspace = cfg
+        .workspace_path
+        .clone()
+        .ok_or_else(|| "No workspace configured".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || tree::list(Path::new(&workspace), &rel, &cfg))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// How deep a dropped folder is walked. Deep enough for real project trees,
@@ -201,7 +220,11 @@ fn collect_files_where(
 /// Formats that are already plain text. There is nothing to extract from them,
 /// so they are skipped rather than sent to a provider — but they are counted so
 /// the UI can say "already text" instead of reporting an unexplained zero.
-const ALREADY_TEXT: &[&str] = &[
+///
+/// The library tree reads the same list to decide which rows open in the
+/// document pane. One list, because a row that offers to open a file
+/// `read_document` will refuse is a click that ends in a toast.
+pub(crate) const ALREADY_TEXT: &[&str] = &[
     "txt", "md", "markdown", "text", "rst", "org", "csv", "tsv", "json",
 ];
 
@@ -220,7 +243,7 @@ fn is_permanent_direct(path: &Path) -> bool {
         })
 }
 
-fn media_type(path: &Path) -> String {
+pub(crate) fn media_type(path: &Path) -> String {
     mime_guess::from_path(path)
         .first_or_octet_stream()
         .essence_str()
@@ -256,12 +279,16 @@ fn route_conversion_candidates(
     plan
 }
 
+/// Named because `convert_one` turns it back into a reason code, and matching
+/// on a sentence written somewhere else is how that silently stops working.
+const BACKEND_NOT_ACCEPTING: &str = "The local conversion service is not accepting jobs";
+
 fn require_backend_capacity(
     plan: NativeConversionPlan,
     accepting_jobs: bool,
 ) -> Result<NativeConversionPlan, String> {
     if !accepting_jobs && !plan.backend.is_empty() {
-        Err("The local conversion service is not accepting jobs".into())
+        Err(BACKEND_NOT_ACCEPTING.into())
     } else {
         Ok(plan)
     }
@@ -740,6 +767,258 @@ async fn run_pipeline(
     })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvertOneOutcome {
+    /// "queued" | "copied" | "blocked"
+    kind: String,
+    /// Set when kind == "blocked": "not_convertible" | "run_in_progress" |
+    /// "backend_unavailable" | "backend_not_accepting" |
+    /// "local_only_requires_remote" | "missing_key".
+    reason: Option<String>,
+    /// The sentence the frontend shows verbatim. A verdict, not an error
+    /// string the webview parses.
+    message: Option<String>,
+}
+
+impl ConvertOneOutcome {
+    fn queued() -> Self {
+        Self {
+            kind: "queued".into(),
+            reason: None,
+            message: None,
+        }
+    }
+
+    fn copied(message: impl Into<String>) -> Self {
+        Self {
+            kind: "copied".into(),
+            reason: None,
+            message: Some(message.into()),
+        }
+    }
+
+    fn blocked(reason: &str, message: impl Into<String>) -> Self {
+        Self {
+            kind: "blocked".into(),
+            reason: Some(reason.into()),
+            message: Some(message.into()),
+        }
+    }
+}
+
+/// Convert one file from the library tree, into the folder it already sits in.
+///
+/// Modelled on `retry_job`, never on `run_pipeline`. It reads the generation
+/// instead of bumping it, appends one job instead of clearing the queue, and
+/// never touches the backend ledger of a run in flight. Fired after a batch,
+/// `run_pipeline`'s opening four lines would wipe every row the user is still
+/// reading with no warning.
+///
+/// Every refusal comes back as a verdict rather than an `Err`, because the
+/// tree renders the answer: it stages the file in Run and shows the host's
+/// sentence. The route plan, the key checks and the reuse rule stay here, so
+/// there is one planner and not a second one in the webview.
+#[tauri::command]
+async fn convert_one(
+    app: AppHandle,
+    state: State<'_, JobManager>,
+    rel: String,
+) -> Result<ConvertOneOutcome, String> {
+    let cfg = settings::load(&app);
+    let workspace = cfg
+        .workspace_path
+        .clone()
+        .ok_or_else(|| "No workspace configured".to_string())?;
+    let source = tree::resolve(Path::new(&workspace), &rel)?;
+    if !source.is_file() {
+        return Ok(ConvertOneOutcome::blocked(
+            "not_convertible",
+            "That file is not there any more.",
+        ));
+    }
+    let extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let Some(jt) = [JobType::Convert, JobType::Transcribe]
+        .into_iter()
+        .find(|jt| jt.accepts(&extension))
+    else {
+        return Ok(ConvertOneOutcome::blocked(
+            "not_convertible",
+            "Tool-Kit has no job that takes this kind of file.",
+        ));
+    };
+
+    // A run owns `run_config` for its whole life and `log_history` reads it at
+    // finish time, so joining one would either convert under the batch's
+    // format or overwrite a config a running task is reading. Refuse, and let
+    // the frontend stage the file in Run.
+    if state
+        .list()
+        .iter()
+        .any(|job| matches!(job.status.as_str(), "queued" | "working" | "processing"))
+    {
+        return Ok(ConvertOneOutcome::blocked(
+            "run_in_progress",
+            "A run is already going. This file is staged in Run, ready for when it finishes.",
+        ));
+    }
+
+    // Results land beside the source. That is what keeps the tree's pairing
+    // rule true the next time this folder is listed.
+    let output_dir = source
+        .parent()
+        .ok_or_else(|| "That file has no folder".to_string())?
+        .to_string_lossy()
+        .into_owned();
+    let source_path = source.to_string_lossy().into_owned();
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let inputs = vec![source_path.clone()];
+
+    // The same preflight a run does, one file wide. Each failure maps to a
+    // reason the tree can act on rather than to a toast the user cannot use.
+    let mut backend_origin = String::new();
+    let mut ledger_origin = String::new();
+    let mut use_backend = false;
+    if jt == JobType::Convert && cfg.conversion_route == settings::ConversionRoute::Backend {
+        backend_origin = match backend_host::backend_origin(&app) {
+            Ok(origin) => origin,
+            Err(error) => return Ok(ConvertOneOutcome::blocked("backend_unavailable", error)),
+        };
+        let plan = match plan_backend_conversion_files(&inputs, &backend_origin).await {
+            Ok(plan) => plan,
+            Err(error) if error == BACKEND_NOT_ACCEPTING => {
+                return Ok(ConvertOneOutcome::blocked("backend_not_accepting", error))
+            }
+            Err(error) => return Ok(ConvertOneOutcome::blocked("backend_unavailable", error)),
+        };
+        if cfg.conversion_profile == settings::ConversionProfile::LocalOnly
+            && !plan.direct.is_empty()
+        {
+            return Ok(ConvertOneOutcome::blocked(
+                "local_only_requires_remote",
+                format!("{file_name} requires Datalab and cannot run with the Local-only profile"),
+            ));
+        }
+        use_backend = !plan.backend.is_empty();
+        if plan.backend.is_empty() && plan.direct.is_empty() {
+            return Ok(ConvertOneOutcome::blocked(
+                "not_convertible",
+                "Nothing here converts this file.",
+            ));
+        }
+    }
+    if use_backend {
+        // Through the accessor, so Sidecar mode says the service is starting
+        // rather than telling the user to paste a token it mints itself.
+        match backend_host::backend_token(&app) {
+            Ok(_) => {}
+            Err(error) => return Ok(ConvertOneOutcome::blocked("backend_unavailable", error)),
+        }
+        let deployment = match backend_host::deployment(&app) {
+            Ok(deployment) => deployment,
+            Err(error) => return Ok(ConvertOneOutcome::blocked("backend_unavailable", error)),
+        };
+        ledger_origin = backend_host::ledger_origin(&deployment).to_string();
+    } else {
+        let provider = jt.provider();
+        if !secrets::has_key(provider.key_name()) {
+            return Ok(ConvertOneOutcome::blocked(
+                "missing_key",
+                format!("Add your {} API key in Settings", provider.label()),
+            ));
+        }
+    }
+
+    // Joining the current generation, so a later Stop cancels this too.
+    let generation = state.generation();
+    // Safe here and nowhere else in this command: the run-in-progress check
+    // above proved no task is reading it.
+    state.set_run_config(cfg.clone());
+
+    // The tree pairs on siblings and is blind to a result the user moved, so
+    // this is what keeps "never do the same work twice" true through the new
+    // door. Same gate a run uses: the backend route files its rows under its
+    // own format and has no reuse rule yet.
+    if cfg.skip_already_done && !use_backend {
+        let found = history::reusable(
+            &app,
+            std::slice::from_ref(&source),
+            jt.id(),
+            &jobs::output_format_for(jt, &cfg),
+        );
+        if let Some(existing) = found.get(&source_path) {
+            if history::is_in_dir(existing, &output_dir) {
+                return Ok(ConvertOneOutcome::copied(
+                    "That file already has a result in this folder. Nothing was charged.",
+                ));
+            }
+            let id = state.next_id();
+            let job = Job::new(id, source_path, output_dir, jt);
+            state.insert(job.clone());
+            let _ = app.emit("job-updated", job);
+            // A failed copy reports itself on the row, which offers Retry.
+            return Ok(if jobs::reuse_result(&app, id, generation, existing) {
+                ConvertOneOutcome::copied(
+                    "Copied a result from an earlier run. Nothing was charged.",
+                )
+            } else {
+                ConvertOneOutcome::queued()
+            });
+        }
+    }
+
+    let id = state.next_id();
+    let job = if use_backend {
+        let client_run_id = uuid::Uuid::new_v4().to_string();
+        let idempotency_key = uuid::Uuid::new_v4().to_string();
+        let ocr = conversion_service::OcrOptions {
+            language_correction: cfg.language_correction,
+            custom_words: cfg.custom_words.clone(),
+        };
+        history::upsert_in_flight(
+            &app,
+            &history::NewInFlight {
+                source_path: &source_path,
+                file_name: &file_name,
+                output_dir: &output_dir,
+                backend_url: &ledger_origin,
+                client_run_id: &client_run_id,
+                idempotency_key: &idempotency_key,
+                conversion_profile: cfg.conversion_profile.id(),
+                ocr_language_correction: ocr.language_correction,
+                ocr_custom_words: &ocr.custom_words_wire(),
+            },
+        );
+        Job::new_backend(
+            id,
+            source_path,
+            output_dir,
+            jobs::BackendContext::new(
+                backend_origin,
+                client_run_id,
+                idempotency_key,
+                None,
+                cfg.conversion_profile,
+                ocr,
+            ),
+        )
+    } else {
+        Job::new(id, source_path, output_dir, jt)
+    };
+    state.insert(job.clone());
+    let _ = app.emit("job-updated", job);
+    jobs::run_job(app.clone(), id, generation);
+    Ok(ConvertOneOutcome::queued())
+}
+
 /// Stop the current run: retire in-flight tasks and mark anything unfinished
 /// as stopped. Work already submitted upstream still costs what it cost, but
 /// nothing further is started and no more results are written.
@@ -839,7 +1118,7 @@ fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
 
 /// Read a result file into the viewer. Capped so a huge dump can't freeze the
 /// webview; UTF-8 only, because this path is Markdown and transcripts.
-const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
+pub(crate) const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
 
 #[tauri::command]
 fn read_text_file(path: String) -> Result<String, String> {
@@ -1052,6 +1331,7 @@ pub fn run() {
             list_jobs,
             scan_inputs,
             run_pipeline,
+            convert_one,
             stop_run,
             retry_job,
             reveal_path,
@@ -1068,6 +1348,7 @@ pub fn run() {
             setup_workspace,
             list_projects,
             create_project,
+            list_project_files,
             conversion_service::service_request,
             conversion_service::download_conversion_markdown,
             backend_host::app_owns_backend,
@@ -1096,7 +1377,7 @@ pub fn run() {
 
             #[cfg(desktop)]
             {
-                use tauri::menu::{Menu, MenuItem};
+                use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
                 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
                 let show_i = MenuItem::with_id(app, "show", "Show Tool-Kit", true, None::<&str>)?;
@@ -1160,6 +1441,42 @@ pub fn run() {
                 if let Err(e) = app.global_shortcut().register(toggle) {
                     eprintln!("[tool-kit] could not register global shortcut: {e}");
                 }
+
+                // Settings is a sheet over the window, and a Mac user looks in
+                // the app menu for it. Spliced into the menu Tauri already
+                // installed, never `set_menu`: a fresh menu drops Edit, View,
+                // Window and Help without saying so.
+                //
+                // The default app submenu is About, separator, Services, so
+                // index 2 with its own separator gives the native order.
+                let settings_i = MenuItem::with_id(
+                    app,
+                    "toolkit:settings",
+                    "Settings…",
+                    true,
+                    Some("CmdOrCtrl+Comma"),
+                )?;
+                let separator = PredefinedMenuItem::separator(app)?;
+                if let Some(app_menu) = app
+                    .menu()
+                    .map(|menu| menu.items())
+                    .transpose()?
+                    .and_then(|items| items.first().and_then(|item| item.as_submenu()).cloned())
+                {
+                    app_menu.insert(&settings_i, 2)?;
+                    app_menu.insert(&separator, 3)?;
+                }
+                // Prefixed, because the tray's `on_menu_event` above is a
+                // global menu listener matching the bare strings "show" and
+                // "quit". A prefixed id falls to its `_ => {}` arm.
+                app.on_menu_event(|app, event| {
+                    if event.id.as_ref() == "toolkit:settings" {
+                        // A menu-bar app's window may be hidden, and this
+                        // blocks on nothing: a wait here stalls AppKit.
+                        show_main_window(app);
+                        let _ = app.emit("open-settings", ());
+                    }
+                });
             }
             Ok(())
         })

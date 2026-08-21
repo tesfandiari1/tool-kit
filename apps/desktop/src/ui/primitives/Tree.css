@@ -1,0 +1,133 @@
+/* Tree — a disclosure tree of folders and files.
+
+   The indent is one rung of the spacing grammar: --s3 per level, which is both
+   "items in a list" and AppKit's measured indentationPerLevel. It caps at four
+   levels, because a fifth walks the name off a 300px pane with no error
+   anywhere. See UI.md.
+
+   Nothing here spends colour. The row says place with a surface step, and the
+   twisty and the glyph inherit the row's ink. */
+
+.ui-tree {
+  /* Matching the app's project rows rather than AppKit's 24px source list:
+     disagreeing with the rest of this window is worse than disagreeing with
+     the platform. One property to change if it reads wrong in the app. */
+  --tree-row-h: 32px;
+}
+
+.ui-tree,
+.ui-tree__group {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+/* A nested group is part of the row above it, not a sibling of it, so it sits
+   at the same --s1 the rows keep between each other. */
+.ui-tree__group {
+  margin-block-start: var(--s1);
+}
+
+.ui-tree__item {
+  min-inline-size: 0;
+}
+
+.ui-tree__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-block-size: var(--tree-row-h);
+  padding-inline: calc(var(--s2) + var(--s3) * min(var(--tree-depth, 0), 4)) var(--s2);
+  border-radius: var(--r-control);
+  transition: background var(--dur-fast) var(--ease);
+}
+
+/* One state, and it is a surface rather than the accent: cobalt is the control
+   you press, and a selected row is a statement of place. */
+.ui-tree__item.is-selected > .ui-tree__row {
+  background: var(--surface-raised);
+}
+
+/* The ring belongs on the row, not on the item: the item also contains its
+   whole open subtree, and a ring around that is a box the size of the pane. */
+.ui-tree__item:focus-visible {
+  outline: none;
+}
+.ui-tree__item:focus-visible > .ui-tree__row {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+/* Drawn with a border rather than shipped as an icon, the same technique
+   Disclosure uses, so it inherits the row's colour and cannot be given a tint
+   of its own. The slot is held on leaves too. */
+.ui-tree__twisty {
+  position: relative;
+  flex: none;
+  inline-size: var(--s3);
+  block-size: var(--s3);
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+}
+/* The triangle is one indent rung wide, and a 12px target is one a pointer
+   misses. This hands it the row's full height and part of the gap beside it,
+   which is dead space in Finder too. It paints nothing and moves nothing. */
+.ui-tree__twisty.is-branch::after {
+  content: "";
+  position: absolute;
+  inset-block: calc((var(--s3) - var(--tree-row-h)) / 2);
+  inset-inline: calc(var(--s1) * -1);
+}
+.ui-tree__twisty.is-branch::before {
+  content: "";
+  inline-size: 0;
+  block-size: 0;
+  border: 3.5px solid transparent;
+  border-left-color: currentColor;
+  transform: translateX(1px);
+  transition: transform var(--dur) var(--ease);
+}
+.ui-tree__item[aria-expanded="true"] > .ui-tree__row > .ui-tree__twisty::before {
+  transform: rotate(90deg) translateY(1px);
+}
+
+.ui-tree__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+}
+.ui-tree__icon svg {
+  display: block;
+}
+
+.ui-tree__name {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+  transition: color var(--dur-fast) var(--ease);
+}
+.ui-tree__item.is-selected > .ui-tree__row > .ui-tree__name {
+  color: var(--ink);
+}
+
+.ui-tree__end {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* "Empty", "Loading…", "N more files". They report, they do not answer. */
+.ui-tree__item.is-quiet > .ui-tree__row > .ui-tree__name {
+  color: var(--ink-ghost);
+  font-style: italic;
+}

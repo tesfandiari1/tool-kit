@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  ConvertOneOutcome,
+  DirListing,
   HistoryEntry,
   Job,
   JobId,
@@ -36,6 +38,9 @@ export const commands = {
   setupWorkspace: (path: string) => invoke<WorkspaceInfo>("setup_workspace", { path }),
   listProjects: () => invoke<ProjectSummary[]>("list_projects"),
   createProject: (title: string) => invoke<ProjectSummary>("create_project", { title }),
+  /// One directory level, lazily. `rel` is workspace-relative, so the webview
+  /// never does string surgery on a filesystem path.
+  listProjectFiles: (rel: string) => invoke<DirListing>("list_project_files", { rel }),
   /// True while the app runs the conversion service itself. The bearer token
   /// is then the host's own, minted per launch for its child, so Settings
   /// offers no field for it and `setSecret("backend", …)` is refused.
@@ -48,6 +53,10 @@ export const commands = {
   scanInputs: (inputs: string[]) => invoke<Scan>("scan_inputs", { inputs }),
   runPipeline: (inputs: string[], outputDir: string, jobType: JobId) =>
     invoke<RunResult>("run_pipeline", { inputs, outputDir, jobType }),
+  /// Convert one file into the folder it already sits in. The host answers
+  /// with a verdict, so the tree renders the answer rather than planning the
+  /// conversion. Never joins a run that is already going.
+  convertOne: (rel: string) => invoke<ConvertOneOutcome>("convert_one", { rel }),
   stopRun: () => invoke<number>("stop_run"),
   retryJob: async (id: number): Promise<void> => {
     await invoke("retry_job", { id });
@@ -87,5 +96,10 @@ export const commands = {
     invoke<string>("download_conversion_markdown", { conversionId, outputDir, fileName }),
   onJobUpdated: (handler: (job: Job) => void) => listen<Job>("job-updated", (e) => {
     handler(e.payload);
+  }),
+  /// The app menu's Settings… item, at ⌘,. A real menu item rather than a
+  /// webview keydown, which would compete with the editor in the same window.
+  onOpenSettings: (handler: () => void) => listen("open-settings", () => {
+    handler();
   }),
 };

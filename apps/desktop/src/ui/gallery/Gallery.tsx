@@ -18,6 +18,7 @@ import {
   Row,
   Segmented,
   Select,
+  Sheet,
   SourceEditor,
   SplitPane,
   Spacer,
@@ -28,6 +29,8 @@ import {
   Tabs,
   Text,
   TextInput,
+  Tree,
+  TreeRow,
   Well,
 } from "../index";
 import type { SplitLayout } from "../index";
@@ -509,8 +512,353 @@ export function Gallery() {
             </Stack>
           </Stack>
         </Section>
+
+        <Section
+          title="Sheet"
+          note="A native dialog in the top layer. Escape closes it, Tab stays inside it, and the toast comes through the overlay slot."
+        >
+          <div className="gal__specimen">
+            <SheetSpecimen />
+          </div>
+        </Section>
+
+        <Section
+          title="Tree"
+          note="Finder's key map. Arrows select, Right descends, Left climbs, Option takes the subtree, Space inspects, typing jumps."
+        >
+          <div className="gal__specimen">
+            <TreeSpecimen />
+          </div>
+        </Section>
       </div>
     </div>
+  );
+}
+
+/// The sheet, its drag strip, and the toast that has to draw above it.
+///
+/// `--bar-h` is set on the host below, so the specimen shows the band the card
+/// leaves clear for the title bar. The app sets the same property on `.app`.
+/// The toast is deliberately a plain fixed-position box: it is the app's
+/// `.toast` in miniature, and the point of the specimen is that a fixed element
+/// outside the dialog would be invisible under it.
+function SheetSpecimen() {
+  const [open, setOpen] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (toast === null) return;
+    const timer = setTimeout(() => {
+      setToast(null);
+    }, 2400);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [toast]);
+
+  return (
+    <div className="gal__sheethost">
+      <Row gap={3}>
+        <Button
+          variant="primary"
+          onClick={() => {
+            setOpen(true);
+          }}
+        >
+          Open the sheet
+        </Button>
+        <Text size="xs" tone="faint">
+          It hangs off the title-bar band, square across the top, and the window behind it goes
+          inert.
+        </Text>
+      </Row>
+      <Sheet
+        open={open}
+        onClose={() => {
+          setOpen(false);
+        }}
+        title="Settings"
+        head={<div className="gal__sheetdrag" />}
+        overlay={toast !== null && <div className="gal__toast">{toast}</div>}
+        footer={
+          <>
+            <Button
+              onClick={() => {
+                setOpen(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => {
+                setOpen(false);
+              }}
+            >
+              Done
+            </Button>
+          </>
+        }
+      >
+        <div className="gal__sheetbody">
+          <Stack gap={4}>
+            <TextInput label="Datalab key" placeholder="••••••••" />
+            <Select
+              label="Output format"
+              defaultValue="markdown"
+              options={[
+                { value: "markdown", label: "Markdown" },
+                { value: "html", label: "HTML" },
+              ]}
+            />
+            <Row gap={3}>
+              <Button
+                onClick={() => {
+                  setToast("Key saved");
+                }}
+              >
+                Save key
+              </Button>
+              <Text size="xs" tone="faint">
+                Fires a toast through the overlay slot, which is the one place it draws above the
+                card.
+              </Text>
+            </Row>
+          </Stack>
+        </div>
+      </Sheet>
+    </div>
+  );
+}
+
+interface SpecNode {
+  path: string;
+  name: string;
+  /// Present on a branch, empty on an open folder with nothing in it.
+  children?: SpecNode[];
+  /// Children asked for and not arrived.
+  busy?: boolean;
+  /// The sibling result this source already has.
+  result?: string;
+  /// A convertible with no result yet.
+  convertible?: boolean;
+  /// Entries past the listing cap.
+  more?: number;
+}
+
+const TREE_SPEC: SpecNode[] = [
+  {
+    path: "Inbox",
+    name: "Inbox",
+    children: [
+      { path: "Inbox/welcome.md", name: "welcome.md" },
+      { path: "Inbox/board-deck.pdf", name: "board-deck.pdf", result: "board-deck.md" },
+      { path: "Inbox/scan_0043.pdf", name: "scan_0043.pdf", convertible: true },
+    ],
+  },
+  {
+    path: "Acme",
+    name: "Acme",
+    children: [
+      {
+        path: "Acme/Contracts",
+        name: "Contracts",
+        children: [
+          {
+            path: "Acme/Contracts/2026",
+            name: "2026",
+            children: [
+              { path: "Acme/Contracts/2026/msa.pdf", name: "msa.pdf", result: "msa.md" },
+              { path: "Acme/Contracts/2026/sow.docx", name: "sow.docx", convertible: true },
+            ],
+          },
+        ],
+      },
+      { path: "Acme/Calls", name: "Calls", busy: true, children: [] },
+      { path: "Acme/Archive", name: "Archive", children: [] },
+    ],
+  },
+  {
+    path: "Research",
+    name: "Research",
+    more: 486,
+    children: [
+      { path: "Research/img2.png", name: "img2.png", convertible: true },
+      { path: "Research/img10.png", name: "img10.png", convertible: true },
+    ],
+  },
+  {
+    path: "Legal",
+    name: "Legal",
+    children: [{ path: "Legal/nda.pdf", name: "nda.pdf", convertible: true }],
+  },
+];
+
+/// Every branch under `path`, for Option+click and Option+Right.
+function subtree(nodes: SpecNode[], path: string): string[] {
+  const found: string[] = [];
+  const walk = (list: SpecNode[], inside: boolean) => {
+    for (const n of list) {
+      const within = inside || n.path === path;
+      if (within && n.children !== undefined && n.path !== path) found.push(n.path);
+      if (n.children) walk(n.children, within);
+    }
+  };
+  walk(nodes, false);
+  return found;
+}
+
+/// Three levels, one branch loading, one empty branch, one truncated listing,
+/// a paired result and an unpaired convertible. Narrow on purpose: the tree
+/// ships in a pane whose floor is 300px, and the depth cap is what keeps a
+/// name readable down there.
+function TreeSpecimen() {
+  const [open, setOpen] = useState(
+    () =>
+      new Set([
+        "Inbox",
+        "Acme",
+        "Acme/Contracts",
+        "Acme/Contracts/2026",
+        "Acme/Calls",
+        "Acme/Archive",
+        "Research",
+      ]),
+  );
+  const [selected, setSelected] = useState("Inbox/board-deck.pdf");
+  const [last, setLast] = useState("selected board-deck.pdf");
+
+  const toggle = (path: string, next: boolean, deep: boolean) => {
+    setOpen((prev) => {
+      const paths = new Set(prev);
+      for (const p of [path, ...(deep ? subtree(TREE_SPEC, path) : [])]) {
+        if (next) paths.add(p);
+        else paths.delete(p);
+      }
+      return paths;
+    });
+    setLast(`${next ? "opened" : "closed"} ${path}${deep ? " and its subtree" : ""}`);
+  };
+
+  const rows = (nodes: SpecNode[], depth: number): ReactNode =>
+    nodes.map((node) => {
+      const branch = node.children !== undefined;
+      const isOpen = branch && open.has(node.path);
+      return (
+        <TreeRow
+          key={node.path}
+          path={node.path}
+          depth={depth}
+          open={branch ? isOpen : undefined}
+          busy={node.busy}
+          selected={selected === node.path}
+          icon={branch ? <FolderGlyph /> : <FileGlyph />}
+          title={node.result === undefined ? node.name : `${node.name} → ${node.result}`}
+          end={
+            node.result !== undefined ? (
+              <Mono size="xs">{node.result}</Mono>
+            ) : node.convertible === true ? (
+              /* The in-row control: out of the tab order, because Enter on the
+                 row is the keyboard route to the same thing. */
+              <Button variant="link" size="sm" tabIndex={-1}>
+                Convert
+              </Button>
+            ) : undefined
+          }
+          group={isOpen && node.busy !== true ? group(node, depth + 1) : undefined}
+        >
+          {node.name}
+        </TreeRow>
+      );
+    });
+
+  const group = (node: SpecNode, depth: number): ReactNode => {
+    const children = node.children ?? [];
+    if (children.length === 0) {
+      return (
+        <TreeRow quiet path={`${node.path}/·empty`} depth={depth}>
+          Empty
+        </TreeRow>
+      );
+    }
+    return (
+      <>
+        {rows(children, depth)}
+        {node.more !== undefined && (
+          <TreeRow quiet path={`${node.path}/·more`} depth={depth}>
+            {node.more} more files
+          </TreeRow>
+        )}
+      </>
+    );
+  };
+
+  return (
+    <Stack gap={3}>
+      <div className="gal__tree">
+        <Tree
+          label="Specimen workspace"
+          onSelect={(path) => {
+            setSelected(path);
+            setLast(`selected ${path}`);
+          }}
+          onActivate={(path) => {
+            setLast(`activated ${path}`);
+          }}
+          onInspect={(path) => {
+            setLast(`inspected ${path}`);
+          }}
+          onToggle={toggle}
+        >
+          {rows(TREE_SPEC, 0)}
+        </Tree>
+      </div>
+      <Mono size="xs" tone="ghost">
+        {last}
+      </Mono>
+      <Text size="xs" tone="faint">
+        Click a row, then drive it from the keyboard. The arrows select and open nothing, Right
+        descends into a folder that is already open, Left climbs from a file, Option+Right takes the
+        whole subtree, Space inspects without scrolling the pane, and typing jumps. Selection is a
+        surface step, never the accent: cobalt is the control you press, and a selected row is a
+        statement of place.
+      </Text>
+    </Stack>
+  );
+}
+
+/// Monochrome, like every glyph in this system. A coloured folder would be the
+/// only colour on screen carrying no signal.
+function FolderGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="13"
+      height="13"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinejoin="round"
+    >
+      <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.5h7A1.5 1.5 0 0 1 19 9v8.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17.5Z" />
+    </svg>
+  );
+}
+
+function FileGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="13"
+      height="13"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinejoin="round"
+    >
+      <path d="M6 3.5h7L18 8.5v12H6Z" />
+      <path d="M13 3.5V9h5" />
+    </svg>
   );
 }
 

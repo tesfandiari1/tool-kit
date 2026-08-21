@@ -1,0 +1,110 @@
+/* Sheet — a modal card over the whole window.
+
+   The dialog element itself is the full viewport and paints nothing: the scrim
+   is a child, so it can hold a token. `::backdrop` is left transparent rather
+   than styled, because custom properties do not resolve there dependably. */
+
+.ui-sheet {
+  position: fixed;
+  inset: 0;
+  inline-size: 100%;
+  max-inline-size: none;
+  block-size: 100%;
+  max-block-size: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  overflow: hidden;
+}
+
+.ui-sheet::backdrop {
+  background: transparent;
+}
+
+.ui-sheet__scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--surface-scrim);
+}
+
+/* Paper's `--surface-scrim` is its page ground: `body` paints with it, so
+   reusing it here covers the window in the card's own colour and the card
+   disappears. The light theme gets a real dimmer instead. */
+[data-theme="paper"] .ui-sheet__scrim {
+  background: color-mix(in srgb, var(--warm-950) 45%, transparent);
+}
+
+/* Anchored under the title bar, square across the top and rounded below, the
+   way an AppKit sheet hangs off the window's own edge. `--bar-h` is the app's
+   title-bar height; with none in scope the card starts at the top. */
+.ui-sheet__card {
+  position: absolute;
+  inset-block-start: var(--bar-h, 0px);
+  inset-inline: 0;
+  margin-inline: auto;
+  /* Fixed measure, no resize handle. A settings form is a reading column, and
+     one that grows with the window stops being one. */
+  inline-size: min(620px, 100%);
+  max-block-size: calc(100% - var(--bar-h, 0px) - var(--s5));
+  display: flex;
+  flex-direction: column;
+  min-block-size: 0;
+  background: var(--surface-solid);
+  border: 1px solid var(--rule-lit);
+  border-block-start: 0;
+  border-end-start-radius: var(--r-panel);
+  border-end-end-radius: var(--r-panel);
+  box-shadow: 0 18px 48px color-mix(in srgb, var(--warm-950) 60%, transparent);
+  overflow: hidden;
+  animation: ui-sheet-in var(--dur-slow) var(--ease-out);
+}
+
+@keyframes ui-sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(var(--s3) * -1));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ui-sheet__title {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0;
+  padding: var(--s3) var(--s4);
+  border-block-end: 1px solid var(--rule);
+}
+
+/* No padding here on purpose: a sheet holds a panel that already carries its
+   own measure and insets, and a library padding an app panel a second time is
+   the harder half to take back. */
+.ui-sheet__body {
+  min-block-size: 0;
+  overflow: auto;
+}
+
+.ui-sheet__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  border-block-start: 1px solid var(--rule);
+}
+
+/* The band above the card, which is the title bar the scrim just made inert.
+   Grid so a bare child fills it: the app passes a drag region with no size of
+   its own, and dragging is a hit test on the element, so an empty box is a
+   window that cannot be moved. */
+.ui-sheet__head {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  block-size: var(--bar-h, 0px);
+  display: grid;
+}

@@ -88,3 +88,45 @@
   place-items: center;
   background: var(--surface-well);
 }
+
+/* Sheet specimen. `--bar-h` is the app's title-bar height, published on `.app`
+   there and set here so the specimen shows the band the card leaves clear and
+   the drag strip that fills it. */
+.gal__sheethost {
+  --bar-h: 40px;
+}
+
+/* Tinted only so the strip is visible in a browser tab. In the app it is a
+   bare `data-tauri-drag-region` div and paints nothing. */
+.gal__sheetdrag {
+  background: var(--rule);
+}
+
+/* The sheet body brings no padding of its own, because it holds a panel that
+   already has a measure. A specimen has no panel, so it supplies one. */
+.gal__sheetbody {
+  padding: var(--s4);
+}
+
+/* The app's `.toast` in miniature: fixed, and drawn from inside the dialog.
+   Outside it, the top layer would hide it completely. */
+.gal__toast {
+  position: fixed;
+  bottom: var(--s5);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: var(--s2) var(--s4);
+  border: 1px solid var(--rule-lit);
+  border-radius: var(--r-panel);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: var(--t-sm);
+  z-index: 60;
+}
+
+/* The tree ships in a pane whose floor is 300px. Reviewing it any wider hides
+   the two things the width decides: where a name truncates, and what the
+   depth cap is worth. */
+.gal__tree {
+  max-width: 300px;
+}

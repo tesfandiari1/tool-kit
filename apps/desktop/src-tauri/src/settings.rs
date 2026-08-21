@@ -106,6 +106,13 @@ pub struct Settings {
     pub workspace_id: Option<String>,
     /// The project new documents land in.
     pub active_project_id: Option<String>,
+    /// Library tree rows the user left open, workspace-relative so a folder
+    /// renamed in Finder does not strand every entry.
+    ///
+    /// A `Vec`, never an `Option<Vec>`: the frontend spreads the host's answer
+    /// over `DEFAULT_SETTINGS`, where an explicit `null` beats the default and
+    /// an absent key falls through to it.
+    pub expanded_paths: Vec<String>,
 }
 
 impl Default for Settings {
@@ -130,6 +137,7 @@ impl Default for Settings {
             workspace_path: None,
             workspace_id: None,
             active_project_id: None,
+            expanded_paths: Vec::new(),
         }
     }
 }
@@ -239,6 +247,35 @@ mod tests {
         assert_eq!(settings.workspace_path, None);
         assert_eq!(settings.workspace_id, None);
         assert_eq!(settings.active_project_id, None);
+    }
+
+    /// The library tree persists what the user left open. Every settings.json
+    /// on disk predates the field, and `load()` answers a parse failure by
+    /// resetting the output folder and the job, so an absent key has to arrive
+    /// as an empty list rather than as a rejection.
+    #[test]
+    fn settings_from_before_the_library_tree_gain_an_empty_expansion_list() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "outputDir": "/tmp/output",
+                "jobType": "convert",
+                "workspacePath": "/tmp/workspace"
+            }"#,
+        )
+        .expect("settings written before the tree should deserialize");
+
+        assert!(settings.expanded_paths.is_empty());
+        assert_eq!(settings.output_dir.as_deref(), Some("/tmp/output"));
+        assert_eq!(settings.workspace_path.as_deref(), Some("/tmp/workspace"));
+    }
+
+    /// A `Vec`, so the wire carries `[]` and never `null`. The frontend
+    /// spreads this over its defaults and an explicit `null` would win.
+    #[test]
+    fn the_expansion_list_serializes_as_an_array() {
+        let value = serde_json::to_value(Settings::default()).expect("settings should serialize");
+
+        assert_eq!(value["expandedPaths"], serde_json::json!([]));
     }
 
     #[test]
