@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ClockCounterClockwiseIcon, GearSixIcon } from "@phosphor-icons/react";
-import { Button, Label, Mono, SplitPane, StatusDot } from "@ui";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Label, Mono, SplitPane, StatusDot } from "@ui";
 import { basename, fmtElapsed } from "@/app/format";
 import { barStatus, runCounter } from "./barStatus";
 import { conversionClient } from "@/app/api";
@@ -40,7 +39,6 @@ import { SettingsPanel } from "@/domains/settings/SettingsPanel";
 import { DocumentPane } from "@/domains/thread/DocumentPane";
 import { isDirty, type OpenDoc } from "@/domains/thread/model";
 import {
-  clearWindowMaxSize,
   confirm,
   copyToClipboard,
   onWindowResized,
@@ -53,14 +51,12 @@ import {
   setWindowResizable,
   windowSize,
   workArea,
-  type WindowSize,
 } from "@/platform/host";
-import { LAUNCHER, ONBOARDING, SPLIT, WORKSPACE, ZOOM } from "./geometry";
+import { ONBOARDING, SPLIT, WORKSPACE, ZOOM } from "./geometry";
 import { useToast } from "./useToast";
 import { useDocuments } from "./useDocuments";
 import { useDocumentSave } from "./useDocumentSave";
 import { useCloseConfirm, useDragDrop, useWindowFocusClass } from "./useHostWindow";
-import { useFitWindow } from "./useFitWindow";
 import { useZoom, zoomLabel } from "./useZoom";
 import "./App.css";
 
@@ -140,7 +136,6 @@ export default function App() {
   /// A workspace is open, so the library is home and the run flow is off the
   /// default nav.
   const libraryMode = loaded && workspacePath !== null;
-  const home: View = libraryMode ? "library" : "run";
 
   /// Surface backend failures instead of dropping them on the floor.
   const call = useCallback(
@@ -318,8 +313,9 @@ export default function App() {
         activeProjectId: workspace.inboxProjectId,
         ...conversionPatch(mode),
       });
-      // Open at workspace size so the library does not bounce up from the
-      // launcher's fixed width on the first frame after onboarding.
+      // Grow here rather than leaving it to the effect below, so the library
+      // does not paint one frame at the gate's size. Latching the flag is what
+      // stops that effect repeating the grow a beat later.
       wasWorkspace.current = true;
       void (async () => {
         try {
@@ -458,43 +454,15 @@ export default function App() {
   useZoom(zoom, onZoom);
 
   const expanded = docs.length > 0;
-  /// A workspace window: resizable, inside `WORKSPACE`'s bounds, at the size
-  /// the user last left it. The library is one, and so is an open document.
-  const wantsWorkspace = libraryMode || expanded;
-  /// The compact launcher belongs to the run flow alone. It is what
-  /// `useFitWindow` sizes, and neither the gate nor the library is one.
-  const launcher = loaded && !onboarding && !wantsWorkspace;
-  // Zoom decides how many logical pixels the launcher's content wants, so the
-  // fit has to know it.
-  useFitWindow(launcher, zoom);
-  /// The launcher's size, read the moment before it grows. Only ever
-  /// `LAUNCHER.width` now that the launcher is fixed, but measured rather than
-  /// assumed, so a collapse cannot disagree with the window on screen.
-  const compactSize = useRef<WindowSize | null>(null);
-  /// The size the window launched at, read once on mount below. Covers a
-  /// collapse that fires before the first launcher measurement lands (a
-  /// document opened and closed inside its await).
-  const launchSize = useRef<WindowSize | null>(null);
   const sizesRef = useRef(settings);
 
   useEffect(() => {
     sizesRef.current = settings;
   }, [settings]);
 
-  // The first-run size comes from tauri.conf.json, which agrees with
-  // `LAUNCHER`. This read is how JS learns what the window took. A failure
-  // leaves the constant in charge.
-  useEffect(() => {
-    void windowSize()
-      .then((size) => {
-        launchSize.current = size;
-      })
-      .catch(() => undefined);
-  }, []);
-
   // First run opens at its own size. Bounds before size, as everywhere else:
-  // the gate is taller and wider than the launcher's minimum, and macOS clamps
-  // `setSize` to whatever is in force at that instant.
+  // the gate is taller and wider than the window's opening minimum, and macOS
+  // clamps `setSize` to whatever is in force at that instant.
   useEffect(() => {
     if (!onboarding) return;
     void (async () => {
@@ -507,64 +475,43 @@ export default function App() {
     })();
   }, [onboarding]);
 
-  // The window follows the surface. Each phase remembers its own size, so
-  // widening the workspace never leaves the launcher stretched, and the
-  // workspace opens where the user last left it rather than at a default.
+  // The window grows to the workspace once, when the settings load says a
+  // workspace is bound, and opens where the user last left it. It never
+  // shrinks back: binding a workspace is permanent, which is why
+  // `wasWorkspace` latches instead of tracking.
   //
-  // The order inside each branch is load-bearing: macOS clamps `setSize` to the
-  // bounds in force at that instant. Widen the bounds before growing, tighten
-  // them before shrinking, or the window lands at the other phase's size.
+  // The statement order is load-bearing: macOS clamps `setSize` to the bounds
+  // in force at that instant, so widen the bounds before growing.
   //
   // Native resizing is the OS animating a real window: there is nothing here
   // to match in CSS, and trying would fight it.
   useEffect(() => {
-    if (wantsWorkspace === wasWorkspace.current) return;
-    wasWorkspace.current = wantsWorkspace;
+    if (!libraryMode || wasWorkspace.current) return;
+    wasWorkspace.current = true;
     void (async () => {
-      // Both reads at once. The split restores its saved ratio a frame after
-      // this effect starts and clamps that percentage against the width in
-      // force right then, so every round trip before the resize costs it.
-      const [current, area] = await Promise.all([
-        windowSize(),
-        wantsWorkspace ? workArea().catch(() => null) : Promise.resolve(null),
-      ]);
-      if (wantsWorkspace) {
-        compactSize.current = current;
-        await setWindowResizable(true);
-        await setWindowMinSize(WORKSPACE.minWidth, WORKSPACE.minHeight);
-        // A ceiling, so a size restored from a larger display cannot open a
-        // window bigger than the screen it is opening on.
-        if (area) await setWindowMaxSize(area.width, area.height);
-        const { expandedWidth, expandedHeight } = sizesRef.current;
-        await resizeWindow(expandedWidth ?? WORKSPACE.width, expandedHeight ?? WORKSPACE.height);
-      } else {
-        // Record the workspace size before shrinking, or the next expand
-        // reads back the launcher's.
-        persist({ expandedWidth: current.width, expandedHeight: current.height });
-        await setWindowMinSize(LAUNCHER.minWidth, LAUNCHER.minHeight);
-        // The workspace ceiling was one display's work area. Carrying it into
-        // a fixed launcher would cap it on the next display for no reason.
-        await clearWindowMaxSize();
-        const w = compactSize.current?.width ?? launchSize.current?.width ?? LAUNCHER.width;
-        // Height is set by `useFitWindow` once the launcher layout paints.
-        await resizeWindow(w, LAUNCHER.minHeight);
-        // Last, because macOS can refuse the shrink above on a window it has
-        // already pinned as non-resizable.
-        await setWindowResizable(false);
-      }
+      // The one read before the resize. The split restores its saved ratio a
+      // frame after this effect starts and clamps that percentage against the
+      // width in force right then, so every round trip here costs it.
+      const area = await workArea().catch(() => null);
+      await setWindowResizable(true);
+      await setWindowMinSize(WORKSPACE.minWidth, WORKSPACE.minHeight);
+      // A ceiling, so a size restored from a larger display cannot open a
+      // window bigger than the screen it is opening on.
+      if (area) await setWindowMaxSize(area.width, area.height);
+      const { expandedWidth, expandedHeight } = sizesRef.current;
+      await resizeWindow(expandedWidth ?? WORKSPACE.width, expandedHeight ?? WORKSPACE.height);
     })();
-  }, [wantsWorkspace, persist]);
+  }, [libraryMode]);
 
-  // Remember the workspace size while the user is in it. The collapse branch
-  // above writes it too, but binding a workspace makes `wantsWorkspace`
-  // permanent, so that branch stops running after first run and the window came
-  // back at the default on every launch.
+  // Remember the workspace size while the user is in it. The grow above only
+  // reads it back, so without this the window returned to the default on every
+  // launch.
   //
   // Our own `resizeWindow` reports through this same event. Writing that back
   // records the size actually on screen, which is what "where you left it"
   // means, ceiling clamp included.
   useEffect(() => {
-    if (!wantsWorkspace) return;
+    if (!libraryMode) return;
     let live = true;
     let settle = 0;
     const un = onWindowResized(() => {
@@ -582,7 +529,7 @@ export default function App() {
       window.clearTimeout(settle);
       void un.then((f) => f());
     };
-  }, [wantsWorkspace, persist]);
+  }, [libraryMode, persist]);
 
   // Escape closes the document you are reading, not the window and not the
   // panel beside it. Bound only while something is open, so an app with no
@@ -888,7 +835,7 @@ export default function App() {
       onPersist={persist}
       onSecrets={setSecrets}
       onToast={showToast}
-      onClose={() => setView(home)}
+      onClose={() => setView("library")}
       embedded={libraryMode}
     />
   );
@@ -899,8 +846,6 @@ export default function App() {
       onChanged={() => setRunsFinished((n) => n + 1)}
       onOpen={(e) => void openHistory(e)}
       onToast={showToast}
-      onClose={() => setView(home)}
-      embedded={libraryMode}
     />
   );
 
@@ -954,12 +899,15 @@ export default function App() {
   const libraryPanel =
     view === "run" ? runPanel : view === "settings" ? settingsPanel : view === "history" ? historyPanel : null;
 
-  // The left column, and the whole body when nothing is open. In workspace
-  // mode the project sidebar stays put while Run, Settings, and History swap
-  // the main column beside it.
-  let left: ReactNode;
-  if (libraryMode) {
-    left = (
+  // The left column, and the whole body when nothing is open. The project
+  // sidebar stays put while Run, Settings, and History swap the main column
+  // beside it.
+  //
+  // The null arm never renders: the two early returns above prove `loaded` and
+  // `!onboarding`, which together bind the workspace path. TypeScript cannot
+  // see through a return, so the guard stays.
+  const left =
+    workspacePath === null ? null : (
       <LibraryShell
         workspacePath={workspacePath}
         projects={projects}
@@ -990,26 +938,6 @@ export default function App() {
         onToast={showToast}
       />
     );
-  } else {
-    switch (view) {
-      case "library":
-        left = null;
-        break;
-      case "settings":
-        left = settingsPanel;
-        break;
-      case "history":
-        left = historyPanel;
-        break;
-      case "run":
-        left = runPanel;
-        break;
-      default: {
-        const _exhaustive: never = view;
-        left = _exhaustive;
-      }
-    }
-  }
 
   // Always the same element in the same slot, collapsed to one pane when
   // nothing is open. Swapping between `<SplitPane>` and a bare `left` moves the
@@ -1054,9 +982,8 @@ export default function App() {
     />
   );
 
-  /// The live run, rendered in whichever bar cell has room for it: the centre
-  /// in the launcher, the actions corner in a workspace, where the nav owns the
-  /// centre for the whole length of the run.
+  /// The live run, rendered in the one bar cell with room for it: the nav owns
+  /// the centre for the whole length of the run.
   const runIndicator =
     status.kind === "run" ? (
       <>
@@ -1103,38 +1030,10 @@ export default function App() {
             </Mono>
           )}
         </div>
-        <div className="bar-actions">
-          {/* In a workspace, all panels live in the centre Segmented nav, so
-              the corner icons belong to the launcher alone. The run reports
-              here instead, because in the centre it displaced the nav and put
-              History out of reach for the length of the run. */}
-          {libraryMode ? (
-            runIndicator
-          ) : (
-            <>
-              <Button
-                variant="ghost"
-                iconOnly
-                icon={<ClockCounterClockwiseIcon weight={view === "history" ? "fill" : "regular"} />}
-                onClick={() => {
-                  setView((v) => (v === "history" ? home : "history"));
-                }}
-                title="History"
-                aria-label="History"
-              />
-              <Button
-                variant="ghost"
-                iconOnly
-                icon={<GearSixIcon weight={view === "settings" ? "fill" : "regular"} />}
-                onClick={() => {
-                  setView((v) => (v === "settings" ? home : "settings"));
-                }}
-                title="Settings"
-                aria-label="Settings"
-              />
-            </>
-          )}
-        </div>
+        {/* Every panel lives in the centre Segmented nav, so the run reports
+            in the corner instead: in the centre it displaced the nav and put
+            History out of reach for the length of the run. */}
+        <div className="bar-actions">{runIndicator}</div>
       </header>
 
       {body}

@@ -50,78 +50,6 @@ svg {
   height: 100vh;
 }
 
-/* Compact launcher: the content sets the height and the native window follows
-   it (`useFitWindow`). Two states, and the hook picks between them:
-
-   - below the ceiling: the frame grows and nothing scrolls
-   - at the ceiling: the frame stops and the page scrolls under a stuck title
-     bar
-
-   Clipping is not a third option, and neither is an inner box that caps its own
-   height. See the sticky-bar note below. */
-html.fit-window,
-html.fit-window body,
-html.fit-window #root {
-  height: auto;
-}
-/* The window is exactly as tall as its content, so there is nothing to scroll
-   to. Without this macOS still rubber-bands the whole interface on a two-finger
-   flick. `overscroll-behavior` stops the bounce reaching the window even at the
-   ceiling. */
-html.fit-window {
-  overflow: hidden;
-  overscroll-behavior: none;
-}
-/* The one case that earns a scrollbar: content taller than the screen. This is
-   the viewport's overflow, not a height on any box, so it cannot change what
-   `#root` measures. */
-html.fit-window.is-capped {
-  overflow-y: auto;
-}
-html.fit-window .app {
-  height: auto;
-  min-height: 0;
-}
-html.fit-window .workspace {
-  flex: none;
-}
-html.fit-window .flow:not(.flow--workspace) {
-  overflow: visible;
-  flex: none;
-}
-html.fit-window .flow-scroll {
-  flex: none;
-  min-height: auto;
-  overflow: visible;
-}
-html.fit-window .flow-scroll::after {
-  display: none;
-}
-html.fit-window .ui-split {
-  height: auto;
-}
-html.fit-window .ui-split__pane {
-  overflow: visible;
-}
-
-/* Ceiling reached: the window stops growing and the page scrolls. The page and
-   not an inner box, because a box capped at the ceiling reports the ceiling as
-   its own height and stops resizing, so nothing releases it again. See
-   `useFitWindow`.
-
-   The title bar sticks instead, and takes the material a macOS toolbar shows
-   once content passes under it. Transparent until then, so the window keeps its
-   vibrancy at rest. */
-html.fit-window .bar {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-}
-html.fit-window.is-scrolled .bar {
-  background: var(--surface-scrim);
-  border-bottom: 1px solid var(--rule);
-}
-
 /* --- Title bar ------------------------------------------------------------
    Traffic lights are drawn over this strip by the system, so the row is inset
    past them. Dragging comes from `data-tauri-drag-region` on the element, not
@@ -176,16 +104,9 @@ html.fit-window.is-scrolled .bar {
   justify-self: center;
   gap: var(--s2);
   min-width: 0;
-  /* The row holds its height across every state: the window is sized to its
-     content, so a bar that grew between "Run" and a live counter would resize
-     the window. --s5 is the first rung that clears the tallest state, the 12px
-     mono counter. */
-  min-height: var(--s5);
-}
-/* Outside the launcher the centre cell also holds the sm Segmented, which is
-   30px tall, so the reservation steps to the first rung that clears it. The
-   launcher keeps --s5: its window is fit to content and never shows the nav. */
-html:not(.fit-window) .bar-status {
+  /* The row holds its height across every state, so the bar never jumps
+     between "Run" and a live counter. The cell also holds the sm Segmented,
+     which is 30px tall, so --s6 is the first rung that clears it. */
   min-height: var(--s6);
 }
 /* View names wear the label treatment, document names stay in mixed case. */
@@ -250,8 +171,8 @@ html:not(.fit-window) .bar-status {
   margin: 0 auto;
 }
 
-/* Compact launcher: natural column stack. When `html.fit-window` is active the
-   native window grows to fit; workspace mode keeps 100vh and pane scroll. */
+/* A plain column stack: the head and foot hold their height and `.flow-scroll`
+   takes the slack. The workspace variant keeps 100vh and pane scroll instead. */
 .flow:not(.flow--workspace) {
   overflow: hidden;
   gap: 0;

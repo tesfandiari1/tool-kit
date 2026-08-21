@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { EyeIcon, FolderOpenIcon, XIcon } from "@phosphor-icons/react";
+import { EyeIcon, FolderOpenIcon } from "@phosphor-icons/react";
 import { Badge, Button, Input, Mono, Row, Spacer, StatusDot, Text } from "@ui";
 import { commands } from "@/app/commands";
 import { basename, fmtWhen } from "@/app/format";
@@ -15,8 +15,6 @@ export function HistoryPanel({
   onChanged,
   onOpen,
   onToast,
-  onClose,
-  embedded = false,
 }: {
   refreshKey: number;
   /// Call after anything that changes what the history says, so the
@@ -24,8 +22,6 @@ export function HistoryPanel({
   onChanged: () => void;
   onOpen: (entry: HistoryEntry) => void;
   onToast: (msg: string) => void;
-  onClose: () => void;
-  embedded?: boolean;
 }) {
   const [query, setQuery] = useState("");
   // null while the first read is in flight, so an empty history and a pending
@@ -97,9 +93,6 @@ export function HistoryPanel({
             >
               Clear history
             </Button>
-            {!embedded && (
-              <Button variant="ghost" size="sm" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close history" />
-            )}
           </Row>
 
           <Input

@@ -1,9 +1,12 @@
-/// Every window number lives here. `App.tsx`, `useFitWindow.ts`, `useZoom.ts`
-/// and `tauri.conf.json` agree with this module. Nothing else hardcodes a
-/// window size.
+/// Every window number lives here. `App.tsx`, `useZoom.ts` and
+/// `tauri.conf.json` agree with this module. Nothing else hardcodes a window
+/// size.
 
-/// The launcher is one fixed width. Its height is its content's height.
-export const LAUNCHER = { width: 560, minWidth: 480, minHeight: 460 } as const;
+/// The size the window opens at, before the settings load says where the
+/// workspace is. Not a phase: a beat later the window grows to `WORKSPACE` or
+/// to `ONBOARDING` and never comes back. `tauri.conf.json` carries the same
+/// three numbers, so change both together.
+export const INITIAL = { width: 560, minWidth: 480, minHeight: 460 } as const;
 
 /// The workspace is resizable inside these bounds. `minWidth` is derived, not
 /// picked: `SPLIT.start`% of it has to clear `SPLIT.minStart`, or the pixel
@@ -15,9 +18,6 @@ export const WORKSPACE = { minWidth: 960, minHeight: 560, width: 1180, height: 7
 /// one control read as the whole window, and small enough that the workspace
 /// arriving afterwards is a visible change rather than nothing happening.
 export const ONBOARDING = { width: 720, height: 520, minWidth: 640, minHeight: 480 } as const;
-
-/// Breathing room so a full-height window never sits flush against the work area.
-export const SCREEN_MARGIN = 48;
 
 /// The document owns two thirds. `minEnd` is a floor, not a preference: the
 /// pane exists to be read.

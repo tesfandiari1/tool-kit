@@ -2,9 +2,10 @@ import type { ReactNode } from "react";
 
 /// Left-column layout: head, body, optional foot in a vertical stack.
 ///
-/// Compact mode: the native window grows to fit (`useFitWindow`); no internal
-/// scroll. Workspace variant passes children through flat so `.flow--workspace`
-/// rules can rank the queue and compress controls inside a fixed 100vh frame.
+/// The default variant holds the head and foot still and scrolls the body
+/// between them. The workspace variant passes children through flat so
+/// `.flow--workspace` rules can rank the queue and compress controls inside a
+/// fixed 100vh frame.
 export function FlowLayout({
   variant = "default",
   head,
