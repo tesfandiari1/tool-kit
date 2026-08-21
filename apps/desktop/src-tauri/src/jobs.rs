@@ -441,6 +441,28 @@ pub fn output_extension_for(jt: JobType, cfg: &settings::Settings) -> &'static s
     }
 }
 
+/// Every extension a finished result may carry on the route in force. What the
+/// tree's pairing rule has to ask, because the writer is not one function.
+///
+/// The Backend route writes Markdown whatever the format says: the service's
+/// artifact is `/artifacts/markdown` and `reserve_markdown_path` names the file
+/// `{stem}.md`. Only the Datalab fallback under that route writes the chosen
+/// format. Pairing on the format alone therefore never matches a service
+/// result, so the row keeps offering Convert, and every press spends again.
+pub fn result_extensions_for(jt: JobType, cfg: &settings::Settings) -> Vec<&'static str> {
+    let chosen = output_extension_for(jt, cfg);
+    if jt == JobType::Convert && cfg.conversion_route == settings::ConversionRoute::Backend {
+        // Markdown first: it is what the service itself writes, and the
+        // fallback is the exception.
+        let mut both = vec!["md"];
+        if chosen != "md" {
+            both.push(chosen);
+        }
+        return both;
+    }
+    vec![chosen]
+}
+
 fn emit(app: &AppHandle, job: Job) {
     let _ = app.emit("job-updated", job);
 }

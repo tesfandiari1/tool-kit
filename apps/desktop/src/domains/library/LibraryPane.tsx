@@ -17,6 +17,7 @@ export function LibraryPane({
   projects,
   tree,
   jobs,
+  onSelect,
   onActivate,
   onInspect,
   onConvert,
@@ -29,6 +30,9 @@ export function LibraryPane({
   projects: ProjectSummary[];
   tree: ProjectTreeState;
   jobs: Job[];
+  /// The selection moved. Null on a project root, which has no `FileRow` of
+  /// its own.
+  onSelect: (row: FileRow | null) => void;
   onActivate: (row: FileRow) => void;
   onInspect: (row: FileRow) => void;
   onConvert: (row: FileRow) => void;
@@ -75,6 +79,7 @@ export function LibraryPane({
           projects={projects}
           tree={tree}
           jobs={jobs}
+          onSelect={onSelect}
           onActivate={onActivate}
           onInspect={onInspect}
           onConvert={onConvert}

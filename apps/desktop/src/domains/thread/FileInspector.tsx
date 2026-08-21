@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { FolderOpenIcon, XIcon } from "@phosphor-icons/react";
 import { Badge, Button, Divider, Label, Mono, Path, Row, Spacer, Stack, Text, Well } from "@ui";
 import { commands } from "@/app/commands";
@@ -48,7 +48,32 @@ export function FileInspector({
   onClose: () => void;
 }) {
   const titleId = useId();
+  const card = useRef<HTMLElement>(null);
+  const restoreTo = useRef<HTMLElement | null>(null);
   const [nowMs] = useState(() => Date.now());
+
+  // Every control in here is a real tab stop, and both ways out unmount the
+  // whole card: Close, and the primary action that opens a document. An
+  // element that unmounts holding focus drops it on <body>, which ends
+  // keyboard navigation with nothing on screen to say so. Put focus back where
+  // it came from — the tree row that raised the card — but only if the card
+  // still holds it, so a click somewhere else is never yanked back.
+  //
+  // Layout, not passive: React runs a passive cleanup for a deleted subtree
+  // after the mutation, by which time the card is off the page and focus is
+  // already on `<body>`, so the test would never see it.
+  useLayoutEffect(() => {
+    const el = card.current;
+    restoreTo.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && el?.contains(active) === true) {
+        restoreTo.current?.focus();
+      }
+      restoreTo.current = null;
+    };
+  }, []);
   /// Keyed on the path rather than reset in an effect, so arrowing to the next
   /// row never shows the previous file's opening lines for a frame.
   const [head, setHead] = useState<{ path: string; text: string } | null>(null);
@@ -75,7 +100,7 @@ export function FileInspector({
       : "";
 
   return (
-    <aside className="doc-inspect" aria-labelledby={titleId}>
+    <aside ref={card} className="doc-inspect" aria-labelledby={titleId}>
       <div className="doc-inspect__card">
         <Row gap={2} className="doc-inspect__head">
           <Label as="h2" id={titleId} tone="strong">

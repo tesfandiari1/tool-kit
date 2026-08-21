@@ -41,6 +41,9 @@ export const commands = {
   createProject: (title: string) => invoke<ProjectSummary>("create_project", { title }),
   /// One directory level, lazily. `rel` is workspace-relative, so the webview
   /// never does string surgery on a filesystem path.
+  ///
+  /// Rejects with a `ListError`, not a string: see `listFailure` in
+  /// `useProjectTree`.
   listProjectFiles: (rel: string) => invoke<DirListing>("list_project_files", { rel }),
   /// True while the app runs the conversion service itself. The bearer token
   /// is then the host's own, minted per launch for its child, so Settings

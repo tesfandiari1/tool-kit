@@ -110,15 +110,18 @@ fn create_project(app: AppHandle, title: String) -> Result<workspace::ProjectSum
 /// round trip on a network volume. A sync command would run it inline on the
 /// AppKit main thread and freeze the window while it went.
 #[tauri::command]
-async fn list_project_files(app: AppHandle, rel: String) -> Result<tree::DirListing, String> {
+async fn list_project_files(app: AppHandle, rel: String) -> Result<tree::DirListing, tree::ListError> {
     let cfg = settings::load(&app);
+    // Not `gone`: the tree asks for its first folders while the onboarding
+    // write is still in flight, and answering that by dropping every expanded
+    // row would empty the persisted expansion on the way in.
     let workspace = cfg
         .workspace_path
         .clone()
-        .ok_or_else(|| "No workspace configured".to_string())?;
+        .ok_or_else(|| tree::ListError::transient("No workspace configured"))?;
     tauri::async_runtime::spawn_blocking(move || tree::list(Path::new(&workspace), &rel, &cfg))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| tree::ListError::transient(e.to_string()))?
 }
 
 /// One folder the webview has already listed, and the mtime it holds for it.

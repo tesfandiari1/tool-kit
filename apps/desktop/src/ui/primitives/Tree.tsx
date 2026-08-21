@@ -39,8 +39,9 @@ export interface TreeRowProps {
   /// Undefined on a leaf, never false. `aria-expanded="false"` on a file makes
   /// every file in the tree announce as a folder nobody has opened.
   open?: boolean;
-  /// Children requested, not arrived. Marks the row busy and, with no `group`
-  /// of its own, stands one loading row in for them.
+  /// Children requested, not arrived. Marks the row busy for assistive
+  /// technology; an open branch with no `group` stands a loading row in for
+  /// them whether or not this is set.
   busy?: boolean;
   selected?: boolean;
   /// Not focusable, not selectable, not counted by type-ahead. The "Empty",
@@ -179,7 +180,10 @@ export function Tree({
         const row = e.target.closest<HTMLElement>("[data-path]");
         const path = row?.dataset.path;
         if (!row || path === undefined) return;
-        if (e.target.closest(".ui-tree__twisty")) {
+        // Branches only. The slot is reserved on leaves too, so without the
+        // qualifier the blank 12px box in front of every file name is a
+        // disclosure control: clicking it asked the host to list a file.
+        if (e.target.closest(".ui-tree__twisty.is-branch")) {
           onToggle(path, row.getAttribute("aria-expanded") !== "true", e.altKey);
           return;
         }
@@ -206,7 +210,11 @@ export function TreeRow({
   group,
   title,
 }: TreeRowProps) {
-  const body = group ?? (busy && open === true ? loadingRow(depth + 1) : undefined);
+  // An open branch always has a group. A read still in flight has not sent one
+  // yet, and a read that failed and left the row open never will, and
+  // `aria-expanded="true"` over nothing is the one shape the tree pattern has
+  // no answer for.
+  const body = group ?? (open === true ? loadingRow(depth + 1) : undefined);
   return (
     <li
       role="treeitem"

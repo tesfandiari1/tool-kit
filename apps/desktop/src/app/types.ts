@@ -65,8 +65,9 @@ export interface FileRow {
   /// The sibling result this source already has, folded into its row.
   resultPath: string | null;
   resultName: string | null;
-  /// This file opens in the document pane. Decided by the host, so a click can
-  /// never end in a `read_document` failure toast.
+  /// This file opens in the document pane: a text extension under the preview
+  /// cap. The encoding is the one thing it cannot answer — only a decode can —
+  /// so a click that fails still falls back to the card.
   openable: boolean;
   /// The same answer for `resultPath`. An `html` result is not a document this
   /// pane reads, so the source row cannot imply it.
@@ -83,6 +84,14 @@ export interface DirListing {
   truncated: number;
   /// Files with a job and no result. The project row's count.
   pending: number;
+}
+
+/// Why a listing failed. `list_project_files` rejects with this rather than a
+/// string, because the tree has to tell a folder that is gone from a volume
+/// that went away: only the first loses its place in the persisted expansion.
+export interface ListError {
+  gone: boolean;
+  message: string;
 }
 
 /// One folder the tree has listed, paired with the mtime that listing carried.
@@ -211,6 +220,22 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 export const ACTIVE: Status[] = ["queued", "working", "processing"];
+
+/// The job that speaks for a source file right now: the newest one, never the
+/// first.
+///
+/// `convert_one` appends to the queue and only a run clears it, so a file
+/// converted twice carries two rows. Reading the first hands a caller a `failed`
+/// or `done` left over from an earlier run, which hides the conversion actually
+/// in flight and leaves its Convert control enabled — one more press, one more
+/// charge. Ids come from an `AtomicU64`, so the highest is always the live one.
+export function latestJobFor(jobs: Job[], sourcePath: string): Job | null {
+  let latest: Job | null = null;
+  for (const job of jobs) {
+    if (job.sourcePath === sourcePath && (latest === null || job.id > latest.id)) latest = job;
+  }
+  return latest;
+}
 /// Above this many files, confirm before spending.
 export const BIG_RUN = 25;
 /// Rows fetched per history read. Deep enough to scroll through a month of

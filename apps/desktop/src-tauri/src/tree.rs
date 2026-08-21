@@ -49,8 +49,10 @@ pub struct FileRow {
     /// That result's file name, for the row's trailing marker.
     pub result_name: Option<String>,
     /// True when this file opens in the document pane: a text extension under
-    /// `MAX_PREVIEW_BYTES`. Decided here so a click can never round-trip into
-    /// a `read_document` failure toast.
+    /// `MAX_PREVIEW_BYTES`. Decided here so one rule answers for a source row
+    /// and the result it pairs with. It cannot answer for the encoding, which
+    /// only a decode can, so the caller still falls back to the card when the
+    /// read refuses.
     pub openable: bool,
     /// The same test, applied to `result_path`. A click on a paired source
     /// opens its result, and an `html` result is not a document this pane
@@ -71,6 +73,49 @@ pub struct DirListing {
     /// slot. Counted before truncation, because the count describes the folder
     /// rather than the rows that fit.
     pub pending: usize,
+}
+
+/// Why a listing failed, in the one distinction its caller has to act on.
+///
+/// A folder that is gone has lost its place in the tree and in the persisted
+/// expansion. Everything else — a volume asleep, a server that timed out, a
+/// permission the user can grant — is a folder that is still there, and
+/// answering it by forgetting every row the user had open would empty
+/// `expandedPaths` for good on the way through.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListError {
+    /// The folder is not there any more, or is not a folder.
+    pub gone: bool,
+    pub message: String,
+}
+
+impl ListError {
+    pub fn gone(message: impl Into<String>) -> Self {
+        Self {
+            gone: true,
+            message: message.into(),
+        }
+    }
+
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self {
+            gone: false,
+            message: message.into(),
+        }
+    }
+
+    /// Only the two kinds that prove the folder itself is gone. Everything
+    /// else, `PermissionDenied` and a dropped network volume included, leaves
+    /// the row alone.
+    fn from_io(error: &std::io::Error) -> Self {
+        use std::io::ErrorKind::{NotADirectory, NotFound};
+        if matches!(error.kind(), NotFound | NotADirectory) {
+            Self::gone(error.to_string())
+        } else {
+            Self::transient(error.to_string())
+        }
+    }
 }
 
 /// Resolve a workspace-relative path, refusing anything that leaves the
@@ -107,11 +152,13 @@ pub fn modified(workspace: &Path, rel: &str) -> Option<u64> {
 
 /// List one directory level under the workspace. `rel` is workspace-relative
 /// and is refused if it escapes.
-pub fn list(workspace: &Path, rel: &str, cfg: &Settings) -> Result<DirListing, String> {
-    let dir = resolve(workspace, rel)?;
-    let dir_meta = std::fs::metadata(&dir).map_err(|e| e.to_string())?;
+pub fn list(workspace: &Path, rel: &str, cfg: &Settings) -> Result<DirListing, ListError> {
+    // A path that escapes names no folder inside the workspace, so it is as
+    // gone as a deleted one and loses its place the same way.
+    let dir = resolve(workspace, rel).map_err(ListError::gone)?;
+    let dir_meta = std::fs::metadata(&dir).map_err(|e| ListError::from_io(&e))?;
     if !dir_meta.is_dir() {
-        return Err("Not a folder".into());
+        return Err(ListError::gone("Not a folder"));
     }
     // Only a project root holds a project.json the app wrote. A folder deeper
     // in the tree carrying that name belongs to the user.
@@ -180,13 +227,16 @@ struct Raw {
     modified_ms: u64,
 }
 
-fn read_level(dir: &Path, at_project_root: bool) -> Result<Vec<Raw>, String> {
+fn read_level(dir: &Path, at_project_root: bool) -> Result<Vec<Raw>, ListError> {
     // Finder hides dotfiles, and .git, .DS_Store and .toolkit are never what
     // the user came here to read. Same predicate the input walk uses.
     let hidden = |name: &str| name.starts_with('.');
 
     let mut raws = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+    for entry in std::fs::read_dir(dir)
+        .map_err(|e| ListError::from_io(&e))?
+        .flatten()
+    {
         let name = entry.file_name().to_string_lossy().into_owned();
         if hidden(&name) || (at_project_root && name == PROJECT_MARKER) {
             continue;
@@ -254,15 +304,21 @@ fn pair_results(raws: &[Raw], cfg: &Settings) -> Pairing {
         let Some(jt) = job_for(&raw.ext) else {
             continue;
         };
-        let key = (
-            stem_of(&raw.name).to_lowercase(),
-            jobs::output_extension_for(jt, cfg).to_string(),
-        );
+        let stem = stem_of(&raw.name).to_lowercase();
+        // Every extension this route can write, not just the chosen format: on
+        // the Backend route the service writes `.md` whatever the format says.
+        // Asking for the format alone leaves a converted file reading as
+        // unconverted, and the row goes on offering to spend.
+        let keys: Vec<(String, String)> = jobs::result_extensions_for(jt, cfg)
+            .into_iter()
+            .map(|ext| (stem.clone(), ext.to_string()))
+            .collect();
         // The plain name a first conversion writes wins over a numbered one,
         // whatever the sort order says.
-        let hit = [exact.get(&key), numbered.get(&key)]
-            .into_iter()
-            .flatten()
+        let hit = keys
+            .iter()
+            .flat_map(|key| exact.get(key))
+            .chain(keys.iter().flat_map(|key| numbered.get(key)))
             .flat_map(|candidates| candidates.iter().copied())
             .find(|&candidate| candidate != index && !pairing.claimed[candidate]);
         if let Some(hit) = hit {
@@ -382,10 +438,20 @@ fn lower(c: char) -> char {
 mod tests {
     use super::*;
 
+    /// The shipped route: the conversion service, which writes Markdown.
     fn settings(format: &str) -> Settings {
         Settings {
             datalab_format: format.into(),
             ..Settings::default()
+        }
+    }
+
+    /// Datalab over the network, which writes the chosen format and nothing
+    /// else.
+    fn direct(format: &str) -> Settings {
+        Settings {
+            conversion_route: crate::settings::ConversionRoute::Direct,
+            ..settings(format)
         }
     }
 
@@ -451,6 +517,50 @@ mod tests {
         assert_eq!(row(&html, "deck.pdf").result_name.as_deref(), Some("deck.html"));
     }
 
+    /// The conversion service writes Markdown whatever the format setting
+    /// says, so a file it converted has to read as converted under every
+    /// format. Pairing on the format alone left the row offering Convert after
+    /// a finished conversion, and every press spent again with nothing on
+    /// screen changing.
+    #[test]
+    fn a_service_result_pairs_under_a_format_the_service_never_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.pdf", "deck.md"]);
+
+        let listing = list(&root, "Inbox", &settings("html")).unwrap();
+
+        assert_eq!(names(&listing), ["deck.pdf"]);
+        assert_eq!(row(&listing, "deck.pdf").result_name.as_deref(), Some("deck.md"));
+        assert_eq!(listing.pending, 0);
+    }
+
+    /// The Datalab fallback under the same route writes the chosen format, so
+    /// both answers pair.
+    #[test]
+    fn a_fallback_result_in_the_chosen_format_pairs_on_the_same_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.pdf", "deck.html"]);
+
+        let listing = list(&root, "Inbox", &settings("html")).unwrap();
+
+        assert_eq!(names(&listing), ["deck.pdf"]);
+        assert_eq!(row(&listing, "deck.pdf").result_name.as_deref(), Some("deck.html"));
+    }
+
+    /// Direct is one writer and it writes the chosen format, so a stray `.md`
+    /// beside the source is not this run's result.
+    #[test]
+    fn the_direct_route_pairs_on_the_chosen_format_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.pdf", "deck.md"]);
+
+        let listing = list(&root, "Inbox", &direct("html")).unwrap();
+
+        assert_eq!(names(&listing), ["deck.md", "deck.pdf"]);
+        assert_eq!(row(&listing, "deck.pdf").result_name, None);
+        assert_eq!(listing.pending, 1);
+    }
+
     #[test]
     fn a_numbered_result_still_pairs_with_its_source() {
         let dir = tempfile::tempdir().unwrap();
@@ -498,8 +608,37 @@ mod tests {
 
         let err = list(&root, "Inbox/../..", &settings("markdown")).unwrap_err();
 
-        assert!(err.contains("outside the workspace"), "unexpected: {err}");
+        assert!(
+            err.message.contains("outside the workspace"),
+            "unexpected: {err:?}"
+        );
+        assert!(err.gone);
         assert!(resolve(&root, "/etc").is_err());
+    }
+
+    /// The one distinction the webview acts on. Only a folder that is really
+    /// gone loses its place in the persisted expansion, so a listing that
+    /// fails for any other reason must not claim it is.
+    #[test]
+    fn only_a_missing_folder_reports_itself_as_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.pdf"]);
+
+        assert!(list(&root, "Inbox/gone", &settings("markdown")).unwrap_err().gone);
+        assert!(
+            list(&root, "Inbox/deck.pdf", &settings("markdown"))
+                .unwrap_err()
+                .gone
+        );
+
+        let denied = root.join("Inbox/locked");
+        std::fs::create_dir_all(&denied).unwrap();
+        std::fs::set_permissions(&denied, std::os::unix::fs::PermissionsExt::from_mode(0o000))
+            .unwrap();
+        let err = list(&root, "Inbox/locked", &settings("markdown")).unwrap_err();
+        std::fs::set_permissions(&denied, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        assert!(!err.gone, "a folder we cannot read is still there: {err:?}");
     }
 
     #[test]

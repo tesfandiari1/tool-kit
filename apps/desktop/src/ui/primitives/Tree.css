@@ -95,8 +95,13 @@
   transform: rotate(90deg) translateY(1px);
 }
 
+/* A fixed slot, the width of the glyph it usually holds. The caller swaps that
+   glyph for a status dot while a job runs, and a slot sized by its content
+   would shift the whole row nine pixels when the job starts and back when it
+   ends — the reflow rule 2 exists to forbid. */
 .ui-tree__icon {
   flex: none;
+  inline-size: var(--s4);
   display: grid;
   place-items: center;
   color: var(--ink-3);

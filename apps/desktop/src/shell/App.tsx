@@ -337,7 +337,13 @@ export default function App() {
     projects,
     expandedPaths: settings.expandedPaths,
     onExpandedChange: setExpandedPaths,
-    refreshKey: runsFinished,
+    /// A finished run, plus the two settings the host's pairing rule reads: the
+    /// output format decides which sibling counts as a result, and the route
+    /// decides whether the service's own Markdown counts too. Without them the
+    /// tree goes on calling a converted file unconverted until the folder
+    /// itself moves. Deliberately not part of `scanKey`, which walks the disk
+    /// and calls the service.
+    refreshKey: `${runsFinished}:${settings.datalabFormat}:${settings.conversionRoute}`,
     showToast,
   });
 
@@ -435,6 +441,11 @@ export default function App() {
         return;
       }
       if (out.kind === "blocked") {
+        // The file is about to be staged for the user to run by hand, so the
+        // run in flight must not take the selection with it when it ends. Same
+        // call Stop makes, for the same reason: this refusal promises the file
+        // is waiting in Run, and the auto-clear would empty the list under it.
+        autoClear.current = false;
         // Staging is not optional. The Run view's hint chain is gated on a
         // non-empty selection, so bouncing without it lands the user on an
         // empty Run view with no hint and a disabled button.
@@ -1008,15 +1019,35 @@ export default function App() {
         projects={projects}
         tree={tree}
         jobs={jobs}
+        /* The card is a Quick Look surface, so it follows the selection while
+           it is up. Without this an arrow press left the card naming one file
+           and the highlighted row naming another, and the card's own Convert
+           then billed the file the user had stopped looking at. It never
+           raises the card on its own: only Space and a click do that. */
+        onSelect={(row) => {
+          showPreview((cur) => (cur === null ? null : row));
+        }}
         /* One click rule: open the best openable thing on the row, and inspect
            when there is none. A plain .md opens. A paired deck.pdf opens its
-           deck.md. An unpaired convertible and a binary raise the card. The
-           host decides `openable`, so a click can never round-trip into a
-           `read_document` failure toast. */
+           deck.md. An unpaired convertible and a binary raise the card.
+
+           The host decides `openable` from the extension and the size cap,
+           which is everything but the encoding: a Windows-1252 .csv is a text
+           row the reader refuses. So a failed open falls back to the card
+           rather than leaving the click with nothing but a toast. */
         onActivate={(row) => {
-          if (row.openable) void openPath(row.path);
-          else if (row.resultOpenable && row.resultPath !== null) void openPath(row.resultPath);
-          else showPreview(row);
+          const path = row.openable
+            ? row.path
+            : row.resultOpenable
+              ? row.resultPath
+              : null;
+          if (path === null) {
+            showPreview(row);
+            return;
+          }
+          void openPath(path).then((opened) => {
+            if (!opened) showPreview(row);
+          });
         }}
         onInspect={(row) => {
           showPreview(preview?.rel === row.rel ? null : row);

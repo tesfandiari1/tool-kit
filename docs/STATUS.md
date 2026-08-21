@@ -128,9 +128,11 @@ of Library, Run, or History on the left, the document pane on the right.
   `project.json` hidden, symlinks listed and never followed, a 500-entry cap
   that reports the remainder as one row, and a refusal for any `rel` that
   escapes the workspace. It pairs a source with its sibling result through
-  `jobs::output_extension_for`, which is now the one extension rule both writers
-  read, so a row's "already converted" mark cannot disagree with what a run
-  writes. `write_output` numbers a collision, so the pairing also matches
+  `jobs::result_extensions_for`, which names every extension the route in force
+  can write, so a row's "already converted" mark cannot disagree with what a run
+  writes. On the Backend route that is two: the service writes `.md` whatever
+  the format setting says, and only the Datalab fallback writes the chosen
+  format. `write_output` numbers a collision, so the pairing also matches
   `deck (1).md`.
 - `Tree` and `TreeRow` in `@ui`, hand-rolled, with Finder's key map: arrows
   select, Right descends, Left climbs, type-to-select, Option-click opens a

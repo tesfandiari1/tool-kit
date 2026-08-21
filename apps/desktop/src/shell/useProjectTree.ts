@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { commands } from "@/app/commands";
-import type { DirListing, ProjectSummary } from "@/app/types";
+import type { DirListing, ListError, ProjectSummary } from "@/app/types";
 import { onWindowFocused } from "@/platform/host";
 
 /// How far one Option-click descends. `NSOutlineView` opens the whole subtree,
@@ -8,6 +8,72 @@ import { onWindowFocused } from "@/platform/host";
 /// fires a thousand `read_dir` calls is a frozen tree with nothing on screen to
 /// explain it.
 const DEEP_EXPAND_DEPTH = 6;
+
+/// How many folders one Option-click may open in total.
+///
+/// The depth cap bounds the rounds, not the width, and width is where the
+/// damage is: a project holding a JS checkout has thousands of package folders
+/// on one level, and `node_modules` is not a dotfile. Every one of them would
+/// be an invoke, a row, and a line in the persisted expansion that every launch
+/// and every finished run then re-reads. The walk stops when the budget is
+/// spent, the same way it stops at the depth cap.
+const DEEP_EXPAND_BUDGET = 200;
+
+/// How many listings are ever in flight at once. Each one is a `read_dir` plus
+/// a `stat` per entry on the host's blocking pool, so a whole level issued at
+/// once is a level-sized spike on a network volume.
+const READ_LIMIT = 8;
+
+/// Run `job` over `items`, never more than `limit` at a time.
+async function mapLimit<A, B>(
+  items: readonly A[],
+  limit: number,
+  job: (item: A) => Promise<B>,
+): Promise<B[]> {
+  const out: B[] = [];
+  for (let start = 0; start < items.length; start += limit) {
+    out.push(...(await Promise.all(items.slice(start, start + limit).map(job))));
+  }
+  return out;
+}
+
+/// What a failed listing means. The host answers with a `ListError`, and only a
+/// folder that is really gone may cost the user their persisted expansion.
+/// Anything else — an unknown rejection included — is read as still there.
+export function listFailure(e: unknown): ListError {
+  if (typeof e === "object" && e !== null && "gone" in e && "message" in e) {
+    return {
+      gone: e.gone === true,
+      message: typeof e.message === "string" ? e.message : "Could not read that folder",
+    };
+  }
+  return { gone: false, message: String(e) };
+}
+
+/// The folders a finished level of a deep expand hands to the next one, capped
+/// by what is left of the budget.
+export function childDirs(level: readonly (DirListing | null)[], budget: number): string[] {
+  const dirs: string[] = [];
+  for (const listing of level) {
+    for (const row of listing?.entries ?? []) {
+      if (!row.isDir) continue;
+      if (dirs.length === budget) return dirs;
+      dirs.push(row.rel);
+    }
+  }
+  return dirs;
+}
+
+/// Where the selection goes when `doomed` and everything under it is about to
+/// unmount: to its parent, and only when the selection is inside it. Null when
+/// there is nothing to move, or when `doomed` is a project root, whose parent
+/// is the workspace and has no row.
+export function climbTarget(selected: string | null, doomed: string): string | null {
+  if (selected === null) return null;
+  if (selected !== doomed && !selected.startsWith(`${doomed}/`)) return null;
+  const cut = doomed.lastIndexOf("/");
+  return cut > 0 ? doomed.slice(0, cut) : null;
+}
 
 /// How long the focus reconcile waits, and how long it then stays quiet.
 /// `Focused(true)` is AppKit's `windowDidBecomeKey:`, so it arrives on every
@@ -81,8 +147,11 @@ export function useProjectTree({
   /// store.
   expandedPaths: string[];
   onExpandedChange: (paths: string[]) => void;
-  /// Bumped once per finished run. Re-lists the roots and everything open.
-  refreshKey: number;
+  /// Re-lists the roots and everything open when it changes. It carries the
+  /// finished-run counter and every setting the host's pairing rule reads, so
+  /// changing the output format cannot leave a converted file marked
+  /// unconverted until the folder itself moves.
+  refreshKey: string;
   showToast: (message: string) => void;
 }): ProjectTreeState {
   const [listings, setListings] = useState<Record<string, DirListing>>({});
@@ -121,27 +190,43 @@ export function useProjectTree({
   );
 
   /// A row that unmounts while it holds focus drops focus on `<body>`, which
-  /// ends keyboard navigation with nothing on screen to say so. Deleting the
-  /// selected file in Finder does exactly that on the next reconcile, so the
-  /// selection and the focus both climb to the folder before its children are
-  /// replaced.
-  const keepFocusInside = useCallback((rel: string, listing: DirListing) => {
-    const current = selectedRef.current;
-    if (!current?.startsWith(`${rel}/`)) return;
-    // Direct children only. A deeper row's own folder answers for it.
-    if (current.slice(rel.length + 1).includes("/")) return;
-    if (listing.entries.some((entry) => entry.rel === current)) return;
+  /// ends keyboard navigation with nothing on screen to say so. Move the
+  /// selection, and the focus with it, to the parent of the row that is going.
+  const climbFrom = useCallback((doomed: string) => {
+    const target = climbTarget(selectedRef.current, doomed);
+    if (target === null) return;
     const active = document.activeElement;
-    if (active instanceof HTMLElement && active.dataset.path === current) {
-      document.querySelector<HTMLElement>(`[data-path="${CSS.escape(rel)}"]`)?.focus();
+    const path = active instanceof HTMLElement ? (active.dataset.path ?? null) : null;
+    if (path !== null && (path === doomed || path.startsWith(`${doomed}/`))) {
+      document.querySelector<HTMLElement>(`[data-path="${CSS.escape(target)}"]`)?.focus();
     }
-    selectedRef.current = rel;
-    setSelected(rel);
+    selectedRef.current = target;
+    setSelected(target);
   }, []);
 
-  /// Read one folder, and on failure drop it rather than leaving stale children
-  /// under an open row. A background read stays silent, so a folder deleted in
-  /// Finder does not toast once per finished run.
+  /// Deleting the selected file in Finder unmounts its row on the next
+  /// reconcile, so the selection climbs before the children are replaced.
+  const keepFocusInside = useCallback(
+    (rel: string, listing: DirListing) => {
+      const current = selectedRef.current;
+      if (!current?.startsWith(`${rel}/`)) return;
+      // The direct child that carries the selection, whether that is the row
+      // itself or something deeper inside it. A deeper row's own folder
+      // usually answers for it, but a folder deleted in Finder never gets that
+      // far: its own listing fails, and this is the last one that can see the
+      // whole subtree go.
+      const child = `${rel}/${current.slice(rel.length + 1).split("/")[0]}`;
+      if (listing.entries.some((entry) => entry.rel === child)) return;
+      climbFrom(child);
+    },
+    [climbFrom],
+  );
+
+  /// Read one folder. A folder the host reports as gone loses its children, its
+  /// place in the persisted expansion and, if the selection was inside it, the
+  /// focus; every other failure changes nothing, because a volume asleep is not
+  /// a folder deleted. A background read stays silent either way, so a folder
+  /// deleted in Finder does not toast once per finished run.
   const read = useCallback(
     async (rel: string, mode: ReadMode): Promise<DirListing | null> => {
       if (inFlight.current.has(rel)) return null;
@@ -165,7 +250,21 @@ export function useProjectTree({
         }
         return listing;
       } catch (e) {
-        if (mode === "click") showToast(String(e));
+        const failure = listFailure(e);
+        if (mode === "click") showToast(failure.message);
+        // A folder that is still there keeps its children and its place in the
+        // persisted expansion. Dropping both on every failure meant one
+        // sleeping volume, or one read that raced the settings write, emptied
+        // `expandedPaths` for good — silently, on a background read the user
+        // never asked for.
+        if (!failure.gone) {
+          // The user clicked and it did not open, so the row closes again. The
+          // toast above says why.
+          if (mode === "click") setExpanded((cur) => cur.filter((p) => p !== rel));
+          return null;
+        }
+        // Gone. Its whole subtree is about to unmount, focus and all.
+        climbFrom(rel);
         cache.current = Object.fromEntries(
           Object.entries(cache.current).filter(([path]) => path !== rel),
         );
@@ -177,7 +276,7 @@ export function useProjectTree({
         if (marks) setBusy((cur) => cur.filter((p) => p !== rel));
       }
     },
-    [keepFocusInside, setExpanded, showToast],
+    [climbFrom, keepFocusInside, setExpanded, showToast],
   );
 
   /// Which of these folders are worth a listing: everything the cache has
@@ -206,16 +305,22 @@ export function useProjectTree({
     async (rel: string, deep: boolean, mode: ReadMode) => {
       let level = [rel];
       const opened: string[] = [];
+      let budget = DEEP_EXPAND_BUDGET;
       for (let depth = 0; level.length > 0; depth += 1) {
-        const results = await Promise.all(level.map((path) => read(path, mode)));
-        if (!deep || depth >= DEEP_EXPAND_DEPTH) break;
-        const next = results.flatMap((listing) =>
-          (listing?.entries ?? []).filter((row) => row.isDir).map((row) => row.rel),
-        );
+        const results = await mapLimit(level, READ_LIMIT, (path) => read(path, mode));
+        if (!deep || depth >= DEEP_EXPAND_DEPTH || budget === 0) break;
+        const next = childDirs(results, budget);
+        budget -= next.length;
         opened.push(...next);
         level = next;
       }
-      if (opened.length > 0) {
+      // Only if the user still has the branch open. These awaits can run for a
+      // second over a network volume, and a click that collapses `rel` in the
+      // middle of one used to be answered by writing all six levels of its
+      // descendants into the persisted expansion anyway — invisibly, because
+      // `rel` itself is gone from the list, until the next click opened the
+      // whole subtree at once.
+      if (opened.length > 0 && expandedRef.current.includes(rel)) {
         setExpanded((cur) => Array.from(new Set([...cur, ...opened])));
       }
     },
@@ -231,7 +336,8 @@ export function useProjectTree({
   // host can answer `list_project_files` from that same settings.json. Asking
   // ahead of the write returns "No workspace configured".
   useEffect(() => {
-    for (const rel of reconcileTargets(projects, expandedRef.current)) void read(rel, "refresh");
+    const targets = reconcileTargets(projects, expandedRef.current);
+    void mapLimit(targets, READ_LIMIT, (rel) => read(rel, "refresh"));
   }, [projects, read, refreshKey]);
 
   // The window came back to the front, so re-read what changed. This is the
@@ -261,7 +367,8 @@ export function useProjectTree({
         last = Date.now();
         const targets = reconcileTargets(projectsRef.current, expandedRef.current);
         void (async () => {
-          for (const rel of await staleAmong(targets)) void read(rel, "reconcile");
+          const stale = await staleAmong(targets);
+          await mapLimit(stale, READ_LIMIT, (rel) => read(rel, "reconcile"));
         })();
       }, wait);
     });

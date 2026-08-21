@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { FolderIcon, TrayIcon } from "@phosphor-icons/react";
 import { Button, Mono, StatusDot, Tree, TreeRow } from "@ui";
-import { ACTIVE, type FileRow, type Job, type ProjectSummary } from "@/app/types";
+import { ACTIVE, latestJobFor, type FileRow, type Job, type ProjectSummary } from "@/app/types";
 import type { ProjectTreeState } from "@/shell/useProjectTree";
 import { fileGlyph } from "./fileGlyph";
 
@@ -30,6 +30,7 @@ export function ProjectTree({
   projects,
   tree,
   jobs,
+  onSelect,
   onActivate,
   onInspect,
   onConvert,
@@ -40,6 +41,9 @@ export function ProjectTree({
   /// conversion is invisible here and the only remedy the user can see is
   /// pressing Convert again, which bills again.
   jobs: Job[];
+  /// The selection moved, by arrow, by type-ahead or by click. Null on a
+  /// project root, which is a branch rather than a file.
+  onSelect: (row: FileRow | null) => void;
   onActivate: (row: FileRow) => void;
   onInspect: (row: FileRow) => void;
   onConvert: (row: FileRow) => void;
@@ -73,7 +77,7 @@ export function ProjectTree({
   const renderRow = (row: FileRow, depth: number): ReactNode => {
     rows.set(row.rel, row);
     const open = row.isDir ? tree.expanded.has(row.rel) : undefined;
-    const job = jobs.find((j) => j.sourcePath === row.path) ?? null;
+    const job = latestJobFor(jobs, row.path);
     const Glyph = fileGlyph(row.ext, row.isDir);
 
     return (
@@ -190,7 +194,10 @@ export function ProjectTree({
     <Tree
       label="Library"
       className="lib-tree"
-      onSelect={tree.select}
+      onSelect={(rel) => {
+        tree.select(rel);
+        onSelect(rows.get(rel) ?? null);
+      }}
       onActivate={activate}
       onInspect={(rel) => {
         const row = rows.get(rel);

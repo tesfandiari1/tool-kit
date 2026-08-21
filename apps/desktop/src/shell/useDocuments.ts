@@ -23,18 +23,22 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
   /// rather than three call sites that have to remember.
   const [preview, setPreview] = useState<FileRow | null>(null);
 
+  /// Reports whether the pane ended up showing the file. A caller with somewhere
+  /// else to put it can then act: the library falls back to the inspector card,
+  /// because `openable` is decided from the extension and the size and only a
+  /// decode can answer for the encoding.
   const open = useCallback(
-    async (title: string, outputPath: string | null) => {
+    async (title: string, outputPath: string | null): Promise<boolean> => {
       if (!outputPath) {
         showToast("No result file to open");
-        return;
+        return false;
       }
       setPreview(null);
       // An open document is already the file on disk, plus any unsaved edit.
       // Re-reading it here would throw that edit away to learn nothing.
       if (docs.some((d) => d.id === outputPath)) {
         setList((cur) => ({ ...cur, activeId: outputPath }));
-        return;
+        return true;
       }
       try {
         const { text, mtimeMs } = await commands.readDocument(outputPath);
@@ -48,8 +52,10 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
           mtimeMs,
         };
         setList((cur) => activateOrInsert(cur.docs, doc));
+        return true;
       } catch (e) {
         showToast(String(e));
+        return false;
       }
     },
     [docs, showToast],
