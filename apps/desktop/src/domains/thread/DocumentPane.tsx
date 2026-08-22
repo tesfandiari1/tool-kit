@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { CodeIcon, CopyIcon, EyeIcon, FolderOpenIcon, XIcon } from "@phosphor-icons/react";
-import { Button, cx, Path, Row, Segmented, Spacer, SourceEditor, StatusDot, Tabs, Text } from "@ui";
+import { Button, cx, Path, Row, Segmented, Spacer, SourceEditor, StatusDot, Tabs, Text, Well } from "@ui";
 import { tildePath } from "@/app/format";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { isDirty, saveNote, saveTone, type DocMode, type OpenDoc } from "./model";
@@ -18,6 +18,7 @@ export function DocumentPane({
   mode,
   allowEdit = true,
   inspector,
+  dragging = false,
   onSelect,
   onClose,
   onModeChange,
@@ -37,6 +38,9 @@ export function DocumentPane({
   /// unmounting on a stray tree click would throw away the reader's scroll
   /// position with nothing to say so.
   inspector?: ReactNode;
+  /// A file is over the window right now. The empty state is the app's only
+  /// drop target once a workspace is bound, so it has to answer a drag.
+  dragging?: boolean;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onModeChange: (mode: DocMode) => void;
@@ -56,12 +60,23 @@ export function DocumentPane({
       </section>
     ) : (
       <section className="doc doc-empty">
-        <Text size="sm" tone="faint">
-          Nothing open yet
-        </Text>
+        {/* The window's one drop target. The handler has always been
+            window-wide, but until now the only thing that said so lived inside
+            Run, so a user sitting in the library was told nothing. */}
+        <Well className={dragging ? "is-dropping" : undefined} selectable={false}>
+          <div className="drop-empty">
+            <Text size="sm" tone="faint">
+              Drop files here to turn them into markdown
+            </Text>
+            <Text size="xs" tone="ghost" className="drop-hint">
+              PDFs, Word and Office files, images, audio, video. Or press ⌘O to
+              pick them.
+            </Text>
+          </div>
+        </Well>
         <Text size="xs" tone="ghost">
-          Click a text file in the library to read it here. Everything else opens
-          as a card.
+          Click a text file in the library to read and edit it here. Everything
+          else opens as a card.
         </Text>
       </section>
     );

@@ -175,7 +175,14 @@ export function ProjectTree({
     );
   };
 
-  const nodes = pinned(projects).map(renderProject);
+  // `setup_workspace` always mints an Inbox, so an empty list means the host
+  // could not read the workspace rather than that the user has no projects. A
+  // bare `ul[role=tree]` renders as nothing at all, which reads as a broken
+  // window; say which of the two it is instead.
+  const nodes =
+    projects.length === 0
+      ? [quietRow(`${QUIET}noprojects`, 0, "No projects found in this folder")]
+      : pinned(projects).map(renderProject);
 
   /// A click or Enter opens a folder and hands a file to the caller. Arrowing
   /// past a folder must not open forty tabs, which is why selection and

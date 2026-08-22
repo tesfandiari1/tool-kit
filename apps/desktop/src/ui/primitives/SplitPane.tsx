@@ -63,8 +63,8 @@ export function SplitPane({
   // nothing under src/ui may import from the app. App.tsx passes the canonical
   // values, so these only cover a caller that passes none. Change one, change
   // the other.
-  defaultStart = 33,
-  minStart = "300px",
+  defaultStart = 26,
+  minStart = "240px",
   minEnd = "50%",
   layout,
   onLayoutChanged,
@@ -73,7 +73,11 @@ export function SplitPane({
 }: SplitPaneProps) {
   const groupRef = useGroupRef();
   const wasCollapsed = useRef(collapsed);
-  const owedRestore = useRef(false);
+  /// Owed at mount, not just on the collapsed -> expanded edge. `defaultLayout`
+  /// is validated against the panels the group has registered, and the second
+  /// one arrives a render later, so a split that never collapses drops the
+  /// layout whole and hands out an even split with nothing to correct it.
+  const owedRestore = useRef(true);
   // Never spread from `layout`: `setLayout` is positional, so key order picks
   // which pane gets which width. See `paneLayout`.
   const intended = useMemo(() => paneLayout(layout, defaultStart), [layout, defaultStart]);

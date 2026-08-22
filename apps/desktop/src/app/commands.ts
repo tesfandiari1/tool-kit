@@ -37,6 +37,10 @@ export const commands = {
   /// Creates the workspace, or adopts the one already there, and guarantees an
   /// Inbox project either way.
   setupWorkspace: (path: string) => invoke<WorkspaceInfo>("setup_workspace", { path }),
+  /// Adopts the configured workspace on an ordinary launch. Answers with a
+  /// `welcomePath` only on the launch that actually wrote the file, so the
+  /// welcome document opens once and never greets the user again.
+  ensureWorkspace: () => invoke<WorkspaceInfo | null>("ensure_workspace"),
   listProjects: () => invoke<ProjectSummary[]>("list_projects"),
   createProject: (title: string) => invoke<ProjectSummary>("create_project", { title }),
   /// One directory level, lazily. `rel` is workspace-relative, so the webview

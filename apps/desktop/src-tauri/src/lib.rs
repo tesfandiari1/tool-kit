@@ -93,6 +93,22 @@ fn setup_workspace(path: String) -> Result<workspace::WorkspaceInfo, String> {
     workspace::setup_workspace(&path)
 }
 
+/// Adopts the configured workspace on an ordinary launch, and reports a welcome
+/// file only when this call is the one that wrote it.
+///
+/// Onboarding is the only other door to `setup_workspace`, so without this a
+/// user who bound their workspace before the welcome file existed would never
+/// get one: their marker is already on disk, so the gate never runs again.
+/// `setup_workspace` is idempotent and the marker makes the seed once-only, so
+/// the cost on every later launch is one small read.
+#[tauri::command]
+fn ensure_workspace(app: AppHandle) -> Result<Option<workspace::WorkspaceInfo>, String> {
+    match settings::load(&app).workspace_path {
+        Some(path) => workspace::setup_workspace(&path).map(Some),
+        None => Ok(None),
+    }
+}
+
 #[tauri::command]
 fn list_projects(app: AppHandle) -> Result<Vec<workspace::ProjectSummary>, String> {
     workspace::list_projects(&app)
@@ -1411,6 +1427,7 @@ pub fn run() {
             suggested_workspace_path,
             inspect_workspace_path,
             setup_workspace,
+            ensure_workspace,
             list_projects,
             create_project,
             list_project_files,

@@ -234,6 +234,18 @@ export default function App() {
     // opens empty.
     const pendingSave = settingsSave.current;
     void pendingSave
+      // Before the listing, so a welcome file this launch seeds is already on
+      // disk when the tree reads the folder. It answers with a path only on
+      // the launch that wrote it, so this opens the document once in the life
+      // of a workspace rather than greeting the user every time.
+      .then(() => commands.ensureWorkspace())
+      .then((info) => {
+        if (live && info?.welcomePath) void openPath(info.welcomePath);
+      })
+      .catch(() => {
+        // A workspace that cannot be adopted still lists below, and that
+        // failure is the one worth reporting.
+      })
       .then(() => commands.listProjects())
       .then((p) => {
         if (live) setProjects(p);
@@ -247,7 +259,7 @@ export default function App() {
     return () => {
       live = false;
     };
-  }, [libraryMode, workspacePath, runsFinished, showToast]);
+  }, [libraryMode, workspacePath, runsFinished, showToast, openPath]);
 
   // Rescan whenever the selection changes: the counts drive the run label, the
   // job autodetect, and the suggested output folder.
@@ -1073,26 +1085,29 @@ export default function App() {
       />
     );
 
-  // One view at a time, at the pane's full width. No shell wrapper: the tree,
-  // the run column and the history all want the whole column, and the sidebar
-  // that used to sit in front of them was what forced Run under its floor.
-  const left = view === "run" ? runPanel : view === "history" ? historyPanel : libraryPane;
-
-  // Always the same element in the same slot, collapsed to one pane when
-  // nothing is open. Swapping between `<SplitPane>` and a bare `left` moves the
-  // column to a different position in the tree, and React answers a move by
-  // remounting: closing the last document threw away a half-typed API key in
+  // Two panes, always. The sidebar is the app's one fixed landmark: the nav
+  // swaps what the end pane holds and the library stays put underneath it, so
+  // the file you are working on never leaves the screen to reach Run.
+  //
+  // Always the same element in the same slot. Swapping between `<SplitPane>`
+  // and a bare pane moves the column to a different position in the tree, and
+  // React answers a move by remounting: that threw away a half-typed API key in
   // Settings and whatever was in the History search box.
   const body = (
     <SplitPane
       className="workspace"
-      collapsed={!expanded}
-      start={left}
+      start={libraryPane}
       end={
+        view === "run" ? (
+          runPanel
+        ) : view === "history" ? (
+          historyPanel
+        ) : (
         <DocumentPane
           docs={docs}
           activeId={activeId}
           mode={mode}
+          dragging={dragging}
           inspector={
             preview === null ? undefined : (
               <FileInspector
@@ -1148,6 +1163,7 @@ export default function App() {
             if (path) void call(() => commands.revealPath(path));
           }}
         />
+        )
       }
       // Passed rather than left to the primitive's defaults. The split is a
       // window measurement, so it lives with the rest of them in geometry.ts.

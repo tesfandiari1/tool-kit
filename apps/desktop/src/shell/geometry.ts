@@ -13,8 +13,8 @@ export const INITIAL = { width: 560, minWidth: 480, minHeight: 460 } as const;
 
 /// The workspace is resizable inside these bounds. `minWidth` is derived, not
 /// picked: `SPLIT.start`% of it has to clear `SPLIT.minStart`, or the pixel
-/// floor beats the ratio at every width. 33% of 960 is 317px, which clears the
-/// 300px floor and still leaves the document 643px, about 68 characters.
+/// floor beats the ratio at every width. 26% of 960 is 249px, which clears the
+/// 240px sidebar floor and leaves the main area 710px.
 export const WORKSPACE = { minWidth: 960, minHeight: 560, width: 1180, height: 780 } as const;
 
 /// First run. Deliberately between the two: wide enough that one sentence and
@@ -22,21 +22,22 @@ export const WORKSPACE = { minWidth: 960, minHeight: 560, width: 1180, height: 7
 /// arriving afterwards is a visible change rather than nothing happening.
 export const ONBOARDING = { width: 720, height: 520, minWidth: 640, minHeight: 480 } as const;
 
-/// The document owns two thirds. `minEnd` is a floor, not a preference: the
-/// pane exists to be read.
+/// The sidebar owns the left edge and the main area owns the rest. The split
+/// never collapses: the sidebar is the app's one fixed landmark, so the nav
+/// swaps the end pane and the start pane stays where the user left it.
 ///
-/// The start pane holds one view at a time at its full width, so `minStart` is
-/// the larger of the two things that go in it.
+/// `minStart` is what the *tree* needs, not what the run column needs. Run and
+/// History live in the end pane now, so the widest thing the start pane ever
+/// draws is a tree row: four levels of --s3 indent is 48px, plus the row's own
+/// chrome, which leaves about 160px of name column at the floor. The indent cap
+/// is what holds that. Uncapped, a deep folder walks its label off the edge.
 ///
-/// The run column is the binding one. Its job segmented sets CONVERT and
-/// TRANSCRIBE in tracked mono uppercase, about 185px together, plus the panel's
-/// --s4 padding and the column's --s5 inset. Below 300px that control clips,
-/// which is what a narrower floor produced.
-///
-/// The tree stays under that, and the indent cap is what keeps it there: four
-/// levels of --s3 is 48px, which leaves about 200px of name column at this
-/// floor. Uncapped, a deep folder would walk its label off the edge instead.
-export const SPLIT = { start: 33, minStart: "300px", minEnd: "50%" } as const;
+/// `minEnd` is a floor, not a preference. It has to clear the run column's job
+/// segmented, which sets CONVERT and TRANSCRIBE in tracked mono uppercase at
+/// about 185px, plus the panel's --s4 padding and the column's --s5 inset. 50%
+/// of `WORKSPACE.minWidth` is 480px, comfortably past that, and the same floor
+/// is what keeps a document readable.
+export const SPLIT = { start: 26, minStart: "240px", minEnd: "50%" } as const;
 
 /// Ten points a step. `useZoom` walks these as a ladder of fixed rungs.
 export const ZOOM = { min: 0.5, max: 2, step: 0.1, default: 1 } as const;

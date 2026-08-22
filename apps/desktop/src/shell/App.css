@@ -172,19 +172,6 @@ svg {
   flex-direction: column;
   gap: var(--s4);
 }
-/* One measure for the whole window when the split is collapsed, whichever view
-   the pane holds. It applies only there; inside an open pane the column is the
-   pane and must not centre itself away from the seam.
-
-   620px clears the widest row the tree can draw: the depth-4 indent and the
-   row's own chrome are about 116px, and a 40-character name beside a paired
-   result name comes to roughly 400px more. Run and History are `.flow` and were
-   already sized by it. */
-.ui-split--collapsed .flow,
-.ui-split--collapsed .lib-side {
-  max-width: 620px;
-  margin: 0 auto;
-}
 
 /* A plain column stack: the head and foot hold their height and `.flow-scroll`
    takes the slack. The workspace variant keeps 100vh and pane scroll instead. */
@@ -333,10 +320,10 @@ svg {
 
 /* --- Library --------------------------------------------------------------
    The whole left pane: the workspace it belongs to, its projects as a tree, and
-   the two ways out. Run and History take the same pane when the nav asks for
-   them, so the insets here match `.flow`'s exactly or the left edge would shift
-   8px on every view switch. The split's own hairline is the divider, so this
-   carries no border of its own. */
+   the two ways out. It is the app's one fixed landmark, so it holds this pane
+   whatever the nav does to the other one. The insets still match `.flow`'s,
+   which is what keeps the sidebar and the run column reading as one window. The
+   split's own hairline is the divider, so this carries no border of its own. */
 .lib-side {
   flex: 1;
   display: flex;
@@ -1004,9 +991,17 @@ svg {
 .doc-empty {
   align-items: center;
   justify-content: center;
-  gap: var(--s1);
+  gap: var(--s4);
   text-align: center;
   padding: var(--s6);
+}
+/* The well is the pane's subject, so it takes a measure rather than shrinking
+   to fit its own copy. 34rem is the reading measure the settings panel already
+   uses, and `align-items: center` above would otherwise collapse it to the
+   width of the longest line. */
+.doc-empty .ui-well {
+  width: 100%;
+  max-width: 34rem;
 }
 
 /* --- File inspector -------------------------------------------------------
