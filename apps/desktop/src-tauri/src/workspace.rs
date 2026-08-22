@@ -32,8 +32,8 @@ pub struct WorkspaceInfo {
     /// took it over rather than minting a new identity.
     pub adopted: bool,
     /// Set only when this call actually wrote `Inbox/welcome.md`. The host is
-    /// the only thing that knows, and first run opens it as a real document
-    /// tab.
+    /// the only thing that knows, and the caller opens it as a real document
+    /// tab. Null on every later call, adopted or not.
     pub welcome_path: Option<String>,
 }
 
@@ -56,6 +56,10 @@ struct WorkspaceMeta {
     schema_version: u32,
     id: String,
     created_at: String,
+    /// Whether `Inbox/welcome.md` was ever written here. `default` so a marker
+    /// written before this field reads as "not yet" and gets the file once.
+    #[serde(default)]
+    welcome_seeded: bool,
 }
 
 /// `{Project}/project.json`
@@ -95,13 +99,14 @@ pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
 
     let workspace_file = toolkit.join("workspace.json");
     let adopted = workspace_file.is_file();
-    let workspace = if adopted {
+    let mut workspace = if adopted {
         read_json::<WorkspaceMeta>(&workspace_file)?
     } else {
         let meta = WorkspaceMeta {
             schema_version: 1,
             id: format!("w_{}", uuid::Uuid::new_v4()),
             created_at: iso_utc_now(),
+            welcome_seeded: false,
         };
         write_json(&workspace_file, &meta)?;
         meta
@@ -126,20 +131,29 @@ pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
     };
 
     // The first thing a new user reads, and a file they own from the moment it
-    // lands. Gated on `adopted` rather than on the Inbox mint: a folder
-    // renamed in Finder makes a fresh Inbox on the next launch, and gating
-    // there would resurrect a file the user deleted for good.
+    // lands. The marker gates it, not the Inbox mint: a folder renamed in
+    // Finder makes a fresh Inbox on the next launch, and gating there would
+    // resurrect a file the user deleted for good.
     //
     // A write failure degrades to `None`. A workspace with no welcome file is
-    // a working workspace.
+    // a working workspace, and the marker stays false so the next launch
+    // retries.
     let welcome = inbox_dir.join("welcome.md");
-    let welcome_path = if !adopted && !welcome.exists() {
+    let welcome_path = if workspace.welcome_seeded || welcome.exists() {
+        None
+    } else {
         std::fs::write(&welcome, include_str!("welcome.md"))
             .ok()
             .map(|_| welcome.to_string_lossy().into_owned())
-    } else {
-        None
     };
+
+    // Record the seed the moment the file is there, so deleting it later is
+    // final. A marker that fails to write is not worth failing setup over: the
+    // file itself answers the same question on the next launch.
+    if !workspace.welcome_seeded && (welcome_path.is_some() || welcome.exists()) {
+        workspace.welcome_seeded = true;
+        let _ = write_json(&workspace_file, &workspace);
+    }
 
     let index = open_index(&toolkit.join("index.db"))?;
     index
