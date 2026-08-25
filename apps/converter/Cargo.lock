@@ -1459,9 +1459,9 @@ dependencies = [
 
 [[package]]
 name = "pdf-inspector"
-version = "1.15.0"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71d004766b3256499a00dc15c05d99872a24ab6d95ee34b6409eaaec4b793b3a"
+checksum = "6cdfc6057e1b38a2ae84490c5e64abc5c81738d4d5ac1ccc55cf1a2c9b87334e"
 dependencies = [
  "env_logger",
  "include_dir",
