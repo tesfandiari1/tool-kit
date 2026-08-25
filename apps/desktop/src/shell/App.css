@@ -548,30 +548,35 @@ svg {
    scrollport so the gutter sits beside the fields, not an arm's length away
    from them. Sections step down the spacing ladder: --s4 between groups,
    --s3 between fields, --s2 inside each control (owned by @ui Field). */
-.settings-panel.flow {
-  padding-inline: 0;
-  padding-bottom: 0;
-}
-.settings-panel .flow-head {
-  padding-inline: var(--s5);
-}
-.settings-panel .flow-scroll {
-  padding: var(--s4) var(--s5) var(--s5);
-  scrollbar-gutter: stable;
-}
-.settings-panel .settings-body {
-  width: 100%;
-  max-width: 34rem;
+/* The sheet's panel. Not `.flow`: that is the window column's layout, insets
+   at --s5 against the window edge, and nesting it in a 620px card gave the
+   form the window's own margins. Worse, `.flow` is a flex column with a
+   `flex: 1` scroll child inside `.ui-sheet__body`, which is a block — the
+   sizing never resolved, so the inner region never scrolled, the outer one
+   did, and the head band scrolled off the top of the card. */
+.settings {
   display: flex;
   flex-direction: column;
-  gap: var(--s4);
 }
-.settings-panel .settings-section {
-  min-width: 0;
+/* Sticky rather than a sibling row, which keeps the sheet body the only
+   scroll container. It needs its own ground: the rows pass under it. */
+.settings__nav {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--s3) var(--s4);
+  background: var(--surface-solid);
+  border-bottom: 1px solid var(--rule);
+}
+/* --s4 is panel body padding, one rung below the --s5 the window column uses
+   against the glass. The card is the frame here, so the inset steps down. */
+.settings__body {
+  padding: var(--s4);
+  scrollbar-gutter: stable;
 }
 /* Fields revealed by a parent choice read as belonging to it: one step closer
-   than the section gap, not another full panel apart. */
-.settings-panel .settings-nest {
+   than the group gap, not another full panel apart. */
+.settings-nest {
   padding-top: var(--s1);
 }
 /* The box shares its row with Save and Remove in a column that can be a third

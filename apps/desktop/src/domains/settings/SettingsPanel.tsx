@@ -1,25 +1,38 @@
 import { useId, useState } from "react";
-import { XIcon } from "@phosphor-icons/react";
 import {
   Badge,
   Button,
-  Disclosure,
-  Divider,
   Field,
   Input,
-  Label,
   Mono,
-  Row,
+  Segmented,
   Select,
-  Spacer,
   Stack,
   Switch,
   TextInput,
 } from "@ui";
 import { commands } from "@/app/commands";
 import { type SecretId, type SecretStatus, type Settings } from "@/app/types";
-import { FlowLayout } from "@/shell/FlowLayout";
 
+/// Which band of settings the sheet is showing. Session state, deliberately
+/// not persisted: a setting is looked up, changed, and left, and reopening on
+/// last week's tab is a worse default than reopening on the first one.
+type Group = "conversion" | "providers" | "runs" | "advanced";
+
+const GROUPS: { value: Group; label: string }[] = [
+  { value: "conversion", label: "Conversion" },
+  { value: "providers", label: "Providers" },
+  { value: "runs", label: "Runs" },
+  { value: "advanced", label: "Advanced" },
+];
+
+/// Settings, in four bands behind one nav.
+///
+/// It used to be every control in one scroll, wrapped in `FlowLayout` — which
+/// is the *window column's* layout, so the form carried the window's own
+/// margins inside a 620px card, and its scroll region never resolved a height
+/// against the sheet body that was already scrolling. The panel is a plain
+/// column now, and the sheet body is the only thing that scrolls.
 export function SettingsPanel({
   settings,
   secrets,
@@ -27,7 +40,6 @@ export function SettingsPanel({
   onPersist,
   onSecrets,
   onToast,
-  onClose,
 }: {
   settings: Settings;
   secrets: SecretStatus;
@@ -39,11 +51,8 @@ export function SettingsPanel({
   onPersist: (patch: Partial<Settings>) => void;
   onSecrets: (s: SecretStatus) => void;
   onToast: (msg: string) => void;
-  /// The close control the sheet does not draw itself. Escape is the other way
-  /// out.
-  onClose: () => void;
 }) {
-  const [advanced, setAdvanced] = useState(false);
+  const [group, setGroup] = useState<Group>("conversion");
 
   const saveKey = async (provider: SecretId, value: string) => {
     try {
@@ -56,21 +65,25 @@ export function SettingsPanel({
   };
 
   return (
-    <FlowLayout
-      className="settings-panel"
-      head={
-        <Row gap={2}>
-          <Spacer />
-          <Button variant="ghost" size="sm" iconOnly icon={<XIcon />} onClick={onClose} aria-label="Close settings" />
-        </Row>
-      }
-    >
-      <div className="settings-body">
-        <section className="settings-section">
+    <div className="settings">
+      {/* Sticky rather than a second flex row, so the sheet body stays the one
+          scroll container. Two nested scrollers is what broke the old panel. */}
+      <div className="settings__nav">
+        <Segmented
+          options={GROUPS}
+          value={group}
+          onChange={setGroup}
+          label="Settings section"
+          size="sm"
+        />
+      </div>
+
+      <div className="settings__body">
+        {group === "conversion" && (
           <Stack gap={3}>
             <Select
               label="Conversion route"
-              hint="Direct keeps today's Datalab path. Backend will route each supported file through the local conversion service."
+              hint="Direct keeps today's Datalab path. Backend routes each supported file through the local conversion service."
               value={settings.conversionRoute}
               onChange={(e) => {
                 onPersist({ conversionRoute: e.target.value === "backend" ? "backend" : "direct" });
@@ -111,24 +124,13 @@ export function SettingsPanel({
                     onPersist({ customWords });
                   }}
                 />
-                {!appOwnsBackend && (
-                  <KeyField
-                    label="Backend token"
-                    hint="Bearer token"
-                    saved={secrets.backend}
-                    onSave={(v) => void saveKey("backend", v)}
-                  />
-                )}
               </Stack>
             )}
           </Stack>
-        </section>
+        )}
 
-        <Divider />
-
-        <section className="settings-section">
+        {group === "providers" && (
           <Stack gap={3}>
-            <Label tone="strong">Provider keys</Label>
             <KeyField
               label="Datalab"
               hint="X-API-Key"
@@ -141,12 +143,18 @@ export function SettingsPanel({
               saved={secrets.revai}
               onSave={(v) => void saveKey("revai", v)}
             />
+            {!appOwnsBackend && (
+              <KeyField
+                label="Backend token"
+                hint="Bearer token"
+                saved={secrets.backend}
+                onSave={(v) => void saveKey("backend", v)}
+              />
+            )}
           </Stack>
-        </section>
+        )}
 
-        <Divider />
-
-        <section className="settings-section">
+        {group === "runs" && (
           <Stack gap={3}>
             <Switch
               label="Skip files already done"
@@ -158,48 +166,39 @@ export function SettingsPanel({
             />
             <Switch
               label="High-accuracy convert"
-              hint="Re-OCRs every page and runs an LLM pass. Best for scans and tables; slower and costs more credits."
+              hint="Re-OCRs every page and runs an LLM pass. Best for scans and tables, and slower for more credits."
               checked={settings.datalabHighAccuracy}
               onChange={(e) => {
                 onPersist({ datalabHighAccuracy: e.target.checked });
               }}
             />
           </Stack>
-        </section>
+        )}
 
-        <Divider />
-
-        <section className="settings-section">
+        {group === "advanced" && (
           <Stack gap={3}>
-            <Disclosure open={advanced} onToggle={setAdvanced}>
-              Advanced
-            </Disclosure>
-            {advanced && (
-              <Stack gap={3} className="settings-nest">
-                <Select
-                  label="Convert output format"
-                  value={settings.datalabFormat}
-                  onChange={(e) => {
-                    onPersist({ datalabFormat: e.target.value });
-                  }}
-                  options={[
-                    { value: "markdown", label: "Markdown (.md)" },
-                    { value: "html", label: "HTML (.html)" },
-                    { value: "json", label: "JSON (.json)" },
-                  ]}
-                />
-                <PipelineField
-                  value={settings.datalabPipelineId}
-                  onCommit={(datalabPipelineId) => {
-                    onPersist({ datalabPipelineId });
-                  }}
-                />
-              </Stack>
-            )}
+            <Select
+              label="Convert output format"
+              value={settings.datalabFormat}
+              onChange={(e) => {
+                onPersist({ datalabFormat: e.target.value });
+              }}
+              options={[
+                { value: "markdown", label: "Markdown (.md)" },
+                { value: "html", label: "HTML (.html)" },
+                { value: "json", label: "JSON (.json)" },
+              ]}
+            />
+            <PipelineField
+              value={settings.datalabPipelineId}
+              onCommit={(datalabPipelineId) => {
+                onPersist({ datalabPipelineId });
+              }}
+            />
           </Stack>
-        </section>
+        )}
       </div>
-    </FlowLayout>
+    </div>
   );
 }
 

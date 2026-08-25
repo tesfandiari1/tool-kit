@@ -12,6 +12,12 @@ export interface SheetProps {
   /// hit test on an attribute rather than a CSS state, so the app passes its
   /// drag region here or the window cannot be moved while the sheet is up.
   head?: ReactNode;
+  /// Controls for the title row, pushed to its trailing edge. A sheet's close
+  /// control belongs here rather than inside the panel: every sheet needs one,
+  /// and a panel that draws its own leaves a second header band under the
+  /// title with nothing else in it. Icons arrive as elements, because nothing
+  /// in this library picks an icon set.
+  titleActions?: ReactNode;
   footer?: ReactNode;
   /// Rendered inside the dialog element, beside the card. The top layer sits
   /// above every z-index, so a fixed toast outside the dialog is invisible
@@ -30,13 +36,24 @@ export interface SheetProps {
 /// resolution inside `::backdrop` is not dependable across WebKit versions and
 /// every colour in this system is a token.
 ///
-/// The card is anchored at `--bar-h`, the app's title-bar height, so the sheet
-/// emerges from the edge a real sheet emerges from and the traffic lights stay
-/// over live chrome. With no `--bar-h` in scope it starts at the top.
+/// The card floats clear of the window on all four sides. It clears `--bar-h`,
+/// the app's title-bar height, so the traffic lights stay over live chrome.
+/// Hanging it off that edge the way an AppKit sheet does read as clipped
+/// instead: a square top with no border cannot be told apart from a card whose
+/// top has scrolled out of the window.
 ///
 /// Clicking the scrim does nothing, which is what an AppKit sheet does. Escape
 /// and the card's own close control are the two ways out.
-export function Sheet({ open, onClose, title, children, head, footer, overlay }: SheetProps) {
+export function Sheet({
+  open,
+  onClose,
+  title,
+  children,
+  head,
+  titleActions,
+  footer,
+  overlay,
+}: SheetProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const restoreTo = useRef<HTMLElement | null>(null);
   const titleId = useId();
@@ -75,9 +92,14 @@ export function Sheet({ open, onClose, title, children, head, footer, overlay }:
         <>
           <div className="ui-sheet__scrim" />
           <div className="ui-sheet__card">
-            <h2 id={titleId} className="ui-sheet__title">
-              <Label tone="strong">{title}</Label>
-            </h2>
+            <div className="ui-sheet__title">
+              <h2 id={titleId} className="ui-sheet__heading">
+                <Label tone="strong">{title}</Label>
+              </h2>
+              {titleActions !== undefined && (
+                <div className="ui-sheet__actions">{titleActions}</div>
+              )}
+            </div>
             <div className="ui-sheet__body">{children}</div>
             {footer !== undefined && <div className="ui-sheet__foot">{footer}</div>}
           </div>

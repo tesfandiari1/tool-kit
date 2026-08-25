@@ -568,8 +568,9 @@ function SheetSpecimen() {
           Open the sheet
         </Button>
         <Text size="xs" tone="faint">
-          It hangs off the title-bar band, square across the top, and the window behind it goes
-          inert.
+          A card clear of the window on all four sides, holding below the title-bar band so the
+          traffic lights stay live. The window behind it goes inert, and its close control sits in
+          the title row rather than in a band of its own.
         </Text>
       </Row>
       <Sheet
@@ -579,6 +580,18 @@ function SheetSpecimen() {
         }}
         title="Settings"
         head={<div className="gal__sheetdrag" />}
+        titleActions={
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-label="Close the sheet"
+            onClick={() => {
+              setOpen(false);
+            }}
+          >
+            Close
+          </Button>
+        }
         overlay={toast !== null && <div className="gal__toast">{toast}</div>}
         footer={
           <>

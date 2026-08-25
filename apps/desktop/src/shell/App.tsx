@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileTextIcon, PlayIcon } from "@phosphor-icons/react";
+import { FileTextIcon, PlayIcon, XIcon } from "@phosphor-icons/react";
 import { Button, Mono, Sheet, SplitPane, StatusDot } from "@ui";
 import { fmtElapsed } from "@/app/format";
 import { barStatus, runCounter } from "./barStatus";
@@ -1021,9 +1021,6 @@ export default function App() {
       onPersist={persist}
       onSecrets={setSecrets}
       onToast={showToast}
-      onClose={() => {
-        setSettingsOpen(false);
-      }}
     />
   );
 
@@ -1310,6 +1307,18 @@ export default function App() {
            no strip inside the dialog the window cannot be moved while Settings
            is open. */
         head={<div data-tauri-drag-region="deep" />}
+        titleActions={
+          <Button
+            variant="ghost"
+            size="sm"
+            iconOnly
+            icon={<XIcon />}
+            aria-label="Close settings"
+            onClick={() => {
+              setSettingsOpen(false);
+            }}
+          />
+        }
         overlay={toastRegion}
       >
         {settingsPanel}

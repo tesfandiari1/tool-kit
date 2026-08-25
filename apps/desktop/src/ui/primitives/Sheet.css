@@ -36,26 +36,31 @@
   background: color-mix(in srgb, var(--warm-950) 45%, transparent);
 }
 
-/* Anchored under the title bar, square across the top and rounded below, the
-   way an AppKit sheet hangs off the window's own edge. `--bar-h` is the app's
-   title-bar height; with none in scope the card starts at the top. */
+/* A card that floats clear of the window on all four sides, rather than an
+   AppKit sheet hanging off the title bar's edge. The edge-hung version read as
+   clipped: a square top with no border is indistinguishable from a card whose
+   top has scrolled out of the window.
+
+   It still clears `--bar-h`, the app's title-bar height, so the traffic lights
+   stay over live chrome. With no `--bar-h` in scope it sits against the top
+   inset alone. */
 .ui-sheet__card {
   position: absolute;
-  inset-block-start: var(--bar-h, 0px);
+  inset-block-start: calc(var(--bar-h, 0px) + var(--s4));
   inset-inline: 0;
   margin-inline: auto;
   /* Fixed measure, no resize handle. A settings form is a reading column, and
-     one that grows with the window stops being one. */
-  inline-size: min(620px, 100%);
-  max-block-size: calc(100% - var(--bar-h, 0px) - var(--s5));
+     one that grows with the window stops being one. The second term is the
+     narrow-window floor: the card keeps its own margin rather than growing
+     into the window edge it is supposed to float above. */
+  inline-size: min(620px, calc(100% - var(--s5) * 2));
+  max-block-size: calc(100% - var(--bar-h, 0px) - var(--s4) - var(--s5));
   display: flex;
   flex-direction: column;
   min-block-size: 0;
   background: var(--surface-solid);
   border: 1px solid var(--rule-lit);
-  border-block-start: 0;
-  border-end-start-radius: var(--r-panel);
-  border-end-end-radius: var(--r-panel);
+  border-radius: var(--r-panel);
   box-shadow: 0 18px 48px color-mix(in srgb, var(--warm-950) 60%, transparent);
   overflow: hidden;
   animation: ui-sheet-in var(--dur-slow) var(--ease-out);
@@ -72,13 +77,28 @@
   }
 }
 
+/* One bar, not two. The panel inside a sheet used to draw its own close
+   control, which left this row holding a title and the row under it holding
+   nothing but an X. */
 .ui-sheet__title {
   display: flex;
   align-items: center;
   gap: var(--s2);
-  margin: 0;
   padding: var(--s3) var(--s4);
   border-block-end: 1px solid var(--rule);
+}
+.ui-sheet__heading {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0;
+  min-inline-size: 0;
+}
+.ui-sheet__actions {
+  margin-inline-start: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
 }
 
 /* No padding here on purpose: a sheet holds a panel that already carries its
