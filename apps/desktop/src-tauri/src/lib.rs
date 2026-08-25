@@ -891,6 +891,59 @@ fn queue_is_free(state: &JobManager, since: u64) -> bool {
 /// tree renders the answer: it stages the file in Run and shows the host's
 /// sentence. The route plan, the key checks and the reuse rule stay here, so
 /// there is one planner and not a second one in the webview.
+/// Copy dropped files into a project, so the library holds the work rather
+/// than pointing at it.
+///
+/// The result of a run lands beside its source, and the tree pairs a source
+/// with a sibling result. A file converted where it was dropped therefore
+/// leaves the workspace holding neither half, which is what made a drop feel
+/// like it went nowhere.
+///
+/// Returns the paths that should actually be run: a copy for anything from
+/// outside, and the file itself for anything already inside the destination,
+/// so dragging a row out of the library and back in cannot duplicate it.
+#[tauri::command(async)]
+fn import_into_project(
+    app: AppHandle,
+    inputs: Vec<String>,
+    job_type: String,
+    project_rel: String,
+) -> Result<Vec<String>, String> {
+    let jt = JobType::from_id(&job_type).ok_or("Unknown job type")?;
+    let cfg = settings::load(&app);
+    let workspace = cfg
+        .workspace_path
+        .clone()
+        .ok_or_else(|| "No workspace configured".to_string())?;
+    // The same check the tree's own listing makes, so a destination cannot be
+    // talked into pointing outside the workspace.
+    let dir = tree::resolve(Path::new(&workspace), &project_rel)?;
+    if !dir.is_dir() {
+        return Err("That project folder is not there any more".into());
+    }
+    let dir_str = dir.to_string_lossy().to_string();
+
+    let mut landed = Vec::new();
+    for source in collect_input_files(&inputs, jt) {
+        // Already where it belongs. Copying would give the user two rows for
+        // one document and bill the second one.
+        if source
+            .parent()
+            .is_some_and(|parent| history::same_dir(parent, &dir))
+        {
+            landed.push(source.to_string_lossy().to_string());
+            continue;
+        }
+        let to = jobs::import_source(&dir_str, &source)?;
+        // Before the run reads it. Reuse is keyed on the source path, so
+        // without this an already-converted file is bought a second time the
+        // moment it is imported.
+        history::carry_forward(&app, &source.to_string_lossy(), &to);
+        landed.push(to);
+    }
+    Ok(landed)
+}
+
 #[tauri::command]
 async fn convert_one(
     app: AppHandle,
@@ -1413,6 +1466,7 @@ pub fn run() {
             scan_inputs,
             run_pipeline,
             convert_one,
+            import_into_project,
             stop_run,
             retry_job,
             reveal_path,

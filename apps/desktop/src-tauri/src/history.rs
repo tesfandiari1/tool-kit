@@ -540,6 +540,51 @@ fn insert(conn: &Connection, f: &Finished) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Carry a source's finished results across to a copy of it.
+///
+/// Reuse is keyed on the source path, so a file imported into a project is a
+/// file this app has never seen and the result it already has would be bought
+/// again. This files the same results under the new path, so the next run
+/// satisfies them from disk for free.
+///
+/// It relies on `jobs::import_source` preserving the modification time:
+/// `reuse_map` requires the stored mtime to equal the file's current one, and
+/// a copy stamped with the time of the copy reads as a document that changed.
+///
+/// Every job and format is carried, not just the one the current settings ask
+/// for, because an import does not know which job the user will run next.
+pub fn carry_forward(app: &AppHandle, from: &str, to: &str) {
+    with_db(app, |conn| {
+        carry_forward_rows(conn, from, to)?;
+        trim(conn)
+    });
+}
+
+fn carry_forward_rows(conn: &Connection, from: &str, to: &str) -> rusqlite::Result<usize> {
+    let file_name = Path::new(to)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    // The newest row per job and format, not every row: a file converted five
+    // times has five rows and one current result.
+    conn.execute(
+        "INSERT INTO history
+           (file_name, source_path, output_path, job_type, output_format,
+            status, error, finished_at, source_mtime)
+         SELECT ?1, ?2, output_path, job_type, output_format,
+                status, NULL, ?3, ?4
+           FROM history
+          WHERE id IN (
+                SELECT MAX(id) FROM history
+                 WHERE source_path = ?5
+                   AND status = 'done'
+                   AND output_path IS NOT NULL
+                 GROUP BY job_type, output_format)",
+        rusqlite::params![file_name, key(to), now_secs(), mtime_ms(to), key(from)],
+    )
+}
+
 fn trim(conn: &Connection) -> rusqlite::Result<()> {
     let n: i64 = conn.query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))?;
     if n > MAX_ENTRIES {
@@ -740,6 +785,101 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         conn
+    }
+
+    /// A finished conversion, filed the way `insert` files one.
+    fn done(conn: &Connection, source: &Path, output: &str, format: &str) {
+        insert(
+            conn,
+            &Finished {
+                file_name: source.file_name().unwrap().to_str().unwrap(),
+                source_path: source.to_str().unwrap(),
+                output_path: Some(output),
+                job_type: "convert",
+                output_format: format,
+                status: "done",
+                error: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_carried_row_makes_the_copy_reusable_at_its_new_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db();
+        let from = dir.path().join("deck.pdf");
+        let to = dir.path().join("Inbox-deck.pdf");
+        let out = dir.path().join("deck.md");
+        fs::write(&from, b"pdf").unwrap();
+        fs::write(&out, b"# deck").unwrap();
+        // The importer preserves the source mtime, which is what lets the
+        // copy answer the mtime check the reuse lookup makes.
+        let when = fs::metadata(&from).unwrap().modified().unwrap();
+        fs::write(&to, b"pdf").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&to)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+
+        done(&conn, &from, out.to_str().unwrap(), "markdown");
+        assert_eq!(
+            carry_forward_rows(&conn, from.to_str().unwrap(), to.to_str().unwrap()).unwrap(),
+            1
+        );
+
+        let found = reuse_map(&conn, std::slice::from_ref(&to), "convert", "markdown");
+        assert_eq!(
+            found.get(&to.to_string_lossy().to_string()).map(String::as_str),
+            Some(out.to_str().unwrap()),
+            "the copy should reuse the original's result instead of being bought again"
+        );
+    }
+
+    #[test]
+    fn carrying_forward_takes_the_newest_row_of_each_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db();
+        let from = dir.path().join("deck.pdf");
+        let to = dir.path().join("copy.pdf");
+        fs::write(&from, b"pdf").unwrap();
+        fs::write(&to, b"pdf").unwrap();
+
+        done(&conn, &from, "/out/old.md", "markdown");
+        done(&conn, &from, "/out/new.md", "markdown");
+        done(&conn, &from, "/out/deck.html", "html");
+
+        // Two formats, one row each. Five conversions of one file are five
+        // rows and one current result.
+        assert_eq!(
+            carry_forward_rows(&conn, from.to_str().unwrap(), to.to_str().unwrap()).unwrap(),
+            2
+        );
+        let carried: Vec<String> = conn
+            .prepare("SELECT output_path FROM history WHERE source_path = ?1 ORDER BY output_path")
+            .unwrap()
+            .query_map([key(to.to_str().unwrap())], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(carried, ["/out/deck.html", "/out/new.md"]);
+    }
+
+    #[test]
+    fn carrying_forward_a_source_with_no_history_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db();
+        let from = dir.path().join("fresh.pdf");
+        let to = dir.path().join("copy.pdf");
+        fs::write(&from, b"pdf").unwrap();
+        fs::write(&to, b"pdf").unwrap();
+
+        assert_eq!(
+            carry_forward_rows(&conn, from.to_str().unwrap(), to.to_str().unwrap()).unwrap(),
+            0
+        );
     }
 
     /// A source file and the output it produced, both real on disk.

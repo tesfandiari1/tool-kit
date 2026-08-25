@@ -271,6 +271,21 @@ struct Pairing {
     claimed: Vec<bool>,
 }
 
+/// How much older than its source a result may be and still be its result.
+///
+/// A conversion writes the result after reading the source, so a file that
+/// predates its source did not come from it. Without this rule a `deck.md` the
+/// user wrote by hand folds `deck.pdf` into its row, and that file then reads
+/// as converted and never converts: silent, and the opposite of what the row
+/// says.
+///
+/// The grace absorbs one bulk write pass. A checkout, an unzip, or a folder
+/// copy lays a directory down in name order, so `deck.md` landing a few
+/// milliseconds ahead of `deck.pdf` is ordering rather than evidence. Erring
+/// this way costs a visible Convert button rather than a silent skip, and
+/// history reuse then satisfies that press from the earlier result for free.
+const PAIR_GRACE_MS: u64 = 2_000;
+
 fn pair_results(raws: &[Raw], cfg: &Settings) -> Pairing {
     // Every file that could be a result, keyed by the stem and extension a
     // conversion would have produced. `numbered` holds the same file under the
@@ -320,7 +335,11 @@ fn pair_results(raws: &[Raw], cfg: &Settings) -> Pairing {
             .flat_map(|key| exact.get(key))
             .chain(keys.iter().flat_map(|key| numbered.get(key)))
             .flat_map(|candidates| candidates.iter().copied())
-            .find(|&candidate| candidate != index && !pairing.claimed[candidate]);
+            .find(|&candidate| {
+                candidate != index
+                    && !pairing.claimed[candidate]
+                    && raws[candidate].modified_ms + PAIR_GRACE_MS >= raw.modified_ms
+            });
         if let Some(hit) = hit {
             pairing.claimed[hit] = true;
             pairing.of[index] = Some(hit);
@@ -486,6 +505,62 @@ mod tests {
         let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
 
         assert_eq!(names(&listing), ["IMG1.pdf", "img2.pdf", "img10.pdf"]);
+    }
+
+    /// Backdate a file, so a test can say "this existed before that".
+    fn age(path: &Path, seconds: u64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_result_older_than_its_source_is_not_its_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.md", "deck.pdf"]);
+        // A note the user wrote last week, and a deck dropped in today.
+        age(&root.join("Inbox/deck.md"), 7 * 24 * 60 * 60);
+
+        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+
+        // Two rows, not one: the note is its own file and the deck still needs
+        // converting. Folding them hid the deck behind a result it never made.
+        assert_eq!(names(&listing), ["deck.md", "deck.pdf"]);
+        assert_eq!(row(&listing, "deck.pdf").result_name, None);
+        assert_eq!(listing.pending, 1);
+    }
+
+    #[test]
+    fn a_source_edited_after_its_result_needs_converting_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.pdf", "deck.md"]);
+        // Same shape by another route: the run wrote the result, then the user
+        // changed the source. Settings promises this runs again, so the tree
+        // must not go on calling it done.
+        age(&root.join("Inbox/deck.md"), 60);
+
+        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+
+        assert_eq!(row(&listing, "deck.pdf").result_name, None);
+    }
+
+    #[test]
+    fn one_write_pass_still_pairs_whatever_order_it_landed_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.pdf", "deck.md"]);
+        // A checkout or an unzip lays a directory down in name order, so the
+        // result can land a moment before the source. That is ordering, not
+        // evidence, and the grace is what tells the two apart.
+        age(&root.join("Inbox/deck.md"), 1);
+
+        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+
+        assert_eq!(names(&listing), ["deck.pdf"]);
+        assert_eq!(row(&listing, "deck.pdf").result_name.as_deref(), Some("deck.md"));
     }
 
     #[test]
