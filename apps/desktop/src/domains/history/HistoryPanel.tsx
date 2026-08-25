@@ -132,56 +132,91 @@ export function HistoryPanel({
         </div>
       ) : (
         <div className="hist-list">
-          {rows.map((e) => (
-            <div className="job" key={e.id}>
-              <StatusDot tone={e.status === "done" ? "pass" : "fault"} label={e.status} />
-              <div className="job-body">
-                <Mono size="xs" tone="ink" className="job-name" title={e.sourcePath}>
-                  {e.fileName}
-                </Mono>
-                {e.status === "failed" && e.error ? (
-                  <Text as="span" size="xs" tone="fault" className="job-sub">
-                    {e.error}
-                  </Text>
-                ) : (
-                  e.outputPath && (
-                    <Text as="span" size="xs" tone="faint" className="job-sub" title={e.outputPath}>
-                      {basename(e.outputPath)}
+          {rows.map((e) => {
+            /// A failed row, and a row whose result the run never wrote, have
+            /// nothing to open. They stay in the list, because the failure is
+            /// the useful answer, and say so rather than answering a click
+            /// with silence.
+            const openable = e.status === "done" && e.outputPath !== null;
+            return (
+              <div
+                className="job"
+                key={e.id}
+                /* The row forwards a click to its primary control, so the whole
+                   row is the target it already looks like, and bails on
+                   anything inside a button so the two actions cannot fire
+                   twice. The run queue's row is this shape for this reason. */
+                onClick={(ev) => {
+                  if (!openable) return;
+                  if (ev.target instanceof Element && ev.target.closest("button")) return;
+                  onOpen(e);
+                }}
+              >
+                <StatusDot tone={e.status === "done" ? "pass" : "fault"} label={e.status} />
+                <div className="job-body">
+                  <button
+                    type="button"
+                    /// Bare on purpose: the row is already the affordance, so a
+                    /// second button shell inside it would be a card in a card.
+                    aria-disabled={!openable}
+                    className="job-open"
+                    title={e.sourcePath}
+                    onClick={
+                      openable
+                        ? () => {
+                            onOpen(e);
+                          }
+                        : undefined
+                    }
+                  >
+                    <Mono size="xs" tone="ink" className="job-name">
+                      {e.fileName}
+                    </Mono>
+                  </button>
+                  {e.status === "failed" && e.error ? (
+                    <Text as="span" size="xs" tone="fault" className="job-sub">
+                      {e.error}
                     </Text>
-                  )
-                )}
-              </div>
-              <Mono size="xs" className="job-time">
-                {fmtWhen(e.finishedAt, nowMs)}
-              </Mono>
-              <div className="job-actions">
-                {e.status === "done" && e.outputPath && (
+                  ) : (
+                    e.outputPath && (
+                      <Text as="span" size="xs" tone="faint" className="job-sub" title={e.outputPath}>
+                        {basename(e.outputPath)}
+                      </Text>
+                    )
+                  )}
+                </div>
+                <Mono size="xs" className="job-time">
+                  {fmtWhen(e.finishedAt, nowMs)}
+                </Mono>
+                <div className="job-actions">
+                  {e.status === "done" && e.outputPath && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      iconOnly
+                      icon={<EyeIcon />}
+                      title="Open"
+                      aria-label="Open"
+                      onClick={() => {
+                        onOpen(e);
+                      }}
+                    />
+                  )}
                   <Button
                     variant="ghost"
                     size="sm"
                     iconOnly
-                    icon={<EyeIcon />}
-                    title="Open"
-                    aria-label="Open"
+                    icon={<FolderOpenIcon />}
+                    title={e.outputPath ? "Show the result in Finder" : "Show the file in Finder"}
+                    aria-label="Show in Finder"
                     onClick={() => {
-                      onOpen(e);
+                      reveal(e);
                     }}
                   />
-                )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  iconOnly
-                  icon={<FolderOpenIcon />}
-                  title={e.outputPath ? "Show the result in Finder" : "Show the file in Finder"}
-                  aria-label="Show in Finder"
-                  onClick={() => {
-                    reveal(e);
-                  }}
-                />
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </FlowLayout>

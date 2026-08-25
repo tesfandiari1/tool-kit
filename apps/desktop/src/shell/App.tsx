@@ -3,11 +3,13 @@ import { FileTextIcon, PlayIcon } from "@phosphor-icons/react";
 import { Button, Mono, Sheet, SplitPane, StatusDot } from "@ui";
 import { fmtElapsed } from "@/app/format";
 import { barStatus, runCounter } from "./barStatus";
+import { autoOpenTarget, terminalIds } from "./runOutcome";
 import { conversionClient } from "@/app/api";
 import { commands } from "@/app/commands";
 import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
 import type {
   FileRow,
+  HistoryEntry,
   Job,
   OnboardingConversionMode,
   ProjectSummary,
@@ -109,6 +111,14 @@ export default function App() {
   const [runsFinished, setRunsFinished] = useState(0);
   const [starting, setStarting] = useState(false);
   const wasRunning = useRef(false);
+  /// The rows already finished when this run started. A run's own results are
+  /// the difference, because every count below is derived from the whole job
+  /// list and `convert_one` appends to it. See `runOutcome.ts`.
+  const terminalAtStart = useRef<ReadonlySet<number>>(new Set());
+  /// The job list, readable from the finish effect without it depending on
+  /// `jobs`. A 200-file run emits hundreds of `job-updated` events, and that
+  /// effect must fire on the transition, not on the traffic.
+  const jobsRef = useRef<Job[]>([]);
   const wasWorkspace = useRef(false);
   const autoClear = useRef(false);
   /// The selection autodetect has already answered. See the effect below.
@@ -222,6 +232,12 @@ export default function App() {
     const un = commands.onJobUpdated(upsert);
     return () => void un.then((f) => f());
   }, [upsert]);
+
+  // Declared above the run-finished effect so it lands first in the same
+  // commit: that effect reads the list and must not read last render's.
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
 
   // The sidebar's list. Re-read once per finished run rather than per
   // job-updated event, for the same reason the history panel does.
@@ -693,21 +709,67 @@ export default function App() {
     };
   }, [importFiles, libraryMode]);
 
+  /// Put a result on screen.
+  ///
+  /// Opening a document is not enough on its own. The end pane holds Run or
+  /// History whenever the nav says so, and `open` deliberately never touches
+  /// the view, so a tab opened from either of those lands where nobody can see
+  /// it — which is why the History eye button has always looked like it did
+  /// nothing. Saving first is what switching tabs already does: `open`
+  /// activates another document without flushing the one leaving, and the
+  /// autosave skips a document whose last write the host refused.
+  const reveal = useCallback(
+    async (open: () => Promise<boolean>) => {
+      if (activeId) await saveDoc(activeId);
+      if (await open()) setView("library");
+    },
+    [activeId, saveDoc],
+  );
+
+  const revealJob = useCallback((job: Job) => reveal(() => openJob(job)), [openJob, reveal]);
+
+  const revealHistory = useCallback(
+    (entry: HistoryEntry) => reveal(() => openHistory(entry)),
+    [openHistory, reveal],
+  );
+
+  /// Read through a ref for the same reason `useCloseConfirm` does: `openJob`
+  /// closes over the open documents, so its identity changes on every
+  /// keystroke, and the effect below must fire on a run's edges rather than on
+  /// that traffic.
+  const revealJobRef = useRef(revealJob);
+  useEffect(() => {
+    revealJobRef.current = revealJob;
+  }, [revealJob]);
+
   // When a run finishes, clear the input selection so the same files can't be
   // re-run by accident — Run greys out until new inputs are added. Gated on a
   // flag set by run(), so finishing a Retry doesn't wipe inputs the user has
   // already staged for the next batch; and skipped when nothing succeeded, so
   // a wholly failed run leaves the selection in place to try again.
   useEffect(() => {
+    // A run starting: remember what was already terminal, so what finishes
+    // below is this run's work and not the whole queue's.
+    if (!wasRunning.current && running) {
+      terminalAtStart.current = terminalIds(jobsRef.current);
+    }
     if (wasRunning.current && !running) {
       if (autoClear.current && doneCount > 0) mutateInputs(() => []);
       autoClear.current = false;
       // The run just changed what counts as already done, and added rows to
       // the history. One bump, not one per event.
       setRunsFinished((n) => n + 1);
+      // One file is a request to read it. A batch is not, so nothing opens.
+      const target = autoOpenTarget(terminalAtStart.current, jobsRef.current);
+      if (target !== null) {
+        // `mode` is one state for the pane rather than one per document, so a
+        // document nobody asked to edit would otherwise arrive in the editor.
+        setMode("read");
+        void revealJobRef.current(target);
+      }
     }
     wasRunning.current = running;
-  }, [running, doneCount, mutateInputs]);
+  }, [running, doneCount, mutateInputs, setMode]);
 
   // Every hook is above this line, which is the only reason the two
   // whole-window states below can return early at all.
@@ -969,7 +1031,7 @@ export default function App() {
     <HistoryPanel
       refreshKey={runsFinished}
       onChanged={() => setRunsFinished((n) => n + 1)}
-      onOpen={(e) => void openHistory(e)}
+      onOpen={(e) => void revealHistory(e)}
       onToast={showToast}
     />
   );
@@ -1007,7 +1069,7 @@ export default function App() {
         const dir = settings.outputDir;
         if (dir) void call(() => commands.revealPath(dir));
       }}
-      onPreview={(j) => void openJob(j)}
+      onPreview={(j) => void revealJob(j)}
       onCopy={(j) => void copyText(j)}
       onRevealJob={(j) => {
         const path = j.outputPath;
