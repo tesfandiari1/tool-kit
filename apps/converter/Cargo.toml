@@ -7,7 +7,7 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
-anydoc = "=0.1.9"
+anydoc = "=0.2.4"
 axum = { version = "0.8.9", features = ["multipart"] }
 hex = "0.4.3"
 libc = { version = "0.2.189", default-features = false }
