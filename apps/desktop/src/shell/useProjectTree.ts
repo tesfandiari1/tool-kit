@@ -119,8 +119,10 @@ export function useProjectTree({
   /// The cache `listings` renders. `read` compares against what it holds, which
   /// a `setListings` updater cannot answer: React decides when to run one.
   const cache = useRef<Record<string, DirListing>>({});
-  /// A ref rather than `busy`: two clicks in one frame read the same state.
-  const inFlight = useRef(new Set<string>());
+  /// A ref rather than `busy`: two clicks in one frame read the same state. A
+  /// read already running is handed back, so a deep expand can await it rather
+  /// than skip the folder.
+  const inFlight = useRef(new Map<string, Promise<DirListing | null>>());
   const expandedRef = useRef(expandedPaths);
   const projectsRef = useRef(projects);
   const selectedRef = useRef(selected);
@@ -177,45 +179,56 @@ export function useProjectTree({
   /// Read one folder. Only a `gone` answer drops its children, its expansion
   /// and its focus: a volume asleep is not a folder deleted.
   const read = useCallback(
-    async (rel: string, mode: ReadMode): Promise<DirListing | null> => {
-      if (inFlight.current.has(rel)) return null;
-      inFlight.current.add(rel);
+    (rel: string, mode: ReadMode): Promise<DirListing | null> => {
+      const running = inFlight.current.get(rel);
+      if (running) return running;
       const marks = mode !== "reconcile";
       if (marks) setBusy((cur) => (cur.includes(rel) ? cur : [...cur, rel]));
-      try {
-        const listing = await commands.listProjectFiles(rel);
-        // `in` rather than a truth test: the index signature types every key
-        // as present, so a bare read takes a property off undefined.
-        const moved =
-          !(rel in cache.current) || cache.current[rel].modifiedMs !== listing.modifiedMs;
-        // An untouched folder keeps its object: a new identity re-renders
-        // every row under it and buys nothing.
-        if (moved || mode !== "reconcile") {
-          if (moved) keepFocusInside(rel, listing);
-          cache.current = { ...cache.current, [rel]: listing };
+      const pending = (async () => {
+        try {
+          const listing = await commands.listProjectFiles(rel);
+          // `in` rather than a truth test: the index signature types every key
+          // as present, so a bare read takes a property off undefined.
+          const moved =
+            !(rel in cache.current) || cache.current[rel].modifiedMs !== listing.modifiedMs;
+          // An untouched folder keeps its object: a new identity re-renders
+          // every row under it and buys nothing.
+          if (moved || mode !== "reconcile") {
+            if (moved) keepFocusInside(rel, listing);
+            cache.current = { ...cache.current, [rel]: listing };
+            setListings(cache.current);
+          }
+          return listing;
+        } catch (e) {
+          const failure = listFailure(e);
+          // A branch with nothing to render must say why. Reconcile stays
+          // quiet: it fires on every window focus.
+          if (mode === "click" || (mode === "refresh" && !(rel in cache.current))) {
+            showToast(failure.message, "danger");
+          }
+          // Dropping these on every failure lets one sleeping volume empty
+          // `expandedPaths` for good.
+          if (!failure.gone) {
+            if (mode === "click") setExpanded((cur) => cur.filter((p) => p !== rel));
+            return null;
+          }
+          climbFrom(rel);
+          cache.current = Object.fromEntries(
+            Object.entries(cache.current).filter(([path]) => path !== rel),
+          );
           setListings(cache.current);
-        }
-        return listing;
-      } catch (e) {
-        const failure = listFailure(e);
-        if (mode === "click") showToast(failure.message, "danger");
-        // Dropping these on every failure lets one sleeping volume empty
-        // `expandedPaths` for good.
-        if (!failure.gone) {
-          if (mode === "click") setExpanded((cur) => cur.filter((p) => p !== rel));
+          setExpanded((cur) => cur.filter((p) => p !== rel));
           return null;
+        } finally {
+          if (marks) setBusy((cur) => cur.filter((p) => p !== rel));
         }
-        climbFrom(rel);
-        cache.current = Object.fromEntries(
-          Object.entries(cache.current).filter(([path]) => path !== rel),
-        );
-        setListings(cache.current);
-        setExpanded((cur) => cur.filter((p) => p !== rel));
-        return null;
-      } finally {
-        inFlight.current.delete(rel);
-        if (marks) setBusy((cur) => cur.filter((p) => p !== rel));
-      }
+      })();
+      inFlight.current.set(rel, pending);
+      void pending.finally(() => {
+        // Only this read: a later one already replaced the entry.
+        if (inFlight.current.get(rel) === pending) inFlight.current.delete(rel);
+      });
+      return pending;
     },
     [climbFrom, keepFocusInside, setExpanded, showToast],
   );

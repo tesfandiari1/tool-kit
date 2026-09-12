@@ -244,6 +244,14 @@ export interface ConvertOneOutcome {
   reason: ConvertBlockReason | null;
   /// Shown verbatim. Never parsed.
   message: string | null;
+  /// The result file, for kind "copied".
+  path: string | null;
+}
+
+/// What an import left behind. Each `failed` entry is "{file name}: {reason}".
+export interface ImportOutcome {
+  landed: string[];
+  failed: string[];
 }
 
 export interface RunResult {

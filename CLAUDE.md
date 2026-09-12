@@ -271,7 +271,8 @@ locally in Sidecar mode only.
   - **`convert_one` is modelled on `retry_job`, never on `run_pipeline`.** It
     converts one file into the folder that file sits in, reads the generation
     instead of bumping it, appends one job rather than clearing the queue, and
-    answers a refusal as a verdict (`kind`, `reason`, `message`).
+    answers a refusal as a verdict (`kind`, `reason`, `message`, and `path`
+    for a copy).
 
 ### Adding a provider / job
 

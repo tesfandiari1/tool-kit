@@ -1,4 +1,5 @@
 import {
+  BookIcon,
   FileAudioIcon,
   FileCodeIcon,
   FileCsvIcon,
@@ -28,6 +29,7 @@ const BY_EXT: Record<string, Icon> = {
   doc: FileDocIcon,
   docx: FileDocIcon,
   odt: FileDocIcon,
+  epub: BookIcon,
   xls: FileXlsIcon,
   xlsx: FileXlsIcon,
   csv: FileCsvIcon,
@@ -54,11 +56,19 @@ const BY_EXT: Record<string, Icon> = {
   aac: FileAudioIcon,
   flac: FileAudioIcon,
   ogg: FileAudioIcon,
+  oga: FileAudioIcon,
+  opus: FileAudioIcon,
+  amr: FileAudioIcon,
   mp4: FileVideoIcon,
   mov: FileVideoIcon,
   m4v: FileVideoIcon,
   webm: FileVideoIcon,
   mkv: FileVideoIcon,
+  avi: FileVideoIcon,
+  wmv: FileVideoIcon,
+  mpeg: FileVideoIcon,
+  mpg: FileVideoIcon,
+  "3gp": FileVideoIcon,
   zip: FileZipIcon,
 };
 

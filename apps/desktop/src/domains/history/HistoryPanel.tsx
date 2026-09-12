@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { EyeIcon, FolderOpenIcon } from "@phosphor-icons/react";
-import { Badge, Button, Input, Meta, Row, Spacer, StatusDot, Text } from "@ui";
+import { Badge, Button, Input, Meta, Row, Spacer, StatusDot, Text, Well } from "@ui";
 import { commands } from "@/app/commands";
 import { basename, fmtWhen } from "@/app/format";
 import { HISTORY_LIMIT, type HistoryEntry } from "@/app/types";
@@ -20,12 +20,15 @@ export function HistoryPanel({
   onChanged,
   onOpen,
   onToast,
+  dragging = false,
 }: {
   refreshKey: number;
   /// Call after any change, or the run screen cites deleted rows.
   onChanged: () => void;
   onOpen: (entry: HistoryEntry) => void;
   onToast: (msg: string) => void;
+  /// A file is over the window, and the list has to answer it.
+  dragging?: boolean;
 }) {
   const [query, setQuery] = useState("");
   // Null while the first read is in flight: empty and pending differ.
@@ -47,7 +50,8 @@ export function HistoryPanel({
     let live = true;
     const t = window.setTimeout(() => {
       void commands
-        .listHistory(query, HISTORY_LIMIT)
+        // One row past the page, which is how the badge knows a "+" is earned.
+        .listHistory(query, HISTORY_LIMIT + 1)
         .then((r) => live && setRows(r))
         .catch(() => live && setRows([]));
     }, 120);
@@ -74,6 +78,9 @@ export function HistoryPanel({
     }
   };
 
+  const shown = rows?.slice(0, HISTORY_LIMIT) ?? null;
+  const overflow = rows !== null && rows.length > HISTORY_LIMIT;
+
   // The result, or the source it came from: the answer for a failed row.
   const reveal = (e: HistoryEntry) => {
     void commands.revealPath(hasResult(e) ? e.outputPath : e.sourcePath).catch((err: unknown) => {
@@ -88,17 +95,13 @@ export function HistoryPanel({
           <Row gap={2}>
             <Spacer />
             <Badge count>
-              {rows === null
-                ? ""
-                : rows.length >= HISTORY_LIMIT
-                  ? `${String(rows.length)}+`
-                  : String(rows.length)}
+              {shown === null ? "" : overflow ? `${String(shown.length)}+` : String(shown.length)}
             </Badge>
             <Button
               variant="ghost"
               /* `clear_history` deletes the whole table, so a search matching
                  nothing must not disable it. */
-              disabled={!rows || (rows.length === 0 && query === "")}
+              disabled={!shown || (shown.length === 0 && query === "")}
               onClick={() => void clear()}
             >
               Clear history
@@ -117,13 +120,20 @@ export function HistoryPanel({
         </>
       }
     >
-      {rows === null ? (
+      {dragging && (
+        <Well className="drop-well is-dropping" selectable={false}>
+          <Text size="sm" tone="faint">
+            Drop files to add them to Run
+          </Text>
+        </Well>
+      )}
+      {shown === null ? (
         <div className="hist-empty">
           <Text size="sm" tone="faint">
             Reading…
           </Text>
         </div>
-      ) : rows.length === 0 ? (
+      ) : shown.length === 0 ? (
         <div className="hist-empty">
           {query ? (
             <Text size="sm" tone="faint">
@@ -142,7 +152,7 @@ export function HistoryPanel({
         </div>
       ) : (
         <div className="hist-list">
-          {rows.map((e) => {
+          {shown.map((e) => {
             /// Nothing to open. The row stays and says so.
             const openable = e.status === "done" && hasResult(e);
             const resultGone = e.outputPath !== null && !e.outputExists;
@@ -164,13 +174,16 @@ export function HistoryPanel({
                   tone={e.status === "failed" ? "fault" : resultGone ? "idle" : "pass"}
                   label={resultGone ? "result deleted" : e.status}
                 />
-                <div className="job-body">
+                {/* The path sits on the body: a disabled button shows no tooltip. */}
+                <div className="job-body" title={e.sourcePath}>
                   <button
                     type="button"
                     /// Bare on purpose: the row is already the affordance.
                     aria-disabled={!openable}
+                    /// Nothing to open, so the platform takes it out of the
+                    /// tab order and makes it inert.
+                    disabled={!openable}
                     className="job-open"
-                    title={e.sourcePath}
                     onClick={
                       openable
                         ? () => {

@@ -104,7 +104,6 @@ export function LibraryPane({
         <div className="lib-side__move">
           <Select
             label="Move to"
-            aria-label={`Move ${selected.name} to another project`}
             value=""
             onChange={(e) => {
               const rel = e.target.value;

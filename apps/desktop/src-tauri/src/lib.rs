@@ -77,10 +77,14 @@ fn inspect_workspace_path(path: String) -> bool {
 }
 
 /// First-launch setup: create or adopt the folder and return its ids. Nothing
-/// is persisted here: the gate binds the workspace at its last beat.
+/// is persisted here: the gate binds the workspace at its last beat. A quit at
+/// that beat leaves a seeded welcome file unread, so a retry reports it again.
 #[tauri::command]
 fn setup_workspace(app: AppHandle, path: String) -> Result<workspace::WorkspaceInfo, String> {
-    let info = workspace::setup_workspace(&path)?;
+    let mut info = workspace::setup_workspace(&path)?;
+    if info.welcome_path.is_none() {
+        info.welcome_path = workspace::seeded_welcome(&path);
+    }
     workspace::migrate_settings(&app);
     Ok(info)
 }
@@ -181,6 +185,20 @@ fn collect_backend_candidates(inputs: &[String]) -> Vec<std::path::PathBuf> {
             || !extension.is_some_and(|extension| ALREADY_TEXT.contains(&extension.as_str()))
     };
     collect_files_where(inputs, &accepts)
+}
+
+/// The candidates to count when no capability set can narrow them: the broad
+/// list minus what Transcribe takes. Counting audio as convertible flips the
+/// frontend's autodetect, which compares the two counts and latches.
+fn fallback_conversion_files(inputs: &[String]) -> Vec<std::path::PathBuf> {
+    let mut files = collect_backend_candidates(inputs);
+    files.retain(|file| {
+        !file
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| JobType::Transcribe.accepts(&extension.to_ascii_lowercase()))
+    });
+    files
 }
 
 fn collect_files_where(
@@ -486,12 +504,11 @@ async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String
                 plan.direct.append(&mut plan.backend);
                 (plan.direct, direct_len)
             }
-            // The frontend's own probe owns the outage message. Keep metadata.
-            Err(_) => {
-                let files = collect_input_files(&inputs, JobType::Convert);
-                let direct_len = files.len();
-                (files, direct_len)
-            }
+            // The frontend's own probe owns the outage message. The route is
+            // unknown, so the candidate list stands: the direct-only set drops
+            // odt, rtf and every other backend-only format. Nothing is
+            // reuse-checked while nothing is routed.
+            Err(_) => (fallback_conversion_files(&inputs), 0),
         }
     } else {
         let files = collect_input_files(&inputs, JobType::Convert);
@@ -865,6 +882,8 @@ struct ConvertOneOutcome {
     reason: Option<String>,
     /// The sentence the frontend shows verbatim.
     message: Option<String>,
+    /// The result file, for kind "copied".
+    path: Option<String>,
 }
 
 impl ConvertOneOutcome {
@@ -873,14 +892,16 @@ impl ConvertOneOutcome {
             kind: "queued".into(),
             reason: None,
             message: None,
+            path: None,
         }
     }
 
-    fn copied(message: impl Into<String>) -> Self {
+    fn copied(message: impl Into<String>, path: String) -> Self {
         Self {
             kind: "copied".into(),
             reason: None,
             message: Some(message.into()),
+            path: Some(path),
         }
     }
 
@@ -889,6 +910,7 @@ impl ConvertOneOutcome {
             kind: "blocked".into(),
             reason: Some(reason.into()),
             message: Some(message.into()),
+            path: None,
         }
     }
 }
@@ -903,15 +925,25 @@ fn queue_is_free(state: &JobManager, since: u64) -> bool {
             .any(|job| matches!(job.status.as_str(), "queued" | "working" | "processing"))
 }
 
+/// What an import left behind: the staged paths, and a line per file that
+/// could not be copied.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportOutcome {
+    landed: Vec<String>,
+    failed: Vec<String>,
+}
+
 /// Copy dropped files into a project. Returns the paths a run should take: a
 /// copy from outside, the file itself from inside, so a round trip cannot
-/// duplicate a row.
+/// duplicate a row. A failure is reported per file, so one refused copy does
+/// not strand the files that did land.
 #[tauri::command(async)]
 fn import_into_project(
     app: AppHandle,
     inputs: Vec<String>,
     project_rel: String,
-) -> Result<Vec<String>, String> {
+) -> Result<ImportOutcome, String> {
     let cfg = settings::load(&app);
     let workspace = cfg
         .workspace_path
@@ -943,8 +975,15 @@ fn import_into_project(
         history::carry_forward(&app, &source.to_string_lossy(), &to);
         Ok(to)
     };
+    let name_of = |path: &Path| -> String {
+        path.file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+            .into_owned()
+    };
 
     let mut landed = Vec::new();
+    let mut failed = Vec::new();
     for input in &inputs {
         let root = Path::new(input);
         // Already filed. Copying gives two rows for one document, and bills.
@@ -962,7 +1001,10 @@ fn import_into_project(
 
         if !root.is_dir() {
             for source in &matches {
-                landed.push(take(&dir, source)?);
+                match take(&dir, source) {
+                    Ok(path) => landed.push(path),
+                    Err(e) => failed.push(format!("{}: {e}", name_of(source))),
+                }
             }
             continue;
         }
@@ -970,12 +1012,19 @@ fn import_into_project(
         // A dropped folder keeps its shape, so the tree pairs results where
         // they sit. It merges by name. `claim_path` numbers collisions.
         for source in &matches {
-            take(&import_destination(&dir, root, source), source)?;
+            if let Err(e) = take(&import_destination(&dir, root, source), source) {
+                failed.push(format!("{}: {e}", name_of(source)));
+            }
         }
-        // One staged path per dropped folder. The run walks it again.
-        landed.push(import_destination(&dir, root, root).to_string_lossy().into_owned());
+        // One staged path per dropped folder, even when some of its files
+        // failed: what landed is inside it. The run walks it again.
+        landed.push(
+            import_destination(&dir, root, root)
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
-    Ok(landed)
+    Ok(ImportOutcome { landed, failed })
 }
 
 /// The folder one imported file lands in: the project, the dropped folder's own
@@ -1210,6 +1259,7 @@ async fn convert_one(
             if history::is_in_dir(existing, &output_dir) {
                 return Ok(ConvertOneOutcome::copied(
                     "That file already has a result in this folder. Nothing was charged.",
+                    existing.clone(),
                 ));
             }
             let id = state.next_id();
@@ -1217,12 +1267,15 @@ async fn convert_one(
             state.insert(job.clone());
             let _ = app.emit("job-updated", job);
             // A failed copy reports itself on the row, which offers Retry.
-            return Ok(if jobs::reuse_result(&app, id, generation, existing) {
-                ConvertOneOutcome::copied(
+            let written = jobs::reuse_result(&app, id, generation, existing)
+                .then(|| state.get(id).and_then(|job| job.output_path))
+                .flatten();
+            return Ok(match written {
+                Some(path) => ConvertOneOutcome::copied(
                     "Copied a result from an earlier run. Nothing was charged.",
-                )
-            } else {
-                ConvertOneOutcome::queued()
+                    path,
+                ),
+                None => ConvertOneOutcome::queued(),
             });
         }
     }
@@ -1945,6 +1998,27 @@ mod scan_tests {
         ] {
             assert!(!is_permanent_direct(Path::new(name)), "{name}");
         }
+    }
+
+    /// The scan's fallback feeds the autodetect, which picks Transcribe only
+    /// while its count is the larger one.
+    #[test]
+    fn the_scan_fallback_keeps_backend_formats_and_leaves_media_to_transcribe() {
+        let root = tree(
+            "scan-fallback-candidates",
+            &[
+                "document.odt",
+                "legacy.docx",
+                "talk.mp3",
+                "movie.mp4",
+                "already.md",
+            ],
+        );
+        let inputs = [root.to_string_lossy().into_owned()];
+        assert_eq!(
+            names(&fallback_conversion_files(&inputs)),
+            vec!["document.odt", "legacy.docx"]
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { cx } from "../cx";
 import "./Tabs.css";
 
@@ -31,10 +31,27 @@ export interface TabsProps {
 /// document is instant.
 export function Tabs({ items, value, onChange, onClose, label, end, className }: TabsProps) {
   const ref = useRef<HTMLDivElement>(null);
+  const landAfterClose = useRef<{ id: string; at: number } | null>(null);
 
   const focusAt = (i: number) => {
     ref.current?.querySelectorAll<HTMLButtonElement>("[role='tab']")[i]?.focus();
   };
+
+  /// Focus lands once the tab is really gone, which a confirm can refuse. The
+  /// intent stays armed while the id is still here: `items` is rebuilt on every
+  /// render of the caller, so clearing on sight would outrun an awaited save.
+  useEffect(() => {
+    const land = landAfterClose.current;
+    if (!land || items.some((t) => t.id === land.id)) return;
+    landAfterClose.current = null;
+    // The unmount drops focus on `<body>`. Anywhere else is the user's, and a
+    // refused confirm can leave this armed for a close it never asked for.
+    const active = document.activeElement;
+    if (active !== document.body && ref.current?.contains(active) !== true) return;
+    ref.current?.querySelectorAll<HTMLButtonElement>("[role='tab']")[
+      Math.min(land.at, items.length - 1)
+    ]?.focus();
+  }, [items]);
 
   const move = (delta: number, from: number) => {
     const next = (from + delta + items.length) % items.length;
@@ -67,8 +84,7 @@ export function Tabs({ items, value, onChange, onClose, label, end, className }:
           e.preventDefault();
           onClose(items[i].id);
           // Focus does not survive the unmount: land on the next tab.
-          const land = Math.min(i, items.length - 2);
-          if (land >= 0) requestAnimationFrame(() => { focusAt(land); });
+          landAfterClose.current = { id: items[i].id, at: i };
         }
       }}
     >

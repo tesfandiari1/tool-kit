@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { commands } from "@/app/commands";
 import { basename } from "@/app/format";
 import type { FileRow, HistoryEntry, Job } from "@/app/types";
@@ -20,11 +20,17 @@ export function useDocuments({
   /// The inspector card's file. Here, so "opening a document dismisses the
   /// card" is an invariant rather than three call sites.
   const [preview, setPreview] = useState<FileRow | null>(null);
+  /// What `docs` holds now, for the callbacks that read it after an await: a
+  /// document saved during a close still reads dirty through the closure.
+  const docsRef = useRef(docs);
+  useEffect(() => {
+    docsRef.current = docs;
+  }, [docs]);
 
   /// Reports whether the pane showed the file: `openable` cannot answer for
   /// the encoding, so a caller needs somewhere else to put it.
   const open = useCallback(
-    async (title: string, outputPath: string | null): Promise<boolean> => {
+    async (outputPath: string | null): Promise<boolean> => {
       if (!outputPath) {
         showToast("No result file to open", "danger");
         return false;
@@ -39,13 +45,17 @@ export function useDocuments({
         const { text, mtimeMs } = await commands.readDocument(outputPath);
         const doc: OpenDoc = {
           id: outputPath,
-          title,
+          // The tab names the result, not the file it came from.
+          title: basename(outputPath),
           subtitle: outputPath,
           text,
           revealPath: outputPath,
           save: "clean",
           mtimeMs,
         };
+        // `mode` is one state for the pane, so the door that opens a document
+        // sets it. Never on re-activation: that drops the editor's undo stack.
+        setMode("read");
         setList((cur) => activateOrInsert(cur.docs, doc));
         return true;
       } catch (e) {
@@ -56,15 +66,12 @@ export function useDocuments({
     [docs, showToast],
   );
 
-  const openJob = useCallback((job: Job) => open(job.fileName, job.outputPath), [open]);
+  const openJob = useCallback((job: Job) => open(job.outputPath), [open]);
 
-  const openHistory = useCallback(
-    (entry: HistoryEntry) => open(entry.fileName, entry.outputPath),
-    [open],
-  );
+  const openHistory = useCallback((entry: HistoryEntry) => open(entry.outputPath), [open]);
 
   /// The doc id is the path, so three doors open one tab.
-  const openPath = useCallback((path: string) => open(basename(path), path), [open]);
+  const openPath = useCallback((path: string) => open(path), [open]);
 
   const select = useCallback((id: string) => {
     setPreview(null);
@@ -75,7 +82,7 @@ export function useDocuments({
   /// refused save reads `error`, and that edit is still in memory.
   const closeDoc = useCallback(
     async (id: string): Promise<boolean> => {
-      const doc = docs.find((d) => d.id === id);
+      const doc = docsRef.current.find((d) => d.id === id);
       if (doc && isDirty(doc.save)) {
         const ok = await confirm("This document has unsaved changes. Close anyway?", {
           title: "Unsaved changes",
@@ -88,7 +95,7 @@ export function useDocuments({
       setList((cur) => removeDoc(cur.docs, cur.activeId, id));
       return true;
     },
-    [docs],
+    [],
   );
 
   /// Follow a file the host moved, tab and autosave with it.

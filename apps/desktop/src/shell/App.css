@@ -139,6 +139,22 @@
     flex: 1;
     min-height: 0;
     min-width: 0;
+    /* Opacity and a 1% settle, transform only, while the OS animates the window
+       open. On the split, which mounts once: on the document pane it replays at
+       every Run or History switch. Nothing matches the close, or CSS fights the
+       native shrink. */
+    animation: pane-in var(--dur-slow) var(--ease);
+    transform-origin: left center;
+  }
+  @keyframes pane-in {
+    from {
+      opacity: 0;
+      transform: scale(0.99);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
 
   /* --- First run --------------------------------------------------------- */
@@ -260,23 +276,6 @@
   /* The open row keeps its name at full strength. */
   .job.is-selected .job-name {
     color: var(--text-body);
-  }
-
-  /* Opacity and a 1% settle, transform only, while the OS animates the window.
-     Nothing matches the close, or CSS fights the native shrink. */
-  .workspace .doc {
-    animation: pane-in var(--dur-slow) var(--ease);
-    transform-origin: left center;
-  }
-  @keyframes pane-in {
-    from {
-      opacity: 0;
-      transform: scale(0.99);
-    }
-    to {
-      opacity: 1;
-      transform: none;
-    }
   }
 
   /* --- Folder picker ------------------------------------------------------ */
@@ -551,6 +550,10 @@
     display: flex;
     flex-direction: column;
   }
+  /* No panel around these rows, so the flow's own inset is the gutter. */
+  .hist-list .job {
+    padding-inline: 0;
+  }
   /* Layout only. See `.job-sub`. */
   .hist-empty {
     display: grid;
@@ -569,8 +572,6 @@
     line-height: var(--lh-body);
     word-break: break-word;
     color: var(--text-body);
-    -webkit-user-select: text;
-    user-select: text;
   }
   .md h1,
   .md h2,
@@ -685,7 +686,8 @@
      library's reduced-motion substitutes too. */
   @media (prefers-reduced-motion: reduce) {
     .spin,
-    .onboarding-beat {
+    .onboarding-beat,
+    .workspace {
       animation: none;
     }
     .folder-hit,

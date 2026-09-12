@@ -15,10 +15,10 @@ it stood before this prune is
 
 | Item | Value |
 |---|---|
-| Branch tip | `1aee5d4` on `main` |
+| Branch tip | `64636db` on `main`, with the known-issues fix on top of it |
 | OpenAPI contract | 0.4.4 (`contract/http/openapi.yaml`) |
 | Desktop version | 1.0.0 (`package.json`, `Cargo.toml`, `tauri.conf.json`) |
-| Installed bundle | `/Applications/Tool-Kit.app`, 1.0.0, built from the tree after `e12388f` with the selection-keyed Convert rail, on 2026-09-12. Signed, notarized and stapled, app `8a159b90` and DMG `c38dde49` |
+| Installed bundle | `/Applications/Tool-Kit.app`, 1.0.0, built from the tree after `64636db` with the 27 known-issue fixes, on 2026-09-12. Signed only, not notarized, app `4f823ae8`. The last notarized build (`8a159b90`, DMG `c38dde49`) is in the Trash |
 | Backend | M0 to M4 complete. M5 unbuilt. M7 cancelled |
 | Desktop | M6 landed, gate open on CVR-067 and CVR-081 |
 | Where the service runs | Sidecar inside the `.app`. Docker needs a `backend-override.json` that no part of the app writes |
@@ -38,6 +38,7 @@ The keychain entitlement stays parked, so `verify-release.sh` fails its
 | 2026-08-21 | The library became a disclosure tree over disk, and the window became two panes | Settings left the `View` union and became a sheet, so opening it no longer evicts the Run column mid-run |
 | 2026-09-12 | The window opens hidden and the frontend sizes, places and shows it. Four agents closed 45 findings. Committed at `2bc1c1b` and `1aee5d4` | Run progress and the title-bar counter measure a per-run baseline, not the whole queue |
 | 2026-09-12 | The design system was replaced by the Tristin Esfandiari system: new token vocabulary, DaVinci and Red Hat Display and DM Sans, no radius, shadow or blur | Surfaces are opaque and follow the macOS appearance, `macOSPrivateApi` is gone, and the Mac App Store is now blocked only by the sidecars |
+| 2026-09-12 | The 27 known issues closed: three fix agents on disjoint files, two adversarial verifiers that landed five corrections, every gate green | `convert_one` answers a `path` for a copy, `import_into_project` answers `{ landed, failed }`, the gate's `setup_workspace` reports a welcome file a quit at the last beat left unread, and `scanKey` carries `capabilities.state` so the host re-plans when the service comes back |
 
 ### What the product does today
 
@@ -68,40 +69,13 @@ The keychain entitlement stays parked, so `verify-release.sh` fails its
 
 ## Known issues
 
-27 issues, each verified twice against the tree on 2026-09-12. Each line names the change at the root and the decisive file and line. The design-system port closed four of the original 31.
+Five, all low, found by the verify pass over the 2026-09-12 fix. Each line names the root and the decisive file.
 
-**Medium**
-
-- When the service refuses or fails, the scan falls back to direct extensions and silently drops odt/rtf files. Fix: Keep the backend candidate list, or the reason, in the scan fallback (`src-tauri/src/lib.rs:491`).
-- One failed copy aborts import_into_project: earlier copies stay on disk, unstaged and unlisted. Fix: Collect per-file failures in import_into_project and return what landed (`src-tauri/src/lib.rs:965`).
-- secret_status is read once at mount, so a backend token minted later leaves Run blocked on a hidden field. Fix: Re-read secretStatus when the capabilities probe first turns ready (`src/shell/App.tsx:209`).
-- requestClose ignores an in-flight save, so a write that fails after close loses the edit silently. Fix: Await a "saving" doc in requestClose before calling closeDoc (`src/shell/useDocumentSave.ts:89`).
-- A non-gone listing failure outside click mode is silent, so the branch shows "Loading…" forever. Fix: Surface non-gone failures in `read` for refresh and reconcile too (`src/shell/useProjectTree.ts:200`).
-
-**Low**
-
-- The badge prints "400+" at exactly 400 rows, because a full page is not a total. Fix: Fetch HISTORY_LIMIT + 1 rows and mark the overflow (`src/domains/history/HistoryPanel.tsx:94`).
-- A non-openable history row keeps a focusable button with no handler and no disabled styling. Fix: Render a span when !openable, or style [aria-disabled] (`src/domains/history/HistoryPanel.tsx:172`).
-- DocumentPane unmounts on every Run or History switch, so pane-in replays on each return to Library. Fix: Keep DocumentPane mounted behind the swapped views, or drop pane-in (`src/shell/App.css:282`).
-- History rows carry the Run panel's 16px gutter with no panel, so they indent past the search field. Fix: Override .job side padding inside .history-panel (`src/shell/App.css:491`).
-- preview-body grants text selection but keeps body's arrow cursor, unlike the paired .ui-selectable rule. Fix: Add cursor: auto to .preview-body, or reuse .ui-selectable (`src/shell/App.css:581`).
-- scanKey omits activeProjectPath, so switching project leaves skip and copy counts stale for inputs outside the workspace. Fix: Add settings.activeProjectPath to scanKey (`src/shell/App.tsx:143`).
-- Convert refused because a run is going stages the file and leaves Library, though the toast already explains. Fix: Skip setView for the run_in_progress reason in convertOne (`src/shell/App.tsx:493`).
-- The ⌘O guard ignores ctrlKey, so Ctrl+⌘O also opens the file picker. Fix: Add e.ctrlKey to the ⌘O guard (`src/shell/App.tsx:722`).
-- HistoryPanel gets no dragging prop, so a drag over History shows no target though the drop is accepted. Fix: Pass dragging to HistoryPanel, or show a window-level drag affordance (`src/shell/App.tsx:1205`).
-- mode is one pane-wide state, so a file opened from the tree lands in Edit. Fix: Reset mode to "read" inside `open`, or key mode per document (`src/shell/useDocuments.ts:14`).
-- openJob and openHistory title a result tab with the source name, so a transcript tab reads lecture.mp3. Fix: Title from basename(outputPath) in openJob and openHistory (`src/shell/useDocuments.ts:54`).
-- Delete on a dirty tab focuses before the async close resolves, so focus lands wrong or on body. Fix: Focus from an effect on items, or await onClose (`src/ui/primitives/Tabs.tsx:70`).
-- Quitting at onboarding's last beat leaves welcome_seeded set, so welcome.md never opens on the retry. Fix: Open welcome.md in OnboardingGate.setup, not after the final beat (`src-tauri/src/workspace.rs:146`).
-- fmtElapsed never rolls over to hours, so a run past an hour reads "127:43" in the title bar. Fix: Add an hours segment to fmtElapsed past 3600 seconds (`src/app/format.ts:16`).
-- Move select's aria-label replaces its visible "Move to" label, so voice control cannot address it. Fix: Reword aria-label to begin "Move to", or drop it (`src/domains/library/LibraryPane.tsx:107`).
-- Glyph map misses nine accepted extensions: epub, oga, avi, wmv, mpeg, mpg, opus, amr, 3gp. Fix: Add the nine missing extensions to BY_EXT (`src/domains/library/fileGlyph.ts:22`).
-- runsFinished re-runs the capabilities probe, so every drop and every finished run re-disables Run. Fix: Drop runsFinished from the probe effect's deps (`src/shell/App.tsx:339`).
-- Convert on a tree row opens a freshly converted result but only toasts a copied one. Fix: Return the copied path from convert_one and open it (`src/shell/App.tsx:496`).
-- Stop drops stop_run's count, so no toast says how many files it cancelled. Fix: Toast the count stopRun() already returns (`src/shell/App.tsx:937`).
-- Two Run hints name a Settings remedy but are not clickable: backend unavailable, and skip already done. Fix: Set hintOpensSettings on both branches of the hint chain (`src/shell/App.tsx:1032`).
-- Option-click deep expand skips any folder whose read is already in flight, so it acts as a plain click. Fix: Await the in-flight read in `read` instead of returning null (`src/shell/useProjectTree.ts:180`).
-- Restore loop calls setLayout on all 90 frames when the saved seam sits under the 240px floor. Fix: Stop retrying once setLayout's applied layout stops changing (`src/ui/primitives/SplitPane.tsx:86`).
+- While the conversion service is down, the scan counts every non-text, non-media extension as convertible, so the blocked hint can over-count a drop with junk in it. It self-corrects on the recovery re-scan and no run can start. Fix: narrow `fallback_conversion_files` once a static backend format set exists (`src-tauri/src/lib.rs`, `fallback_conversion_files`).
+- A folder whose refresh read fails without being gone renders as an open branch with no rows after the one toast. Fix: cache a failure marker in `read` and render a quiet row from it (`src/shell/useProjectTree.ts`, `src/domains/library/ProjectTree.tsx`, `childrenOf`).
+- `open` in `useDocuments` depends on `docs`, so every door changes identity per keystroke and App keeps `revealJobRef` for it. Fix: read the already-open check through `docsRef` and drop `docs` from the deps (`src/shell/useDocuments.ts`).
+- `rustfmt --check` is dirty at seven pre-existing sites in `history.rs`, `tree.rs` and `workspace.rs`. Fix: run `cargo fmt` in its own commit (`src-tauri/src/history.rs:576`).
+- `fileGlyph` maps `heic` and `m4v`, which no job accepts. Fix: drop the two entries (`src/domains/library/fileGlyph.ts`).
 
 ---
 

@@ -11,9 +11,13 @@ export function tildePath(p: string) {
   return p.replace(/^\/Users\/[^/]+/, "~");
 }
 
+/// m:ss, and h:mm:ss once a run passes the hour.
 export function fmtElapsed(nowMs: number, startedSec: number) {
   const s = Math.max(0, Math.floor(nowMs / 1000) - startedSec);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const ss = String(s % 60).padStart(2, "0");
+  if (s < 3600) return `${Math.floor(s / 60)}:${ss}`;
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+  return `${Math.floor(s / 3600)}:${mm}:${ss}`;
 }
 
 /// History is scanned, not read: relative while that is the useful answer,

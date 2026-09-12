@@ -31,7 +31,7 @@ function MarkdownLink({ href, children }: ComponentProps<"a">) {
 /// a 200-file run emits hundreds of them.
 export const MarkdownViewer = memo(function MarkdownViewer({ text }: { text: string }) {
   return (
-    <div className="preview-body md">
+    <div className="preview-body md ui-selectable">
       <Markdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>
         {text}
       </Markdown>

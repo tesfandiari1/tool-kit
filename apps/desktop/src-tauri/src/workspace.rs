@@ -170,6 +170,16 @@ pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
     })
 }
 
+/// The welcome file an earlier setup left behind. The gate runs only with no
+/// workspace bound, so a retry after a quit at its last beat finds the file it
+/// seeded still unread.
+pub fn seeded_welcome(path: &str) -> Option<String> {
+    let welcome = Path::new(path).join(CATCH_ALL_TITLE).join("welcome.md");
+    welcome
+        .is_file()
+        .then(|| welcome.to_string_lossy().into_owned())
+}
+
 /// Rename a pre-existing `Inbox` to the catch-all's current name, once.
 /// Identity is `project.json`, so the id, the date and every file survive.
 /// A folder the user retitled by hand is theirs, and is left alone.
@@ -533,6 +543,25 @@ mod tests {
 
         let second = setup_workspace(&path).unwrap();
         assert_eq!(second.welcome_path, None);
+    }
+
+    /// A quit at the gate's last beat leaves the file seeded and unopened, so
+    /// the retry has to find it without writing it.
+    #[test]
+    fn the_seeded_welcome_file_is_still_found_after_a_second_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = workspace_path(&dir);
+        setup_workspace(&path).unwrap();
+        setup_workspace(&path).unwrap();
+
+        let welcome = Path::new(&path).join("Drop Box/welcome.md");
+        assert_eq!(
+            seeded_welcome(&path).as_deref(),
+            Some(welcome.to_string_lossy().as_ref())
+        );
+
+        std::fs::remove_file(&welcome).unwrap();
+        assert_eq!(seeded_welcome(&path), None);
     }
 
     /// The file belongs to the user, so deleting it is their decision.

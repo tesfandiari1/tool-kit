@@ -147,6 +147,12 @@ export default function App() {
     settings.outputDir,
     // The route decides which extensions `scan_inputs` counts.
     settings.conversionRoute,
+    // The active project is where a run writes, which the scan judges "already
+    // here" against.
+    settings.activeProjectPath,
+    // The host plans the route against the live service, so a service that
+    // comes back has to re-plan what it counted while it was down.
+    capabilities.state,
     runsFinished,
   ]);
   const scanCurrent = scanResult.key === scanKey;
@@ -306,7 +312,7 @@ export default function App() {
       return;
     }
 
-    const probe = { cancelled: false };
+    const probe = { cancelled: false, ready: false };
     const pendingSave = settingsSave.current;
     setCapabilities({ state: "loading" });
     const ask = async () => {
@@ -314,12 +320,17 @@ export default function App() {
         await pendingSave;
         const { data } = await conversionClient.GET("/api/v1/capabilities");
         if (!data) throw new Error("Conversion service capabilities were unavailable");
+        // The sidecar mints its token after the mount read, so the first
+        // answer re-reads the keys.
+        const keys = probe.ready ? null : await commands.secretStatus().catch(() => null);
         if (probe.cancelled) return true;
+        probe.ready = true;
         setCapabilities({
           state: "ready",
           acceptingJobs: data.data.conversion.acceptingJobs,
           inputFormats: data.data.conversion.inputFormats,
         });
+        if (keys) setSecrets(keys);
         return true;
       } catch (e) {
         // The run hint has nothing to say but the host's own reason.
@@ -336,7 +347,7 @@ export default function App() {
       probe.cancelled = true;
       window.clearInterval(retry);
     };
-  }, [settings.conversionRoute, runsFinished]);
+  }, [settings.conversionRoute]);
 
 
   /// Stable: the tree's fetch effects depend on it.
@@ -396,7 +407,8 @@ export default function App() {
         }
       })();
       setView("library");
-      // Only a brand-new workspace carries one: the host writes it once.
+      // A new workspace carries one, and so does one the gate seeded on a run
+      // that quit before binding it.
       if (workspace.welcomePath !== null) void openPath(workspace.welcomePath);
     },
     [openPath, persist],
@@ -450,10 +462,15 @@ export default function App() {
       const project = settingsRef.current.activeProjectPath;
       if (project === null) return paths;
       try {
-        const landed = await commands.importIntoProject(paths, project);
+        const { landed, failed } = await commands.importIntoProject(paths, project);
         // No watcher, and the focus reconcile does not fire while the window
         // keeps focus, so without this the copies land invisibly.
         setRunsFinished((n) => n + 1);
+        // A file that never landed is staged nowhere, so unsaid it vanishes.
+        if (failed.length > 0) {
+          const rest = failed.length - 1;
+          showToast(rest > 0 ? `${failed[0]} (+${String(rest)} more)` : failed[0], "danger");
+        }
         return landed;
       } catch (e) {
         showToast(String(e), "danger");
@@ -490,7 +507,8 @@ export default function App() {
         // a non-empty selection, so bouncing without it lands on an empty view.
         addPaths([row.path]);
         showToast(out.message ?? "Cannot convert this file yet", "danger");
-        setView("run");
+        // A run already underway needs no bounce: the toast says it is staged.
+        if (out.reason !== "run_in_progress") setView("run");
         return;
       }
       if (out.kind === "copied") {
@@ -498,10 +516,16 @@ export default function App() {
         // A copy finishes inside the command, so no job runs and the
         // run-finished effect never fires. Refresh the tree so the row pairs.
         setRunsFinished((n) => n + 1);
+        // What a freshly converted result does: put it on screen.
+        if (out.path !== null) {
+          void openPath(out.path).then((opened) => {
+            if (opened) setView("library");
+          });
+        }
       }
       // Queued needs nothing: its status arrives on the job-updated stream.
     },
-    [addPaths, showPreview, showToast],
+    [addPaths, openPath, showPreview, showToast],
   );
 
   /// File one library row, and the result beside it, into another project. The
@@ -719,7 +743,9 @@ export default function App() {
   useEffect(() => {
     if (!libraryMode) return;
     const onKey = (e: KeyboardEvent) => {
-      if (!e.metaKey || e.key.toLowerCase() !== "o" || e.shiftKey || e.altKey) return;
+      if (!e.metaKey || e.ctrlKey || e.key.toLowerCase() !== "o" || e.shiftKey || e.altKey) {
+        return;
+      }
       // A keydown inside the modal <dialog> still bubbles here.
       if (settingsOpen) return;
       const el = document.activeElement;
@@ -792,13 +818,11 @@ export default function App() {
       // One file is a request to read it. A batch is not, so nothing opens.
       const target = autoOpenTarget(terminalAtStart, jobsRef.current);
       if (target !== null) {
-        // `mode` is one state for the pane, not one per document.
-        setMode("read");
         void revealJobRef.current(target);
       }
     }
     wasRunning.current = running;
-  }, [running, doneCount, mutateInputs, setMode, terminalAtStart]);
+  }, [running, doneCount, mutateInputs, terminalAtStart]);
 
   /* The only channel for errors that never reach a job row. Hoisted because a
      modal <dialog> draws in the top layer, so a region at the app root is
@@ -930,7 +954,10 @@ export default function App() {
   const stop = async () => {
     // Stopping is not finishing: the auto-clear would wipe the selection.
     autoClear.current = false;
-    await call(() => commands.stopRun());
+    const stopped = await call(() => commands.stopRun());
+    if (typeof stopped === "number" && stopped > 0) {
+      showToast(`Stopped ${String(stopped)} file${stopped === 1 ? "" : "s"}`);
+    }
   };
 
   /// The second door that spends. Stop turns a cancelled batch into failed
@@ -1006,10 +1033,11 @@ export default function App() {
     if (reason === "capabilities_pending") {
       hint = "Checking conversion service capabilities…";
     } else if (reason === "backend_unavailable") {
-      // Settings holds no control that moves the service, so carry the host's
-      // own reason.
+      // Carry the host's own reason. Settings is still the remedy: the route
+      // switch sends these files direct to Datalab.
       const detail = capabilities.state === "unavailable" ? capabilities.message : undefined;
       hint = detail ?? `Conversion service unavailable for ${count} file${count > 1 ? "s" : ""}`;
+      hintOpensSettings = true;
     } else if (reason === "backend_not_accepting") {
       hint = `Conversion service is not accepting jobs for ${count} file${count > 1 ? "s" : ""} right now`;
       hintOpensSettings = true;
@@ -1027,6 +1055,7 @@ export default function App() {
     hintOpensSettings = true;
   } else if (toRun === 0 && copying === 0 && skipping > 0) {
     hint = `All ${skipping} already have a result beside them — turn off “Skip files already done” in Settings to run them again`;
+    hintOpensSettings = true;
   } else if (settings.inputs.length > 0 && destination === null) {
     // Last in the chain: the branches above are more actionable.
     hint = "Choose an output folder for the results";
@@ -1072,6 +1101,7 @@ export default function App() {
   const historyPanel = (
     <HistoryPanel
       refreshKey={runsFinished}
+      dragging={dragging}
       onChanged={() => setRunsFinished((n) => n + 1)}
       onOpen={(e) => void revealHistory(e)}
       onToast={showToast}

@@ -28,25 +28,39 @@ export function useDocumentSave({
     docsRef.current = docs;
   }, [docs]);
 
+  /// The write each document has in flight, so a close can wait for it.
+  const writes = useRef(new Map<string, Promise<boolean>>());
+
   /// Reports whether the document is on disk, so a caller can stop.
   const saveDoc = useCallback(
-    async (id: string): Promise<boolean> => {
-      const doc = docsRef.current.find((d) => d.id === id);
-      // `saving` reads as clean, which stops ⌘S racing the autosave.
-      if (!doc || !isDirty(doc.save)) return true;
-      setDocMeta(id, { save: "saving" });
-      try {
-        const mtimeMs = await commands.writeDocument(doc.id, doc.text, doc.mtimeMs);
-        // Take the new mtime even when typing outran the write, or the next
-        // save offers a stale one and the host refuses it.
-        const now = docsRef.current.find((d) => d.id === id);
-        setDocMeta(id, now?.text === doc.text ? { save: "saved", mtimeMs } : { mtimeMs });
-        return true;
-      } catch {
-        // The header says it, where a toast would not.
-        setDocMeta(id, { save: "error" });
-        return false;
-      }
+    (id: string): Promise<boolean> => {
+      const write = (async () => {
+        const doc = docsRef.current.find((d) => d.id === id);
+        // `saving` reads as clean, which stops ⌘S racing the autosave.
+        if (!doc || !isDirty(doc.save)) return true;
+        setDocMeta(id, { save: "saving" });
+        try {
+          const mtimeMs = await commands.writeDocument(doc.id, doc.text, doc.mtimeMs);
+          // Take the new mtime even when typing outran the write, or the next
+          // save offers a stale one and the host refuses it.
+          const now = docsRef.current.find((d) => d.id === id);
+          setDocMeta(id, now?.text === doc.text ? { save: "saved", mtimeMs } : { mtimeMs });
+          // The ref lags the render, and a close that waited on this write
+          // saves again inside that gap.
+          docsRef.current = docsRef.current.map((d) => (d.id === id ? { ...d, mtimeMs } : d));
+          return true;
+        } catch {
+          // The header says it, where a toast would not.
+          setDocMeta(id, { save: "error" });
+          return false;
+        }
+      })();
+      writes.current.set(id, write);
+      void write.finally(() => {
+        // Only this one: a later save already replaced the entry.
+        if (writes.current.get(id) === write) writes.current.delete(id);
+      });
+      return write;
     },
     [setDocMeta],
   );
@@ -80,11 +94,15 @@ export function useDocumentSave({
     };
   }, [activeId, saveDoc]);
 
-  /// Close, saving first, and report whether it closed. A refused save stops
-  /// the first attempt only: the second skips the doomed retry and hands over
-  /// to `closeDoc`, or a file changed on disk is a tab that never closes.
+  /// Close, saving first, and report whether it closed. A write already in
+  /// flight is waited on, or an edit that fails after the tab closed is lost
+  /// silently. A refused save stops the first attempt only: the second skips
+  /// the doomed retry and hands over to `closeDoc`, or a file changed on disk
+  /// is a tab that never closes.
   const requestClose = useCallback(
     async (id: string): Promise<boolean> => {
+      const pending = writes.current.get(id);
+      if (pending && !(await pending)) return false;
       const doc = docsRef.current.find((d) => d.id === id);
       if (doc?.save === "edited" && !(await saveDoc(id))) return false;
       return closeDoc(id);

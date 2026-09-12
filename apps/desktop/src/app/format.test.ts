@@ -16,6 +16,11 @@ describe("fmtElapsed", () => {
     expect(fmtElapsed(1_700_000_065_000, 1_700_000_000)).toBe("1:05");
     expect(fmtElapsed(1_699_000_000_000, 1_700_000_000)).toBe("0:00");
   });
+
+  it("rolls to h:mm:ss past an hour", () => {
+    expect(fmtElapsed(1_700_003_600_000, 1_700_000_000)).toBe("1:00:00");
+    expect(fmtElapsed(1_700_003_723_000, 1_700_000_000)).toBe("1:02:03");
+  });
 });
 
 describe("fmtWhen", () => {

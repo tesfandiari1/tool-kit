@@ -52,6 +52,7 @@ export function SplitPane({
   /// Owed at mount too: `defaultLayout` is validated against the panels then
   /// registered, and the second arrives a render later.
   const owedRestore = useRef(true);
+  const groupEl = useRef<HTMLDivElement | null>(null);
   // Never spread from `layout`: `setLayout` is positional, so key order picks
   // which pane gets which width. See `paneLayout`.
   const intended = useMemo(() => paneLayout(layout, defaultStart), [layout, defaultStart]);
@@ -60,7 +61,10 @@ export function SplitPane({
      when its ids match the panels present at mount. It retries because the
      second panel registers a render later and the window is still growing,
      where the start percentage is clamped under `minStart` for good. Only on
-     the collapsed to expanded edge, or it pulls the seam out from a drag. */
+     the collapsed to expanded edge, or it pulls the seam out from a drag.
+     A clamp can only move when the group resizes, so one call per width is
+     enough, plus one on the next frame: the library stores the new group size
+     after this callback, so the first call still measures the old one. */
   useEffect(() => {
     if (wasCollapsed.current && !collapsed) owedRestore.current = true;
     wasCollapsed.current = collapsed;
@@ -68,6 +72,8 @@ export function SplitPane({
 
     let left = RESTORE_FRAMES;
     let frame = 0;
+    let lastWidth = -1;
+    let again = false;
     const settled = (applied: SplitLayout) =>
       Object.keys(intended).every(
         (id) => Math.abs((applied[id] ?? 0) - (intended[id] ?? 0)) < RESTORE_EPSILON,
@@ -81,7 +87,12 @@ export function SplitPane({
           owedRestore.current = false;
           return;
         }
-        group.setLayout(intended);
+        const width = groupEl.current?.offsetWidth ?? 0;
+        if (width !== lastWidth || again) {
+          again = width !== lastWidth;
+          lastWidth = width;
+          group.setLayout(intended);
+        }
       }
       if (--left > 0) frame = requestAnimationFrame(restore);
       else owedRestore.current = false;
@@ -96,6 +107,7 @@ export function SplitPane({
     <Group
       orientation="horizontal"
       groupRef={groupRef}
+      elementRef={groupEl}
       className={cx("ui-split", collapsed && "ui-split--collapsed", className)}
       defaultLayout={intended}
       /* The library also fires on mount, on a recompute and after any
