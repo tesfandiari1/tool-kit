@@ -5,7 +5,7 @@ It supersedes the four documents now in `docs/archive/`: `HANDOFF.md`,
 `CLOSEOUT_EXECUTION_PLAN.md`, `BACKEND_EPIC.md`, and `BACKEND_SERVICE_PLAN.md`. Read it before you touch the tree, then re-read
 the worktree. This file goes stale the moment someone lands a commit.
 
-**Last updated:** 2026-08-21
+**Last updated:** 2026-09-12
 
 Docs use **standard** STE voice: American spelling, active voice, no em dashes,
 no semicolons between independent sentences. Use a colon in section titles,
@@ -19,156 +19,133 @@ rewrite code, commands, identifiers, or quotations to match prose rules.
 | Item | Value |
 |---|---|
 | Branch | `main`. Run `git log --oneline -8` for the tip |
-| Layout | **Restructured.** `apps/{desktop,converter}`, `crates/`, `workers/`, `contract/`, `deploy/`. See CLAUDE.md |
+| Layout | `apps/{desktop,converter}`, `crates/`, `workers/`, `contract/`, `deploy/`. See CLAUDE.md |
 | OpenAPI contract | **0.4.4** (`contract/http/openapi.yaml`) |
-| Backend | M0, M1, M2, M3, M4 complete. M5 and M8 unbuilt. **M7 cancelled**, see section 4 |
+| Backend | M0 to M4 complete. M5 and M8 unbuilt. **M7 cancelled**, see section 4 |
 | Desktop | M6 implementation landed, **gate open** (CVR-067, CVR-081) |
-| Exposure | Loopback only, and staying there. M7 remote access is cancelled |
-| Local backend | **Sidecar landed 2026-08-20, and it is now the only path the app chooses.** The converter ships inside the `.app` and `conversion_route` defaults to `backend`. `backend_host::Deployment` reads `backend-override.json`, which only a deployment writes, so Manual (Docker) is unreachable from the UI. See section 3 |
+| Exposure | Loopback only, and staying there |
+| Local backend | **Sidecar landed 2026-08-20, and the app chooses no other path.** The converter ships inside the `.app`, `conversion_route` defaults to `backend`, and Manual (Docker) needs a `backend-override.json` only a deployment writes. See section 3 |
 | Backend Datalab fallback | Not built. Phase 2, now unblocked |
 | Phase 1 | **Complete 2026-08-19.** All four gates met |
-| Desktop version | **1.0.0** (`apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml`, `tauri.conf.json`) |
-| 1.0 bundle | **Signed, notarized and stapled 2026-08-20, and the first bundle to carry the sidecars.** Apple accepted the app (`667c0ab9`) and the DMG (`ac8c18da`), both `Ready for distribution`, no issues. A quarantined copy of the DMG answers `accepted / source=Notarized Developer ID`. Keychain entitlement stays parked until the provisioning profile lands, so `verify-release.sh` still fails that one section by design |
+| Desktop version | **1.0.0** (`package.json`, `Cargo.toml`, `tauri.conf.json`) |
+| 1.0 bundle | **Signed, notarized and stapled 2026-08-20**, the first bundle carrying the sidecars. Apple accepted the app (`667c0ab9`) and the DMG (`ac8c18da`), and a quarantined DMG answers `accepted / source=Notarized Developer ID`. The keychain entitlement stays parked, so `verify-release.sh` fails that section by design |
 | Latest container smoke | `20260819T161851Z`, image `sha256:4a0cbdd0…` |
 
 ### The sidecar, 2026-08-20
 
-The converter now ships inside the app, so a user installs one DMG and deploys
+The converter ships inside the app, so a user installs one DMG and deploys
 nothing.
 
-**What landed.** `pnpm sidecars` builds the converter, the PDF worker, and the
-Swift Vision worker and stages them with the `-aarch64-apple-darwin` suffix that
-`bundle.externalBin` requires, plus the pdf-inspector bcmaps as a resource.
+**What landed.** `pnpm sidecars` builds the converter, the PDF worker and the
+Swift Vision worker, stages them with the `-aarch64-apple-darwin` suffix
+`bundle.externalBin` requires, and stages the bcmaps as a resource.
 `backend_host.rs` owns the process. Two converter edits support it: `main.rs`
-logs `listener.local_addr()` rather than the configured address, which is the
-port handshake and also fixes a log that lied whenever Docker used port 0, and
-`TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF` gives the service a way to notice its
-parent died. `verify-release.sh` grew three sections that grade the sidecars.
+logs `listener.local_addr()`, the port handshake, and
+`TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF` lets the service notice its parent
+died. `verify-release.sh` grades the sidecars in three new sections.
 
 **Measured, not assumed.** All three binaries link only the macOS base system
-and the OS Swift runtime, so nothing needs bundling. Staged as siblings, the
-converter finds both workers with no env var, reports engines `pdf-inspector`,
-`anydoc` and `apple-vision`, and advertises **24 media types against Docker's
-18**. A PNG converted through `local_vision` and a PDF through `local_pdf`, both
-offline under `local_only`. SIGTERM and stdin EOF each stop it inside 250 ms,
-independently. Bundle cost is 17.5 MB of Mach-O plus 1.6 MB of bcmaps.
+and the OS Swift runtime. Staged as siblings, the converter finds both workers
+with no env var, reports engines `pdf-inspector`, `anydoc` and `apple-vision`,
+and advertises **24 media types against Docker's 18**. A PNG converted through
+`local_vision` and a PDF through `local_pdf`, offline under `local_only`.
+SIGTERM and stdin EOF each stop it inside 250 ms. Bundle cost is 17.5 MB of
+Mach-O plus 1.6 MB of bcmaps. A signed build stamps all three helpers
+`flags=0x10000(runtime)`, team `92MA44797J`, inner-out ahead of the `.app`, and
+Apple notarized both. Out of a **quarantined** copy the converter starts,
+resolves both workers and the bcmaps, and reports all 24 media types.
 
-**The one design consequence worth remembering.** The port is ephemeral, so the
-recorded origin on an in-flight ledger row cannot be a URL. Sidecar rows record
-the literal alias `sidecar`, and `BackendContext` still gets the live origin.
-Without that, `recovery_origin_still_configured` fails on every relaunch, the
-row is deleted, `recovery_blocker` is set, and nothing ever clears it, so Retry
-dies permanently.
+**The one design consequence worth remembering.** The port is ephemeral, so an
+in-flight ledger row cannot record a URL. Sidecar rows record the literal alias
+`sidecar`, and `BackendContext` still gets the live origin. Without that,
+`recovery_origin_still_configured` fails on every relaunch, the row is deleted,
+`recovery_blocker` is set, and nothing clears it, so Retry dies permanently.
 
-**The release path is proven, not assumed.** A signed build stamps all three
-helpers `flags=0x10000(runtime)`, team `92MA44797J`, timestamped, signed
-inner-out ahead of the `.app`, so `build-sidecars.sh` is right to do no signing
-of its own. `verify-release.sh` passes every section but the parked keychain
-entitlement. Apple notarized the app and the DMG on the first submission either
-has ever made with nested binaries, with no issues raised against any helper.
-The strongest check is the last one: out of a **quarantined** copy of the
-installed app, the converter starts, resolves both workers through
-`current_exe().with_file_name(...)`, resolves the bcmaps through
-`BaseDirectory::Resource`, and reports `pdf-inspector`, `anydoc` and
-`apple-vision` across 24 media types. The hardened runtime blocks none of it,
-so the app needs no entitlement to spawn its own signed helpers.
+**Where the service runs stopped being a setting.** `backend_host::Deployment`
+reads `backend-override.json` beside `settings.json`, absent means Sidecar, and
+`pnpm backend:docker` is the only thing that writes it. `local_backend_mode` is
+gone from `Settings`, `backend_host` no longer reads `Settings`, and
+`conversion_route` defaults to `backend`.
 
-**Where the service runs stopped being a setting, 2026-08-20.** The app uses
-the sidecar. `backend_host::Deployment` reads `backend-override.json` beside
-`settings.json`, absent means Sidecar, and `pnpm backend:docker` is the only
-thing that writes it. `local_backend_mode` is gone from `Settings` and
-`backend_host` no longer reads `Settings` at all. `conversion_route` now
-defaults to `backend`, which is what makes "the app uses the sidecar" true
-rather than nominal: it used to default to `direct`, so the sidecar ran and
-converted nothing.
-
-**Not built.** The live backend status row. `settings.backend_url` and the
-Settings field that wrote it are gone: the Manual URL comes from the override
-file, and the Backend token field is offered only when a deployment owns the
-service, because the app mints its own.
+**Not built.** The live backend status row. `settings.backend_url` and its
+Settings field are gone: the Manual URL comes from the override file, and the
+Backend token field appears only when a deployment owns the service.
 
 ### The workspace and first run, 2026-08-20
 
-The app opened on the run queue, which is a batch tool's home. It now opens on
-a library. `workspace.rs` creates or adopts the one folder an install is bound
-to: `.toolkit/workspace.json` is the identity marker, an Inbox project is
-guaranteed, and `.toolkit/index.db` is derived state that a missing file
-answers as an empty list rather than an error. Identity lives in the marker,
-not the path, so renaming the folder in Finder changes nothing. Four commands
-carry it: `suggested_workspace_path`, `inspect_workspace_path`,
+The app opens on a library, not the run queue. `workspace.rs` creates or adopts
+the one folder an install is bound to: `.toolkit/workspace.json` is the identity
+marker, a Drop Box project is guaranteed, and `.toolkit/index.db` is derived
+state that a missing file answers as an empty list. Identity lives in
+the marker, not the path, so renaming the folder in Finder changes nothing. Four
+commands carry it: `suggested_workspace_path`, `inspect_workspace_path`,
 `setup_workspace`, `list_projects`. `setup_workspace` persists the binding from
-the host rather than trusting the webview, which can lose a race against
-`save_settings`.
+the host, because the webview can lose a race against `save_settings`.
 
-This is the second SQLite database in the app. `history.rs` still owns every
-statement against `history.db`, and `workspace.rs` owns every statement against
-`index.db`. One is app state, the other is derived state a user may delete.
+It is the app's second SQLite database, and `history.rs` and `workspace.rs`
+each own every statement against their own file.
 
 First run asks three questions, and `conversionMode.ts` maps the third onto the
-three settings it really is, which lets the copy say "this Mac" while the app
-goes on speaking in routes and profiles. Local means `local_only` rather than
-`standard` with a preference, because choosing this Mac has to mean the bytes
-cannot leave it.
+three settings it really is, so the copy can say "this Mac". Local means
+`local_only`, because choosing this Mac has to mean the bytes cannot leave it.
 
-**Not built.** Nothing imports into a project yet, so the library lists what
-onboarding created and no more. The gate writes `conversionRoute: backend` with
-no Settings control to change it back, which is the same missing surface the
-sidecar section names.
+**Not built.** The live backend status row.
 
 ### The library tree, the Settings sheet, and two columns, 2026-08-21
 
-The library was a flat list of project names beside a centre column. It is now a
-disclosure tree of the files actually on disk, and the window is two panes: one
-of Library, Run, or History on the left, the document pane on the right.
+The library became a disclosure tree of the files on disk, and the window became
+two panes: Library, Run, or History on the left, the document pane on the right.
 
 **What landed.**
 
-- `tree.rs` lists one directory level from disk, on the blocking pool. Finder's
-  rules: case-insensitive natural sort with folders interleaved, dotfiles and
-  `project.json` hidden, symlinks listed and never followed, a 500-entry cap
-  that reports the remainder as one row, and a refusal for any `rel` that
-  escapes the workspace. It pairs a source with its sibling result through
-  `jobs::result_extensions_for`, which names every extension the route in force
-  can write, so a row's "already converted" mark cannot disagree with what a run
-  writes. On the Backend route that is two: the service writes `.md` whatever
-  the format setting says, and only the Datalab fallback writes the chosen
-  format. `write_output` numbers a collision, so the pairing also matches
-  `deck (1).md`.
+- `tree.rs` lists one directory level under Finder's rules: natural sort with
+  folders interleaved, dotfiles and `project.json` hidden, symlinks listed and
+  never followed, a 500-entry cap reporting the remainder as one row, and a
+  refusal for any `rel` escaping the workspace. It pairs a source with its
+  sibling result through `jobs::result_extensions_for`, `deck (1).md` included.
 - `Tree` and `TreeRow` in `@ui`, hand-rolled, with Finder's key map: arrows
   select, Right descends, Left climbs, type-to-select, Option-click opens a
-  whole subtree, Space raises the inspector card. The pure keyboard rules sit in
-  `treeKeys.ts` with their own tests.
-- `Sheet` in `@ui`, a native `<dialog>`. Settings left the `View` union and is a
-  sheet over the whole window now, opened by the sidebar gear, by
-  **Tool-Kit ▸ Settings…** at ⌘,, and by the run hint. Opening it no longer
-  evicts the Run column in the middle of a run.
-- `convert_one` converts one file into the folder it already sits in and answers
-  with a verdict rather than an error, so the tree renders the host's sentence
-  instead of planning a route of its own. Modelled on `retry_job`, so it cannot
-  wipe a queue the user is reading. `blocked` stages the file in Run and says
-  why.
-- `welcome.md` is a real file, written once into a new workspace's Inbox. Delete
-  it in Finder and it stays deleted.
+  subtree, Space raises the inspector card. The pure rules sit in `treeKeys.ts`.
+- `Sheet` in `@ui`, a native `<dialog>`. Settings left the `View` union, so
+  opening it no longer evicts the Run column mid-run.
+- `convert_one` converts one file into the folder it sits in and answers with a
+  verdict rather than an error. Modelled on `retry_job`, so it cannot wipe a
+  queue the user is reading.
+- `welcome.md` is a real file, written once into a new workspace's Drop Box.
+  Delete it in Finder and it stays deleted.
 - The unreachable launcher window phase is gone, in its own commit:
   `useFitWindow.ts`, every `html.fit-window` rule, `LibraryShell`,
   `ProjectSidebar`, and `ProjectWorkspace`.
-- Freshness is a finished run plus a debounced window-focus reconcile. It asks
-  `changed_project_dirs` which open folders moved, one `stat` each, and re-lists
-  only those: a listing costs a `read_dir` plus a `stat` per entry, and a
-  cancelled file picker was paying that for every open folder to learn nothing.
-  Nothing reacts to `job-updated`, because a 200-file run emits hundreds of
-  those events.
+- Freshness is a finished run plus a debounced focus reconcile over
+  `changed_project_dirs`. Nothing reacts to `job-updated`.
 
-**This supersedes one line above.** The library lists what is on disk, not only
-what onboarding created. Nothing imports into a project yet, so that half of the
-2026-08-20 note still stands.
+**Not built.** No rename, delete, or right-click menu, so the tree can create a
+project and not remove one. Nothing drops onto a project row. Open tabs do not
+come back on relaunch: a restored tab whose file changed would reopen stale and
+the mtime handshake would refuse the first save. There is no FSEvents watcher,
+by decision. The project row's count is top-level unconverted convertibles only.
 
-**Not built.** No rename, no delete, and no right-click menu, so the tree can
-create a project and not remove one. Nothing drops onto a project row. Open tabs
-do not come back on relaunch: a restored tab whose file changed on disk would
-reopen stale and the mtime handshake would refuse the first save. There is no
-FSEvents watcher, by decision. The project row's count is top-level unconverted
-convertibles only, and the row's `title` says so.
+### The launch sequence, the tree's doors, and a fix batch, 2026-09-12
+
+**None of this is committed.**
+
+**What landed.** The window opens hidden and the frontend sizes, places and
+shows it, so the launch flash is gone. `centerWindow` sets the point itself,
+because tao applies `setSize` asynchronously and `center()` reads the pre-grow
+frame. `setup()` shows the window after 3s regardless.
+
+The tree's result slot shows the result's kind, capped at half the row. Convert
+and Save here answer on the hovered row alone, and a tree door switches to
+Library first rather than to a column that hides the file.
+
+Four agents fixed 45 findings. Retry N failed now asks Run's big-run
+confirmation. A refused Datalab fallback submit clears its claim, an uncertain
+one fails terminally, and the reuse gate moved from per route to per file. Run
+progress measures a baseline, and a finished run expands the folders it wrote
+into.
+
+**This supersedes two lines above.** Dropped files import into a project, and
+Settings carries a Conversion route control now.
 
 ### The restructure, 2026-08-19
 
@@ -184,15 +161,12 @@ platform-specific pieces out of the converter. The call graph is unchanged:
 | `f99b9ef` | One protocol crate for every spawned worker |
 | `8b23c46` | M7 closed out, ignore rules land ahead of what they cover |
 
-`packages/ui` was considered and skipped: `UI.md` names the trigger as a second
-client and there is not one, the library has no app imports to catch, and the
-move would have dropped three test files out of Vitest's scope silently.
-`workers/pdf` is deferred because `tool-kit-pdf-worker` is a `[[bin]]` reached
-through `CARGO_BIN_EXE_tool-kit-pdf-worker`, which only resolves inside its own
-package, so it is a crate extraction rather than a move.
+`packages/ui` was skipped: there is no second client, and the move would have
+dropped three test files out of Vitest's scope silently. `workers/pdf` is
+deferred because `tool-kit-pdf-worker` is a `[[bin]]` reached through
+`CARGO_BIN_EXE_tool-kit-pdf-worker`, which resolves only inside its own package.
 
-The sprint that closed Phase 1, newest first. This is a snapshot, not a
-running log. `git log` is the source of truth.
+The sprint that closed Phase 1, newest first. A snapshot, not a running log.
 
 | Commit | Content |
 |---|---|
@@ -205,54 +179,115 @@ running log. `git log` is the source of truth.
 | `a337594` | Consolidation of every planning doc into this file |
 
 **Sprint 0, Sprint 1, Sprint A, and the Phase 1 closeout are done.** `scanKey`
-in `apps/desktop/src/shell/App.tsx` includes `conversionRoute` (S0.7). The
-capability probe retries on an interval instead of latching Run off for the
-session (S0.8).
+includes `conversionRoute` (S0.7), and the capability probe retries on an
+interval instead of latching Run off for the session (S0.8).
 
-The closeout audited every falsifiable claim in this file against the tree. It
-confirmed 20 mismatches and refuted 4. Seven of them were code, not prose, and
-section 9 lists all seven. The lesson to carry into M5: each one was already
-marked done, and no gate caught any of them. Only reading the code against the
-claim did.
+The closeout audited every falsifiable claim here against the tree, confirming
+20 mismatches and refuting 4. Seven were code, not prose, and section 9 lists
+them. Each was already marked done, and no gate caught any: only reading the
+code against the claim did.
 
-**`d6fc6eb` is mistitled.** Its message reads "docs: add comprehensive backend
-and desktop execution plans". It contains six `git mv` renames into
-`docs/archive/` and nothing else.
+**`d6fc6eb` is mistitled**: its message promises execution plans, and it holds
+six `git mv` renames into `docs/archive/` and nothing else.
 
 ### What the product does today
 
-- Conversion defaults to the direct Datalab route. Transcription uses Rev.ai
-  and is unchanged.
-- A user may select the local backend. Run is planned per file from live
-  `capabilities.inputFormats`, so the desktop never hardcodes the backend's
-  proven format set.
-- Image and HTML formats stay permanently direct. `local_only` rejects anything
-  that would require Datalab.
-- Keys stay in the macOS Keychain. The webview sees neither bearer values nor
-  document bytes.
-- Backend jobs persist a client run ID, idempotency key, original backend URL,
-  source mtime, profile, and optional backend job ID before submission. Restart
-  recovery replays or resumes against the recorded URL.
-- Submit and poll validate UUID response identity. Poll also requires the
-  response ID to equal the requested job before any artifact downloads.
-- **Backend-mode history reuse and copy are disabled, by two different
-  mechanisms.** Terminal backend jobs file under `output_format`
-  `backend:markdown` (`jobs.rs:407`) or `backend_fallback:{format}`
-  (`jobs.rs:409`). `run_pipeline` skips the lookup outright, behind an explicit
-  `jt == Convert && route == Backend` guard (`lib.rs:549`). `split_reusable`
-  carries no such guard (`lib.rs:351`), and instead never matches, because it
-  passes `output_format_for(job_type, cfg)`, which returns the Datalab format
-  string. Both paths end in "every file runs again", which is safe, so the two
-  shapes only matter to whoever writes S2.3: one call site needs its guard
-  removed, the other needs a provenance-aware format.
+- Conversion defaults to the backend route, the sidecar. Transcription uses
+  Rev.ai, unchanged.
+- Run is planned per file from live `capabilities.inputFormats`, so the desktop
+  never hardcodes the backend's format set.
+- Image and HTML formats stay permanently direct, and `local_only` rejects
+  anything needing Datalab.
+- Keys stay in the macOS Keychain, and the webview sees neither bearer values
+  nor document bytes.
+- Backend jobs persist a client run ID, idempotency key, backend URL, source
+  mtime, profile and optional job ID before submission. Restart recovery replays
+  against the recorded URL.
+- Submit and poll validate UUID response identity, and poll requires the
+  response ID to equal the requested job before any download.
+- **History reuse is asked per file, not per route.** `run_pipeline` excludes
+  only the files the service takes, and `scan_inputs` passes only the direct
+  slice to `split_reusable`, so every file Datalab converts is reused or copied
+  whatever the route says. Backend jobs file under `backend:markdown` or
+  `backend_fallback:{format}`, which neither lookup asks for, so a
+  backend-converted result is never reused: S2.3 still needs a provenance-aware
+  format.
 - **No gate rebuilds `Tool-Kit.app`.** `pnpm verify:all` runs `tsc`, ESLint,
-  Vitest, `vite build`, and both Clippy and test suites. None produce an app.
-  Use `pnpm tauri dev` to exercise current source.
-- The desktop does not render in a plain browser, and that is expected.
-  `useWindowFocusClass` and `useCloseConfirm` call `getCurrentWindow()` in a
-  mount effect. With no `window.__TAURI_INTERNALS__` that throws and React 19
-  tears the tree down. Use `pnpm tauri dev`, or `?gallery` for the bridge-free
-  design review.
+  Vitest, `vite build`, Clippy and both test suites, none of which produce an
+  app. Use `pnpm tauri dev` to exercise current source.
+- The desktop does not render in a plain browser: `useWindowFocusClass` and
+  `useCloseConfirm` call `getCurrentWindow()` in a mount effect, which throws
+  with no `window.__TAURI_INTERNALS__`. Use `pnpm tauri dev`, or `?gallery`.
+
+### Known issues, logged 2026-09-12
+
+**Unverified.** Findings nobody has reproduced or fixed.
+
+**Run queue**
+
+- `@container flow` rules never fire: `container-type` is on `.flow--workspace`.
+- Convert from the library opens on `queued`, only toasts on `copied`.
+- `fmtElapsed` never rolls to hours, so a long batch reads "127:43".
+- A click on a queued row is silent, marked only `aria-disabled`.
+- `stop_run` returns a stopped-row count that `stop()` discards.
+
+**History**
+
+- History titles a tab by source name, the tree by result.
+- A non-openable row's file-name button is focusable with no `onClick`.
+- The count badge prints "400+" at exactly `HISTORY_LIMIT`.
+
+**Library tree**
+
+- A transient listing failure strands the branch at "Loading…".
+- A failed row's red dot is `aria-hidden`, and its title says nothing.
+- Option-click expand drops any subtree already being read.
+- The "already has a result" verdict leaves the Convert control in place.
+- `fileGlyph` misses `epub`, `avi`, `wmv`, `mpeg`, `mpg`, `opus`, `oga`.
+- The "Move to" Select passes `aria-label` over its visible label.
+
+**Document pane**
+
+- `useDocumentSave` can mark Saved with the last keystroke only in memory.
+- `requestClose` saves only on `edited`, so Escape mid-autosave closes unconfirmed.
+- Delete-to-close schedules focus in a rAF against async `onClose`.
+- `mode` is pane-wide, so a second document opens in Edit.
+- Tab element ids come from the absolute path, so spaces break them.
+- "Show in Finder" is guarded on `revealPath`, which is always set.
+
+**Settings, onboarding and hints**
+
+- The "turn off Skip files already done" hint is not actionable.
+- Every import drop re-runs the capabilities effect, disabling Run briefly.
+- `backend_not_accepting` opens Settings, which the neighbouring branch refuses to.
+- Quitting mid-onboarding leaves `welcome_seeded` set with no `workspacePath`.
+- The onboarding resize skips `setResizable(true)` before `setSize`.
+
+**Drop, import and window**
+
+- `import_into_project` aborts on the first copy failure, stranding copies.
+- A fractional logical size fails `Option<u32>`, and the rejection is swallowed.
+- `SplitPane`'s restore loop burns 90 rAF frames when the seam cannot fit.
+- `dragging` is not wired into History, so a drop shows nothing.
+- `.workspace .doc` replays its entry animation on every Library return.
+- The ⌘O handler ignores `ctrlKey`, so Ctrl+⌘O also opens the picker.
+
+**CSS**
+
+- `.toast-region`, `.history-panel`, `.lib-tree` and `ui-split--collapsed` have no rules.
+- A stale short-window comment dangles over the split section.
+- `.hint` is clickable prose inheriting `cursor: default`.
+- `.preview-body` is selectable without `cursor: auto`.
+- `.hist-list` rows carry job-row padding with no Panel, inset 16px.
+
+**Host and events**
+
+- `secrets` is read once at mount: a late token latches Run off.
+- `fail_backend_retryable` never logs history, so backend failures miss History.
+- `collect_backend_candidates` admits `.csv` while `ALREADY_TEXT` also counts it.
+- `scanKey` omits `activeProjectPath` and `conversionProfile`.
+- `convert_one` refuses a second tree conversion, evicting the library.
+- A service up but not accepting silently drops supported files.
 
 ---
 
@@ -402,9 +437,8 @@ to allow Datalab fallback." No Markdown reached the output folder. That is the
 whole point of the step: a scan the backend will not convert must refuse
 visibly rather than publish partial text or bill Datalab behind the profile.
 
-`needs_remote_decision` is the only gate, `BackendAction::NeedsRemote` is the
-only path into `run_datalab_fallback`, and
-`needs_remote_falls_back_only_for_standard` pins both.
+`BackendAction::NeedsRemote` is the only path into `run_datalab_fallback`, and
+a `ConversionProfile::LocalOnly` profile refuses there before it is taken.
 
 **`standard` will fall back and spend credits, in the same session.** One run
 under `standard` published `backend_fallback:markdown` a minute before the
@@ -516,9 +550,10 @@ which produces the plain Datalab format string and never selects a backend row.
 
 The fix teaches the matcher about provenance, so a backend result satisfies a
 backend-route re-run and a direct result satisfies a direct-route re-run,
-without either substituting for the other. Until it lands, backend mode always
-re-runs. That costs time and never costs correctness, which is why it ships
-after M5 rather than before.
+without either substituting for the other. Until it lands, a backend-converted
+file always re-runs, while a file the service hands back to Datalab is reused
+normally (2026-09-12). That costs time and never costs correctness, which is why
+it ships after M5 rather than before.
 
 ### Phase 2 gates
 
@@ -1686,6 +1721,7 @@ smoke against the real binary.
 | `apps/converter/README.md` | Converter setup and environment variables |
 | `apps/converter/evals/README.md` | Corpus manifest data rules |
 | `.impeccable.md` | Design context read by every `/impeccable` skill |
+| `docs/DESIGN_PORT.md` | Design-system port plan. Sources in `design/` |
 
 The former live documents live in `docs/archive/` with a redirect at the top of
 each file: `HANDOFF.md`, `CLOSEOUT_EXECUTION_PLAN.md`, `BACKEND_EPIC.md`, and

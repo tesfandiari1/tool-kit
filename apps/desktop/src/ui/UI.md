@@ -66,7 +66,7 @@ taste difference. The gap is inversely proportional to the relationship:
 both the "items in a list" rung and AppKit's measured `indentationPerLevel`, and
 it stops at four:
 `calc(var(--s2) + var(--s3) * min(var(--tree-depth), 4))`. Uncapped, a deep
-folder walks its own name off the left pane's 300px floor, with no error
+folder walks its own name off the left pane's 240px floor, with no error
 anywhere to say so.
 
 **The outer margin is the largest gap on screen.** A column whose edge inset
@@ -119,13 +119,12 @@ src/ui/
     Text              Label · Display · Text · Mono
     Path              Path (a file path as crumbs)
     Button            Button
-    Surface           Panel · CellGrid · Cell · Well · Divider
-    Badge             Badge · Status · StatusDot
+    Surface           Panel · Well · Divider
+    Badge             Badge · StatusDot
     Field             Field · Input · TextInput · Select · Switch
     Layout            Stack · Row · Spacer
     Meter             Meter
     Segmented         Segmented
-    Disclosure        Disclosure
     Sheet             Sheet (a modal card on a native <dialog>)
     Tree              Tree · TreeRow, with treeKeys.ts beside them
   gallery/            the specimen page
@@ -134,12 +133,7 @@ src/ui/
 Primitives are grouped by concept because they are read and changed together.
 Each `.tsx` imports its own `.css`.
 
-### Two pairs that are easy to confuse
-
-**`Status` vs `StatusDot`.** `StatusDot` draws its own dot. `Status` is a
-fixed-width slot that tints whatever glyph you put in it. Use `Status` wherever
-the glyph's *shape* carries meaning the colour cannot, such as a spinner for
-work in flight. `RunView` uses `Status` for exactly that reason.
+### One pair that is easy to confuse
 
 **`Input` vs `TextInput`.** `TextInput` is `Field` + `Input`, which is what most
 settings want. Reach for the bare `Input` when the control shares a row with
