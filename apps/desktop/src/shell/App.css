@@ -231,22 +231,18 @@
   .lib-tree__result {
     flex: none;
   }
-  /* Holds its width at rest, so the row is one size hovered, focused and
-     converting. `pointer-events` moves with the opacity, or an invisible control
-     answers a click on empty space. */
+  /* Shown on the selected row only, which React sets on exactly one item, and
+     hidden with `visibility` so the slot keeps its width and the hidden control
+     takes no clicks. Never `:hover`: WebKit leaves stale hover on rows that
+     scroll under a still pointer, and a tracked caps rail shows every ghost. */
   .lib-tree__convert {
     display: flex;
     flex: none;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity var(--dur-fast) var(--ease);
+    visibility: hidden;
   }
-  /* Keyed on the row: an item holds its own subtree, so hovering a file would
-     light every project above it. */
-  .ui-tree__row:hover .lib-tree__convert,
+  .ui-tree__item.is-selected > .ui-tree__row .lib-tree__convert,
   .ui-tree__item:focus-visible > .ui-tree__row .lib-tree__convert {
-    opacity: 1;
-    pointer-events: auto;
+    visibility: visible;
   }
   /* A fact about the row, not a control, so it never hides and holds its
      width. */
