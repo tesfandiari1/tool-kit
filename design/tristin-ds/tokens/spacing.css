@@ -1,0 +1,16 @@
+:root{
+--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:24px;--space-6:32px;--space-7:48px;--space-8:64px;--space-9:96px;--space-10:128px;
+/* Section padding: generous. Blocks breathe. */
+--section-pad-y:var(--space-9);--section-pad-x:var(--space-8);--block-pad:var(--space-7);
+--content-max:1280px;--prose-max:62ch;
+/* Rules and shape. Buildings have corners. */
+--rule-w:1px;--radius:0;--shadow:none;
+/* Masthead plate only: shadow tinted to the page ink */
+--shadow-plate:0 1px 0 rgba(43,43,43,0.08),0 12px 32px -12px rgba(43,43,43,0.28);
+/* Grain: subtle paper texture on bone and dark surfaces */
+--grain-opacity:0.06; /* @kind other */
+/* Motion: hover transitions only. Nothing moves on scroll. */
+--ease:cubic-bezier(0.4,0,0.2,1); /* @kind other */ --dur:180ms; /* @kind other */ --dur-slow:320ms; /* @kind other */
+/* Controls */
+--control-h:44px;--control-h-sm:36px;--control-pad-x:24px;
+}
