@@ -121,7 +121,7 @@ fallback is Phase 2. LAN deploy is Phase 3. See [`docs/STATUS.md`](docs/STATUS.m
 
 ## License
 
-MIT. Bundled fonts are SIL OFL 1.1; see
+MIT. Red Hat Display and DM Sans are SIL OFL 1.1; TRJN DaVinci is licensed. See
 [`apps/desktop/src/ui/fonts/THIRD_PARTY_NOTICES.md`](apps/desktop/src/ui/fonts/THIRD_PARTY_NOTICES.md).
 The converter's runtime notices are in
 [`apps/converter/THIRD_PARTY_NOTICES.md`](apps/converter/THIRD_PARTY_NOTICES.md).

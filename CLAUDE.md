@@ -17,8 +17,8 @@ beside the input.
 | Convert | Datalab (`/api/v1/convert`, or a pinned pipeline) | PDF / DOCX / images / … → markdown |
 | Transcribe | Rev.ai (async) | audio / video → text |
 
-The bundle builds `app` + `dmg` only, and `underWindowBackground` vibrancy with
-`titleBarStyle: Overlay` needs `macOSPrivateApi`, ruling out the Mac App Store.
+The bundle builds `app` + `dmg` only, and the three spawned sidecars plus the
+loopback converter rule out the Mac App Store.
 
 ## Repository layout
 
@@ -333,25 +333,28 @@ Keychain token.
 **Read `src/ui/UI.md` before touching any UI.** Its four rules are the reason to
 reject a change:
 
-1. **Colour is signal, never decoration.** Amber = live, green = passed, red =
-   failed, cobalt = the control you press. Icons and glyphs are never coloured.
+1. **Colour is signal, never decoration.** `--status-warning` = live,
+   `--status-success` = passed, `--status-danger` = failed, `--status-info` =
+   note. The control you press is ink on bone. Icons are never coloured.
 2. **Values light up, they don't appear.** Counts and timers hold their slot as
    ghost glyphs so the window never reflows while jobs finish.
-3. **macOS first.** Vibrancy under a scrim, SF metrics, `body.inactive` states,
-   HIG focus rings, tabular numerals, native `<select>` and checkboxes.
+3. **macOS first.** Opaque surfaces that follow the system appearance through
+   `light-dark()`, `body.inactive` states, one 1px focus ring, tabular
+   numerals, native `<select>` and checkboxes.
 4. **Whitespace is a grammar.** `--s1`..`--s8` run from atoms of one object to
    the window edge, and the gap is inversely proportional to the relationship.
 
-Three families: **Instrument Serif** display, **SF Pro** prose, **JetBrains
-Mono** for every label, tab and button (uppercase, `0.09em` tracked), both
-self-hosted OFL.
+Three families: **TRJN DaVinci** display, **DM Sans** prose, **Red Hat Display**
+500 for every label, tab and button (uppercase, `0.22em` tracked). All
+self-hosted: two OFL families plus DaVinci, licensed.
 
 - **ESLint enforces the `@ui` boundary**: nothing under `src/ui` imports from
   `@/app`, `@/domains`, `@/platform`, or `@tauri-apps/*`.
 - **A primitive with no specimen in `Gallery.tsx` does not exist.** Add it in
   the same commit, reviewed at `http://localhost:1420/?gallery`.
-- **`App.tsx` must import `@ui` before `./App.css`**, which does not `@import`
-  the token layer: doing both shipped 16KB twice with competing `:root` blocks.
+- **Cascade layers, not import order.** `base.css` and `App.css` both declare
+  `@layer ui, app;`, each `ui/primitives/*.css` wraps in `@layer ui` and
+  `App.css` in `@layer app`, so an app override wins at any import order.
 - **`src/shell/App.css` is app composites only** and carries no `:root` block. A
   new custom property belongs in `tokens.css` or on its own element.
 
@@ -370,6 +373,9 @@ self-hosted OFL.
 - **The provisioning profile is pinned to the signing certificate**, which
   expires **2031-06-18**. Rotate the cert and you must regenerate the profile,
   or the app will not launch.
+- **`pnpm lint` runs `scripts/lint-tokens.sh`.** A literal colour, radius,
+  shadow, blur or font family under `src/`, outside `ui/tokens.css` and
+  `ui/fonts.css`, fails it.
 - **`pnpm sidecars` gates `cargo`, not just the bundler.** A missing staged
   binary fails `cargo check`/`clippy`/`test` and `pnpm tauri dev` with
   `ResourcePathNotFound`, on every fresh clone and `git clean`.

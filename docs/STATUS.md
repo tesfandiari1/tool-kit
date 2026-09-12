@@ -37,6 +37,7 @@ The keychain entitlement stays parked, so `verify-release.sh` fails its
 | 2026-08-20 | The app opens on a library bound to one folder, created or adopted by `workspace.rs` | Identity lives in `.toolkit/workspace.json`, not in the path, so renaming the folder in Finder changes nothing |
 | 2026-08-21 | The library became a disclosure tree over disk, and the window became two panes | Settings left the `View` union and became a sheet, so opening it no longer evicts the Run column mid-run |
 | 2026-09-12 | The window opens hidden and the frontend sizes, places and shows it. Four agents closed 45 findings. Committed at `2bc1c1b` and `1aee5d4` | Run progress and the title-bar counter measure a per-run baseline, not the whole queue |
+| 2026-09-12 | The design system was replaced by the Tristin Esfandiari system: new token vocabulary, DaVinci and Red Hat Display and DM Sans, no radius, shadow or blur | Surfaces are opaque and follow the macOS appearance, `macOSPrivateApi` is gone, and the Mac App Store is now blocked only by the sidecars |
 
 ### What the product does today
 
@@ -67,7 +68,7 @@ The keychain entitlement stays parked, so `verify-release.sh` fails its
 
 ## Known issues
 
-31 issues, each verified twice against the tree on 2026-09-12, none fixed. Each line names the change at the root and the decisive file and line. The second pass dropped one item and restored two the first pass had refused.
+27 issues, each verified twice against the tree on 2026-09-12. Each line names the change at the root and the decisive file and line. The design-system port closed four of the original 31.
 
 **Medium**
 
@@ -87,24 +88,20 @@ The keychain entitlement stays parked, so `verify-release.sh` fails its
 - scanKey omits activeProjectPath, so switching project leaves skip and copy counts stale for inputs outside the workspace. Fix: Add settings.activeProjectPath to scanKey (`src/shell/App.tsx:143`).
 - Convert refused because a run is going stages the file and leaves Library, though the toast already explains. Fix: Skip setView for the run_in_progress reason in convertOne (`src/shell/App.tsx:493`).
 - The ⌘O guard ignores ctrlKey, so Ctrl+⌘O also opens the file picker. Fix: Add e.ctrlKey to the ⌘O guard (`src/shell/App.tsx:722`).
-- toast-region, history-panel and lib-tree are emitted as class hooks with no CSS rule anywhere. Fix: Drop the three unused class names, or give them rules (`src/shell/App.tsx:807`).
 - HistoryPanel gets no dragging prop, so a drag over History shows no target though the drop is accepted. Fix: Pass dragging to HistoryPanel, or show a window-level drag affordance (`src/shell/App.tsx:1205`).
 - mode is one pane-wide state, so a file opened from the tree lands in Edit. Fix: Reset mode to "read" inside `open`, or key mode per document (`src/shell/useDocuments.ts:14`).
 - openJob and openHistory title a result tab with the source name, so a transcript tab reads lecture.mp3. Fix: Title from basename(outputPath) in openJob and openHistory (`src/shell/useDocuments.ts:54`).
 - Delete on a dirty tab focuses before the async close resolves, so focus lands wrong or on body. Fix: Focus from an effect on items, or await onClose (`src/ui/primitives/Tabs.tsx:70`).
-- Tab ids embed absolute paths, so any folder with a space breaks id and aria-controls. Fix: Encode t.id when building the ui-tab and ui-tabpanel ids (`src/ui/primitives/Tabs.tsx:83`).
 - Quitting at onboarding's last beat leaves welcome_seeded set, so welcome.md never opens on the retry. Fix: Open welcome.md in OnboardingGate.setup, not after the final beat (`src-tauri/src/workspace.rs:146`).
 - fmtElapsed never rolls over to hours, so a run past an hour reads "127:43" in the title bar. Fix: Add an hours segment to fmtElapsed past 3600 seconds (`src/app/format.ts:16`).
 - Move select's aria-label replaces its visible "Move to" label, so voice control cannot address it. Fix: Reword aria-label to begin "Move to", or drop it (`src/domains/library/LibraryPane.tsx:107`).
 - Glyph map misses nine accepted extensions: epub, oga, avi, wmv, mpeg, mpg, opus, amr, 3gp. Fix: Add the nine missing extensions to BY_EXT (`src/domains/library/fileGlyph.ts:22`).
-- Queued rows carry aria-disabled but no dimmed styling, and the row still highlights on hover. Fix: Add a .job-open[aria-disabled="true"] dim rule in App.css (`src/domains/run/RunView.tsx:653`).
 - runsFinished re-runs the capabilities probe, so every drop and every finished run re-disables Run. Fix: Drop runsFinished from the probe effect's deps (`src/shell/App.tsx:339`).
 - Convert on a tree row opens a freshly converted result but only toasts a copied one. Fix: Return the copied path from convert_one and open it (`src/shell/App.tsx:496`).
 - Stop drops stop_run's count, so no toast says how many files it cancelled. Fix: Toast the count stopRun() already returns (`src/shell/App.tsx:937`).
 - Two Run hints name a Settings remedy but are not clickable: backend unavailable, and skip already done. Fix: Set hintOpensSettings on both branches of the hint chain (`src/shell/App.tsx:1032`).
 - Option-click deep expand skips any folder whose read is already in flight, so it acts as a plain click. Fix: Await the in-flight read in `read` instead of returning null (`src/shell/useProjectTree.ts:180`).
 - Restore loop calls setLayout on all 90 frames when the saved seam sits under the 240px floor. Fix: Stop retrying once setLayout's applied layout stops changing (`src/ui/primitives/SplitPane.tsx:86`).
-- TreeRow's icon slot is aria-hidden, so a failed row's StatusDot label is never announced. Fix: Name the failure in TreeRow's title, or drop icon aria-hidden (`src/ui/primitives/Tree.tsx:209`).
 
 ---
 
@@ -235,7 +232,7 @@ revert them as part of a patch.
 |---|---|
 | `docs/STATUS.md` | This file. The single live status document |
 | `docs/north-star.md` | The local-first product target |
-| `docs/DESIGN_PORT.md` | Design-system port plan. Sources in `design/` |
+| `docs/DESIGN_PORT.md` | Why the design system looks the way it does. Sources in `design/` |
 | `docs/archive/` | Everything closed, with a note on why |
 | `README.md` | How to run, test, and release |
 | `CLAUDE.md` | Desktop architecture contract and the gotcha list |
