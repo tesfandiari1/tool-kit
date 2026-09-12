@@ -25,20 +25,12 @@
         "trafficLightPosition": {
           "x": 18,
           "y": 22
-        },
-        "transparent": true,
-        "windowEffects": {
-          "effects": [
-            "underWindowBackground"
-          ],
-          "state": "followsWindowActiveState"
         }
       }
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; form-action 'none'"
-    },
-    "macOSPrivateApi": true
+    }
   },
   "bundle": {
     "active": true,
