@@ -15,9 +15,9 @@ use uuid::Uuid;
 
 use super::model::{
     ArtifactKind, AttemptState, CommitOperation, ConversionState, CreateOutcome, EngineRecord,
-    FailedResult, LocalAnalysis, LocalStart, NeedsRemoteResult, NewArtifact, NewConversion,
-    Profile, RecoveryCandidate, RequeueOutcome, StoredArtifact, StoredAttempt, StoredConversion,
-    StoredFailure, StoredSource, SuccessfulArtifacts,
+    FailedResult, FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult, NewArtifact,
+    NewConversion, Profile, RecoveryCandidate, RequeueOutcome, StoredArtifact, StoredAttempt,
+    StoredConversion, StoredFailure, StoredSource, SuccessfulArtifacts,
 };
 
 pub const DATABASE_FILENAME: &str = "converter.sqlite";
@@ -332,12 +332,7 @@ impl SqliteRepository {
         attempt_id: Uuid,
         result: NeedsRemoteResult,
     ) -> Result<StoredConversion, RepositoryError> {
-        validate_bounded_text(
-            &result.fallback_reason,
-            1,
-            128,
-            "fallback reason is invalid",
-        )?;
+        validate_bounded_text(&result.fallback_reason, 128, "fallback reason is invalid")?;
         let analysis = encode_local_analysis(&result.analysis)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         require_active_state(
@@ -403,41 +398,17 @@ impl SqliteRepository {
             expected_attempt,
         )
         .await?;
-        let updated_at = now_rfc3339()?;
-
-        let attempt = sqlx::query(
-            "UPDATE attempts
-             SET state = 'failed', failure_code = ?1, failure_message = ?2,
-                 updated_at = ?3, finished_at = ?3
-             WHERE conversion_id = ?4 AND id = ?5 AND state = ?6",
+        fail_rows(
+            &mut transaction,
+            ActiveIds {
+                conversion_id,
+                attempt_id,
+            },
+            result.stage,
+            &result.failure.code,
+            &result.failure.message,
         )
-        .bind(&result.failure.code)
-        .bind(&result.failure.message)
-        .bind(&updated_at)
-        .bind(conversion_id.hyphenated().to_string())
-        .bind(attempt_id.hyphenated().to_string())
-        .bind(expected_attempt.as_str())
-        .execute(&mut *transaction)
         .await?;
-        require_one_transition_row(attempt.rows_affected(), "attempts.state")?;
-
-        let conversion = sqlx::query(
-            "UPDATE conversions
-             SET status = 'failed', failure_code = ?1, failure_message = ?2,
-                 updated_at = ?3
-             WHERE id = ?4 AND auth_scope = ?5 AND active_attempt_id = ?6
-               AND status = ?7",
-        )
-        .bind(&result.failure.code)
-        .bind(&result.failure.message)
-        .bind(&updated_at)
-        .bind(conversion_id.hyphenated().to_string())
-        .bind(AUTH_SCOPE)
-        .bind(attempt_id.hyphenated().to_string())
-        .bind(expected_conversion.as_str())
-        .execute(&mut *transaction)
-        .await?;
-        require_one_transition_row(conversion.rows_affected(), "conversions.status")?;
 
         let conversion = load_required_conversion(&mut transaction, conversion_id).await?;
         commit_transition(
@@ -890,35 +861,60 @@ async fn fail_unclaimable_source(
     conversion_id: Uuid,
     attempt_id: Uuid,
 ) -> Result<(), RepositoryError> {
+    fail_rows(
+        transaction,
+        ActiveIds {
+            conversion_id,
+            attempt_id,
+        },
+        FailureStage::Queued,
+        "unsupported_source_media_type",
+        "No local engine handles this source media type.",
+    )
+    .await
+}
+
+/// Writes the failure to both rows, guarded on the state the caller expects.
+async fn fail_rows(
+    transaction: &mut Transaction<'_, Sqlite>,
+    ids: ActiveIds,
+    expected: FailureStage,
+    code: &str,
+    message: &str,
+) -> Result<(), RepositoryError> {
     let updated_at = now_rfc3339()?;
-    let conversion_id = conversion_id.hyphenated().to_string();
-    let attempt_id = attempt_id.hyphenated().to_string();
+    let conversion_id = ids.conversion_id.hyphenated().to_string();
+    let attempt_id = ids.attempt_id.hyphenated().to_string();
     let attempt = sqlx::query(
         "UPDATE attempts
-         SET state = 'failed', failure_code = 'unsupported_source_media_type',
-             failure_message = 'No local engine handles this source media type.',
-             updated_at = ?1, finished_at = ?1
-         WHERE conversion_id = ?2 AND id = ?3 AND state = 'queued'",
+         SET state = 'failed', failure_code = ?1, failure_message = ?2,
+             updated_at = ?3, finished_at = ?3
+         WHERE conversion_id = ?4 AND id = ?5 AND state = ?6",
     )
+    .bind(code)
+    .bind(message)
     .bind(&updated_at)
     .bind(&conversion_id)
     .bind(&attempt_id)
+    .bind(expected.attempt_state().as_str())
     .execute(&mut **transaction)
     .await?;
     require_one_transition_row(attempt.rows_affected(), "attempts.state")?;
 
     let conversion = sqlx::query(
         "UPDATE conversions
-         SET status = 'failed', failure_code = 'unsupported_source_media_type',
-             failure_message = 'No local engine handles this source media type.',
-             updated_at = ?1
-         WHERE id = ?2 AND auth_scope = ?3 AND active_attempt_id = ?4
-           AND status = 'queued'",
+         SET status = 'failed', failure_code = ?1, failure_message = ?2,
+             updated_at = ?3
+         WHERE id = ?4 AND auth_scope = ?5 AND active_attempt_id = ?6
+           AND status = ?7",
     )
+    .bind(code)
+    .bind(message)
     .bind(&updated_at)
     .bind(&conversion_id)
     .bind(AUTH_SCOPE)
     .bind(&attempt_id)
+    .bind(expected.conversion_state().as_str())
     .execute(&mut **transaction)
     .await?;
     require_one_transition_row(conversion.rows_affected(), "conversions.status")?;
@@ -1195,9 +1191,9 @@ fn require_one_transition_row(
 }
 
 fn validate_local_start(start: &LocalStart) -> Result<(), RepositoryError> {
-    validate_bounded_text(&start.engine.name, 1, 128, "engine name is invalid")?;
-    validate_bounded_text(&start.engine.version, 1, 128, "engine version is invalid")?;
-    validate_bounded_text(&start.route, 1, 128, "route is invalid")
+    validate_bounded_text(&start.engine.name, 128, "engine name is invalid")?;
+    validate_bounded_text(&start.engine.version, 128, "engine version is invalid")?;
+    validate_bounded_text(&start.route, 128, "route is invalid")
 }
 
 fn encode_local_analysis(
@@ -1220,17 +1216,10 @@ fn encode_local_analysis(
         1,
         128,
         8_192,
-        false,
         "reason codes are invalid",
     )?;
-    let warnings_json = encode_string_array(
-        &analysis.warnings,
-        0,
-        1_024,
-        65_536,
-        false,
-        "warnings are invalid",
-    )?;
+    let warnings_json =
+        encode_string_array(&analysis.warnings, 0, 1_024, 65_536, "warnings are invalid")?;
     Ok(EncodedLocalAnalysis {
         classification: analysis.classification.as_str(),
         inspection_json,
@@ -1244,13 +1233,12 @@ fn encode_string_array(
     minimum_items: usize,
     maximum_item_length: usize,
     maximum_encoded_length: usize,
-    allow_empty: bool,
     message: &'static str,
 ) -> Result<String, RepositoryError> {
     if values.len() < minimum_items
         || values.len() > 256
         || values.iter().any(|value| {
-            (!allow_empty && value.is_empty())
+            value.is_empty()
                 || value.len() > maximum_item_length
                 || value.chars().any(char::is_control)
         })
@@ -1266,8 +1254,8 @@ fn encode_string_array(
 }
 
 fn validate_failure(failure: &StoredFailure) -> Result<(), RepositoryError> {
-    validate_bounded_text(&failure.code, 1, 128, "failure code is invalid")?;
-    validate_bounded_text(&failure.message, 1, 1_024, "failure message is invalid")
+    validate_bounded_text(&failure.code, 128, "failure code is invalid")?;
+    validate_bounded_text(&failure.message, 1_024, "failure message is invalid")
 }
 
 fn validate_artifact(
@@ -1311,14 +1299,10 @@ fn validate_artifact(
 
 fn validate_bounded_text(
     value: &str,
-    minimum_length: usize,
     maximum_length: usize,
     message: &'static str,
 ) -> Result<(), RepositoryError> {
-    if value.len() < minimum_length
-        || value.len() > maximum_length
-        || value.chars().any(char::is_control)
-    {
+    if value.is_empty() || value.len() > maximum_length || value.chars().any(char::is_control) {
         return Err(RepositoryError::InvalidInput(message));
     }
     Ok(())
@@ -1738,8 +1722,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        hash_idempotency_key, RepositoryError, SqliteRepository, AUTH_SCOPE, DATABASE_FILENAME,
-        MAX_POOL_CONNECTIONS,
+        hash_idempotency_key, RepositoryError, SqliteConnection, SqliteRepository, AUTH_SCOPE,
+        DATABASE_FILENAME, MAX_POOL_CONNECTIONS,
     };
     use crate::persistence::{
         ArtifactKind, AttemptState, ConversionState, CreateOutcome, DocumentClassification,
@@ -1757,12 +1741,10 @@ mod tests {
     fn only_a_row_shape_error_may_be_quarantined_at_startup() {
         // This row is wrong. Quarantine is correct.
         assert!(RepositoryError::CorruptData("conversions.state").is_row_shape());
-        assert!(
-            RepositoryError::ConversionNotFound {
-                conversion_id: Uuid::nil(),
-            }
-            .is_row_shape()
-        );
+        assert!(RepositoryError::ConversionNotFound {
+            conversion_id: Uuid::nil(),
+        }
+        .is_row_shape());
         assert!(RepositoryError::Database(sqlx::Error::RowNotFound).is_row_shape());
         assert!(
             RepositoryError::Database(sqlx::Error::ColumnNotFound("source_media_type".into()))
@@ -1774,11 +1756,11 @@ mod tests {
         assert!(!RepositoryError::Database(sqlx::Error::PoolTimedOut).is_row_shape());
         assert!(!RepositoryError::Database(sqlx::Error::PoolClosed).is_row_shape());
         assert!(
-            !RepositoryError::Database(sqlx::Error::Io(std::io::Error::other("disk"))).is_row_shape()
+            !RepositoryError::Database(sqlx::Error::Io(std::io::Error::other("disk")))
+                .is_row_shape()
         );
         assert!(!RepositoryError::MissingCommittedConversion.is_row_shape());
     }
-
 
     /// `-- no-transaction` runs the file in autocommit, so a rebuild that
     /// drops before it renames has a window where neither table exists under
@@ -1868,24 +1850,46 @@ mod tests {
 
         let job_id = "11111111-2222-4333-8444-555555555555";
         let attempt_id = "66666666-7777-4888-8999-000000000000";
-        let digest = "a".repeat(64);
-        sqlx::query(
-            "INSERT INTO conversions (
-                id, client_run_id, auth_scope, idempotency_key_hash,
-                request_fingerprint, profile, status, source_relative_path,
-                source_media_type, source_byte_length, source_sha256,
-                reason_codes_json, warnings_json, origin_request_id,
-                created_at, updated_at
-             ) VALUES (
-                ?1, ?1, 'bootstrap', ?2, ?2, 'standard', 'queued', ?3,
-                'application/pdf', 128, ?2, '[]', '[]', 'request-1',
-                '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'
-             )",
+        // Every seeded conversion is this insert. Only the columns it takes vary.
+        let insert_conversion = async |id: &str,
+                                       digest_character: &str,
+                                       profile: &str,
+                                       media_type: &str,
+                                       byte_length: i64,
+                                       origin_request_id: &str,
+                                       timestamp: &str| {
+            sqlx::query(
+                "INSERT INTO conversions (
+                    id, client_run_id, auth_scope, idempotency_key_hash,
+                    request_fingerprint, profile, status, source_relative_path,
+                    source_media_type, source_byte_length, source_sha256,
+                    reason_codes_json, warnings_json, origin_request_id,
+                    created_at, updated_at
+                 ) VALUES (
+                    ?1, ?1, 'bootstrap', ?2, ?2, ?3, 'queued', ?4, ?5, ?6, ?2,
+                    '[]', '[]', ?7, ?8, ?8
+                 )",
+            )
+            .bind(id)
+            .bind(digest_character.repeat(64))
+            .bind(profile)
+            .bind(format!("jobs/{id}/source/input"))
+            .bind(media_type)
+            .bind(byte_length)
+            .bind(origin_request_id)
+            .bind(timestamp)
+            .execute(&pool)
+            .await
+        };
+        insert_conversion(
+            job_id,
+            "a",
+            "standard",
+            "application/pdf",
+            128,
+            "request-1",
+            "2026-08-18T00:00:00Z",
         )
-        .bind(job_id)
-        .bind(&digest)
-        .bind(format!("jobs/{job_id}/source/input"))
-        .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
@@ -1926,47 +1930,29 @@ mod tests {
 
         // The widened constraints accept the new formats...
         let docx_id = "aaaaaaaa-1111-4111-8222-333333333333";
-        sqlx::query(
-            "INSERT INTO conversions (
-                id, client_run_id, auth_scope, idempotency_key_hash,
-                request_fingerprint, profile, status, source_relative_path,
-                source_media_type, source_byte_length, source_sha256,
-                reason_codes_json, warnings_json, origin_request_id,
-                created_at, updated_at
-             ) VALUES (
-                ?1, ?1, 'bootstrap', ?2, ?2, 'local_only', 'queued', ?3,
-                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                256, ?2, '[]', '[]', 'request-2',
-                '2026-08-18T00:00:01Z', '2026-08-18T00:00:01Z'
-             )",
+        insert_conversion(
+            docx_id,
+            "b",
+            "local_only",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            256,
+            "request-2",
+            "2026-08-18T00:00:01Z",
         )
-        .bind(docx_id)
-        .bind("b".repeat(64))
-        .bind(format!("jobs/{docx_id}/source/input"))
-        .execute(&pool)
         .await
         .unwrap();
 
         // ...including a media type that only migration 0003 admits.
         let odt_id = "aaaaaaaa-2222-4111-8222-333333333333";
-        sqlx::query(
-            "INSERT INTO conversions (
-                id, client_run_id, auth_scope, idempotency_key_hash,
-                request_fingerprint, profile, status, source_relative_path,
-                source_media_type, source_byte_length, source_sha256,
-                reason_codes_json, warnings_json, origin_request_id,
-                created_at, updated_at
-             ) VALUES (
-                ?1, ?1, 'bootstrap', ?2, ?2, 'standard', 'queued', ?3,
-                'application/vnd.oasis.opendocument.text',
-                256, ?2, '[]', '[]', 'request-3',
-                '2026-08-18T00:00:02Z', '2026-08-18T00:00:02Z'
-             )",
+        insert_conversion(
+            odt_id,
+            "c",
+            "standard",
+            "application/vnd.oasis.opendocument.text",
+            256,
+            "request-3",
+            "2026-08-18T00:00:02Z",
         )
-        .bind(odt_id)
-        .bind("c".repeat(64))
-        .bind(format!("jobs/{odt_id}/source/input"))
-        .execute(&pool)
         .await
         .expect("migration 0003 must admit the OpenDocument media types");
         let docx_attempt = "bbbbbbbb-2222-4333-8444-555555555555";
@@ -2028,23 +2014,15 @@ mod tests {
 
         // ...and still reject nonsense.
         let bad_id = "cccccccc-3333-4333-8444-555555555555";
-        let rejected = sqlx::query(
-            "INSERT INTO conversions (
-                id, client_run_id, auth_scope, idempotency_key_hash,
-                request_fingerprint, profile, status, source_relative_path,
-                source_media_type, source_byte_length, source_sha256,
-                reason_codes_json, warnings_json, origin_request_id,
-                created_at, updated_at
-             ) VALUES (
-                ?1, ?1, 'bootstrap', ?2, ?2, 'standard', 'queued', ?3,
-                'text/plain', 64, ?2, '[]', '[]', 'request-3',
-                '2026-08-18T00:00:02Z', '2026-08-18T00:00:02Z'
-             )",
+        let rejected = insert_conversion(
+            bad_id,
+            "c",
+            "standard",
+            "text/plain",
+            64,
+            "request-3",
+            "2026-08-18T00:00:02Z",
         )
-        .bind(bad_id)
-        .bind("c".repeat(64))
-        .bind(format!("jobs/{bad_id}/source/input"))
-        .execute(&pool)
         .await;
         assert!(rejected.is_err(), "an unlisted media type must be rejected");
 
@@ -2053,10 +2031,7 @@ mod tests {
 
     #[tokio::test]
     async fn migrations_configure_a_file_backed_database_and_repeat_cleanly() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 4, BUSY_TIMEOUT)
-            .await
-            .unwrap();
+        let (directory, repository) = open_repository(4).await;
 
         assert!(directory.path().join(DATABASE_FILENAME).is_file());
         let tables: i64 = sqlx::query(
@@ -2072,30 +2047,9 @@ mod tests {
         .unwrap();
         assert_eq!(tables, 3);
 
-        let journal_mode: String = sqlx::query("PRAGMA journal_mode")
-            .fetch_one(&repository.pool)
-            .await
-            .unwrap()
-            .try_get(0)
-            .unwrap();
-        let foreign_keys: i64 = sqlx::query("PRAGMA foreign_keys")
-            .fetch_one(&repository.pool)
-            .await
-            .unwrap()
-            .try_get(0)
-            .unwrap();
-        let synchronous: i64 = sqlx::query("PRAGMA synchronous")
-            .fetch_one(&repository.pool)
-            .await
-            .unwrap()
-            .try_get(0)
-            .unwrap();
-        let busy_timeout: i64 = sqlx::query("PRAGMA busy_timeout")
-            .fetch_one(&repository.pool)
-            .await
-            .unwrap()
-            .try_get(0)
-            .unwrap();
+        let mut pooled = repository.pool.acquire().await.unwrap();
+        assert_pragmas(&mut pooled).await;
+        drop(pooled);
         let sqlite_features = sqlx::query(
             "SELECT sqlite_version() AS version,
                     json_valid('[]') AS json_available,
@@ -2108,10 +2062,6 @@ mod tests {
             .fetch_all(&repository.pool)
             .await
             .unwrap();
-        assert_eq!(journal_mode, "wal");
-        assert_eq!(foreign_keys, 1);
-        assert_eq!(synchronous, 2);
-        assert_eq!(busy_timeout, 5_000);
         assert!(!sqlite_features
             .try_get::<String, _>("version")
             .unwrap()
@@ -2131,34 +2081,7 @@ mod tests {
             connections.push(repository.pool.acquire().await.unwrap());
         }
         for connection in &mut connections {
-            let journal_mode: String = sqlx::query("PRAGMA journal_mode")
-                .fetch_one(&mut **connection)
-                .await
-                .unwrap()
-                .try_get(0)
-                .unwrap();
-            let foreign_keys: i64 = sqlx::query("PRAGMA foreign_keys")
-                .fetch_one(&mut **connection)
-                .await
-                .unwrap()
-                .try_get(0)
-                .unwrap();
-            let synchronous: i64 = sqlx::query("PRAGMA synchronous")
-                .fetch_one(&mut **connection)
-                .await
-                .unwrap()
-                .try_get(0)
-                .unwrap();
-            let busy_timeout: i64 = sqlx::query("PRAGMA busy_timeout")
-                .fetch_one(&mut **connection)
-                .await
-                .unwrap()
-                .try_get(0)
-                .unwrap();
-            assert_eq!(journal_mode, "wal");
-            assert_eq!(foreign_keys, 1);
-            assert_eq!(synchronous, 2);
-            assert_eq!(busy_timeout, 5_000);
+            assert_pragmas(connection).await;
         }
         drop(connections);
 
@@ -2170,10 +2093,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_get_replay_conflict_and_capacity_are_durable() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 1, BUSY_TIMEOUT)
-            .await
-            .unwrap();
+        let (directory, repository) = open_repository(1).await;
         let original = new_conversion("same-key", "a");
         let original_id = original.id;
 
@@ -2231,10 +2151,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_idempotent_creates_choose_one_conversion() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 16, BUSY_TIMEOUT)
-            .await
-            .unwrap();
+        let (_directory, repository) = open_repository(16).await;
         let barrier = Arc::new(Barrier::new(8));
         let mut tasks = Vec::new();
         for _ in 0..8 {
@@ -2278,10 +2195,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_fresh_keys_compete_for_one_active_slot_atomically() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 1, BUSY_TIMEOUT)
-            .await
-            .unwrap();
+        let (_directory, repository) = open_repository(1).await;
         let barrier = Arc::new(Barrier::new(2));
         let mut tasks = Vec::new();
         for input in [
@@ -2324,10 +2238,7 @@ mod tests {
 
     #[tokio::test]
     async fn replay_conflict_and_capacity_keep_precedence_under_concurrency() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 1, BUSY_TIMEOUT)
-            .await
-            .unwrap();
+        let (_directory, repository) = open_repository(1).await;
         let accepted = new_conversion("accepted-key", "a");
         let accepted_id = accepted.id;
         assert!(matches!(
@@ -2365,22 +2276,9 @@ mod tests {
 
     #[tokio::test]
     async fn active_attempt_cannot_point_at_another_conversion() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 2, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let first = created(
-            repository
-                .create_or_replay(new_conversion("first", "a"))
-                .await
-                .unwrap(),
-        );
-        let second = created(
-            repository
-                .create_or_replay(new_conversion("second", "b"))
-                .await
-                .unwrap(),
-        );
+        let (_directory, repository) = open_repository(2).await;
+        let first = queued_conversion(&repository, "first", "a").await;
+        let second = queued_conversion(&repository, "second", "b").await;
 
         let result = sqlx::query(
             "UPDATE conversions
@@ -2404,10 +2302,7 @@ mod tests {
 
     #[tokio::test]
     async fn raw_idempotency_keys_are_not_persisted() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 2, BUSY_TIMEOUT)
-            .await
-            .unwrap();
+        let (_directory, repository) = open_repository(2).await;
         let input = new_conversion("do-not-store-this-key", "e");
         let expected_hash = input.idempotency_key_sha256.clone();
         repository.create_or_replay(input).await.unwrap();
@@ -2425,16 +2320,8 @@ mod tests {
 
     #[tokio::test]
     async fn legal_success_path_commits_both_artifacts_and_integrity_failure_retains_audit_rows() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 2, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let queued = created(
-            repository
-                .create_or_replay(new_conversion("success", "a"))
-                .await
-                .unwrap(),
-        );
+        let (_directory, repository) = open_repository(2).await;
+        let queued = queued_conversion(&repository, "success", "a").await;
         let conversion_id = queued.id;
         let attempt_id = queued.active_attempt.id;
 
@@ -2509,17 +2396,9 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_outcomes_require_their_exact_legal_source_state() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 8, BUSY_TIMEOUT)
-            .await
-            .unwrap();
+        let (_directory, repository) = open_repository(8).await;
 
-        let queued_failure = created(
-            repository
-                .create_or_replay(new_conversion("queued-failure", "a"))
-                .await
-                .unwrap(),
-        );
+        let queued_failure = queued_conversion(&repository, "queued-failure", "a").await;
         let failed = repository
             .finish_failed(
                 queued_failure.id,
@@ -2531,16 +2410,7 @@ mod tests {
         assert_eq!(failed.state, ConversionState::Failed);
         assert_eq!(failed.active_attempt.state, AttemptState::Failed);
 
-        let remote = created(
-            repository
-                .create_or_replay(new_conversion("needs-remote", "b"))
-                .await
-                .unwrap(),
-        );
-        repository
-            .start_local(remote.id, remote.active_attempt.id, local_start())
-            .await
-            .unwrap();
+        let remote = converting_conversion(&repository, "needs-remote", "b").await;
         let remote = repository
             .finish_needs_remote(
                 remote.id,
@@ -2564,20 +2434,8 @@ mod tests {
             Some("scanned_pdf")
         );
 
-        let converting_failure = created(
-            repository
-                .create_or_replay(new_conversion("converting-failure", "c"))
-                .await
-                .unwrap(),
-        );
-        repository
-            .start_local(
-                converting_failure.id,
-                converting_failure.active_attempt.id,
-                local_start(),
-            )
-            .await
-            .unwrap();
+        let converting_failure =
+            converting_conversion(&repository, "converting-failure", "c").await;
         let failed = repository
             .finish_failed(
                 converting_failure.id,
@@ -2588,20 +2446,8 @@ mod tests {
             .unwrap();
         assert_eq!(failed.state, ConversionState::Failed);
 
-        let finalizing_failure = created(
-            repository
-                .create_or_replay(new_conversion("finalizing-failure", "d"))
-                .await
-                .unwrap(),
-        );
-        repository
-            .start_local(
-                finalizing_failure.id,
-                finalizing_failure.active_attempt.id,
-                local_start(),
-            )
-            .await
-            .unwrap();
+        let finalizing_failure =
+            converting_conversion(&repository, "finalizing-failure", "d").await;
         repository
             .mark_finalizing(
                 finalizing_failure.id,
@@ -2624,16 +2470,8 @@ mod tests {
 
     #[tokio::test]
     async fn stale_and_illegal_transitions_do_not_mutate_the_conversion() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 2, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let queued = created(
-            repository
-                .create_or_replay(new_conversion("transition-guards", "a"))
-                .await
-                .unwrap(),
-        );
+        let (_directory, repository) = open_repository(2).await;
+        let queued = queued_conversion(&repository, "transition-guards", "a").await;
 
         assert!(matches!(
             repository
@@ -2678,28 +2516,10 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_fifo_claims_take_each_queued_attempt_once_in_order() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 4, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let first = created(
-            repository
-                .create_or_replay(new_conversion("fifo-first", "a"))
-                .await
-                .unwrap(),
-        );
-        let second = created(
-            repository
-                .create_or_replay(new_conversion("fifo-second", "b"))
-                .await
-                .unwrap(),
-        );
-        let third = created(
-            repository
-                .create_or_replay(new_conversion("fifo-third", "c"))
-                .await
-                .unwrap(),
-        );
+        let (_directory, repository) = open_repository(4).await;
+        let first = queued_conversion(&repository, "fifo-first", "a").await;
+        let second = queued_conversion(&repository, "fifo-second", "b").await;
+        let third = queued_conversion(&repository, "fifo-third", "c").await;
         let expected_first_two = [
             first.active_attempt.queue_sequence,
             second.active_attempt.queue_sequence,
@@ -2750,16 +2570,8 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_exact_start_allows_one_transition_and_rejects_the_stale_caller() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 2, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let queued = created(
-            repository
-                .create_or_replay(new_conversion("concurrent-start", "a"))
-                .await
-                .unwrap(),
-        );
+        let (_directory, repository) = open_repository(2).await;
+        let queued = queued_conversion(&repository, "concurrent-start", "a").await;
         let conversion_id = queued.id;
         let attempt_id = queued.active_attempt.id;
         let barrier = Arc::new(Barrier::new(2));
@@ -2793,20 +2605,8 @@ mod tests {
 
     #[tokio::test]
     async fn artifact_insert_failure_rolls_back_both_rows_and_success_transition() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 2, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let conversion = created(
-            repository
-                .create_or_replay(new_conversion("artifact-atomic", "a"))
-                .await
-                .unwrap(),
-        );
-        repository
-            .start_local(conversion.id, conversion.active_attempt.id, local_start())
-            .await
-            .unwrap();
+        let (_directory, repository) = open_repository(2).await;
+        let conversion = converting_conversion(&repository, "artifact-atomic", "a").await;
         repository
             .mark_finalizing(
                 conversion.id,
@@ -2843,16 +2643,8 @@ mod tests {
 
     #[tokio::test]
     async fn conversion_update_failure_rolls_back_the_prior_attempt_transition() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 2, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let conversion = created(
-            repository
-                .create_or_replay(new_conversion("transition-atomic", "a"))
-                .await
-                .unwrap(),
-        );
+        let (_directory, repository) = open_repository(2).await;
+        let conversion = queued_conversion(&repository, "transition-atomic", "a").await;
         sqlx::query(
             "CREATE TRIGGER reject_failed_conversion
              BEFORE UPDATE OF status ON conversions
@@ -2883,26 +2675,9 @@ mod tests {
 
     #[tokio::test]
     async fn requeue_preserves_history_reenters_fifo_and_stops_at_the_limit() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 4, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let first = created(
-            repository
-                .create_or_replay(new_conversion("requeue-first", "a"))
-                .await
-                .unwrap(),
-        );
-        repository
-            .start_local(first.id, first.active_attempt.id, local_start())
-            .await
-            .unwrap();
-        let second = created(
-            repository
-                .create_or_replay(new_conversion("requeue-second", "b"))
-                .await
-                .unwrap(),
-        );
+        let (_directory, repository) = open_repository(4).await;
+        let first = converting_conversion(&repository, "requeue-first", "a").await;
+        let second = queued_conversion(&repository, "requeue-second", "b").await;
         let recovered_attempt_id = Uuid::new_v4();
 
         let outcome = repository
@@ -2976,16 +2751,8 @@ mod tests {
 
     #[tokio::test]
     async fn requeue_accepts_finalizing_and_rejects_illegal_or_stale_attempts() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 3, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let queued = created(
-            repository
-                .create_or_replay(new_conversion("requeue-guards", "a"))
-                .await
-                .unwrap(),
-        );
+        let (_directory, repository) = open_repository(3).await;
+        let queued = queued_conversion(&repository, "requeue-guards", "a").await;
         assert!(matches!(
             repository
                 .interrupt_and_requeue(queued.id, queued.active_attempt.id, Uuid::new_v4(), 3,)
@@ -3023,20 +2790,8 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_requeue_allows_one_new_active_attempt() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 2, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let conversion = created(
-            repository
-                .create_or_replay(new_conversion("concurrent-requeue", "a"))
-                .await
-                .unwrap(),
-        );
-        repository
-            .start_local(conversion.id, conversion.active_attempt.id, local_start())
-            .await
-            .unwrap();
+        let (_directory, repository) = open_repository(2).await;
+        let conversion = converting_conversion(&repository, "concurrent-requeue", "a").await;
         let new_ids = [Uuid::new_v4(), Uuid::new_v4()];
         let barrier = Arc::new(Barrier::new(2));
         let mut tasks = Vec::new();
@@ -3082,36 +2837,10 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_listing_is_filtered_complete_and_includes_artifacts_in_one_view() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 8, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let queued = created(
-            repository
-                .create_or_replay(new_conversion("list-queued", "a"))
-                .await
-                .unwrap(),
-        );
-        let converting = created(
-            repository
-                .create_or_replay(new_conversion("list-converting", "b"))
-                .await
-                .unwrap(),
-        );
-        repository
-            .start_local(converting.id, converting.active_attempt.id, local_start())
-            .await
-            .unwrap();
-        let finalizing = created(
-            repository
-                .create_or_replay(new_conversion("list-finalizing", "c"))
-                .await
-                .unwrap(),
-        );
-        repository
-            .start_local(finalizing.id, finalizing.active_attempt.id, local_start())
-            .await
-            .unwrap();
+        let (_directory, repository) = open_repository(8).await;
+        let queued = queued_conversion(&repository, "list-queued", "a").await;
+        let converting = converting_conversion(&repository, "list-converting", "b").await;
+        let finalizing = converting_conversion(&repository, "list-finalizing", "c").await;
         repository
             .mark_finalizing(
                 finalizing.id,
@@ -3120,16 +2849,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let succeeded = created(
-            repository
-                .create_or_replay(new_conversion("list-succeeded", "d"))
-                .await
-                .unwrap(),
-        );
-        repository
-            .start_local(succeeded.id, succeeded.active_attempt.id, local_start())
-            .await
-            .unwrap();
+        let succeeded = converting_conversion(&repository, "list-succeeded", "d").await;
         repository
             .mark_finalizing(succeeded.id, succeeded.active_attempt.id, local_analysis())
             .await
@@ -3142,12 +2862,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let failed = created(
-            repository
-                .create_or_replay(new_conversion("list-failed", "e"))
-                .await
-                .unwrap(),
-        );
+        let failed = queued_conversion(&repository, "list-failed", "e").await;
         repository
             .finish_failed(
                 failed.id,
@@ -3156,20 +2871,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let needs_remote = created(
-            repository
-                .create_or_replay(new_conversion("list-needs-remote", "f"))
-                .await
-                .unwrap(),
-        );
-        repository
-            .start_local(
-                needs_remote.id,
-                needs_remote.active_attempt.id,
-                local_start(),
-            )
-            .await
-            .unwrap();
+        let needs_remote = converting_conversion(&repository, "list-needs-remote", "f").await;
         repository
             .finish_needs_remote(
                 needs_remote.id,
@@ -3232,26 +2934,9 @@ mod tests {
 
     #[tokio::test]
     async fn failed_requeue_insert_rolls_back_interruption_and_preserves_foreign_keys() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 3, BUSY_TIMEOUT)
-            .await
-            .unwrap();
-        let recovering = created(
-            repository
-                .create_or_replay(new_conversion("rollback-requeue", "a"))
-                .await
-                .unwrap(),
-        );
-        repository
-            .start_local(recovering.id, recovering.active_attempt.id, local_start())
-            .await
-            .unwrap();
-        let other = created(
-            repository
-                .create_or_replay(new_conversion("rollback-other", "b"))
-                .await
-                .unwrap(),
-        );
+        let (_directory, repository) = open_repository(3).await;
+        let recovering = converting_conversion(&repository, "rollback-requeue", "a").await;
+        let other = queued_conversion(&repository, "rollback-other", "b").await;
 
         assert!(matches!(
             repository
@@ -3289,10 +2974,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_check_requires_a_live_read_write_pool() {
-        let directory = TempDir::new().unwrap();
-        let repository = SqliteRepository::open(directory.path(), 2, BUSY_TIMEOUT)
-            .await
-            .unwrap();
+        let (_directory, repository) = open_repository(2).await;
         repository.health_check().await.unwrap();
         repository.pool.close().await;
         assert!(matches!(
@@ -3301,8 +2983,75 @@ mod tests {
         ));
     }
 
+    async fn open_repository(max_active_jobs: u32) -> (TempDir, SqliteRepository) {
+        let directory = TempDir::new().unwrap();
+        let repository = SqliteRepository::open(directory.path(), max_active_jobs, BUSY_TIMEOUT)
+            .await
+            .unwrap();
+        (directory, repository)
+    }
+
+    async fn assert_pragmas(connection: &mut SqliteConnection) {
+        let journal_mode: String = sqlx::query("PRAGMA journal_mode")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
+        let foreign_keys: i64 = sqlx::query("PRAGMA foreign_keys")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
+        let synchronous: i64 = sqlx::query("PRAGMA synchronous")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
+        let busy_timeout: i64 = sqlx::query("PRAGMA busy_timeout")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(synchronous, 2);
+        assert_eq!(busy_timeout, 5_000);
+    }
+
     fn new_conversion(key: &str, fingerprint_character: &str) -> NewConversion {
         new_conversion_with_ids(key, fingerprint_character, Uuid::new_v4(), Uuid::new_v4())
+    }
+
+    async fn queued_conversion(
+        repository: &SqliteRepository,
+        key: &str,
+        fingerprint_character: &str,
+    ) -> crate::persistence::StoredConversion {
+        created(
+            repository
+                .create_or_replay(new_conversion(key, fingerprint_character))
+                .await
+                .unwrap(),
+        )
+    }
+
+    /// A queued conversion walked to converting_local, the state most of the
+    /// transition tests start from.
+    async fn converting_conversion(
+        repository: &SqliteRepository,
+        key: &str,
+        fingerprint_character: &str,
+    ) -> crate::persistence::StoredConversion {
+        let conversion = queued_conversion(repository, key, fingerprint_character).await;
+        repository
+            .start_local(conversion.id, conversion.active_attempt.id, local_start())
+            .await
+            .unwrap();
+        conversion
     }
 
     fn created(outcome: CreateOutcome) -> crate::persistence::StoredConversion {

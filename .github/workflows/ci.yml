@@ -45,7 +45,9 @@ jobs:
       - run: cargo test --locked --manifest-path crates/worker-protocol/Cargo.toml
       - run: cargo clippy --locked --manifest-path apps/converter/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path apps/converter/Cargo.toml
-      - uses: astral-sh/setup-uv@v10
+      # No floating `v10` tag exists upstream: their major-tag series stops at
+      # v7, so `@v10` fails to resolve. Pin the release.
+      - uses: astral-sh/setup-uv@v10.0.1
       # Property-based testing against the running service. It boots its own
       # copy on a throwaway port and data root, so it shares nothing with the
       # steps above.
@@ -61,6 +63,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri
+      # tauri-build resolves bundle.externalBin and bundle.resources in the
+      # build script, so cargo clippy/test fail with ResourcePathNotFound
+      # without them. Both are gitignored, so a fresh checkout has neither.
+      # ponytail: empty placeholders satisfy the existence probe, which is all
+      # this job needs. It compiles and unit-tests, it never bundles. Anything
+      # that bundles or runs the sidecar must run `pnpm sidecars` for real.
+      - name: Stage placeholder sidecar artifacts
+        run: |
+          mkdir -p apps/desktop/src-tauri/binaries \
+                   apps/desktop/src-tauri/resources/pdf-inspector/bcmaps
+          touch apps/desktop/src-tauri/binaries/tool-kit-converter-aarch64-apple-darwin \
+                apps/desktop/src-tauri/binaries/tool-kit-pdf-worker-aarch64-apple-darwin \
+                apps/desktop/src-tauri/binaries/tool-kit-vision-worker-aarch64-apple-darwin \
+                apps/desktop/src-tauri/resources/pdf-inspector/pdf-inspector-MIT.txt \
+                apps/desktop/src-tauri/resources/pdf-inspector/adobe-bcmaps.txt
       - run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib
 

@@ -1,7 +1,7 @@
 use std::{
     fmt,
     fs::File,
-    io::{Read, Take},
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -36,12 +36,12 @@ impl BootstrapAuth {
             source,
         })?;
         let mut raw = Vec::new();
-        read_bounded(file.take(MAX_TOKEN_FILE_BYTES + 1), &mut raw).map_err(|source| {
-            AuthLoadError::Read {
+        file.take(MAX_TOKEN_FILE_BYTES + 1)
+            .read_to_end(&mut raw)
+            .map_err(|source| AuthLoadError::Read {
                 path: path.to_owned(),
                 source,
-            }
-        })?;
+            })?;
         if raw.len() as u64 > MAX_TOKEN_FILE_BYTES {
             raw.zeroize();
             return Err(AuthLoadError::TooLarge(path.to_owned()));
@@ -98,10 +98,6 @@ impl fmt::Debug for BootstrapAuth {
             .field("digest", &"[REDACTED]")
             .finish()
     }
-}
-
-fn read_bounded(mut reader: Take<File>, output: &mut Vec<u8>) -> std::io::Result<()> {
-    reader.read_to_end(output).map(|_| ())
 }
 
 fn strip_one_line_ending(raw: &mut Vec<u8>) {

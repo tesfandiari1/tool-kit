@@ -22,6 +22,7 @@ use tokio::{
     sync::{watch, OwnedSemaphorePermit, Semaphore},
 };
 
+use super::child::{self, is_lowercase_sha256};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
@@ -37,7 +38,7 @@ const CSV_FORMAT_LABEL: &str = "csv";
 /// Engine-specific detail persisted as attempt diagnostics and embedded in
 /// the manifest. Content-free: the detected format family and wall time only.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct AnyDocDiagnostics {
     pub format: String,
     pub processing_time_ms: u64,
@@ -59,10 +60,7 @@ impl AnyDocEngine {
     }
 
     pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, EngineFailure> {
-        Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .map_err(|_| EngineFailure::Unavailable)
+        child::acquire(&self.permits).await
     }
 
     /// Runs blocking work on a blocking thread under a hard deadline. A hang
@@ -269,13 +267,6 @@ fn format_label(format: anydoc::Format) -> &'static str {
         anydoc::Format::Odp => "odp",
         anydoc::Format::Csv => "csv",
     }
-}
-
-fn is_lowercase_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(test)]

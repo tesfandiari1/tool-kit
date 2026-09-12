@@ -38,13 +38,7 @@ fn run() -> Result<(), ()> {
     };
     let expected_source_bytes = required_positive_u64_env(WORKER_EXPECTED_SOURCE_BYTES_ENV)?;
     let expected_source_sha256 = required_lowercase_sha256_env(WORKER_EXPECTED_SOURCE_SHA256_ENV)?;
-    let max_output_bytes = env::var(WORKER_MAX_OUTPUT_BYTES_ENV)
-        .map_err(|_| ())?
-        .parse::<u64>()
-        .map_err(|_| ())?;
-    if max_output_bytes == 0 {
-        return Err(());
-    }
+    let max_output_bytes = required_positive_u64_env(WORKER_MAX_OUTPUT_BYTES_ENV)?;
     let output_directory = PathBuf::from(output_directory);
     let output_metadata = std::fs::symlink_metadata(&output_directory).map_err(|_| ())?;
     if output_metadata.file_type().is_symlink() || !output_metadata.is_dir() {

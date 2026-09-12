@@ -401,7 +401,10 @@ fn a_transparent_background_is_flattened_rather_than_read_as_blank() {
     assert!(run.status.success(), "worker exited {:?}", run.status);
     let report = read_report(&run.staging);
     let VisionOutcome::Converted { .. } = report.outcome else {
-        panic!("a transparent background is not a blank page: {:?}", report.outcome);
+        panic!(
+            "a transparent background is not a blank page: {:?}",
+            report.outcome
+        );
     };
     let markdown = fs::read_to_string(run.staging.join(VISION_MARKDOWN_FILE)).unwrap();
     assert!(

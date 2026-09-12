@@ -111,32 +111,24 @@ pub(crate) enum PolicyDecision {
 }
 
 impl PolicyDecision {
-    pub(crate) fn reason_codes(&self) -> &[ReasonCode] {
-        match self {
-            Self::Publish { reason_codes, .. } => reason_codes,
-            Self::NeedsRemote { reason_code } => std::slice::from_ref(reason_code),
-        }
-    }
-
-    pub(crate) fn warnings(&self) -> &[Warning] {
-        match self {
-            Self::Publish { warnings, .. } => warnings,
-            Self::NeedsRemote { .. } => &[],
-        }
-    }
-
     pub(crate) fn reason_strings(&self) -> Vec<String> {
-        self.reason_codes()
-            .iter()
-            .map(|code| code.as_str().to_owned())
-            .collect()
+        match self {
+            Self::Publish { reason_codes, .. } => reason_codes
+                .iter()
+                .map(|code| code.as_str().to_owned())
+                .collect(),
+            Self::NeedsRemote { reason_code } => vec![reason_code.as_str().to_owned()],
+        }
     }
 
     pub(crate) fn warning_strings(&self) -> Vec<String> {
-        self.warnings()
-            .iter()
-            .map(|warning| warning.as_str().to_owned())
-            .collect()
+        match self {
+            Self::Publish { warnings, .. } => warnings
+                .iter()
+                .map(|warning| warning.as_str().to_owned())
+                .collect(),
+            Self::NeedsRemote { .. } => Vec::new(),
+        }
     }
 }
 

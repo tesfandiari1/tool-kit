@@ -33,7 +33,9 @@ GENERATED="${ROOT_DIR}/apps/desktop/src/app/api/schema.ts"
 [ -f "${CONTRACT}" ] || { printf 'FAIL: no contract at %s\n' "${CONTRACT}" >&2; exit 1; }
 [ -f "${GENERATED}" ] || { printf 'FAIL: no generated client at %s\n' "${GENERATED}" >&2; exit 1; }
 
-EXPECTED="$(mktemp -t schema-drift)"
+# A full template, not `mktemp -t`: GNU mktemp rejects a -t template with no
+# X's, so the BSD form that works on macOS fails on the Linux CI runner.
+EXPECTED="$(mktemp "${TMPDIR:-/tmp}/schema-drift.XXXXXX")"
 # Runs on every exit path, so a failing diff does not leave the file behind.
 trap 'rm -f "${EXPECTED}"' EXIT
 

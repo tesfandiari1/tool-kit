@@ -194,14 +194,9 @@ impl Settings {
 }
 
 fn sibling_worker_path(name: &str) -> Result<PathBuf, ConfigError> {
-    let executable = env::current_exe().map_err(ConfigError::CurrentExecutable)?;
-    let worker_name = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_owned()
-    };
-
-    Ok(executable.with_file_name(worker_name))
+    Ok(env::current_exe()
+        .map_err(ConfigError::CurrentExecutable)?
+        .with_file_name(name))
 }
 
 fn absolute_path(variable: &'static str, raw: String) -> Result<PathBuf, ConfigError> {

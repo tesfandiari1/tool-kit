@@ -288,8 +288,6 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/HealthResponse"
-    BadRequest:
-      $ref: "#/components/responses/Error400"
     Unauthorized:
       description: Missing or invalid bearer token
       headers:
@@ -378,7 +376,7 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
-    Error400:
+    BadRequest:
       description: Malformed request
       headers:
         X-Request-Id:

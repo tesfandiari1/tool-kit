@@ -3,17 +3,16 @@ use uuid::Uuid;
 
 use crate::{
     artifacts::{ArtifactError, PublicationState},
-    conversion::{ArtifactReadFailure, ConversionService},
+    conversion::{
+        ArtifactReadFailure, ConversionService, ARTIFACT_INTEGRITY_CODE,
+        ARTIFACT_INTEGRITY_MESSAGE, SOURCE_INTEGRITY_CODE, SOURCE_INTEGRITY_MESSAGE,
+    },
     persistence::{
         AttemptState, ConversionState, DocumentClassification, FailedResult, FailureStage,
         RecoveryCandidate, RepositoryError, RequeueOutcome, StoredConversion, StoredFailure,
     },
 };
 
-const SOURCE_INTEGRITY_CODE: &str = "source_integrity_failed";
-const SOURCE_INTEGRITY_MESSAGE: &str = "The immutable source failed integrity validation.";
-const ARTIFACT_INTEGRITY_CODE: &str = "artifact_integrity_failed";
-const ARTIFACT_INTEGRITY_MESSAGE: &str = "A published artifact failed integrity validation.";
 const RECOVERY_LIMIT_CODE: &str = "recovery_limit_exceeded";
 const RECOVERY_LIMIT_MESSAGE: &str =
     "The conversion exceeded the configured startup recovery limit.";

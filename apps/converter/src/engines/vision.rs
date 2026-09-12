@@ -6,24 +6,19 @@
 //! the service runs without, never a startup error.
 
 use std::{
-    io::Read as _,
     path::{Path, PathBuf},
-    process::{Command as StdCommand, Stdio},
+    process::Stdio,
     sync::Arc,
-    thread,
     time::{Duration, Instant},
 };
 
-use sha2::{Digest, Sha256};
-use thiserror::Error;
 use tokio::{
     fs,
-    io::AsyncReadExt,
     process::Command,
     sync::{watch, OwnedSemaphorePermit, Semaphore},
 };
 
-use super::child::wait_for_child;
+use super::child::{self, is_lowercase_sha256, wait_for_child, WorkerStartupError};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
@@ -38,14 +33,14 @@ use crate::{
     worker_protocol::FallbackReason,
 };
 
-const MAX_REPORT_BYTES: u64 = 1024 * 1024;
+const WORKER_LABEL: &str = "Vision";
 const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Engine-specific detail persisted as attempt diagnostics and embedded in the
 /// manifest. Content-free, and wall time is all of it: see the quality note in
 /// [`analysis`] for why Vision reports no measurement.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct VisionDiagnostics {
     pub processing_time_ms: u64,
 }
@@ -67,8 +62,8 @@ impl VisionEngine {
         worker_path: PathBuf,
         timeout: Duration,
         max_output_bytes: u64,
-    ) -> Result<Self, VisionStartupError> {
-        validate_worker(&worker_path)?;
+    ) -> Result<Self, WorkerStartupError> {
+        child::validate_worker(&worker_path, WORKER_LABEL)?;
         let version = verify_worker_identity(&worker_path)?;
 
         Ok(Self {
@@ -85,11 +80,7 @@ impl VisionEngine {
     }
 
     pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, EngineFailure> {
-        self.permits
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| EngineFailure::Unavailable)
+        child::acquire(&self.permits).await
     }
 
     pub async fn convert(
@@ -153,46 +144,20 @@ impl VisionEngine {
         elapsed: Duration,
     ) -> Result<EngineOutcome, EngineFailure> {
         let report_path = paths.publication_staging.join(VISION_WORKER_REPORT_FILE);
-        let metadata = fs::symlink_metadata(&report_path)
-            .await
-            .map_err(|_| EngineFailure::Protocol)?;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.len() > MAX_REPORT_BYTES
-        {
-            return Err(EngineFailure::Protocol);
-        }
-        let encoded = fs::read(&report_path)
-            .await
-            .map_err(|_| EngineFailure::Protocol)?;
-        let report: VisionReport =
-            serde_json::from_slice(&encoded).map_err(|_| EngineFailure::Protocol)?;
+        let report: VisionReport = child::read_report(&report_path).await?;
         self.validate_identity(&report)?;
 
         let outcome = match report.outcome {
             VisionOutcome::Converted { artifact } => {
-                if artifact.relative_path != VISION_MARKDOWN_FILE
-                    || artifact.byte_length == 0
-                    || artifact.byte_length > self.max_output_bytes
-                    || !is_sha256(&artifact.sha256)
-                {
-                    return Err(EngineFailure::Protocol);
-                }
-                let markdown_path = paths.staged_markdown();
-                let markdown_metadata = fs::symlink_metadata(&markdown_path)
-                    .await
-                    .map_err(|_| EngineFailure::Protocol)?;
-                if !markdown_metadata.is_file()
-                    || markdown_metadata.file_type().is_symlink()
-                    || markdown_metadata.len() != artifact.byte_length
-                    || markdown_metadata.len() > self.max_output_bytes
-                {
-                    return Err(EngineFailure::Protocol);
-                }
-                let (digest, has_content) = hash_and_check_content(&markdown_path).await?;
-                if !has_content || digest != artifact.sha256 {
-                    return Err(EngineFailure::Protocol);
-                }
+                let digest = child::validate_staged_markdown(
+                    paths,
+                    VISION_MARKDOWN_FILE,
+                    &artifact.relative_path,
+                    artifact.byte_length,
+                    &artifact.sha256,
+                    self.max_output_bytes,
+                )
+                .await?;
                 EngineOutcome::Converted {
                     analysis: analysis(elapsed)?,
                     byte_length: artifact.byte_length,
@@ -200,12 +165,7 @@ impl VisionEngine {
                 }
             }
             VisionOutcome::Rejected { code } => {
-                if fs::try_exists(paths.staged_markdown())
-                    .await
-                    .map_err(|_| EngineFailure::Protocol)?
-                {
-                    return Err(EngineFailure::Protocol);
-                }
+                child::reject_if_markdown_staged(paths).await?;
                 match fallback_reason(code) {
                     Some(reason_code) => EngineOutcome::NeedsRemote {
                         analysis: analysis(elapsed)?,
@@ -237,76 +197,15 @@ impl VisionEngine {
     }
 }
 
-fn validate_worker(path: &Path) -> Result<(), VisionStartupError> {
-    let metadata = std::fs::metadata(path).map_err(|source| VisionStartupError::InvalidWorker {
-        path: path.to_owned(),
-        source,
-    })?;
-    if !metadata.is_file() {
-        return Err(VisionStartupError::WorkerNotFile(path.to_owned()));
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Err(VisionStartupError::WorkerNotExecutable(path.to_owned()));
-        }
-    }
-    Ok(())
-}
-
 /// Returns the macOS product version the worker reported. The handshake line
 /// is a fixed prefix plus that version, so the check is prefix equality plus a
 /// dotted-number tail rather than the byte equality a pinned engine allows.
-fn verify_worker_identity(path: &Path) -> Result<String, VisionStartupError> {
-    let mut child = StdCommand::new(path)
-        .arg("--version")
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|source| VisionStartupError::WorkerHandshake {
-            path: path.to_owned(),
-            source,
-        })?;
-    let deadline = std::time::Instant::now() + WORKER_IDENTITY_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(VisionStartupError::WorkerIdentityTimeout(path.to_owned()));
-            }
-            Err(source) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(VisionStartupError::WorkerHandshake {
-                    path: path.to_owned(),
-                    source,
-                });
-            }
-        }
+fn verify_worker_identity(path: &Path) -> Result<String, WorkerStartupError> {
+    let output = child::worker_identity_line(path, WORKER_LABEL, WORKER_IDENTITY_TIMEOUT)?;
+    let mismatch = || WorkerStartupError::WorkerIdentityMismatch {
+        worker: WORKER_LABEL,
+        path: path.to_owned(),
     };
-    let mut output = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        stdout
-            .take(4097)
-            .read_to_end(&mut output)
-            .map_err(|source| VisionStartupError::WorkerHandshake {
-                path: path.to_owned(),
-                source,
-            })?;
-    }
-    let mismatch = || VisionStartupError::WorkerIdentityMismatch(path.to_owned());
-    if !status.success() {
-        return Err(mismatch());
-    }
     let line = std::str::from_utf8(&output).map_err(|_| mismatch())?;
     let version = line
         .strip_prefix(VISION_WORKER_IDENTITY_PREFIX)
@@ -386,64 +285,6 @@ fn rejection(code: VisionRejectionCode) -> EngineRejection {
     }
 }
 
-fn is_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn is_lowercase_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-async fn hash_and_check_content(path: &Path) -> Result<(String, bool), EngineFailure> {
-    let mut file = fs::File::open(path)
-        .await
-        .map_err(|_| EngineFailure::Protocol)?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut has_content = false;
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .await
-            .map_err(|_| EngineFailure::Protocol)?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-        has_content |= buffer[..count]
-            .iter()
-            .any(|byte| !byte.is_ascii_whitespace());
-    }
-    Ok((hex::encode(digest.finalize()), has_content))
-}
-
-#[derive(Debug, Error)]
-pub enum VisionStartupError {
-    #[error("Vision worker is unavailable at {path:?}")]
-    InvalidWorker {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("Vision worker path is not a regular file: {0:?}")]
-    WorkerNotFile(PathBuf),
-    #[error("Vision worker path is not executable: {0:?}")]
-    WorkerNotExecutable(PathBuf),
-    #[error("Vision worker handshake failed at {path:?}")]
-    WorkerHandshake {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("Vision worker identity does not match the pinned protocol: {0:?}")]
-    WorkerIdentityMismatch(PathBuf),
-    #[error("Vision worker identity check timed out: {0:?}")]
-    WorkerIdentityTimeout(PathBuf),
-}
-
 #[cfg(test)]
 mod tests {
     use std::{path::Path, time::Duration};
@@ -452,7 +293,7 @@ mod tests {
     use tokio::sync::watch;
 
     use super::{
-        verify_worker_identity, EngineOutcome, FallbackReason, VisionEngine, VisionStartupError,
+        verify_worker_identity, EngineOutcome, FallbackReason, VisionEngine, WorkerStartupError,
     };
     use crate::artifacts::{AttemptPaths, ValidatedOpenFile};
     use crate::persistence::DocumentClassification;
@@ -505,7 +346,7 @@ mod tests {
 
         assert!(matches!(
             verify_worker_identity(&worker),
-            Err(VisionStartupError::WorkerIdentityMismatch(_))
+            Err(WorkerStartupError::WorkerIdentityMismatch { .. })
         ));
     }
 
@@ -523,7 +364,7 @@ mod tests {
 
         assert!(matches!(
             verify_worker_identity(&worker),
-            Err(VisionStartupError::WorkerIdentityMismatch(_))
+            Err(WorkerStartupError::WorkerIdentityMismatch { .. })
         ));
     }
 
@@ -600,7 +441,10 @@ mod tests {
             // A frame count this engine cannot carry is still a file a remote
             // engine converts, and one it converted before images left
             // `PERMANENT_DIRECT_FORMATS`. Only unreadable bytes are terminal.
-            ("multi_frame_image", Some(FallbackReason::LocalQualityFailed)),
+            (
+                "multi_frame_image",
+                Some(FallbackReason::LocalQualityFailed),
+            ),
             ("invalid_image", None),
         ] {
             let directory = tempfile::tempdir().unwrap();

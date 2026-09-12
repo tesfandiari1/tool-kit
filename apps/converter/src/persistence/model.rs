@@ -1,7 +1,13 @@
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The serde strings are the HTTP contract; `as_str` is the database column.
+/// They are the same three words, which is why one enum carries both.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Profile {
     Standard,
     LocalOnly,
@@ -18,16 +24,22 @@ impl Profile {
     }
 
     pub(crate) fn from_database(value: &str) -> Option<Self> {
-        match value {
-            "standard" => Some(Self::Standard),
-            "local_only" => Some(Self::LocalOnly),
-            "best_quality" => Some(Self::BestQuality),
-            _ => None,
-        }
+        [Self::Standard, Self::LocalOnly, Self::BestQuality]
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl FromStr for Profile {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::from_database(value).ok_or(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConversionState {
     Queued,
     ConvertingLocal,
@@ -49,16 +61,21 @@ impl ConversionState {
         }
     }
 
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::NeedsRemote)
+    }
+
     pub(crate) fn from_database(value: &str) -> Option<Self> {
-        match value {
-            "queued" => Some(Self::Queued),
-            "converting_local" => Some(Self::ConvertingLocal),
-            "finalizing" => Some(Self::Finalizing),
-            "succeeded" => Some(Self::Succeeded),
-            "failed" => Some(Self::Failed),
-            "needs_remote" => Some(Self::NeedsRemote),
-            _ => None,
-        }
+        [
+            Self::Queued,
+            Self::ConvertingLocal,
+            Self::Finalizing,
+            Self::Succeeded,
+            Self::Failed,
+            Self::NeedsRemote,
+        ]
+        .into_iter()
+        .find(|candidate| candidate.as_str() == value)
     }
 }
 
@@ -87,32 +104,39 @@ impl AttemptState {
     }
 
     pub(crate) fn from_database(value: &str) -> Option<Self> {
-        match value {
-            "queued" => Some(Self::Queued),
-            "converting_local" => Some(Self::ConvertingLocal),
-            "finalizing" => Some(Self::Finalizing),
-            "succeeded" => Some(Self::Succeeded),
-            "failed" => Some(Self::Failed),
-            "needs_remote" => Some(Self::NeedsRemote),
-            "interrupted" => Some(Self::Interrupted),
-            _ => None,
-        }
+        [
+            Self::Queued,
+            Self::ConvertingLocal,
+            Self::Finalizing,
+            Self::Succeeded,
+            Self::Failed,
+            Self::NeedsRemote,
+            Self::Interrupted,
+        ]
+        .into_iter()
+        .find(|candidate| candidate.as_str() == value)
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     Markdown,
     Manifest,
 }
 
 impl ArtifactKind {
-    pub(crate) fn from_database(value: &str) -> Option<Self> {
-        match value {
-            "markdown" => Some(Self::Markdown),
-            "manifest" => Some(Self::Manifest),
-            _ => None,
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Manifest => "manifest",
         }
+    }
+
+    pub(crate) fn from_database(value: &str) -> Option<Self> {
+        [Self::Markdown, Self::Manifest]
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
     }
 }
 

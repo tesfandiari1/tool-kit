@@ -52,7 +52,7 @@ pub enum WorkerOutcome {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Inspection {
     pub pdf_type: PdfTypeLabel,
     pub confidence: f32,
@@ -67,7 +67,7 @@ pub struct Inspection {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PageReasons {
     pub page: u32,
     pub reasons: Vec<String>,

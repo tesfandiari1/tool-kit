@@ -26,10 +26,10 @@ use crate::{
     },
     faults::{FaultBarrier, FaultPoint},
     persistence::{
-        hash_idempotency_key, ArtifactKind as StoredArtifactKind, ConversionState, CreateOutcome,
-        EngineRecord, FailedResult, FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult,
-        NewArtifact, NewConversion, NewSource, RepositoryError, SqliteRepository, StoredArtifact,
-        StoredConversion, StoredFailure, SuccessfulArtifacts,
+        hash_idempotency_key, ConversionState, CreateOutcome, EngineRecord, FailedResult,
+        FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult, NewArtifact, NewConversion,
+        NewSource, RepositoryError, SqliteRepository, StoredArtifact, StoredConversion,
+        StoredFailure, SuccessfulArtifacts,
     },
     vision_protocol::VISION_ENGINE_NAME,
     worker_protocol::{Inspection, PdfTypeLabel, PDF_INSPECTOR_VERSION},
@@ -37,17 +37,27 @@ use crate::{
 
 use super::{
     model::{
-        now, source_format_by_media_type, LocalEngineKind, ManifestEngine, ManifestOutput,
-        ManifestRoute, ManifestSource,
+        now, source_format_by_media_type, LocalEngineKind, ManifestEngine, ManifestRoute,
+        ManifestSource,
     },
     policy::{self, LocalResult, PolicyDecision, RouteKind},
-    ArtifactKind, ArtifactRecord, ArtifactView, ConversionManifest, ConversionProfile, JobStatus,
-    JobView, SourceMetadata,
+    ArtifactKind, ArtifactRecord, ArtifactView, ConversionManifest, ConversionProfile, JobView,
+    SourceMetadata,
 };
 
 const MARKDOWN_MEDIA_TYPE: &str = "text/markdown; charset=utf-8";
 const MANIFEST_MEDIA_TYPE: &str = "application/json";
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
+
+// The wire-visible failure text. Startup recovery reports the same two
+// refusals, so it reads them from here rather than keeping its own copy.
+pub(crate) const SOURCE_INTEGRITY_CODE: &str = "source_integrity_failed";
+pub(crate) const SOURCE_INTEGRITY_MESSAGE: &str =
+    "The immutable source failed integrity validation.";
+pub(crate) const ARTIFACT_INTEGRITY_CODE: &str = "artifact_integrity_failed";
+pub(crate) const ARTIFACT_INTEGRITY_MESSAGE: &str =
+    "A published artifact failed integrity validation.";
+const PUBLICATION_FAILED_MESSAGE: &str = "The service could not publish conversion artifacts.";
 
 #[derive(Clone, Debug)]
 pub struct ConversionService {
@@ -155,7 +165,7 @@ impl ConversionService {
             client_run_id: submission.client_run_id,
             idempotency_key_sha256: hash_idempotency_key(&submission.idempotency_key),
             request_fingerprint: fingerprint,
-            profile: submission.profile.into(),
+            profile: submission.profile,
             source: NewSource {
                 relative_path: portable_relative(source_relative_path(job_id)),
                 media_type: submission.source.media_type.clone(),
@@ -320,7 +330,7 @@ impl ConversionService {
             return Ok(None);
         };
         if job.state != ConversionState::Succeeded {
-            return Ok(Some(if JobStatus::from(job.state).is_terminal() {
+            return Ok(Some(if job.state.is_terminal() {
                 ArtifactLookup::NotFound
             } else {
                 ArtifactLookup::NotReady
@@ -380,15 +390,7 @@ impl ConversionService {
             return Ok(());
         };
         if job.source.relative_path != portable_relative(source_relative_path(job_id)) {
-            self.finish_failure(
-                job_id,
-                attempt_id,
-                FailureStage::ConvertingLocal,
-                "source_integrity_failed",
-                "The immutable source failed integrity validation.",
-                true,
-            )
-            .await?;
+            self.fail_source_integrity(job_id, attempt_id).await?;
             return Ok(());
         }
         let source = match self
@@ -404,15 +406,7 @@ impl ConversionService {
             Err(error) => match classify_artifact_error(error) {
                 ArtifactReadFailure::Integrity => {
                     tracing::warn!(%job_id, %attempt_id, "claimed source failed integrity validation");
-                    self.finish_failure(
-                        job_id,
-                        attempt_id,
-                        FailureStage::ConvertingLocal,
-                        "source_integrity_failed",
-                        "The immutable source failed integrity validation.",
-                        true,
-                    )
-                    .await?;
+                    self.fail_source_integrity(job_id, attempt_id).await?;
                     return Ok(());
                 }
                 ArtifactReadFailure::Transient(error) => {
@@ -438,7 +432,9 @@ impl ConversionService {
         let mut cancellation = shutdown.clone();
         let permit = tokio::select! {
             permit = acquire => permit,
-            () = wait_for_cancellation(&mut cancellation) => {
+            () = async {
+                let _ = cancellation.wait_for(|stop| *stop).await;
+            } => {
                 tracing::info!(%job_id, %attempt_id, "shutdown interrupted an engine permit wait; preserving claim");
                 return Ok(());
             }
@@ -512,11 +508,7 @@ impl ConversionService {
         // Everything below this line is the routing policy's call, not the
         // engine's. The engine reports what it measured; `policy::decide` says
         // whether that is publishable under this profile.
-        let route = match source_format.engine {
-            LocalEngineKind::Pdf => RouteKind::LocalPdf,
-            LocalEngineKind::AnyDoc => RouteKind::LocalAnyDoc,
-            LocalEngineKind::Vision => RouteKind::LocalVision,
-        };
+        let route = route_for(source_format.engine);
         let (analysis, local_result, published_bytes) = match conversion {
             Ok(EngineOutcome::Converted {
                 analysis,
@@ -569,10 +561,10 @@ impl ConversionService {
             }
         };
 
-        let decision = policy::decide(job.profile.into(), route, local_result);
+        let decision = policy::decide(job.profile, route, local_result);
         match (&decision, published_bytes) {
-            (PolicyDecision::Publish { .. }, Some((byte_length, sha256))) => {
-                self.finalize_success(job, paths, analysis, decision, byte_length, sha256)
+            (PolicyDecision::Publish { .. }, Some(markdown)) => {
+                self.finalize_success(job, paths, analysis, decision, route, markdown)
                     .await?;
             }
             // The policy refused to publish output the engine did produce, so
@@ -633,9 +625,11 @@ impl ConversionService {
         paths: AttemptPaths,
         engine_analysis: EngineAnalysis,
         decision: PolicyDecision,
-        markdown_bytes: u64,
-        markdown_sha256: String,
+        route: RouteKind,
+        // The staged Markdown's size and digest, as the engine measured them.
+        markdown: (u64, String),
     ) -> Result<(), ConversionExecutionError> {
+        let (markdown_bytes, markdown_sha256) = markdown;
         let job_id = job.id;
         let attempt_id = job.active_attempt.id;
         let request_id = job.origin_request_id.clone();
@@ -652,7 +646,7 @@ impl ConversionService {
                 attempt_id,
                 FailureStage::Finalizing,
                 EngineFailure::Protocol.code(),
-                "The service could not publish conversion artifacts.",
+                PUBLICATION_FAILED_MESSAGE,
                 true,
             )
             .await?;
@@ -664,7 +658,7 @@ impl ConversionService {
             job_id,
             attempt_id,
             client_run_id: finalizing.client_run_id,
-            profile: finalizing.profile.into(),
+            profile: finalizing.profile,
             source: ManifestSource {
                 media_type: finalizing.source.media_type.clone(),
                 byte_length: finalizing.source.byte_length,
@@ -676,24 +670,12 @@ impl ConversionService {
                 features: Vec::new(),
             },
             route: ManifestRoute {
-                kind: match source_format_by_media_type(&finalizing.source.media_type)
-                    .map(|format| format.engine)
-                {
-                    Some(LocalEngineKind::AnyDoc) => RouteKind::LocalAnyDoc,
-                    Some(LocalEngineKind::Vision) => RouteKind::LocalVision,
-                    // `None` is unreachable: the claim fails an engine-less
-                    // media type closed. Spelled out rather than wildcarded so
-                    // a fourth engine is a compile error, not a job silently
-                    // labelled `local_pdf`.
-                    Some(LocalEngineKind::Pdf) | None => RouteKind::LocalPdf,
-                }
-                .as_str()
-                .to_owned(),
+                kind: route.as_str().to_owned(),
                 reason_codes: decision.reason_strings(),
             },
             document: engine_analysis.diagnostics,
             warnings: decision.warning_strings(),
-            output: ManifestOutput {
+            output: ManifestSource {
                 media_type: MARKDOWN_MEDIA_TYPE.to_owned(),
                 byte_length: markdown_bytes,
                 sha256: markdown_sha256.clone(),
@@ -706,32 +688,20 @@ impl ConversionService {
             completed_at,
         };
         let encoded = match serde_json::to_vec(&manifest) {
-            Ok(encoded) => encoded,
-            Err(_) => {
+            Ok(encoded) if encoded.len() as u64 <= MAX_MANIFEST_BYTES => encoded,
+            _ => {
                 self.finish_failure(
                     job_id,
                     attempt_id,
                     FailureStage::Finalizing,
                     "manifest_encoding_failed",
-                    "The service could not publish conversion artifacts.",
+                    PUBLICATION_FAILED_MESSAGE,
                     true,
                 )
                 .await?;
                 return Ok(());
             }
         };
-        if encoded.len() as u64 > MAX_MANIFEST_BYTES {
-            self.finish_failure(
-                job_id,
-                attempt_id,
-                FailureStage::Finalizing,
-                "manifest_encoding_failed",
-                "The service could not publish conversion artifacts.",
-                true,
-            )
-            .await?;
-            return Ok(());
-        }
         if write_and_sync_new(&paths.staged_manifest(), &encoded)
             .await
             .is_err()
@@ -744,7 +714,7 @@ impl ConversionService {
                 attempt_id,
                 FailureStage::Finalizing,
                 "artifact_publication_failed",
-                "The service could not publish conversion artifacts.",
+                PUBLICATION_FAILED_MESSAGE,
                 true,
             )
             .await?;
@@ -769,7 +739,7 @@ impl ConversionService {
                     attempt_id,
                     FailureStage::Finalizing,
                     "artifact_publication_failed",
-                    "The service could not publish conversion artifacts.",
+                    PUBLICATION_FAILED_MESSAGE,
                     true,
                 )
                 .await?;
@@ -785,8 +755,8 @@ impl ConversionService {
                     job_id,
                     attempt_id,
                     FailureStage::Finalizing,
-                    "artifact_integrity_failed",
-                    "A published artifact failed integrity validation.",
+                    ARTIFACT_INTEGRITY_CODE,
+                    ARTIFACT_INTEGRITY_MESSAGE,
                     false,
                 )
                 .await?;
@@ -806,6 +776,22 @@ impl ConversionService {
             "conversion attempt completed"
         );
         Ok(())
+    }
+
+    async fn fail_source_integrity(
+        &self,
+        job_id: Uuid,
+        attempt_id: Uuid,
+    ) -> Result<(), ConversionExecutionError> {
+        self.finish_failure(
+            job_id,
+            attempt_id,
+            FailureStage::ConvertingLocal,
+            SOURCE_INTEGRITY_CODE,
+            SOURCE_INTEGRITY_MESSAGE,
+            true,
+        )
+        .await
     }
 
     async fn finish_failure(
@@ -918,11 +904,11 @@ impl ConversionService {
         if !manifest_bytes_match(&encoded, manifest.byte_length, &manifest.sha256) {
             return Err(ArtifactReadFailure::Integrity);
         }
-        let raw: serde_json::Value =
-            serde_json::from_slice(&encoded).map_err(|_| ArtifactReadFailure::Integrity)?;
-        validate_manifest_shape(&raw)?;
+        // `deny_unknown_fields` on the manifest structs is the shape check.
+        // The `document` object is the producing engine's own type, so
+        // `validate_manifest` decodes it against that engine's struct.
         let decoded: ConversionManifest =
-            serde_json::from_value(raw).map_err(|_| ArtifactReadFailure::Integrity)?;
+            serde_json::from_slice(&encoded).map_err(|_| ArtifactReadFailure::Integrity)?;
         let markdown_limit =
             markdown_read_limit(markdown_expected, &decoded.output, self.max_output_bytes)?;
         let markdown = self
@@ -997,8 +983,8 @@ impl ConversionService {
 
     async fn record_artifact_integrity_failure(&self, job: &StoredConversion) -> JobView {
         let failure = StoredFailure {
-            code: "artifact_integrity_failed".to_owned(),
-            message: "A published artifact failed integrity validation.".to_owned(),
+            code: ARTIFACT_INTEGRITY_CODE.to_owned(),
+            message: ARTIFACT_INTEGRITY_MESSAGE.to_owned(),
         };
         match self
             .repository
@@ -1094,15 +1080,6 @@ pub(crate) enum ConversionExecutionError {
     Persistence(#[from] RepositoryError),
 }
 
-/// Resolves once `shutdown` turns true, including when it already is.
-async fn wait_for_cancellation(shutdown: &mut watch::Receiver<bool>) {
-    while !*shutdown.borrow_and_update() {
-        if shutdown.changed().await.is_err() {
-            return;
-        }
-    }
-}
-
 /// The request identity a replay is matched on, so every field the job is run
 /// with belongs in it. The OCR options are persisted and read by the engine
 /// much later, so leaving them out lets a resumed run replay onto a job
@@ -1135,30 +1112,34 @@ pub(crate) fn submission_fingerprint(
 /// than starting against nothing.
 fn local_start(media_type: &str, vision_version: Option<&str>) -> Option<LocalStart> {
     let format = source_format_by_media_type(media_type)?;
-    let start = match format.engine {
-        LocalEngineKind::Pdf => LocalStart {
-            engine: EngineRecord {
-                name: "pdf-inspector".to_owned(),
-                version: PDF_INSPECTOR_VERSION.to_owned(),
-            },
-            route: RouteKind::LocalPdf.as_str().to_owned(),
+    let engine = match format.engine {
+        LocalEngineKind::Pdf => EngineRecord {
+            name: "pdf-inspector".to_owned(),
+            version: PDF_INSPECTOR_VERSION.to_owned(),
         },
-        LocalEngineKind::AnyDoc => LocalStart {
-            engine: EngineRecord {
-                name: ANYDOC_ENGINE_NAME.to_owned(),
-                version: ANYDOC_VERSION.to_owned(),
-            },
-            route: RouteKind::LocalAnyDoc.as_str().to_owned(),
+        LocalEngineKind::AnyDoc => EngineRecord {
+            name: ANYDOC_ENGINE_NAME.to_owned(),
+            version: ANYDOC_VERSION.to_owned(),
         },
-        LocalEngineKind::Vision => LocalStart {
-            engine: EngineRecord {
-                name: VISION_ENGINE_NAME.to_owned(),
-                version: vision_version?.to_owned(),
-            },
-            route: RouteKind::LocalVision.as_str().to_owned(),
+        LocalEngineKind::Vision => EngineRecord {
+            name: VISION_ENGINE_NAME.to_owned(),
+            version: vision_version?.to_owned(),
         },
     };
-    Some(start)
+    Some(LocalStart {
+        engine,
+        route: route_for(format.engine).as_str().to_owned(),
+    })
+}
+
+/// The one place the engine-to-route rule lives. Both the manifest and the
+/// stored attempt row read it, so they cannot label the same job differently.
+fn route_for(engine: LocalEngineKind) -> RouteKind {
+    match engine {
+        LocalEngineKind::Pdf => RouteKind::LocalPdf,
+        LocalEngineKind::AnyDoc => RouteKind::LocalAnyDoc,
+        LocalEngineKind::Vision => RouteKind::LocalVision,
+    }
 }
 
 fn local_analysis(analysis: &EngineAnalysis, decision: &PolicyDecision) -> LocalAnalysis {
@@ -1177,11 +1158,11 @@ fn artifact_pair(job: &StoredConversion) -> Option<(&StoredArtifact, &StoredArti
     let markdown = job
         .artifacts
         .iter()
-        .find(|artifact| artifact.kind == StoredArtifactKind::Markdown)?;
+        .find(|artifact| artifact.kind == ArtifactKind::Markdown)?;
     let manifest = job
         .artifacts
         .iter()
-        .find(|artifact| artifact.kind == StoredArtifactKind::Manifest)?;
+        .find(|artifact| artifact.kind == ArtifactKind::Manifest)?;
     Some((markdown, manifest))
 }
 
@@ -1302,7 +1283,7 @@ fn validate_manifest(
         || manifest.job_id != job.id
         || manifest.attempt_id != attempt.id
         || manifest.client_run_id != job.client_run_id
-        || manifest.profile != job.profile.into()
+        || manifest.profile != job.profile
         || manifest.source.media_type != job.source.media_type
         || manifest.source.byte_length != job.source.byte_length
         || manifest.source.sha256 != job.source.sha256
@@ -1328,72 +1309,9 @@ fn validate_manifest(
     Ok(())
 }
 
-fn validate_manifest_shape(value: &serde_json::Value) -> Result<(), ArtifactReadFailure> {
-    require_exact_object_keys(
-        value,
-        &[
-            "schemaVersion",
-            "jobId",
-            "attemptId",
-            "clientRunId",
-            "profile",
-            "source",
-            "engine",
-            "route",
-            "document",
-            "warnings",
-            "output",
-            "startedAt",
-            "completedAt",
-        ],
-    )?;
-    require_exact_object_keys(&value["source"], &["mediaType", "byteLength", "sha256"])?;
-    require_exact_object_keys(&value["engine"], &["name", "version", "features"])?;
-    require_exact_object_keys(&value["route"], &["kind", "reasonCodes"])?;
-    // The document object carries the producing engine's own diagnostics
-    // shape; an unknown engine's manifest is not verifiable.
-    let engine_name = value["engine"]["name"]
-        .as_str()
-        .ok_or(ArtifactReadFailure::Integrity)?;
-    match engine_name {
-        "pdf-inspector" => {
-            require_exact_object_keys(
-                &value["document"],
-                &[
-                    "pdfType",
-                    "confidence",
-                    "pageCount",
-                    "pagesNeedingOcr",
-                    "ocrReasonsByPage",
-                    "hasEncodingIssues",
-                    "isComplex",
-                    "pagesWithTables",
-                    "pagesWithColumns",
-                    "processingTimeMs",
-                ],
-            )?;
-            let reasons = value["document"]["ocrReasonsByPage"]
-                .as_array()
-                .ok_or(ArtifactReadFailure::Integrity)?;
-            for page in reasons {
-                require_exact_object_keys(page, &["page", "reasons"])?;
-            }
-        }
-        ANYDOC_ENGINE_NAME => {
-            require_exact_object_keys(&value["document"], &["format", "processingTimeMs"])?;
-        }
-        VISION_ENGINE_NAME => {
-            require_exact_object_keys(&value["document"], &["processingTimeMs"])?;
-        }
-        _ => return Err(ArtifactReadFailure::Integrity),
-    }
-    require_exact_object_keys(&value["output"], &["mediaType", "byteLength", "sha256"])?;
-    Ok(())
-}
-
 fn markdown_read_limit(
     stored: Option<&StoredArtifact>,
-    output: &ManifestOutput,
+    output: &ManifestSource,
     configured_maximum: u64,
 ) -> Result<u64, ArtifactReadFailure> {
     if output.media_type != MARKDOWN_MEDIA_TYPE || output.byte_length == 0 {
@@ -1413,17 +1331,6 @@ fn markdown_read_limit(
 
 fn manifest_bytes_match(bytes: &[u8], byte_length: u64, sha256: &str) -> bool {
     bytes.len() as u64 == byte_length && hex::encode(Sha256::digest(bytes)) == sha256
-}
-
-fn require_exact_object_keys(
-    value: &serde_json::Value,
-    expected: &[&str],
-) -> Result<(), ArtifactReadFailure> {
-    let object = value.as_object().ok_or(ArtifactReadFailure::Integrity)?;
-    if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
-        return Err(ArtifactReadFailure::Integrity);
-    }
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -1503,10 +1410,10 @@ mod tests {
 
     use super::{
         classify_artifact_error, manifest_bytes_match, markdown_read_limit, submission_fingerprint,
-        validate_manifest_shape, wait_for_cancellation, ArtifactError, ArtifactReadFailure,
-        ConversionProfile, ManifestOutput,
+        ArtifactError, ArtifactReadFailure, ConversionManifest, ConversionProfile, ManifestSource,
     };
-    use crate::persistence::{ArtifactKind as StoredArtifactKind, StoredArtifact};
+    use crate::persistence::{ArtifactKind, StoredArtifact};
+    use crate::worker_protocol::Inspection;
 
     /// A replay is matched on the fingerprint alone, so an OCR option outside
     /// it means a resumed run silently replays onto a job converted with the
@@ -1522,38 +1429,6 @@ mod tests {
         assert_ne!(baseline, fingerprint(false, "Acme"));
         assert_ne!(baseline, fingerprint(true, ""));
         assert_eq!(baseline, fingerprint(true, "Acme"));
-    }
-
-    /// The permit wait selects on this, so it has to fire for a receiver that
-    /// was already cancelled as well as one cancelled later.
-    #[tokio::test]
-    async fn cancellation_resolves_whether_it_arrives_before_or_during_the_wait() {
-        let (already, mut already_rx) = tokio::sync::watch::channel(true);
-        tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            wait_for_cancellation(&mut already_rx),
-        )
-        .await
-        .expect("an already-cancelled receiver must resolve immediately");
-        drop(already);
-
-        let (later, mut later_rx) = tokio::sync::watch::channel(false);
-        let waiter = tokio::spawn(async move { wait_for_cancellation(&mut later_rx).await });
-        later.send_replace(true);
-        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
-            .await
-            .expect("a later cancellation must wake the wait")
-            .unwrap();
-
-        // A dropped sender must not hang the runner either.
-        let (dropped, mut dropped_rx) = tokio::sync::watch::channel(false);
-        drop(dropped);
-        tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            wait_for_cancellation(&mut dropped_rx),
-        )
-        .await
-        .expect("a closed channel must resolve");
     }
 
     #[test]
@@ -1635,51 +1510,63 @@ mod tests {
         ));
     }
 
+    /// The manifest shape is `deny_unknown_fields` on the structs it decodes
+    /// into. `document` is untyped there, so its shape is the producing
+    /// engine's own type, checked where the manifest is validated.
     #[test]
-    fn manifest_shape_rejects_unknown_nested_and_page_fields() {
+    fn manifest_shape_rejects_unknown_nested_and_document_fields() {
+        let document = json!({
+            "pdfType": "text_based",
+            "confidence": 1.0,
+            "pageCount": 1,
+            "pagesNeedingOcr": [],
+            "ocrReasonsByPage": [{"page": 1, "reasons": []}],
+            "hasEncodingIssues": false,
+            "isComplex": false,
+            "pagesWithTables": [],
+            "pagesWithColumns": [],
+            "processingTimeMs": 1
+        });
         let valid = json!({
             "schemaVersion": 1,
-            "jobId": null,
-            "attemptId": null,
-            "clientRunId": null,
-            "profile": null,
-            "source": {"mediaType": null, "byteLength": null, "sha256": null},
-            "engine": {"name": "pdf-inspector", "version": null, "features": null},
-            "route": {"kind": null, "reasonCodes": null},
-            "document": {
-                "pdfType": null,
-                "confidence": null,
-                "pageCount": null,
-                "pagesNeedingOcr": null,
-                "ocrReasonsByPage": [{"page": null, "reasons": null}],
-                "hasEncodingIssues": null,
-                "isComplex": null,
-                "pagesWithTables": null,
-                "pagesWithColumns": null,
-                "processingTimeMs": null
-            },
-            "warnings": null,
-            "output": {"mediaType": null, "byteLength": null, "sha256": null},
-            "startedAt": null,
-            "completedAt": null
+            "jobId": Uuid::nil(),
+            "attemptId": Uuid::nil(),
+            "clientRunId": Uuid::nil(),
+            "profile": "standard",
+            "source": {"mediaType": "application/pdf", "byteLength": 1, "sha256": "a".repeat(64)},
+            "engine": {"name": "pdf-inspector", "version": "1.15.0", "features": []},
+            "route": {"kind": "local_pdf", "reasonCodes": []},
+            "document": document,
+            "warnings": [],
+            "output": {"mediaType": "text/markdown", "byteLength": 1, "sha256": "b".repeat(64)},
+            "startedAt": "1970-01-01T00:00:00Z",
+            "completedAt": "1970-01-01T00:00:00Z"
         });
-        assert!(validate_manifest_shape(&valid).is_ok());
+        assert!(serde_json::from_value::<ConversionManifest>(valid.clone()).is_ok());
+        assert!(serde_json::from_value::<Inspection>(document.clone()).is_ok());
 
-        for path in ["top", "source", "document", "page"] {
+        for path in ["top", "source", "engine", "route", "output"] {
             let mut mutated = valid.clone();
             match path {
                 "top" => mutated["unexpected"] = json!(true),
-                "source" => mutated["source"]["unexpected"] = json!(true),
-                "document" => mutated["document"]["unexpected"] = json!(true),
-                "page" => {
-                    mutated["document"]["ocrReasonsByPage"][0]["unexpected"] = json!(true);
-                }
-                _ => unreachable!(),
+                other => mutated[other]["unexpected"] = json!(true),
             }
-            assert!(matches!(
-                validate_manifest_shape(&mutated),
-                Err(ArtifactReadFailure::Integrity)
-            ));
+            assert!(
+                serde_json::from_value::<ConversionManifest>(mutated).is_err(),
+                "an unknown {path} field must not decode"
+            );
+        }
+
+        for path in ["document", "page"] {
+            let mut mutated = document.clone();
+            match path {
+                "document" => mutated["unexpected"] = json!(true),
+                _ => mutated["ocrReasonsByPage"][0]["unexpected"] = json!(true),
+            }
+            assert!(
+                serde_json::from_value::<Inspection>(mutated).is_err(),
+                "an unknown {path} field must not decode"
+            );
         }
     }
 
@@ -1687,14 +1574,14 @@ mod tests {
     fn markdown_limits_preserve_valid_history_and_bound_new_publications() {
         let stored = StoredArtifact {
             attempt_id: Uuid::nil(),
-            kind: StoredArtifactKind::Markdown,
+            kind: ArtifactKind::Markdown,
             relative_path: "result.md".to_owned(),
             media_type: super::MARKDOWN_MEDIA_TYPE.to_owned(),
             byte_length: 10,
             sha256: "a".repeat(64),
             created_at: "created".to_owned(),
         };
-        let output = ManifestOutput {
+        let output = ManifestSource {
             media_type: super::MARKDOWN_MEDIA_TYPE.to_owned(),
             byte_length: 10,
             sha256: "a".repeat(64),
@@ -1707,7 +1594,7 @@ mod tests {
         ));
         assert_eq!(markdown_read_limit(None, &output, 10).unwrap(), 10);
 
-        let mismatched = ManifestOutput {
+        let mismatched = ManifestSource {
             sha256: "b".repeat(64),
             ..output
         };

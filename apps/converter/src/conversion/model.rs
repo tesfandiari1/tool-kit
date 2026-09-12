@@ -1,55 +1,12 @@
-use std::str::FromStr;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::fs::File;
 use uuid::Uuid;
 
-use crate::persistence::{
-    ArtifactKind as StoredArtifactKind, ConversionState, Profile, StoredArtifact, StoredConversion,
-};
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConversionProfile {
-    Standard,
-    LocalOnly,
-    BestQuality,
-}
-
-impl ConversionProfile {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::LocalOnly => "local_only",
-            Self::BestQuality => "best_quality",
-        }
-    }
-}
-
-impl FromStr for ConversionProfile {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "standard" => Ok(Self::Standard),
-            "local_only" => Ok(Self::LocalOnly),
-            "best_quality" => Ok(Self::BestQuality),
-            _ => Err(()),
-        }
-    }
-}
-
-impl From<ConversionProfile> for Profile {
-    fn from(value: ConversionProfile) -> Self {
-        match value {
-            ConversionProfile::Standard => Self::Standard,
-            ConversionProfile::LocalOnly => Self::LocalOnly,
-            ConversionProfile::BestQuality => Self::BestQuality,
-        }
-    }
-}
+use super::service::{ARTIFACT_INTEGRITY_CODE, ARTIFACT_INTEGRITY_MESSAGE};
+use super::{ArtifactKind, ConversionProfile, JobStatus};
+use crate::persistence::{StoredArtifact, StoredConversion};
 
 /// One advertised upload format: the accepted extension, the canonical media
 /// type stored with the source, the container signature the upload path
@@ -357,46 +314,6 @@ pub(crate) fn servable_media_types(vision_available: bool) -> Vec<&'static str> 
     servable
 }
 
-impl From<Profile> for ConversionProfile {
-    fn from(value: Profile) -> Self {
-        match value {
-            Profile::Standard => Self::Standard,
-            Profile::LocalOnly => Self::LocalOnly,
-            Profile::BestQuality => Self::BestQuality,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum JobStatus {
-    Queued,
-    ConvertingLocal,
-    Finalizing,
-    Succeeded,
-    Failed,
-    NeedsRemote,
-}
-
-impl JobStatus {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::NeedsRemote)
-    }
-}
-
-impl From<ConversionState> for JobStatus {
-    fn from(value: ConversionState) -> Self {
-        match value {
-            ConversionState::Queued => Self::Queued,
-            ConversionState::ConvertingLocal => Self::ConvertingLocal,
-            ConversionState::Finalizing => Self::Finalizing,
-            ConversionState::Succeeded => Self::Succeeded,
-            ConversionState::Failed => Self::Failed,
-            ConversionState::NeedsRemote => Self::NeedsRemote,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobView {
@@ -420,8 +337,8 @@ impl JobView {
             id: job.id,
             active_attempt_id: job.active_attempt.id,
             client_run_id: job.client_run_id,
-            profile: job.profile.into(),
-            status: job.state.into(),
+            profile: job.profile,
+            status: job.state,
             route: job.route.as_ref().map(|kind| RouteView {
                 kind: kind.clone(),
                 reason_codes: job.reason_codes.clone(),
@@ -440,8 +357,8 @@ impl JobView {
         let mut view = Self::from_stored(job);
         view.status = JobStatus::Failed;
         view.failure = Some(JobFailure {
-            code: "artifact_integrity_failed".to_owned(),
-            message: "A published artifact failed integrity validation.".to_owned(),
+            code: ARTIFACT_INTEGRITY_CODE.to_owned(),
+            message: ARTIFACT_INTEGRITY_MESSAGE.to_owned(),
         });
         view.updated_at = now();
         view
@@ -468,31 +385,6 @@ pub struct SourceMetadata {
     pub sha256: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactKind {
-    Markdown,
-    Manifest,
-}
-
-impl ArtifactKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Markdown => "markdown",
-            Self::Manifest => "manifest",
-        }
-    }
-}
-
-impl From<StoredArtifactKind> for ArtifactKind {
-    fn from(value: StoredArtifactKind) -> Self {
-        match value {
-            StoredArtifactKind::Markdown => Self::Markdown,
-            StoredArtifactKind::Manifest => Self::Manifest,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct ArtifactRecord {
     pub file: File,
@@ -514,7 +406,7 @@ pub struct ArtifactView {
 
 impl ArtifactView {
     pub fn from_stored(job_id: Uuid, artifact: &StoredArtifact) -> Self {
-        let kind = ArtifactKind::from(artifact.kind);
+        let kind = artifact.kind;
         Self {
             kind,
             attempt_id: artifact.attempt_id,
@@ -527,7 +419,7 @@ impl ArtifactView {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ConversionManifest {
     pub(crate) schema_version: u32,
     pub(crate) job_id: Uuid,
@@ -539,13 +431,13 @@ pub(crate) struct ConversionManifest {
     pub(crate) route: ManifestRoute,
     pub(crate) document: Value,
     pub(crate) warnings: Vec<String>,
-    pub(crate) output: ManifestOutput,
+    pub(crate) output: ManifestSource,
     pub(crate) started_at: String,
     pub(crate) completed_at: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ManifestSource {
     pub(crate) media_type: String,
     pub(crate) byte_length: u64,
@@ -553,6 +445,7 @@ pub(crate) struct ManifestSource {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ManifestEngine {
     pub(crate) name: String,
     pub(crate) version: String,
@@ -560,18 +453,10 @@ pub(crate) struct ManifestEngine {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ManifestRoute {
     pub(crate) kind: String,
     pub(crate) reason_codes: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ManifestOutput {
-    pub(crate) media_type: String,
-    pub(crate) byte_length: u64,
-    pub(crate) sha256: String,
 }
 
 pub fn now() -> String {

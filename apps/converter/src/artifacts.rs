@@ -1,5 +1,3 @@
-#![allow(dead_code)] // P2 APIs are wired into the runtime during P4 integration.
-
 use std::{
     ffi::OsStr,
     path::{Component, Path, PathBuf},
@@ -16,7 +14,7 @@ use uuid::Uuid;
 
 use crate::worker_protocol::MARKDOWN_FILE;
 
-pub const MANIFEST_FILE: &str = "manifest.json";
+const MANIFEST_FILE: &str = "manifest.json";
 
 const JOBS_DIRECTORY: &str = "jobs";
 const SOURCE_DIRECTORY: &str = "source";
@@ -120,10 +118,6 @@ impl ArtifactStore {
         Ok(store)
     }
 
-    pub fn root(&self) -> &Path {
-        self.root.as_path()
-    }
-
     /// Proves the data root still accepts writes by creating and removing one
     /// probe file. It never reads, writes, or removes anything under `jobs/`,
     /// so readiness cannot damage a stored conversion.
@@ -151,24 +145,27 @@ impl ArtifactStore {
         // The guard owns the removal so a failed write or a cancelled readiness
         // check still leaves the directory empty. Readiness runs under a
         // timeout, and a dropped future never resumes to run async cleanup.
-        let mut probe = ProbeFile::new(directory.join(Uuid::new_v4().to_string()));
-        write_health_probe(probe.path())
+        let mut probe = ProbeFile {
+            path: directory.join(Uuid::new_v4().to_string()),
+            removed: false,
+        };
+        write_health_probe(&probe.path)
             .await
             .map_err(|source| ArtifactError::HealthProbe {
-                path: probe.path().to_owned(),
+                path: probe.path.clone(),
                 source,
             })?;
-        fs::remove_file(probe.path())
+        fs::remove_file(&probe.path)
             .await
             .map_err(|source| ArtifactError::HealthProbe {
-                path: probe.path().to_owned(),
+                path: probe.path.clone(),
                 source,
             })?;
-        probe.mark_removed();
+        probe.removed = true;
         Ok(())
     }
 
-    pub fn job_paths(&self, job_id: Uuid) -> JobPaths {
+    fn job_paths(&self, job_id: Uuid) -> JobPaths {
         let job = self.root.join(job_relative_path(job_id));
         let source_directory = job.join(SOURCE_DIRECTORY);
         JobPaths {
@@ -253,22 +250,9 @@ impl ArtifactStore {
         self.validate_source(submission.job_id, None, None).await
     }
 
-    /// Creates one retry-safe attempt directory. During M1 compatibility this
-    /// lazily creates a missing job tree; P4 must remove that lazy path and
-    /// require `prepare_submission` plus `publish_source` first.
-    pub async fn create_attempt(
-        &self,
-        job_id: Uuid,
-        attempt_id: Uuid,
-    ) -> Result<AttemptPaths, ArtifactError> {
-        self.ensure_job_for_compatibility(job_id).await?;
-        self.create_attempt_directory(job_id, attempt_id).await
-    }
-
-    /// Strict durable path for retries. Unlike the M1 compatibility wrapper,
-    /// this refuses to create an attempt until the immutable source exists as
-    /// a regular, non-symlink file. P4 should switch callers to this method and
-    /// then remove the lazy `create_attempt` wrapper.
+    /// Refuses to create an attempt until the immutable source exists as a
+    /// regular, non-symlink file, so a retry cannot run against a missing or
+    /// substituted source.
     pub async fn create_retry_attempt(
         &self,
         job_id: Uuid,
@@ -502,43 +486,9 @@ impl ArtifactStore {
         expected_byte_length: Option<u64>,
         expected_sha256: Option<&str>,
     ) -> Result<ValidatedOpenFile, ArtifactError> {
-        self.open_validated_relative_file(
+        self.open_validated_relative_file_with_limit(
             &source_relative_path(job_id),
-            expected_byte_length,
-            expected_sha256,
-        )
-        .await
-    }
-
-    pub async fn validate_artifact(
-        &self,
-        job_id: Uuid,
-        attempt_id: Uuid,
-        artifact: PublishedArtifact,
-        expected_byte_length: Option<u64>,
-        expected_sha256: Option<&str>,
-    ) -> Result<ValidatedFile, ArtifactError> {
-        self.open_validated_artifact(
-            job_id,
-            attempt_id,
-            artifact,
-            expected_byte_length,
-            expected_sha256,
-        )
-        .await
-        .map(ValidatedOpenFile::without_handle)
-    }
-
-    pub async fn open_validated_artifact(
-        &self,
-        job_id: Uuid,
-        attempt_id: Uuid,
-        artifact: PublishedArtifact,
-        expected_byte_length: Option<u64>,
-        expected_sha256: Option<&str>,
-    ) -> Result<ValidatedOpenFile, ArtifactError> {
-        self.open_validated_relative_file(
-            &artifact_relative_path(job_id, attempt_id, artifact),
+            None,
             expected_byte_length,
             expected_sha256,
         )
@@ -565,7 +515,7 @@ impl ArtifactStore {
         .await
     }
 
-    pub fn resolve_relative(&self, relative: &Path) -> Result<PathBuf, ArtifactError> {
+    fn resolve_relative(&self, relative: &Path) -> Result<PathBuf, ArtifactError> {
         if relative.as_os_str().is_empty()
             || relative
                 .components()
@@ -580,10 +530,7 @@ impl ArtifactStore {
         Ok(resolved)
     }
 
-    pub async fn resolve_existing_relative(
-        &self,
-        relative: &Path,
-    ) -> Result<PathBuf, ArtifactError> {
+    async fn resolve_existing_relative(&self, relative: &Path) -> Result<PathBuf, ArtifactError> {
         let resolved = self.resolve_relative(relative)?;
         let mut current = self.root.as_path().to_owned();
         let components = relative.components().collect::<Vec<_>>();
@@ -609,24 +556,8 @@ impl ArtifactStore {
     }
 
     pub async fn discard_unaccepted_job(&self, job_id: Uuid) -> Result<(), ArtifactError> {
-        let relative = job_relative_path(job_id);
-        let path = self.resolve_relative(&relative)?;
-        let Some(metadata) = optional_metadata(&path).await? else {
-            return Ok(());
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(ArtifactError::UnsafeOwnedPath(path));
-        }
-        self.resolve_existing_relative(&relative).await?;
-        fs::remove_dir_all(&path)
+        self.discard_owned_directory(&job_relative_path(job_id), self.root.join(JOBS_DIRECTORY))
             .await
-            .map_err(|source| ArtifactError::Discard {
-                path: path.clone(),
-                source,
-            })?;
-        sync_directory(self.root.join(JOBS_DIRECTORY))
-            .await
-            .map_err(|source| ArtifactError::Discard { path, source })
     }
 
     pub async fn discard_attempt(
@@ -634,22 +565,35 @@ impl ArtifactStore {
         job_id: Uuid,
         attempt_id: Uuid,
     ) -> Result<(), ArtifactError> {
-        let relative = attempt_relative_path(job_id, attempt_id);
-        let path = self.resolve_relative(&relative)?;
+        self.discard_owned_directory(
+            &attempt_relative_path(job_id, attempt_id),
+            self.job_paths(job_id).attempts,
+        )
+        .await
+    }
+
+    /// Removes one backend-owned directory. A symlink or a non-directory is
+    /// corruption, so it is refused rather than followed.
+    async fn discard_owned_directory(
+        &self,
+        relative: &Path,
+        parent_to_sync: PathBuf,
+    ) -> Result<(), ArtifactError> {
+        let path = self.resolve_relative(relative)?;
         let Some(metadata) = optional_metadata(&path).await? else {
             return Ok(());
         };
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(ArtifactError::UnsafeOwnedPath(path));
         }
-        self.resolve_existing_relative(&relative).await?;
+        self.resolve_existing_relative(relative).await?;
         fs::remove_dir_all(&path)
             .await
             .map_err(|source| ArtifactError::Discard {
                 path: path.clone(),
                 source,
             })?;
-        sync_directory(self.job_paths(job_id).attempts)
+        sync_directory(parent_to_sync)
             .await
             .map_err(|source| ArtifactError::Discard { path, source })
     }
@@ -724,37 +668,6 @@ impl ArtifactStore {
         Ok(quarantine_relative)
     }
 
-    /// M1 compatibility wrapper. It validates the deterministic layout and
-    /// removes the whole unaccepted job so the now-shared source cannot leak.
-    /// Remove this path-based wrapper during P4 integration.
-    pub async fn discard(&self, paths: &AttemptPaths) {
-        let result = self.attempt_ids_from_paths(paths).map(|(job_id, _)| job_id);
-        match result {
-            Ok(job_id) => {
-                if let Err(error) = self.discard_unaccepted_job(job_id).await {
-                    tracing::warn!(%job_id, %error, "failed to remove compatibility job storage");
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "refused to remove non-owned compatibility path");
-            }
-        }
-    }
-
-    /// M1 compatibility wrapper. Remove during P4 integration in favor of the
-    /// ID-derived `prepare_artifacts` method.
-    pub async fn prepare_publication(&self, paths: &AttemptPaths) -> Result<(), ArtifactError> {
-        let (job_id, attempt_id) = self.attempt_ids_from_paths(paths)?;
-        self.prepare_artifacts(job_id, attempt_id).await.map(|_| ())
-    }
-
-    /// M1 compatibility wrapper. Remove during P4 integration in favor of the
-    /// ID-derived `publish_artifacts` method.
-    pub async fn publish(&self, paths: &AttemptPaths) -> Result<(), ArtifactError> {
-        let (job_id, attempt_id) = self.attempt_ids_from_paths(paths)?;
-        self.publish_artifacts(job_id, attempt_id).await
-    }
-
     async fn create_submission_children(&self, paths: &JobPaths) -> Result<(), ArtifactError> {
         self.require_owned_directory_relative(
             paths
@@ -799,20 +712,6 @@ impl ArtifactStore {
                 path: paths.job.clone(),
                 source,
             })
-    }
-
-    async fn ensure_job_for_compatibility(&self, job_id: Uuid) -> Result<(), ArtifactError> {
-        let paths = self.job_paths(job_id);
-        match optional_metadata(&paths.job).await? {
-            None => self.prepare_submission(job_id).await.map(|_| ()),
-            Some(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => {
-                self.resolve_existing_relative(&job_relative_path(job_id))
-                    .await?;
-                require_directory(&paths.source_directory).await?;
-                require_directory(&paths.attempts).await
-            }
-            Some(_) => Err(ArtifactError::UnsafeOwnedPath(paths.job)),
-        }
     }
 
     async fn ensure_attempt_for_publication(
@@ -907,21 +806,6 @@ impl ArtifactStore {
         Ok((path, file, metadata))
     }
 
-    async fn open_validated_relative_file(
-        &self,
-        relative: &Path,
-        expected_byte_length: Option<u64>,
-        expected_sha256: Option<&str>,
-    ) -> Result<ValidatedOpenFile, ArtifactError> {
-        self.open_validated_relative_file_with_limit(
-            relative,
-            None,
-            expected_byte_length,
-            expected_sha256,
-        )
-        .await
-    }
-
     async fn open_validated_relative_file_with_limit(
         &self,
         relative: &Path,
@@ -977,42 +861,13 @@ impl ArtifactStore {
             sha256,
         })
     }
-
-    fn attempt_ids_from_paths(&self, paths: &AttemptPaths) -> Result<(Uuid, Uuid), ArtifactError> {
-        let relative = paths
-            .attempt
-            .strip_prefix(self.root.as_path())
-            .map_err(|_| ArtifactError::PathLayoutMismatch)?;
-        let components = relative
-            .components()
-            .map(|component| match component {
-                Component::Normal(value) => Some(value),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()
-            .ok_or(ArtifactError::PathLayoutMismatch)?;
-        let [jobs, job_id, attempts, attempt_id] = components.as_slice() else {
-            return Err(ArtifactError::PathLayoutMismatch);
-        };
-        if *jobs != OsStr::new(JOBS_DIRECTORY) || *attempts != OsStr::new(ATTEMPTS_DIRECTORY) {
-            return Err(ArtifactError::PathLayoutMismatch);
-        }
-        let job_id = Uuid::parse_str(&job_id.to_string_lossy())
-            .map_err(|_| ArtifactError::PathLayoutMismatch)?;
-        let attempt_id = Uuid::parse_str(&attempt_id.to_string_lossy())
-            .map_err(|_| ArtifactError::PathLayoutMismatch)?;
-        if *paths != self.attempt_paths(job_id, attempt_id) {
-            return Err(ArtifactError::PathLayoutMismatch);
-        }
-        Ok((job_id, attempt_id))
-    }
 }
 
-pub fn job_relative_path(job_id: Uuid) -> PathBuf {
+fn job_relative_path(job_id: Uuid) -> PathBuf {
     PathBuf::from(JOBS_DIRECTORY).join(job_id.to_string())
 }
 
-pub fn source_staging_relative_path(job_id: Uuid) -> PathBuf {
+fn source_staging_relative_path(job_id: Uuid) -> PathBuf {
     job_relative_path(job_id)
         .join(SOURCE_DIRECTORY)
         .join(SOURCE_STAGING_FILE)
@@ -1024,19 +879,19 @@ pub fn source_relative_path(job_id: Uuid) -> PathBuf {
         .join(SOURCE_FILE)
 }
 
-pub fn attempt_relative_path(job_id: Uuid, attempt_id: Uuid) -> PathBuf {
+fn attempt_relative_path(job_id: Uuid, attempt_id: Uuid) -> PathBuf {
     attempts_relative_path(job_id).join(attempt_id.to_string())
 }
 
-pub fn attempts_relative_path(job_id: Uuid) -> PathBuf {
+fn attempts_relative_path(job_id: Uuid) -> PathBuf {
     job_relative_path(job_id).join(ATTEMPTS_DIRECTORY)
 }
 
-pub fn publication_staging_relative_path(job_id: Uuid, attempt_id: Uuid) -> PathBuf {
+fn publication_staging_relative_path(job_id: Uuid, attempt_id: Uuid) -> PathBuf {
     attempt_relative_path(job_id, attempt_id).join(PUBLICATION_STAGING_DIRECTORY)
 }
 
-pub fn artifacts_relative_path(job_id: Uuid, attempt_id: Uuid) -> PathBuf {
+fn artifacts_relative_path(job_id: Uuid, attempt_id: Uuid) -> PathBuf {
     attempt_relative_path(job_id, attempt_id).join(ARTIFACTS_DIRECTORY)
 }
 
@@ -1048,7 +903,7 @@ pub fn artifact_relative_path(
     artifacts_relative_path(job_id, attempt_id).join(artifact.file_name())
 }
 
-pub fn preacceptance_quarantine_reservation_relative_path(
+fn preacceptance_quarantine_reservation_relative_path(
     job_id: Uuid,
     quarantine_id: Uuid,
 ) -> PathBuf {
@@ -1057,7 +912,7 @@ pub fn preacceptance_quarantine_reservation_relative_path(
         .join(format!("{job_id}-{quarantine_id}"))
 }
 
-pub fn preacceptance_quarantine_relative_path(job_id: Uuid, quarantine_id: Uuid) -> PathBuf {
+fn preacceptance_quarantine_relative_path(job_id: Uuid, quarantine_id: Uuid) -> PathBuf {
     preacceptance_quarantine_reservation_relative_path(job_id, quarantine_id).join("job")
 }
 
@@ -1125,10 +980,6 @@ impl AttemptPaths {
         self.publication_staging.join(MANIFEST_FILE)
     }
 
-    pub fn markdown(&self) -> PathBuf {
-        self.published.join(MARKDOWN_FILE)
-    }
-
     pub fn manifest(&self) -> PathBuf {
         self.published.join(MANIFEST_FILE)
     }
@@ -1139,23 +990,6 @@ impl AttemptPaths {
 struct ProbeFile {
     path: PathBuf,
     removed: bool,
-}
-
-impl ProbeFile {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            removed: false,
-        }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn mark_removed(&mut self) {
-        self.removed = true;
-    }
 }
 
 impl Drop for ProbeFile {
@@ -1314,16 +1148,10 @@ async fn hash_open_file(
     Ok(hex::encode(digest.finalize()))
 }
 
-#[cfg(unix)]
 fn set_private_directory(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(not(unix))]
-fn set_private_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -1463,7 +1291,7 @@ mod tests {
         artifact_relative_path, artifacts_relative_path, attempt_relative_path, job_relative_path,
         preacceptance_quarantine_relative_path, preacceptance_quarantine_reservation_relative_path,
         publication_staging_relative_path, source_relative_path, source_staging_relative_path,
-        ArtifactError, ArtifactStore, AttemptPaths, ProbeFile, PublicationState, PublishedArtifact,
+        ArtifactError, ArtifactStore, ProbeFile, PublicationState, PublishedArtifact,
         HEALTH_DIRECTORY, MANIFEST_FILE,
     };
     use crate::worker_protocol::MARKDOWN_FILE;
@@ -1472,17 +1300,20 @@ mod tests {
     async fn durable_layout_publishes_and_validates_source_and_artifacts() {
         let directory = tempdir().unwrap();
         let store = ArtifactStore::initialize(directory.path()).unwrap();
+        // `initialize` canonicalizes, and a macOS temp dir resolves through
+        // /private, so a bare temp path would not match what the store built.
+        let root = directory.path().canonicalize().unwrap();
         let job_id = Uuid::new_v4();
         let attempt_id = Uuid::new_v4();
 
         let prepared = store.prepare_submission(job_id).await.unwrap();
         assert_eq!(
             prepared.paths.source_staging,
-            store.root().join(source_staging_relative_path(job_id))
+            root.join(source_staging_relative_path(job_id))
         );
         assert_eq!(
             prepared.paths.source,
-            store.root().join(source_relative_path(job_id))
+            root.join(source_relative_path(job_id))
         );
         assert!(matches!(
             store.create_retry_attempt(job_id, attempt_id).await,
@@ -1513,7 +1344,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             attempt.attempt,
-            store.root().join(attempt_relative_path(job_id, attempt_id))
+            root.join(attempt_relative_path(job_id, attempt_id))
         );
         let prepared_attempt = store.prepare_artifacts(job_id, attempt_id).await.unwrap();
         assert_eq!(attempt, prepared_attempt);
@@ -1526,11 +1357,12 @@ mod tests {
         store.publish_artifacts(job_id, attempt_id).await.unwrap();
 
         let markdown_hash = hex::encode(Sha256::digest(b"# result\n"));
-        let markdown = store
-            .validate_artifact(
+        let mut markdown = store
+            .open_bounded_validated_artifact(
                 job_id,
                 attempt_id,
                 PublishedArtifact::Markdown,
+                9,
                 Some(9),
                 Some(&markdown_hash),
             )
@@ -1538,18 +1370,8 @@ mod tests {
             .unwrap();
         assert_eq!(markdown.byte_length, 9);
         assert_eq!(markdown.sha256, markdown_hash);
-        let mut opened_markdown = store
-            .open_validated_artifact(
-                job_id,
-                attempt_id,
-                PublishedArtifact::Markdown,
-                Some(9),
-                Some(&markdown.sha256),
-            )
-            .await
-            .unwrap();
         let mut opened_markdown_bytes = Vec::new();
-        opened_markdown
+        markdown
             .file
             .read_to_end(&mut opened_markdown_bytes)
             .await
@@ -1735,7 +1557,10 @@ mod tests {
             Err(ArtifactError::PathAlreadyExists(_))
         ));
 
-        let attempt = store.create_attempt(job_id, attempt_id).await.unwrap();
+        let attempt = store
+            .create_retry_attempt(job_id, attempt_id)
+            .await
+            .unwrap();
         store.prepare_artifacts(job_id, attempt_id).await.unwrap();
         tokio::fs::write(attempt.staged_markdown(), b"markdown")
             .await
@@ -1748,18 +1573,6 @@ mod tests {
             store.publish_artifacts(job_id, attempt_id).await,
             Err(ArtifactError::PathAlreadyExists(_))
         ));
-
-        let outside = tempdir().unwrap();
-        let outside_marker = outside.path().join("keep");
-        tokio::fs::write(&outside_marker, b"keep").await.unwrap();
-        let forged = AttemptPaths {
-            attempt: outside.path().to_owned(),
-            source: outside_marker.clone(),
-            publication_staging: outside.path().join("publication.staging"),
-            published: outside.path().join("artifacts"),
-        };
-        store.discard(&forged).await;
-        assert!(outside_marker.exists());
 
         assert_eq!(
             publication_staging_relative_path(job_id, attempt_id),
@@ -1864,7 +1677,9 @@ mod tests {
             PublicationState::Published
         );
         assert_eq!(
-            tokio::fs::read(attempt.markdown()).await.unwrap(),
+            tokio::fs::read(attempt.published.join(MARKDOWN_FILE))
+                .await
+                .unwrap(),
             b"markdown"
         );
         assert!(prepared.paths.source.is_file());
@@ -1924,8 +1739,11 @@ mod tests {
         let path = directory.path().join("probe");
 
         {
-            let guard = ProbeFile::new(path.clone());
-            std::fs::write(guard.path(), b"ready").unwrap();
+            let guard = ProbeFile {
+                path: path.clone(),
+                removed: false,
+            };
+            std::fs::write(&guard.path, b"ready").unwrap();
             assert!(path.is_file());
         }
 
@@ -1978,7 +1796,10 @@ mod tests {
             Err(ArtifactError::SymlinkPath(_))
         ));
 
-        let attempt = store.create_attempt(job_id, attempt_id).await.unwrap();
+        let attempt = store
+            .create_attempt_directory(job_id, attempt_id)
+            .await
+            .unwrap();
         let attempt_mode = std::fs::metadata(&attempt.attempt)
             .unwrap()
             .permissions()

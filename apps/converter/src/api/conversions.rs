@@ -84,19 +84,9 @@ pub async fn create(
     let multipart = multipart.map_err(|rejection| {
         let status = rejection.into_response().status();
         if status == StatusCode::PAYLOAD_TOO_LARGE {
-            error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "upload_too_large",
-                "The upload exceeds the configured limit.",
-                &request_id,
-            )
+            upload_too_large(&request_id)
         } else {
-            error(
-                StatusCode::BAD_REQUEST,
-                "invalid_multipart",
-                "The multipart request is malformed.",
-                &request_id,
-            )
+            invalid_multipart(&request_id)
         }
     })?;
 
@@ -201,14 +191,7 @@ pub async fn get(
         .get(job_id)
         .await
         .map_err(|_| service_unavailable(&request_id))?
-        .ok_or_else(|| {
-            error(
-                StatusCode::NOT_FOUND,
-                "conversion_not_found",
-                "The conversion does not exist.",
-                &request_id,
-            )
-        })?;
+        .ok_or_else(|| not_found(&request_id))?;
     Ok(Json(JobEnvelope { data: job }))
 }
 
@@ -223,14 +206,7 @@ pub async fn list_artifacts(
         .artifact_views(job_id)
         .await
         .map_err(|_| service_unavailable(&request_id))?
-        .ok_or_else(|| {
-            error(
-                StatusCode::NOT_FOUND,
-                "conversion_not_found",
-                "The conversion does not exist.",
-                &request_id,
-            )
-        })?;
+        .ok_or_else(|| not_found(&request_id))?;
     Ok(Json(ArtifactListEnvelope { data: artifacts }))
 }
 
@@ -262,14 +238,7 @@ async fn download(
         .artifact(job_id, kind)
         .await
         .map_err(|_| service_unavailable(&request_id))?
-        .ok_or_else(|| {
-            error(
-                StatusCode::NOT_FOUND,
-                "conversion_not_found",
-                "The conversion does not exist.",
-                &request_id,
-            )
-        })?;
+        .ok_or_else(|| not_found(&request_id))?;
     let artifact = match lookup {
         ArtifactLookup::Ready(artifact) => artifact,
         ArtifactLookup::NotReady => {
@@ -326,14 +295,11 @@ async fn stage_multipart(
     let mut source = None;
     let mut language_correction = None;
     let mut custom_words = None;
-    while let Some(field) = multipart.next_field().await.map_err(|_| {
-        error(
-            StatusCode::BAD_REQUEST,
-            "invalid_multipart",
-            "The multipart request is malformed.",
-            request_id,
-        )
-    })? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| invalid_multipart(request_id))?
+    {
         match field.name() {
             Some("clientRunId") if client_run_id.is_none() => {
                 let value = read_text(field, request_id).await?;
@@ -435,14 +401,11 @@ async fn read_text(
     request_id: &RequestId,
 ) -> Result<String, ApiError> {
     let mut bytes = Vec::new();
-    while let Some(chunk) = field.chunk().await.map_err(|_| {
-        error(
-            StatusCode::BAD_REQUEST,
-            "invalid_multipart",
-            "The multipart request is malformed.",
-            request_id,
-        )
-    })? {
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|_| invalid_multipart(request_id))?
+    {
         if bytes.len().saturating_add(chunk.len()) > MAX_METADATA_BYTES {
             return Err(error(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -550,33 +513,18 @@ async fn stream_source(
             request_id,
         )
     })? {
-        byte_length = byte_length.checked_add(chunk.len() as u64).ok_or_else(|| {
-            error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "upload_too_large",
-                "The upload exceeds the configured limit.",
-                request_id,
-            )
-        })?;
+        byte_length = byte_length
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| upload_too_large(request_id))?;
         if byte_length > max_upload_bytes {
-            return Err(error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "upload_too_large",
-                "The upload exceeds the configured limit.",
-                request_id,
-            ));
+            return Err(upload_too_large(request_id));
         }
         let remaining = 1024_usize.saturating_sub(signature.len());
         signature.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
         digest.update(&chunk);
-        file.write_all(&chunk).await.map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "scratch_write_failed",
-                "The service could not store the upload.",
-                request_id,
-            )
-        })?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|_| scratch_write_failed(request_id))?;
     }
     if byte_length == 0 || !has_container_magic(format.magic, &signature) {
         return Err(error(
@@ -586,14 +534,9 @@ async fn stream_source(
             request_id,
         ));
     }
-    file.sync_all().await.map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "scratch_write_failed",
-            "The service could not store the upload.",
-            request_id,
-        )
-    })?;
+    file.sync_all()
+        .await
+        .map_err(|_| scratch_write_failed(request_id))?;
     Ok(SourceMetadata {
         media_type: format.media_type.to_owned(),
         byte_length,
@@ -679,14 +622,7 @@ fn parse_idempotency_key(headers: &HeaderMap, request_id: &RequestId) -> Result<
 }
 
 fn parse_job_id(raw: &str, request_id: &RequestId) -> Result<Uuid, ApiError> {
-    Uuid::parse_str(raw).map_err(|_| {
-        error(
-            StatusCode::NOT_FOUND,
-            "conversion_not_found",
-            "The conversion does not exist.",
-            request_id,
-        )
-    })
+    Uuid::parse_str(raw).map_err(|_| not_found(request_id))
 }
 
 fn accepted(job: JobView, replayed: bool) -> Response {
@@ -729,6 +665,42 @@ fn service_unavailable(request_id: &RequestId) -> ApiError {
         StatusCode::INTERNAL_SERVER_ERROR,
         "conversion_unavailable",
         "The conversion service is temporarily unavailable.",
+        request_id,
+    )
+}
+
+fn not_found(request_id: &RequestId) -> ApiError {
+    error(
+        StatusCode::NOT_FOUND,
+        "conversion_not_found",
+        "The conversion does not exist.",
+        request_id,
+    )
+}
+
+fn invalid_multipart(request_id: &RequestId) -> ApiError {
+    error(
+        StatusCode::BAD_REQUEST,
+        "invalid_multipart",
+        "The multipart request is malformed.",
+        request_id,
+    )
+}
+
+fn upload_too_large(request_id: &RequestId) -> ApiError {
+    error(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "upload_too_large",
+        "The upload exceeds the configured limit.",
+        request_id,
+    )
+}
+
+fn scratch_write_failed(request_id: &RequestId) -> ApiError {
+    error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "scratch_write_failed",
+        "The service could not store the upload.",
         request_id,
     )
 }

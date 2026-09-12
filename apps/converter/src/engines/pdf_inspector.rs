@@ -1,22 +1,18 @@
 use std::{
-    io::Read as _,
     path::{Path, PathBuf},
-    process::{Command as StdCommand, Stdio},
+    process::Stdio,
     sync::Arc,
-    thread,
     time::Duration,
 };
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
     fs,
-    io::AsyncReadExt,
     process::Command,
     sync::{watch, OwnedSemaphorePermit, Semaphore},
 };
 
-use super::child::wait_for_child;
+use super::child::{self, is_lowercase_sha256, wait_for_child, WorkerStartupError};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
@@ -29,7 +25,7 @@ use crate::{
     },
 };
 
-const MAX_REPORT_BYTES: u64 = 1024 * 1024;
+const WORKER_LABEL: &str = "PDF";
 const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(2);
 const EXPECTED_WORKER_IDENTITY: &str = "tool-kit-pdf-worker protocol=2 pdf-inspector=1.15.0\n";
 const REQUIRED_CMAPS: [&str; 4] = [
@@ -57,7 +53,7 @@ impl PdfInspectorEngine {
         max_output_bytes: u64,
         rayon_threads: usize,
     ) -> Result<Self, EngineStartupError> {
-        validate_worker(&worker_path)?;
+        child::validate_worker(&worker_path, WORKER_LABEL)?;
         verify_worker_identity(&worker_path)?;
         if let Some(path) = bcmaps_dir.as_deref() {
             let metadata =
@@ -82,11 +78,7 @@ impl PdfInspectorEngine {
     }
 
     pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, EngineFailure> {
-        self.permits
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| EngineFailure::Unavailable)
+        child::acquire(&self.permits).await
     }
 
     pub async fn convert(
@@ -140,20 +132,7 @@ impl PdfInspectorEngine {
         paths: &AttemptPaths,
     ) -> Result<EngineOutcome, EngineFailure> {
         let report_path = paths.publication_staging.join(WORKER_REPORT_FILE);
-        let metadata = fs::symlink_metadata(&report_path)
-            .await
-            .map_err(|_| EngineFailure::Protocol)?;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.len() > MAX_REPORT_BYTES
-        {
-            return Err(EngineFailure::Protocol);
-        }
-        let encoded = fs::read(&report_path)
-            .await
-            .map_err(|_| EngineFailure::Protocol)?;
-        let report: WorkerReport =
-            serde_json::from_slice(&encoded).map_err(|_| EngineFailure::Protocol)?;
+        let report: WorkerReport = child::read_report(&report_path).await?;
         validate_identity(&report)?;
 
         let outcome = match report.outcome {
@@ -162,28 +141,15 @@ impl PdfInspectorEngine {
                 artifact,
             } => {
                 validate_complete_inspection(&inspection)?;
-                if artifact.relative_path != MARKDOWN_FILE
-                    || artifact.byte_length == 0
-                    || artifact.byte_length > self.max_output_bytes
-                    || !is_sha256(&artifact.sha256)
-                {
-                    return Err(EngineFailure::Protocol);
-                }
-                let markdown_path = paths.staged_markdown();
-                let markdown_metadata = fs::symlink_metadata(&markdown_path)
-                    .await
-                    .map_err(|_| EngineFailure::Protocol)?;
-                if !markdown_metadata.is_file()
-                    || markdown_metadata.file_type().is_symlink()
-                    || markdown_metadata.len() != artifact.byte_length
-                    || markdown_metadata.len() > self.max_output_bytes
-                {
-                    return Err(EngineFailure::Protocol);
-                }
-                let (digest, has_content) = hash_and_check_content(&markdown_path).await?;
-                if !has_content || digest != artifact.sha256 {
-                    return Err(EngineFailure::Protocol);
-                }
+                let digest = child::validate_staged_markdown(
+                    paths,
+                    MARKDOWN_FILE,
+                    &artifact.relative_path,
+                    artifact.byte_length,
+                    &artifact.sha256,
+                    self.max_output_bytes,
+                )
+                .await?;
                 EngineOutcome::Converted {
                     analysis: into_analysis(&inspection)?,
                     byte_length: artifact.byte_length,
@@ -195,24 +161,14 @@ impl PdfInspectorEngine {
                 reason_code,
             } => {
                 validate_needs_remote(&inspection, reason_code)?;
-                if fs::try_exists(paths.staged_markdown())
-                    .await
-                    .map_err(|_| EngineFailure::Protocol)?
-                {
-                    return Err(EngineFailure::Protocol);
-                }
+                child::reject_if_markdown_staged(paths).await?;
                 EngineOutcome::NeedsRemote {
                     analysis: into_analysis(&inspection)?,
                     reason_code,
                 }
             }
             WorkerOutcome::Rejected { code } => {
-                if fs::try_exists(paths.staged_markdown())
-                    .await
-                    .map_err(|_| EngineFailure::Protocol)?
-                {
-                    return Err(EngineFailure::Protocol);
-                }
+                child::reject_if_markdown_staged(paths).await?;
                 EngineOutcome::Rejected {
                     rejection: rejection(code),
                 }
@@ -225,71 +181,13 @@ impl PdfInspectorEngine {
     }
 }
 
-fn validate_worker(path: &Path) -> Result<(), EngineStartupError> {
-    let metadata = std::fs::metadata(path).map_err(|source| EngineStartupError::InvalidWorker {
-        path: path.to_owned(),
-        source,
-    })?;
-    if !metadata.is_file() {
-        return Err(EngineStartupError::WorkerNotFile(path.to_owned()));
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Err(EngineStartupError::WorkerNotExecutable(path.to_owned()));
-        }
-    }
-    Ok(())
-}
-
-fn verify_worker_identity(path: &Path) -> Result<(), EngineStartupError> {
-    let mut child = StdCommand::new(path)
-        .arg("--version")
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|source| EngineStartupError::WorkerHandshake {
+fn verify_worker_identity(path: &Path) -> Result<(), WorkerStartupError> {
+    let output = child::worker_identity_line(path, WORKER_LABEL, WORKER_IDENTITY_TIMEOUT)?;
+    if output.as_slice() != EXPECTED_WORKER_IDENTITY.as_bytes() {
+        return Err(WorkerStartupError::WorkerIdentityMismatch {
+            worker: WORKER_LABEL,
             path: path.to_owned(),
-            source,
-        })?;
-    let deadline = std::time::Instant::now() + WORKER_IDENTITY_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(EngineStartupError::WorkerIdentityTimeout(path.to_owned()));
-            }
-            Err(source) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(EngineStartupError::WorkerHandshake {
-                    path: path.to_owned(),
-                    source,
-                });
-            }
-        }
-    };
-    let mut output = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        stdout
-            .take(4097)
-            .read_to_end(&mut output)
-            .map_err(|source| EngineStartupError::WorkerHandshake {
-                path: path.to_owned(),
-                source,
-            })?;
-    }
-    if !status.success() || output.as_slice() != EXPECTED_WORKER_IDENTITY.as_bytes() {
-        return Err(EngineStartupError::WorkerIdentityMismatch(path.to_owned()));
+        });
     }
     Ok(())
 }
@@ -448,62 +346,10 @@ pub(crate) fn is_complete_native_inspection(inspection: &Inspection) -> bool {
         && !inspection.has_encoding_issues
 }
 
-fn is_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn is_lowercase_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-async fn hash_and_check_content(path: &Path) -> Result<(String, bool), EngineFailure> {
-    let mut file = fs::File::open(path)
-        .await
-        .map_err(|_| EngineFailure::Protocol)?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut has_content = false;
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .await
-            .map_err(|_| EngineFailure::Protocol)?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-        has_content |= buffer[..count]
-            .iter()
-            .any(|byte| !byte.is_ascii_whitespace());
-    }
-    Ok((hex::encode(digest.finalize()), has_content))
-}
-
 #[derive(Debug, Error)]
 pub enum EngineStartupError {
-    #[error("PDF worker is unavailable at {path:?}")]
-    InvalidWorker {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("PDF worker path is not a regular file: {0:?}")]
-    WorkerNotFile(PathBuf),
-    #[error("PDF worker path is not executable: {0:?}")]
-    WorkerNotExecutable(PathBuf),
-    #[error("PDF worker handshake failed at {path:?}")]
-    WorkerHandshake {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("PDF worker identity does not match the pinned protocol: {0:?}")]
-    WorkerIdentityMismatch(PathBuf),
-    #[error("PDF worker identity check timed out: {0:?}")]
-    WorkerIdentityTimeout(PathBuf),
+    #[error(transparent)]
+    Startup(#[from] WorkerStartupError),
     #[error("PDF CMap directory is unavailable at {path:?}")]
     InvalidCmaps {
         path: PathBuf,
@@ -529,7 +375,7 @@ mod tests {
 
     use super::{
         is_complete_native_inspection, validate_cmaps, verify_worker_identity, EngineFailure,
-        EngineStartupError, PdfInspectorEngine,
+        EngineStartupError, PdfInspectorEngine, WorkerStartupError,
     };
     use crate::artifacts::{AttemptPaths, ValidatedOpenFile};
     use crate::worker_protocol::{Inspection, PageReasons, PdfTypeLabel};
@@ -582,7 +428,7 @@ mod tests {
 
         assert!(matches!(
             verify_worker_identity(&worker),
-            Err(EngineStartupError::WorkerIdentityMismatch(_))
+            Err(WorkerStartupError::WorkerIdentityMismatch { .. })
         ));
     }
 
