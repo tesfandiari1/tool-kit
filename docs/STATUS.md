@@ -18,7 +18,7 @@ it stood before this prune is
 | Branch tip | `1aee5d4` on `main` |
 | OpenAPI contract | 0.4.4 (`contract/http/openapi.yaml`) |
 | Desktop version | 1.0.0 (`package.json`, `Cargo.toml`, `tauri.conf.json`) |
-| Installed bundle | `/Applications/Tool-Kit.app`, 1.0.0, built from `e12388f` on 2026-09-12 with the new design system. Signed, notarized and stapled, app `5fb8c40b` and DMG `040bd273` |
+| Installed bundle | `/Applications/Tool-Kit.app`, 1.0.0, built from the tree after `e12388f` with the selection-keyed Convert rail, on 2026-09-12. Signed, notarized and stapled, app `8a159b90` and DMG `c38dde49` |
 | Backend | M0 to M4 complete. M5 unbuilt. M7 cancelled |
 | Desktop | M6 landed, gate open on CVR-067 and CVR-081 |
 | Where the service runs | Sidecar inside the `.app`. Docker needs a `backend-override.json` that no part of the app writes |
