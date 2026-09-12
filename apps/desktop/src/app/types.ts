@@ -1,5 +1,4 @@
-/// Wire types shared with the Tauri command surface. This module must not
-/// import React — keep clients and view code on opposite sides of the boundary.
+/// Wire types for the Tauri command surface. Never import React here.
 
 export type JobId = "convert" | "transcribe";
 export type Status = "queued" | "working" | "processing" | "done" | "failed";
@@ -7,51 +6,35 @@ export type SecretId = "datalab" | "revai" | "backend";
 export type ConversionRoute = "direct" | "backend";
 export type ConversionProfile = "standard" | "local_only";
 export type ReuseDisposition = "pending" | "already_here" | "reusable";
-/// How the local conversion service gets started. `sidecar` is the app
-/// spawning and owning it; `manual` is the developer running it themselves.
-/// The one conversion question first run asks. It maps onto a route, a
-/// profile, and a backend mode; see `domains/onboarding/conversionMode`.
+/// First run's one conversion question. See `domains/onboarding/conversionMode`.
 export type OnboardingConversionMode = "local" | "cloud";
-/// What the left column holds. Documents open beside it and are not a view,
-/// and Settings is a sheet over the whole window rather than a fourth member:
-/// it used to evict the Run column mid-run.
+/// What the end pane holds. Settings is a sheet, not a fourth member.
 export type View = "library" | "run" | "history";
 
-/// The workspace `setup_workspace` created or adopted.
 export interface WorkspaceInfo {
   workspacePath: string;
-  workspaceId: string;
-  /// The project every import lands in until the user picks another.
-  inboxProjectId: string;
-  /// The folder already held a workspace, so setup adopted it rather than
-  /// writing a new one. It is what makes first run say "Open" instead of
-  /// "Create".
-  adopted: boolean;
-  /// The `Inbox/welcome.md` this call wrote, or null when it wrote none. Set
-  /// on a brand-new workspace only, so first run opens it as a real tab and a
-  /// user who deletes it never sees it again.
+  catchAllProjectId: string;
+  /// That project's folder, workspace-relative.
+  catchAllPath: string;
+  /// Set on the launch that wrote the file, so it opens once per workspace.
   welcomePath: string | null;
 }
 
-/// One project folder, as the sidebar lists it.
 export interface ProjectSummary {
   id: string;
   title: string;
-  /// Relative to the workspace root ("Inbox"), so moving the workspace does
-  /// not stale the list.
+  /// Relative to the workspace root, so moving the workspace keeps it valid.
   path: string;
   /// RFC 3339 UTC.
   createdAt: string;
 }
 
-/// One entry in a project folder, as `list_project_files` reports it. The host
-/// decides everything a row renders, so the tree never mirrors the extension
-/// table or the preview cap.
+/// One entry in a project folder. The host decides everything a row renders,
+/// so the tree never mirrors the extension table or the preview cap.
 export interface FileRow {
-  /// Absolute. The only path handed back to a command that opens or reveals.
+  /// Absolute. The only path handed to a command that opens or reveals.
   path: string;
-  /// Workspace-relative. Expansion and selection are keyed on this, so a
-  /// workspace renamed in Finder does not strand every entry.
+  /// Workspace-relative. Expansion and selection are keyed on this.
   rel: string;
   name: string;
   isDir: boolean;
@@ -60,43 +43,33 @@ export interface FileRow {
   mediaType: string;
   size: number;
   modifiedMs: number;
-  /// The job that takes this file. Null means neither one does.
+  /// Null when neither job takes it.
   job: JobId | null;
-  /// The sibling result this source already has, folded into its row.
   resultPath: string | null;
   resultName: string | null;
-  /// This file opens in the document pane: a text extension under the preview
-  /// cap. The encoding is the one thing it cannot answer — only a decode can —
-  /// so a click that fails still falls back to the card.
+  /// Opens in the document pane. It cannot answer for the encoding, so a
+  /// failed click falls back to the card.
   openable: boolean;
-  /// The same answer for `resultPath`. An `html` result is not a document this
-  /// pane reads, so the source row cannot imply it.
+  /// The same answer for `resultPath`.
   resultOpenable: boolean;
 }
 
-/// One directory level.
 export interface DirListing {
-  /// The directory's own mtime, so a focus reconcile can skip a folder that
-  /// did not change.
+  /// The directory's own mtime, so a focus reconcile can skip it unchanged.
   modifiedMs: number;
   entries: FileRow[];
-  /// Entries past the host's cap, dropped from `entries`.
   truncated: number;
   /// Files with a job and no result. The project row's count.
   pending: number;
 }
 
-/// Why a listing failed. `list_project_files` rejects with this rather than a
-/// string, because the tree has to tell a folder that is gone from a volume
-/// that went away: only the first loses its place in the persisted expansion.
+/// Only a folder reported `gone` loses its persisted expansion.
 export interface ListError {
   gone: boolean;
   message: string;
 }
 
-/// One folder the tree has listed, paired with the mtime that listing carried.
-/// The focus reconcile hands these back so the host can answer which of them
-/// moved without reading a single directory.
+/// A listed folder and its mtime, so the host answers without a `read_dir`.
 export interface KnownDir {
   rel: string;
   modifiedMs: number;
@@ -108,35 +81,47 @@ export interface ScannedConversionFile {
   reuse: ReuseDisposition;
 }
 
-/// What `scan_inputs` reports for the current selection.
+export interface InputMatch {
+  path: string;
+  /// Relative to the dropped folder.
+  name: string;
+  job: JobId;
+}
+
+/// One dropped path. The host owns the walk, the dotfiles and the depth cap.
+export interface InputNode {
+  path: string;
+  name: string;
+  isDir: boolean;
+  /// Null for a folder, and for a file neither job takes.
+  job: JobId | null;
+  matches: InputMatch[];
+  truncated: number;
+}
+
 export interface Scan {
   convert: number;
   transcribe: number;
-  /// Files whose result is already in the chosen output folder — nothing at
-  /// all happens to these. Both jobs are reported so switching job reads a
-  /// number already in hand, with no re-scan, and so no new signal for the
-  /// autodetect effect to react to.
+  /// Already in the output folder: nothing happens to these. Both jobs report,
+  /// so switching job needs no re-scan and autodetect sees no new signal.
   alreadyHereConvert: number;
   alreadyHereTranscribe: number;
-  /// Files whose result exists in some *other* folder. These are copied rather
-  /// than sent to the provider again: real work, but free and instant.
+  /// Result in another folder: copied rather than bought again.
   reusableConvert: number;
   reusableTranscribe: number;
-  /// Concrete Convert files and their MIME/reuse disposition. File contents
-  /// stay in the host; this metadata is enough for capability-driven routing.
   convertFiles: ScannedConversionFile[];
   alreadyText: number;
   suggestedOutput: string | null;
+  nodes: InputNode[];
 }
 
-/// One finished job, as `list_history` returns it.
 export interface HistoryEntry {
   id: number;
   fileName: string;
   sourcePath: string;
   outputPath: string | null;
-  jobType: JobId;
-  outputFormat: string;
+  /// The result is still on disk. False on a failed row.
+  outputExists: boolean;
   status: "done" | "failed";
   error: string | null;
   /// Unix seconds.
@@ -158,18 +143,12 @@ export interface Job {
   failure: { code: string; message: string } | null;
   outputPath: string | null;
   error: string | null;
-  createdAt: number;
   startedAt: number | null;
 }
 
 export interface Settings {
-  /// First run has been answered. The gate is keyed on `workspacePath`, which
-  /// is the thing the app cannot work without; this records that the user was
-  /// asked rather than that a folder happens to exist.
-  onboardingComplete: boolean;
   /// The workspace folder. Null means first run.
   workspacePath: string | null;
-  workspaceId: string | null;
   inputs: string[];
   outputDir: string | null;
   jobType: JobId;
@@ -184,23 +163,23 @@ export interface Settings {
   skipAlreadyDone: boolean;
   /// Last SplitPane layout. Null until the user has dragged the seam.
   splitLayout: Record<string, number> | null;
-  /// Inner size while the document pane is open. Null until the first expand.
+  /// Inner size the user last left the workspace window at. Null until then.
   expandedWidth: number | null;
   expandedHeight: number | null;
-  /// Webview page-zoom factor, not a font size: it scales the whole app,
-  /// chrome included. 1 is 100%.
+  /// Page zoom, not a font size: it scales the whole app. 1 is 100%.
   zoom: number;
-  /// Library tree rows left open, workspace-relative. Never null: this object
-  /// is spread over `DEFAULT_SETTINGS`, where an explicit null would win.
+  /// Never null: this object is spread over `DEFAULT_SETTINGS`, where an
+  /// explicit null would win.
   expandedPaths: string[];
+  /// Where a drop is filed and a run writes, workspace-relative. This, not
+  /// `outputDir`, once a workspace is bound.
+  activeProjectPath: string | null;
 }
 
 export type SecretStatus = Record<SecretId, boolean>;
 
 export const DEFAULT_SETTINGS: Settings = {
-  onboardingComplete: false,
   workspacePath: null,
-  workspaceId: null,
   inputs: [],
   outputDir: null,
   jobType: "convert",
@@ -217,18 +196,14 @@ export const DEFAULT_SETTINGS: Settings = {
   expandedHeight: null,
   zoom: 1,
   expandedPaths: [],
+  activeProjectPath: null,
 };
 
 export const ACTIVE: Status[] = ["queued", "working", "processing"];
 
-/// The job that speaks for a source file right now: the newest one, never the
-/// first.
-///
-/// `convert_one` appends to the queue and only a run clears it, so a file
-/// converted twice carries two rows. Reading the first hands a caller a `failed`
-/// or `done` left over from an earlier run, which hides the conversion actually
-/// in flight and leaves its Convert control enabled — one more press, one more
-/// charge. Ids come from an `AtomicU64`, so the highest is always the live one.
+/// The newest job for a source, never the first. A file converted twice carries
+/// two rows, and the stale `done` leaves Convert enabled for one more charge.
+/// Ids come from an `AtomicU64`, so the highest is live.
 export function latestJobFor(jobs: Job[], sourcePath: string): Job | null {
   let latest: Job | null = null;
   for (const job of jobs) {
@@ -238,8 +213,7 @@ export function latestJobFor(jobs: Job[], sourcePath: string): Job | null {
 }
 /// Above this many files, confirm before spending.
 export const BIG_RUN = 25;
-/// Rows fetched per history read. Deep enough to scroll through a month of
-/// work, shallow enough that the panel opens instantly.
+/// Rows per history read.
 export const HISTORY_LIMIT = 400;
 export const EMPTY_SCAN: Scan = {
   convert: 0,
@@ -251,10 +225,10 @@ export const EMPTY_SCAN: Scan = {
   convertFiles: [],
   alreadyText: 0,
   suggestedOutput: null,
+  nodes: [],
 };
 
-/// Why the host refused to convert one file. Every reason maps to something
-/// the tree can do about it, which is why they are codes and not sentences.
+/// Codes rather than sentences: every reason maps to something the tree does.
 export type ConvertBlockReason =
   | "not_convertible"
   | "run_in_progress"
@@ -263,9 +237,8 @@ export type ConvertBlockReason =
   | "local_only_requires_remote"
   | "missing_key";
 
-/// The host's verdict on a one-file convert. The tree renders this rather than
-/// planning the conversion itself: the route plan, the key checks and the
-/// reuse rule all live in Rust.
+/// The host's verdict. The route plan, the key checks and the reuse rule all
+/// live in Rust.
 export interface ConvertOneOutcome {
   kind: "queued" | "copied" | "blocked";
   reason: ConvertBlockReason | null;
@@ -274,10 +247,10 @@ export interface ConvertOneOutcome {
 }
 
 export interface RunResult {
-  /// Files sent to the provider — the only ones that cost anything.
+  /// Sent to the provider, the only ones that cost anything.
   count: number;
-  /// Files left alone: their result is already in the output folder.
+  /// Left alone: the result is already in the output folder.
   skipped: number;
-  /// Files satisfied by copying a result an earlier run produced elsewhere.
+  /// Satisfied by copying a result from elsewhere.
   copied: number;
 }

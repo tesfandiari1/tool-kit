@@ -1,9 +1,8 @@
 //! Native HTTP boundary for the conversion service.
 //!
-//! The webview supplies only contract paths, ordinary request metadata, and a
-//! desktop source path. This module owns file streaming, response bounds, and
-//! artifact writes. The origin and the token come from `backend_host`, which is
-//! the only thing that knows which of them is in force.
+//! The webview supplies only contract paths, request metadata and a source
+//! path. This module owns file streaming, response bounds and artifact writes.
+//! The origin and the token come from `backend_host`.
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::{multipart, Client, Method, Response, Url};
@@ -18,16 +17,13 @@ use tokio::io::AsyncWriteExt;
 use crate::backend_host;
 
 const GENERIC_BODY_LIMIT: usize = 1024 * 1024;
-/// Matches the backend's documented default output ceiling. The service may
-/// advertise less at runtime; later jobs integration can apply that tighter
-/// capability before reaching this host safety boundary.
+/// Matches the backend's documented output ceiling. A service may advertise
+/// less at runtime, which is the tighter check.
 const MARKDOWN_BODY_LIMIT: usize = 50 * 1024 * 1024;
 const SMALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const STREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const MAX_OUTPUT_COLLISIONS: u32 = 1000;
-/// The contract's ceiling on every multipart text part. Checking it here names
-/// the offending field; letting it through returns an opaque 422 on every job
-/// in the run instead.
+/// The contract's ceiling on every multipart text part. Checked here, so the
+/// offending field is named rather than 422ing every job in the run.
 const MAX_METADATA_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,10 +107,8 @@ struct ConversionSubmission {
     custom_words: String,
 }
 
-/// The local-OCR settings a submission was made with. They travel together and
-/// the backend's image engine is the only thing that reads them. They are also
-/// part of the service's replay fingerprint, so a recovered job has to resubmit
-/// the values it was created with, not whatever Settings say now.
+/// The local-OCR settings a submission was made with, read by the image engine
+/// alone. Part of the replay fingerprint, so a recovered job resubmits them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OcrOptions {
     pub(crate) language_correction: bool,
@@ -132,8 +126,7 @@ impl Default for OcrOptions {
 }
 
 impl OcrOptions {
-    /// One word per line: the wire form the contract documents, and the form
-    /// the in-flight ledger stores so recovery can rebuild the list.
+    /// One word per line: the contract's wire form, and what the ledger stores.
     pub(crate) fn custom_words_wire(&self) -> String {
         self.custom_words.join("\n")
     }
@@ -180,41 +173,20 @@ pub(crate) async fn service_request(
     send_service_request(&base_url, token.as_deref(), request).await
 }
 
-#[tauri::command]
-pub(crate) async fn download_conversion_markdown(
-    app: AppHandle,
-    conversion_id: String,
-    output_dir: String,
-    file_name: String,
-) -> Result<String, String> {
-    let base_url = backend_host::backend_origin(&app)?;
-    let token = backend_host::backend_token(&app)?;
-    download_markdown(&base_url, &token, &conversion_id, &output_dir, &file_name).await
-}
-
-/// Fetch the live routing contract without authentication. Callers must use
-/// `input_formats`; support is intentionally not duplicated in desktop code.
+/// Fetch the live routing contract, unauthenticated. Callers read
+/// `input_formats`, which is never duplicated in desktop code.
 pub(crate) async fn fetch_capabilities(base_url: &str) -> Result<ConversionCapabilities, String> {
-    let response = send_service_request(
-        base_url,
-        None,
-        ServiceRequestPayload {
-            method: "GET".into(),
-            path: "/api/v1/capabilities".into(),
-            headers: BTreeMap::new(),
-            body: None,
-        },
-    )
-    .await?;
-    let envelope: CapabilitiesEnvelope = parse_success(response, None, "capabilities")?;
+    let response =
+        send_service_request(base_url, None, get_request("/api/v1/capabilities")).await?;
+    let envelope: CapabilitiesEnvelope = parse_success(response, "capabilities")?;
     Ok(ConversionCapabilities {
         accepting_jobs: envelope.data.conversion.accepting_jobs,
         input_formats: envelope.data.conversion.input_formats,
     })
 }
 
-/// Submit a source path through the host-only multipart door. The webview
-/// never observes the bearer token or the source bytes.
+/// Submit a source path through the host-only multipart door, so the webview
+/// sees neither the bearer token nor the source bytes.
 pub(crate) async fn submit_conversion(
     base_url: &str,
     token: &str,
@@ -250,7 +222,7 @@ pub(crate) async fn submit_conversion(
         },
     )
     .await?;
-    let envelope: ConversionJobEnvelope = parse_success(response, Some(token), "submission")?;
+    let envelope: ConversionJobEnvelope = parse_success(response, "submission")?;
     validate_uuid(&envelope.data.id, "conversion id returned by submission")?;
     Ok(envelope.data)
 }
@@ -265,15 +237,10 @@ pub(crate) async fn poll_conversion(
     let response = send_service_request(
         base_url,
         Some(token),
-        ServiceRequestPayload {
-            method: "GET".into(),
-            path: format!("/api/v1/conversions/{conversion_id}"),
-            headers: BTreeMap::new(),
-            body: None,
-        },
+        get_request(&format!("/api/v1/conversions/{conversion_id}")),
     )
     .await?;
-    let envelope: ConversionJobEnvelope = parse_success(response, Some(token), "poll")?;
+    let envelope: ConversionJobEnvelope = parse_success(response, "poll")?;
     validate_uuid(&envelope.data.id, "conversion id returned by poll")?;
     if envelope.data.id != conversion_id {
         return Err(
@@ -287,29 +254,33 @@ pub(crate) fn validate_base_url(base_url: &str) -> Result<(), String> {
     endpoint_url(base_url, "/health/live").map(|_| ())
 }
 
-pub(crate) fn validate_conversion_id(conversion_id: &str) -> Result<(), String> {
-    validate_uuid(conversion_id, "conversion id")
-}
-
+/// The body arrives already redacted from `response_payload`, which is the one
+/// place that scrubs the token.
 fn parse_success<T: for<'de> Deserialize<'de>>(
     response: ServiceResponsePayload,
-    token: Option<&str>,
     operation: &str,
 ) -> Result<T, String> {
     if !(200..300).contains(&response.status) {
-        let detail = redact_token(&response.body, token);
         return Err(format!(
-            "Conversion service {operation} returned HTTP {}: {detail}",
-            response.status
+            "Conversion service {operation} returned HTTP {}: {}",
+            response.status, response.body
         ));
     }
     serde_json::from_str(&response.body)
         .map_err(|_| format!("Conversion service returned an invalid {operation} response"))
 }
 
-/// Send one bounded, contract-allowlisted request against an explicit service.
-/// Keeping the service URL outside Settings here lets restart recovery replay
-/// against the server recorded with the original in-flight conversion.
+fn get_request(path: &str) -> ServiceRequestPayload {
+    ServiceRequestPayload {
+        method: "GET".into(),
+        path: path.into(),
+        headers: BTreeMap::new(),
+        body: None,
+    }
+}
+
+/// Send one bounded, contract-allowlisted request against an explicit service,
+/// so recovery can replay against the server the in-flight row recorded.
 pub(crate) async fn send_service_request(
     base_url: &str,
     token: Option<&str>,
@@ -317,9 +288,7 @@ pub(crate) async fn send_service_request(
 ) -> Result<ServiceResponsePayload, String> {
     let route = classify_route(&request.method, &request.path)?;
     if route == ContractRoute::DownloadMarkdown {
-        return Err(
-            "Markdown artifacts must use download_conversion_markdown and cannot cross IPC".into(),
-        );
+        return Err("Markdown artifacts are fetched host-side and cannot cross IPC".into());
     }
 
     let endpoint = endpoint_url(base_url, &request.path)?;
@@ -336,7 +305,7 @@ pub(crate) async fn send_service_request(
             .headers(headers)
             .timeout(SMALL_REQUEST_TIMEOUT);
         let builder = if route.requires_authentication() {
-            builder.bearer_auth(required_token(token)?)
+            builder.bearer_auth(valid_token(token)?)
         } else {
             builder
         };
@@ -347,7 +316,7 @@ pub(crate) async fn send_service_request(
 }
 
 /// Stream a Markdown artifact from an explicit service directly to disk.
-/// Only the final path is returned; response bytes are never serialized.
+/// Only the final path is returned. Response bytes are never serialized.
 pub(crate) async fn download_markdown(
     base_url: &str,
     token: &str,
@@ -375,13 +344,13 @@ async fn download_markdown_with_limit(
     body_limit: usize,
 ) -> Result<String, String> {
     validate_uuid(conversion_id, "conversion id")?;
-    let (output_dir, stem) = validate_output(output_dir, file_name).await?;
+    let output_dir = validate_output(output_dir, file_name).await?;
     let path = format!("/api/v1/conversions/{conversion_id}/artifacts/markdown");
     let endpoint = endpoint_url(base_url, &path)?;
     let client = http_client()?;
     let mut response = client
         .get(endpoint)
-        .bearer_auth(valid_token(token)?)
+        .bearer_auth(valid_token(Some(token))?)
         .timeout(STREAM_REQUEST_TIMEOUT)
         .send()
         .await
@@ -413,7 +382,11 @@ async fn download_markdown_with_limit(
         ));
     }
 
-    let (path, mut file) = reserve_markdown_path(&output_dir, &stem).await?;
+    let output_dir = output_dir
+        .to_str()
+        .ok_or_else(|| "Output folder path is not valid UTF-8".to_string())?;
+    let (file, path) = crate::jobs::claim_path(output_dir, file_name, "md", "")?;
+    let mut file = tokio::fs::File::from_std(file);
     let write_result: Result<(), String> = async {
         let mut written = 0usize;
         while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
@@ -445,10 +418,9 @@ async fn download_markdown_with_limit(
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// One client for the process. A `Client` owns the connection pool, so building
-/// one per request threw the pooled connection away every time and made a ten
-/// minute conversion open roughly 120 of them. Cloning is a refcount bump.
-fn http_client() -> Result<Client, String> {
+/// One client for the process. A `Client` owns the connection pool, so one per
+/// request opens roughly 120 on a ten-minute conversion.
+pub(crate) fn http_client() -> Result<Client, String> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -461,18 +433,14 @@ fn http_client() -> Result<Client, String> {
         .clone()
 }
 
-fn valid_token(token: &str) -> Result<&str, String> {
-    let trimmed = token.trim();
-    if trimmed.is_empty() {
-        return Err("Backend token is not configured".into());
-    }
+fn valid_token(token: Option<&str>) -> Result<&str, String> {
+    let trimmed = token
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "Backend token is not configured".to_string())?;
     HeaderValue::from_str(&format!("Bearer {trimmed}"))
         .map_err(|_| "Backend token contains invalid header characters".to_string())?;
     Ok(trimmed)
-}
-
-fn required_token(token: Option<&str>) -> Result<&str, String> {
-    valid_token(token.ok_or_else(|| "Backend token is not configured".to_string())?)
 }
 
 fn endpoint_url(base_url: &str, path: &str) -> Result<Url, String> {
@@ -534,7 +502,7 @@ fn classify_conversion_get(path: &str) -> Result<ContractRoute, String> {
     }
 }
 
-fn validate_uuid(value: &str, label: &str) -> Result<(), String> {
+pub(crate) fn validate_uuid(value: &str, label: &str) -> Result<(), String> {
     let bytes = value.as_bytes();
     let valid = bytes.len() == 36
         && bytes.iter().enumerate().all(|(index, byte)| {
@@ -619,10 +587,8 @@ async fn send_conversion(
         .part("source", source_part)
         .text("clientRunId", submission.client_run_id)
         .text("profile", submission.profile);
-    // Absent is the documented default for both, and a service built before
-    // the OCR parts existed answers an unknown field with 422. The desktop and
-    // the container ship on their own cadences, so only a user who changed an
-    // OCR setting puts a part on the wire that an older service can reject.
+    // Absent is the documented default for both, and an older service answers
+    // an unknown field with 422. Only a changed OCR setting sends a part.
     if !submission.language_correction {
         form = form.text("languageCorrection", "false");
     }
@@ -633,7 +599,7 @@ async fn send_conversion(
     client
         .post(endpoint)
         .headers(headers)
-        .bearer_auth(required_token(token)?)
+        .bearer_auth(valid_token(token)?)
         .multipart(form)
         .timeout(STREAM_REQUEST_TIMEOUT)
         .send()
@@ -721,7 +687,7 @@ async fn read_bounded_body(response: &mut Response, limit: usize) -> Result<Vec<
     Ok(bytes)
 }
 
-async fn validate_output(output_dir: &str, file_name: &str) -> Result<(PathBuf, String), String> {
+async fn validate_output(output_dir: &str, file_name: &str) -> Result<PathBuf, String> {
     let directory = PathBuf::from(output_dir);
     let metadata = tokio::fs::metadata(&directory)
         .await
@@ -738,39 +704,7 @@ async fn validate_output(output_dir: &str, file_name: &str) -> Result<(PathBuf, 
     {
         return Err("Output filename must be one plain filename".into());
     }
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Output filename must have a valid stem".to_string())?;
-    Ok((directory, stem.to_string()))
-}
-
-async fn reserve_markdown_path(
-    output_dir: &Path,
-    stem: &str,
-) -> Result<(PathBuf, tokio::fs::File), String> {
-    for number in 0..MAX_OUTPUT_COLLISIONS {
-        let name = if number == 0 {
-            format!("{stem}.md")
-        } else {
-            format!("{stem} ({number}).md")
-        };
-        let candidate = output_dir.join(name);
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-            .await
-        {
-            Ok(file) => return Ok((candidate, file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("Could not write to the output folder: {error}")),
-        }
-    }
-    Err(format!(
-        "Could not find a free filename for {stem}.md in the output folder"
-    ))
+    Ok(directory)
 }
 
 fn transport_error(error: reqwest::Error) -> String {
@@ -910,15 +844,6 @@ mod tests {
         bytes.windows(4).position(|window| window == b"\r\n\r\n")
     }
 
-    fn get_request(path: &str) -> ServiceRequestPayload {
-        ServiceRequestPayload {
-            method: "GET".into(),
-            path: path.into(),
-            headers: BTreeMap::new(),
-            body: None,
-        }
-    }
-
     fn default_ocr() -> OcrOptions {
         OcrOptions {
             language_correction: true,
@@ -926,8 +851,8 @@ mod tests {
         }
     }
 
-    /// A hand-edited settings.json can carry more custom words than the
-    /// contract's text-part budget, which would 422 every job in the run.
+    /// A hand-edited settings.json can exceed the contract's text-part budget,
+    /// which would 422 every job in the run.
     #[tokio::test]
     async fn custom_words_over_the_metadata_budget_are_refused_by_name() {
         let ocr = OcrOptions {
@@ -1327,8 +1252,8 @@ mod tests {
             assert!(request
                 .to_ascii_lowercase()
                 .contains("idempotency-key: same-key-after-loss\r\n"));
-            // Default OCR settings put nothing on the wire, so a service built
-            // before those parts existed still accepts the submission.
+            // Default OCR settings put nothing on the wire, so an older service
+            // still accepts the submission.
             assert!(!request.contains("name=\"languageCorrection\""));
             assert!(!request.contains("name=\"customWords\""));
         }

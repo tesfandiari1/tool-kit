@@ -5,8 +5,7 @@ import "./Tabs.css";
 export interface TabItem {
   id: string;
   label: string;
-  /// Unsaved changes. The mark's slot is held at every state, so a document
-  /// going dirty never resizes the tab or shifts the strip beside it.
+  /// The mark's slot is held at every state (UI.md rule 2).
   dirty?: boolean;
 }
 
@@ -14,32 +13,21 @@ export interface TabsProps {
   items: TabItem[];
   value: string;
   onChange: (id: string) => void;
-  /// Omit to make tabs permanent. When present, each tab gets a close control
-  /// on hover and answers Delete and Backspace.
+  /// Omit for permanent tabs. Present, each answers Delete and Backspace.
   onClose?: (id: string) => void;
   /// Names the strip for assistive technology.
   label?: string;
-  /// Rendered after the last tab: an overflow chip, a count, a new-doc button.
+  /// Rendered after the last tab.
   end?: ReactNode;
   className?: string;
 }
 
-/// A strip of open documents.
+/// A strip of open documents, and a real `tablist` unlike `Segmented`, because
+/// each tab controls a panel. The caller owns that panel and connects it with
+/// `id={`ui-tabpanel-${id}`}` and `aria-labelledby={`ui-tab-${id}`}`.
 ///
-/// A real `tablist`, unlike `Segmented` — the distinction is whether a panel
-/// exists. `Segmented` switches a persisted mode and shows no panel, so it
-/// announces itself as a radio group. These tabs each control a document
-/// panel, so the ARIA tabs pattern is the honest description.
-///
-/// The caller owns the panel and must connect it:
-///
-///     <Tabs items={docs} value={id} onChange={setId} />
-///     <div role="tabpanel" id={`ui-tabpanel-${id}`} aria-labelledby={`ui-tab-${id}`}>
-///
-/// Keyboard follows the APG: one stop in the tab order, arrows move and
-/// activate, Home and End jump to the ends, Delete closes when closable.
-/// Activation follows focus because switching a document is cheap and
-/// instant — the rule only bends when a panel costs a network call.
+/// Keyboard follows the APG, and activation follows focus because switching a
+/// document is instant.
 export function Tabs({ items, value, onChange, onClose, label, end, className }: TabsProps) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -77,8 +65,7 @@ export function Tabs({ items, value, onChange, onClose, label, end, className }:
         } else if ((e.key === "Delete" || e.key === "Backspace") && onClose) {
           e.preventDefault();
           onClose(items[i].id);
-          // Focus does not survive the closed tab unmounting. Land on the tab
-          // that slides into its place, or the last one if this was the end.
+          // Focus does not survive the unmount: land on the next tab.
           const land = Math.min(i, items.length - 2);
           if (land >= 0) requestAnimationFrame(() => { focusAt(land); });
         }
@@ -115,8 +102,7 @@ export function Tabs({ items, value, onChange, onClose, label, end, className }:
                 <button
                   type="button"
                   className="ui-tabs__x"
-                  /// Out of the tab order on purpose: Delete on the tab is the
-                  /// keyboard route, so this is one less stop per open document.
+                  /// Out of the tab order: Delete on the tab does this.
                   tabIndex={-1}
                   aria-label={`Close ${t.label}`}
                   onClick={(e) => {

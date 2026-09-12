@@ -5,13 +5,8 @@ import { tildePath } from "@/app/format";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { isDirty, saveNote, saveTone, type DocMode, type OpenDoc } from "./model";
 
-/// The right half of the workspace: every open result, one at a time, with the
-/// inspector card over it when the library points at something this pane cannot
-/// read.
-///
-/// This is a pane, not a view. The column that produced these documents stays
-/// on screen beside it, which is the whole point of the split — reading a
-/// result no longer means leaving the thing that made it.
+/// Every open result, one at a time, with the inspector card over it when the
+/// library points at something this pane cannot read.
 export function DocumentPane({
   docs,
   activeId,
@@ -19,6 +14,7 @@ export function DocumentPane({
   allowEdit = true,
   inspector,
   dragging = false,
+  onPick,
   onSelect,
   onClose,
   onModeChange,
@@ -29,18 +25,15 @@ export function DocumentPane({
   docs: OpenDoc[];
   activeId: string | null;
   mode: DocMode;
-  /// Whether the Read/Edit toggle is offered. False while the host has no way
-  /// to write the file back: an edit it cannot save is an edit it discards.
+  /// False when the host cannot write the file back.
   allowEdit?: boolean;
-  /// A Quick Look card, layered over the document rather than replacing it. The
-  /// document underneath is covered and inert, never unmounted: `.doc-body` is
-  /// keyed on the document id to give each tab its own CodeMirror instance, so
-  /// unmounting on a stray tree click would throw away the reader's scroll
-  /// position with nothing to say so.
+  /// Layered over the document, which stays mounted: `.doc-body` is keyed on
+  /// the document id, so unmounting loses the reader's scroll position.
   inspector?: ReactNode;
-  /// A file is over the window right now. The empty state is the app's only
-  /// drop target once a workspace is bound, so it has to answer a drag.
+  /// A file is over the window, and the empty state has to answer it.
   dragging?: boolean;
+  /// Open the file picker. A box that looks like a target answers a click.
+  onPick: () => void;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onModeChange: (mode: DocMode) => void;
@@ -52,27 +45,39 @@ export function DocumentPane({
   const covered = inspector !== undefined && inspector !== null;
 
   if (!doc) {
-    // With nothing open the pane is either its empty state or, on a fresh
-    // workspace where the first click lands on a PDF, the card on its own.
+    // With nothing open: the empty state, or the card on its own.
     return covered ? (
       <section className="doc is-covered">
         <div className="doc-stack">{inspector}</div>
       </section>
     ) : (
       <section className="doc doc-empty">
-        {/* The window's one drop target. The handler has always been
-            window-wide, but until now the only thing that said so lived inside
-            Run, so a user sitting in the library was told nothing. */}
-        <Well className={dragging ? "is-dropping" : undefined} selectable={false}>
-          <div className="drop-empty">
-            <Text size="sm" tone="faint">
-              Drop files here to turn them into markdown
+        {/* The window's one drop target, and it answers a click as well as a
+            drag. The same control as the Run column's well. */}
+        <Well
+          className={cx("drop-well", dragging && "is-dropping")}
+          selectable={false}
+          /* The button inside fills the well and bubbles here, so one click
+             would open the file panel twice. */
+          onClick={(e) => {
+            if (e.target instanceof Element && e.target.closest("button")) return;
+            onPick();
+          }}
+        >
+          <button
+            type="button"
+            className="drop-empty"
+            title="Choose files (⌘O)"
+            onClick={onPick}
+          >
+            <FolderOpenIcon weight="light" aria-hidden />
+            <Text size="sm" tone="default">
+              Choose files to turn into markdown
             </Text>
             <Text size="xs" tone="ghost" className="drop-hint">
-              PDFs, Word and Office files, images, audio, video. Or press ⌘O to
-              pick them.
+              Or drop them here. PDFs, Word and Office files, images, audio, video.
             </Text>
-          </div>
+          </button>
         </Well>
         <Text size="xs" tone="ghost">
           Click a text file in the library to read and edit it here. Everything
@@ -88,29 +93,24 @@ export function DocumentPane({
     <section className={cx("doc", covered && "is-covered")}>
       <Tabs
         label="Open documents"
-        /* `isDirty`, not `save === "edited"`: a document whose write the host
-           refused still holds the edit only in memory, so the strip must mark
-           it. Otherwise the tab looks settled and then asks on the way out. */
+        /* `isDirty`, not `save === "edited"`: a refused write still holds the
+           edit in memory, and the tab must not look settled. */
         items={docs.map((d) => ({ id: d.id, label: d.title, dirty: isDirty(d.save) }))}
         value={doc.id}
         onChange={onSelect}
         onClose={onClose}
       />
 
-      {/* One box for the document and the card that covers it. `inert`
-          goes on the two covered elements rather than on this wrapper, or
-          it would reach the card as well. It is only ever applied on the
-          same tick as a tree interaction that has already moved focus out
-          of here: `inert` on an ancestor of the focused element blurs it
-          with no event to intercept. */}
+      {/* `inert` goes on the two covered elements, never on this wrapper,
+          which would reach the card too. It lands on the same tick as the tree
+          interaction that already moved focus out: `inert` over the focused
+          element blurs it with no event to intercept. */}
       <div className="doc-stack">
         <header className="doc-head" inert={covered}>
           <Row gap={2}>
-            {/* Rule 2: the dot holds this slot at every save state, so a
-                document going dirty never nudges the controls beside it. */}
+            {/* The dot holds this slot at every state (UI.md rule 2). */}
             <StatusDot tone={saveTone(doc.save)} label={note ?? undefined} />
-            {/* The path and the save note share one slot, and the note wins: what
-                just happened to the file outranks where it came from. */}
+            {/* One slot, and the note wins over the path. */}
             <div className="doc-id">
               {note !== null || doc.subtitle === null ? (
                 <Text size="xs" tone={doc.save === "error" ? "fault" : "faint"} truncate title={note ?? undefined}>

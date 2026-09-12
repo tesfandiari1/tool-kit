@@ -1,4 +1,4 @@
-/* SourceEditor — the host box. Everything inside is themed through
+/* SourceEditor: the host box. Everything inside is themed through
    EditorView.theme in the component, so the two never disagree about a token. */
 
 .ui-source {

@@ -1,38 +1,43 @@
 import type { Job } from "@/app/types";
 
-/// What a run produced, as opposed to what exists.
-///
-/// Every count on the run screen is derived from the whole job list, which is
-/// the right answer for a fresh run and the wrong one everywhere else.
-/// `run_pipeline` clears the queue, but `convert_one` appends to it and
-/// `retry_job` rewrites a row in place, and neither bumps the generation. So
-/// one file converted from the tree after a 200-file batch reports 201 jobs
-/// and 200 done. The serialized `Job` carries no generation, so the only way
-/// to name this run's work is to diff against what was already terminal when
-/// it started.
+/// What a run produced, as opposed to what exists. `convert_one` appends to the
+/// queue and `retry_job` rewrites a row, and the serialized `Job` carries no
+/// generation, so this run's work is a diff against what was terminal.
 
-/// The rows a run must not claim. Failed counts as terminal: a retry moves one
-/// back out of this set, which is what lets retrying a single file open its
-/// result the way converting a single file does.
+/// Failed counts as terminal, and a retry moves one back out.
 export function terminalIds(jobs: Job[]): Set<number> {
   return new Set(
     jobs.filter((j) => j.status === "done" || j.status === "failed").map((j) => j.id),
   );
 }
 
-/// The results this run finished. Failures are not results, so they are not
-/// here: a run that fails its only file has nothing to open.
+/// Failures are not results: a run that fails its only file opens nothing.
 export function newlyDone(before: ReadonlySet<number>, jobs: Job[]): Job[] {
   return jobs.filter((j) => j.status === "done" && !before.has(j.id));
 }
 
-/// The one result worth opening on its own, or null.
-///
-/// One file is a request to read it. Twenty are a batch, and opening twenty
-/// tabs, or picking one of them for the user, is not what they asked for.
+/// The folders a run wrote into, with the ancestors that have to be open for
+/// them to show. A run writes beside its source, so the active project is
+/// often not one of them. Paths outside the workspace are skipped.
+export function resultDirs(workspacePath: string, done: Job[]): string[] {
+  const prefix = `${workspacePath}/`;
+  const dirs = new Set<string>();
+  for (const job of done) {
+    if (job.outputPath?.startsWith(prefix) !== true) continue;
+    const parts = job.outputPath.slice(prefix.length).split("/");
+    parts.pop();
+    let rel = "";
+    for (const part of parts) {
+      rel = rel === "" ? part : `${rel}/${part}`;
+      dirs.add(rel);
+    }
+  }
+  return [...dirs];
+}
+
+/// One file is a request to read it. Twenty are a batch.
 export function autoOpenTarget(before: ReadonlySet<number>, jobs: Job[]): Job | null {
   const fresh = newlyDone(before, jobs);
   if (fresh.length !== 1) return null;
-  // Nothing to read: the job finished but wrote no path we can open.
   return fresh[0].outputPath === null ? null : fresh[0];
 }

@@ -1,6 +1,4 @@
-/* Buttons wear the label treatment: mono, uppercase, tracked. Straight from
-   the reference, where every control from "SIGN UP FREE" to a tab reads this
-   way. It is the loudest single signal of the design language. */
+/* Buttons wear the label treatment: mono, uppercase, tracked. */
 
 .ui-btn {
   display: inline-flex;
@@ -32,8 +30,7 @@
   opacity: 0.38;
 }
 
-/* `lg` exists for the one actuator a screen is built around. It is not a
-   "bigger button": using it twice on a view means neither is the actuator. */
+/* `lg` is the one actuator a screen is built around, never a bigger button. */
 .ui-btn--lg {
   height: 38px;
   padding: 0 var(--s4);
@@ -65,19 +62,6 @@
   border-color: var(--accent-active);
 }
 
-/* --- secondary: outlined, the reference's "CONTACT SALES" ------------- */
-.ui-btn--secondary {
-  border-color: var(--accent);
-  color: var(--accent-quiet);
-}
-.ui-btn--secondary:hover:not(:disabled) {
-  background: var(--accent-wash);
-  border-color: var(--accent-hover);
-}
-.ui-btn--secondary:active:not(:disabled) {
-  background: color-mix(in srgb, var(--accent-wash) 70%, transparent);
-}
-
 /* --- ghost: chrome-level actions that must not compete ---------------- */
 .ui-btn--ghost {
   color: var(--ink-2);
@@ -106,9 +90,7 @@
   border-color: var(--rule-strong);
 }
 
-/* --- link: a text action with no box ----------------------------------
-   Still wears the mono label treatment, so it reads as a control rather than
-   as prose that happens to be clickable. */
+/* --- link: a text action with no box, still label-treated ------------- */
 .ui-btn--link {
   height: auto;
   padding: 0;
@@ -122,27 +104,8 @@
   color: var(--accent);
 }
 
-/* --- danger ----------------------------------------------------------- */
-.ui-btn--danger {
-  border-color: var(--fault);
-  color: var(--fault);
-}
-.ui-btn--danger:hover:not(:disabled) {
-  background: var(--fault);
-  color: var(--accent-ink);
-}
-.ui-btn--danger:active:not(:disabled) {
-  background: color-mix(in srgb, var(--fault) 85%, transparent);
-  color: var(--accent-ink);
-}
-
-/* A button mid-flight is disabled but must not read as unavailable, so it
-   keeps full opacity and takes the live colour.
-
-   Outlined rather than filled: this state can persist for minutes while a
-   queue drains, and a solid amber slab that size becomes the loudest thing on
-   screen for the whole run. Amber on the panel says "working" without
-   shouting, and without reading as "broken". */
+/* Disabled mid-flight, but never dimmed: that would read as unavailable.
+   Outlined rather than filled, because this can persist for minutes. */
 .ui-btn--busy:disabled {
   opacity: 1;
   background: var(--surface);
@@ -164,8 +127,7 @@
   width: 24px;
 }
 
-/* macOS dims an inactive window's accents. The primary action is exempt: a
-   grey Run button reads as disabled, which is a lie. */
+/* Exempt from inactive dimming: a grey Run button reads as disabled. */
 body.inactive .ui-btn--primary:not(:disabled),
 body.inactive .ui-btn--busy:disabled {
   filter: saturate(0.85);

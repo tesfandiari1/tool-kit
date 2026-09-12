@@ -1,5 +1,4 @@
-/* Pills and status glyphs. The pill is lifted from the reference's model chips
-   ("Universal-3.5 Pro"): hairline outline, full radius, mono label, no fill. */
+/* Pills and status glyphs: hairline outline, full radius, no fill. */
 
 .ui-badge {
   display: inline-flex;
@@ -21,59 +20,17 @@
 
 .ui-badge--square {
   border-radius: var(--r-control);
+  /* Two digits plus this border-box's own padding (UI.md rule 2). */
+  min-inline-size: calc(2ch + var(--s3) * 2 + 2px);
+  justify-content: center;
 }
 
-.ui-badge--accent {
-  border-color: var(--accent);
-  color: var(--accent-quiet);
-}
-.ui-badge--live {
-  border-color: var(--live);
-  color: var(--live);
-}
 .ui-badge--pass {
   border-color: var(--pass);
   color: var(--pass);
 }
-.ui-badge--fault {
-  border-color: var(--fault);
-  color: var(--fault);
-}
 
-/* --- Status slot ---------------------------------------------------------
-   A fixed box that tints whatever glyph is put inside it. Used where the icon
-   itself carries meaning colour cannot — a spinner for working, a check for
-   done, a warning for failed — so the shape says what happened and the colour
-   says how it went. The box never changes size, so a list of rows cannot
-   reflow as their states change. */
-.ui-status {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 16px;
-  color: var(--ink-3);
-}
-
-.ui-status--live {
-  color: var(--live);
-}
-.ui-status--pass {
-  color: var(--pass);
-}
-.ui-status--fault {
-  color: var(--fault);
-}
-
-/* A queued job is waiting for a semaphore permit, not being worked on. Giving
-   it the live colour made "in the queue" and "a provider is processing this"
-   look identical, which is the one distinction amber is supposed to draw. */
-.ui-status--queued {
-  color: var(--ink-3);
-}
-
-/* --- Status dot ----------------------------------------------------------
-   Holds its slot at every status so a list of jobs never reflows as rows
-   change state. */
+/* --- Status dot: holds its slot at every status ----------------------- */
 .ui-dot {
   display: inline-block;
   flex: none;
@@ -108,9 +65,8 @@
   }
 }
 
-/* Reduced motion still needs "this one is live" to be legible, so the pulse
-   becomes a static ring rather than disappearing. The ring is amber, not the
-   accent: a live indicator drawn in the action colour says "press me". */
+/* The pulse becomes a static ring, amber and never the accent, which would
+   say "press me". */
 @media (prefers-reduced-motion: reduce) {
   .ui-dot--live {
     animation: none;
@@ -118,8 +74,7 @@
   }
 }
 
-/* Live indicators stay lit in an inactive window: a background run is the
-   whole reason to glance at one. */
+/* Live indicators stay lit in an inactive window. */
 body.inactive .ui-dot--live {
   background: var(--live);
 }

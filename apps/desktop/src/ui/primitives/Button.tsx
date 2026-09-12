@@ -2,7 +2,7 @@ import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { cx } from "../cx";
 import "./Button.css";
 
-export type ButtonVariant = "primary" | "secondary" | "quiet" | "ghost" | "link" | "danger";
+export type ButtonVariant = "primary" | "quiet" | "ghost" | "link";
 /// `lg` is reserved for a view's single actuator. See Button.css.
 export type ButtonSize = "sm" | "md" | "lg";
 

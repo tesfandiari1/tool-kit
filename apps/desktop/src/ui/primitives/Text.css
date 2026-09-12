@@ -1,9 +1,6 @@
 /* Typography primitives. Each family has exactly one job here. */
 
-/* --- Label ---------------------------------------------------------------
-   The signature of the design language: mono, uppercase, widely tracked. Used
-   for every section heading, tab, field label, and button. If you remember one
-   rule from this system, it is that labels look like this. */
+/* --- Label: mono, uppercase, tracked. The language's signature -------- */
 .ui-label {
   font-family: var(--font-mono);
   font-size: var(--t-label);
@@ -21,16 +18,8 @@
 .ui-label--accent {
   color: var(--accent-quiet);
 }
-.ui-label--live {
-  color: var(--live);
-}
-.ui-label--fault {
-  color: var(--fault);
-}
 
-/* --- Display -------------------------------------------------------------
-   Instrument Serif, set tight. Panel titles and headline numbers only. Never
-   below --t-lg: this face is drawn for size and muddies at UI scale. */
+/* --- Display: never below --t-lg, where this face muddies ------------- */
 .ui-display {
   font-family: var(--font-display);
   font-weight: var(--weight-normal);
@@ -53,8 +42,7 @@
   font-size: var(--t-4xl);
 }
 
-/* --- Text ----------------------------------------------------------------
-   SF Pro. All prose. */
+/* --- Text: SF Pro, all prose ------------------------------------------ */
 .ui-text {
   font-family: var(--font-body);
   line-height: var(--lh-body);
@@ -82,20 +70,15 @@
 .ui-text--faint {
   color: var(--ink-3);
 }
-/* Values hold their slot as dim glyphs and brighten when they carry meaning,
-   so the window never reflows while jobs finish out of order. */
+/* Values hold their slot and brighten (UI.md rule 2). */
 .ui-text--ghost {
   color: var(--ink-ghost);
-}
-.ui-text--pass {
-  color: var(--pass);
 }
 .ui-text--fault {
   color: var(--fault);
 }
 
-/* --- Mono ----------------------------------------------------------------
-   Paths, counts, timers, identifiers. Anything the eye scans in a column. */
+/* --- Mono: anything the eye scans in a column ------------------------- */
 .ui-mono {
   font-family: var(--font-mono);
   font-size: var(--t-sm);
@@ -110,9 +93,6 @@
 }
 .ui-mono--sm {
   font-size: var(--t-sm);
-}
-.ui-mono--base {
-  font-size: var(--t-base);
 }
 
 .ui-mono--ink {

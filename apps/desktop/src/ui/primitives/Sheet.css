@@ -1,8 +1,5 @@
-/* Sheet — a modal card over the whole window.
-
-   The dialog element itself is the full viewport and paints nothing: the scrim
-   is a child, so it can hold a token. `::backdrop` is left transparent rather
-   than styled, because custom properties do not resolve there dependably. */
+/* A modal card over the window. The scrim is a child, not `::backdrop`, where
+   custom properties do not resolve dependably. */
 
 .ui-sheet {
   position: fixed;
@@ -29,30 +26,22 @@
   background: var(--surface-scrim);
 }
 
-/* Paper's `--surface-scrim` is its page ground: `body` paints with it, so
-   reusing it here covers the window in the card's own colour and the card
-   disappears. The light theme gets a real dimmer instead. */
+/* Paper's `--surface-scrim` is its page ground, so reusing it here makes the
+   card disappear. The light theme gets a real dimmer. */
 [data-theme="paper"] .ui-sheet__scrim {
   background: color-mix(in srgb, var(--warm-950) 45%, transparent);
 }
 
-/* A card that floats clear of the window on all four sides, rather than an
-   AppKit sheet hanging off the title bar's edge. The edge-hung version read as
-   clipped: a square top with no border is indistinguishable from a card whose
-   top has scrolled out of the window.
-
-   It still clears `--bar-h`, the app's title-bar height, so the traffic lights
-   stay over live chrome. With no `--bar-h` in scope it sits against the top
-   inset alone. */
+/* Floats clear on all four sides: hung off the title bar, a square top with
+   no border reads as clipped. It clears `--bar-h` so the traffic lights stay
+   over live chrome. */
 .ui-sheet__card {
   position: absolute;
   inset-block-start: calc(var(--bar-h, 0px) + var(--s4));
   inset-inline: 0;
   margin-inline: auto;
-  /* Fixed measure, no resize handle. A settings form is a reading column, and
-     one that grows with the window stops being one. The second term is the
-     narrow-window floor: the card keeps its own margin rather than growing
-     into the window edge it is supposed to float above. */
+  /* A fixed reading measure, with a narrow-window floor so the card keeps its
+     margin rather than grow into the window edge. */
   inline-size: min(620px, calc(100% - var(--s5) * 2));
   max-block-size: calc(100% - var(--bar-h, 0px) - var(--s4) - var(--s5));
   display: flex;
@@ -77,9 +66,7 @@
   }
 }
 
-/* One bar, not two. The panel inside a sheet used to draw its own close
-   control, which left this row holding a title and the row under it holding
-   nothing but an X. */
+/* One bar: a panel drawing its own close leaves this row holding a title. */
 .ui-sheet__title {
   display: flex;
   align-items: center;
@@ -101,26 +88,14 @@
   gap: var(--s2);
 }
 
-/* No padding here on purpose: a sheet holds a panel that already carries its
-   own measure and insets, and a library padding an app panel a second time is
-   the harder half to take back. */
+/* No padding: the panel inside already carries its own measure and insets. */
 .ui-sheet__body {
   min-block-size: 0;
   overflow: auto;
 }
 
-.ui-sheet__foot {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--s2);
-  padding: var(--s3) var(--s4);
-  border-block-start: 1px solid var(--rule);
-}
-
-/* The band above the card, which is the title bar the scrim just made inert.
-   Grid so a bare child fills it: the app passes a drag region with no size of
-   its own, and dragging is a hit test on the element, so an empty box is a
-   window that cannot be moved. */
+/* The inert title bar above the card. Grid, so the app's sizeless drag region
+   fills it: an empty box is a window that cannot be moved. */
 .ui-sheet__head {
   position: absolute;
   inset-block-start: 0;

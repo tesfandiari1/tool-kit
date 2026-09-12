@@ -1,6 +1,5 @@
-//! In-memory job queue. A "run" clears the queue, then one job per matching
-//! file is submitted to its provider and polled on a background task, with a
-//! concurrency cap so we don't hammer the upstream APIs.
+//! In-memory job queue. A run clears the queue, then submits one job per
+//! matching file and polls it on a background task, capped at 4 in flight.
 
 use serde::Serialize;
 use std::path::Path;
@@ -15,14 +14,9 @@ use crate::conversion_service::{self, ConversionFailure, ConversionJob};
 use crate::providers::{self, PollResult, ProviderKind};
 use crate::{backend_host, history, secrets, settings};
 
-/// One client for every provider request in the process.
-///
-/// A `Client` owns the connection pool, so one per job meant a fresh TLS
-/// handshake to Datalab or Rev.ai for every file: 200 handshakes on a 200-file
-/// run instead of one per host. Cloning shares the pool.
-///
-/// No global timeout, because submits carry whole files and need far longer
-/// than polls. Each request sets its own (see `providers::*_TIMEOUT`).
+/// One client for every provider request in the process. A `Client` owns the
+/// connection pool, so one per job means a TLS handshake per file. No global
+/// timeout: each request sets its own (see `providers::*_TIMEOUT`).
 fn provider_client() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT
@@ -35,12 +29,12 @@ fn provider_client() -> reqwest::Client {
         .clone()
 }
 
-/// How patient the first poll of a recovered conversion is, before it calls the
-/// service gone. Twelve seconds covers a sidecar that has published its port
-/// and is still opening its database.
+/// How patient the first poll of a recovered conversion is: 12s covers a
+/// sidecar still opening its database.
 const RESUME_MAX_ATTEMPTS: u32 = 6;
 const RESUME_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Every 5s for ~60 minutes, bailing after ~1 minute of unbroken errors.
 const BACKEND_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const BACKEND_MAX_POLLS: u32 = 720;
 const BACKEND_MAX_CONSECUTIVE_ERRORS: u32 = 12;
@@ -51,13 +45,12 @@ enum BackendPhase {
     DatalabFallback,
 }
 
-/// A remote fallback that has already been started for this file. The ledger
-/// records the provider before the request is sent, so a row with no request
-/// id means the submission may already have been billed.
+/// A remote fallback already started for this file. The provider is recorded
+/// before the request is sent, so no request id means it may be billed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FallbackContext {
-    /// `datalab` or `datalab_pipeline`. Resume polls the endpoint the request
-    /// was sent to, not whatever Settings say now.
+    /// `datalab` or `datalab_pipeline`. A resume polls the endpoint the request
+    /// went to, not whatever Settings say now.
     pub(crate) provider: String,
     pub(crate) request_id: Option<String>,
     pub(crate) check_url: Option<String>,
@@ -68,18 +61,16 @@ const DATALAB_PIPELINE_PROVIDER: &str = "datalab_pipeline";
 
 #[derive(Clone, Debug)]
 pub(crate) struct BackendContext {
-    /// The origin this job was queued against, kept as the stand-in for the
-    /// instant the host cannot answer. Every request resolves the live one
-    /// through `request_origin`, because the sidecar's port moves on a restart.
+    /// The origin this job was queued against, a stand-in for the instant the
+    /// host cannot answer. Every request resolves the live one through
+    /// `request_origin`, because the sidecar's port moves on a restart.
     pub(crate) backend_url: String,
     pub(crate) client_run_id: String,
     pub(crate) idempotency_key: String,
     pub(crate) backend_job_id: Option<String>,
     pub(crate) profile: settings::ConversionProfile,
-    /// The OCR options this submission belongs to: the run snapshot's on a
-    /// fresh run, the ledger's on a recovered one. Reading them from Settings
-    /// at submit time instead would resubmit a stored idempotency key under a
-    /// changed fingerprint, which the service answers 409 forever.
+    /// The OCR options this submission belongs to. Reading Settings at submit
+    /// time resubmits a stored key under a changed fingerprint, which 409s.
     pub(crate) ocr: conversion_service::OcrOptions,
     phase: BackendPhase,
     fallback: Option<FallbackContext>,
@@ -108,8 +99,7 @@ impl BackendContext {
         }
     }
 
-    /// Resume a fallback the ledger already recorded, instead of starting the
-    /// submit-or-poll lifecycle over and paying for the file twice.
+    /// Resume a fallback the ledger recorded, rather than paying twice.
     pub(crate) fn resuming_fallback(mut self, fallback: FallbackContext) -> Self {
         self.phase = BackendPhase::DatalabFallback;
         self.fallback = Some(fallback);
@@ -134,15 +124,7 @@ impl JobType {
         }
     }
 
-    pub fn label(&self) -> &'static str {
-        match self {
-            JobType::Convert => "Convert",
-            JobType::Transcribe => "Transcribe",
-        }
-    }
-
-    /// The stable string this job is filed under in the history database.
-    /// Matches `from_id`, and must not change once rows exist.
+    /// The string this job is filed under in history. Frozen once rows exist.
     pub fn id(&self) -> &'static str {
         match self {
             JobType::Convert => "convert",
@@ -157,7 +139,6 @@ impl JobType {
         }
     }
 
-    /// Does this job accept a file with the given lowercase extension?
     pub fn accepts(&self, ext: &str) -> bool {
         match self {
             JobType::Convert => matches!(
@@ -219,16 +200,12 @@ pub struct Job {
     pub progress_note: String,
     pub output_path: Option<String>,
     pub error: Option<String>,
-    /// Backend-provided metadata is intentionally stringly typed: new route,
-    /// warning, failure, and status values must not break an older desktop.
+    /// Stringly typed, so a new backend value cannot break an older desktop.
     pub route: Option<String>,
     pub reason_codes: Vec<String>,
     pub warnings: Vec<String>,
     pub failure: Option<ConversionFailure>,
-    pub created_at: u64,
-    /// When this job actually left the queue. The elapsed timer counts from
-    /// here so a file waiting behind the concurrency cap doesn't appear to
-    /// have been processing for the whole wait.
+    /// When this job left the queue, so the elapsed timer excludes the wait.
     pub started_at: Option<u64>,
     #[serde(skip)]
     pub(crate) backend: Option<BackendContext>,
@@ -256,7 +233,6 @@ impl Job {
             reason_codes: Vec::new(),
             warnings: Vec::new(),
             failure: None,
-            created_at: now_secs(),
             started_at: None,
             backend: None,
         }
@@ -287,18 +263,15 @@ pub struct JobManager {
     jobs: Mutex<Vec<Job>>,
     counter: AtomicU64,
     sem: Arc<Semaphore>,
-    /// Bumped by every new run and by Stop. A spawned task captures the value
-    /// at spawn time and aborts as soon as it no longer matches, so starting a
-    /// second run (or hitting Stop) reliably retires the previous run's tasks
-    /// instead of leaving them to spend credits and write files invisibly.
+    /// Bumped by every new run and by Stop. A spawned task captures it and
+    /// aborts once it stops matching, so a retired run stops spending.
     generation: AtomicU64,
-    /// Settings snapshot taken when a run starts, so changing Settings mid-run
-    /// can't split one run across two output formats or two models.
+    /// Settings snapshot at run start, so a mid-run change splits no run.
     run_config: Mutex<settings::Settings>,
 }
 
-/// Keeps the jobs lock through the caller's durable side effects and event
-/// emission, so retirement cannot split a guarded mutation from its signal.
+/// Holds the jobs lock through the caller's side effects and emit, so
+/// retirement cannot split a guarded mutation from its signal.
 struct GenerationUpdate<'a> {
     job: Job,
     _jobs: MutexGuard<'a, Vec<Job>>,
@@ -404,10 +377,7 @@ impl JobManager {
 }
 
 /// What "the same output" means when deciding whether a file is already done.
-///
-/// The pipeline id is folded in on purpose: pinning a `pl_…` pipeline changes
-/// what Convert produces, so a plain-convert result is not a substitute for it
-/// and the file must run again.
+/// The pipeline id is folded in: it changes what Convert produces.
 pub fn output_format_for(jt: JobType, cfg: &settings::Settings) -> String {
     match jt {
         JobType::Transcribe => "text".to_string(),
@@ -424,12 +394,8 @@ pub fn output_format_for(jt: JobType, cfg: &settings::Settings) -> String {
 }
 
 /// The extension a finished result carries. Read by both writers and by the
-/// tree's pairing rule, which is what makes "a sibling .md means already
-/// converted" true. A third copy would let the tree's mark disagree with what
-/// a run writes.
-///
-/// Deliberately not `output_format_for`: that folds the pipeline id into the
-/// history key, and an extension has no room for one.
+/// tree's pairing rule, so a third copy would let them disagree. Not
+/// `output_format_for`: an extension has no room for a pipeline id.
 pub fn output_extension_for(jt: JobType, cfg: &settings::Settings) -> &'static str {
     match jt {
         JobType::Transcribe => "txt",
@@ -441,19 +407,14 @@ pub fn output_extension_for(jt: JobType, cfg: &settings::Settings) -> &'static s
     }
 }
 
-/// Every extension a finished result may carry on the route in force. What the
-/// tree's pairing rule has to ask, because the writer is not one function.
-///
-/// The Backend route writes Markdown whatever the format says: the service's
-/// artifact is `/artifacts/markdown` and `reserve_markdown_path` names the file
-/// `{stem}.md`. Only the Datalab fallback under that route writes the chosen
-/// format. Pairing on the format alone therefore never matches a service
-/// result, so the row keeps offering Convert, and every press spends again.
+/// Every extension a finished result may carry on the route in force, which is
+/// what the tree's pairing rule has to ask. The Backend route writes Markdown
+/// whatever the format says, and only its Datalab fallback writes the chosen
+/// format, so pairing on the format alone never matches a service result.
 pub fn result_extensions_for(jt: JobType, cfg: &settings::Settings) -> Vec<&'static str> {
     let chosen = output_extension_for(jt, cfg);
     if jt == JobType::Convert && cfg.conversion_route == settings::ConversionRoute::Backend {
-        // Markdown first: it is what the service itself writes, and the
-        // fallback is the exception.
+        // Markdown first: the service writes it, the fallback is the odd one.
         let mut both = vec!["md"];
         if chosen != "md" {
             both.push(chosen);
@@ -467,11 +428,8 @@ fn emit(app: &AppHandle, job: Job) {
     let _ = app.emit("job-updated", job);
 }
 
-/// File a terminal job in the history. Best-effort by design: `history::record`
-/// swallows storage errors so a finished conversion is still a success.
-///
-/// User-initiated stops are skipped — `stop_run` marks cancelled jobs with the
-/// error "Stopped", and a cancelled 200-file run would otherwise bury the log.
+/// File a terminal job in the history. Best-effort: `history::record` swallows
+/// storage errors. A user Stop is skipped, or a cancelled run buries the log.
 fn log_history(app: &AppHandle, job: &Job, status: &str, error: Option<&str>) {
     if error == Some("Stopped") {
         return;
@@ -498,15 +456,9 @@ fn log_history(app: &AppHandle, job: &Job, status: &str, error: Option<&str>) {
     );
 }
 
-/// Move a job's visible state, but only while it still belongs to the current
-/// run. Returns false when the run was retired, which every caller treats as
-/// "stop here": a stopped row must not be relabelled, and work must not
-/// continue past a Stop.
-/// Returns whether the run is still current, which is what the callers branch
-/// on. Emitting is separate: the backend poll calls this every 5s with the same
-/// pending note, so an unconditional emit woke every frontend subscriber once a
-/// tick per job with nothing to say. The direct Datalab loop already guarded
-/// this on its own side.
+/// Move a job's visible state, only while it still belongs to the current run.
+/// A false answer means "stop here": a stopped row must not be relabelled.
+/// Emitting is conditional, because the poll repeats one note every 5s.
 fn set_status(app: &AppHandle, id: u64, generation: u64, status: &str, note: &str) -> bool {
     let manager = app.state::<JobManager>();
     let mut changed = false;
@@ -525,44 +477,7 @@ fn set_status(app: &AppHandle, id: u64, generation: u64, status: &str, note: &st
     true
 }
 
-/// Generation-guarded, like `fail_backend_terminal`. A submit or poll can
-/// outlive Stop, and an unguarded write-back relabels a stopped row and files
-/// a genuine-looking failure in the history.
-fn fail(app: &AppHandle, id: u64, generation: u64, err: &str) {
-    let manager = app.state::<JobManager>();
-    let Some(updated) = manager.update_if_generation(id, generation, |j| {
-        j.status = "failed".to_string();
-        j.progress_note = String::new();
-        j.error = Some(err.to_string());
-    }) else {
-        return;
-    };
-    let job = updated.job.clone();
-    updated.emit(app);
-    log_history(app, &job, "failed", Some(err));
-}
-
-/// The converted text is already on disk by the time this runs, so the job row
-/// carries only its path. It used to carry the text as well, which shipped
-/// every result across IPC and pinned it in the webview until the next run
-/// cleared the queue. Copy reads the file instead.
-fn finish(app: &AppHandle, id: u64, generation: u64, output_path: Option<String>) {
-    let manager = app.state::<JobManager>();
-    let Some(updated) = manager.update_if_generation(id, generation, |j| {
-        j.status = "done".to_string();
-        j.progress_note = String::new();
-        j.output_path = output_path;
-        j.error = None;
-    }) else {
-        return;
-    };
-    let job = updated.job.clone();
-    updated.emit(app);
-    log_history(app, &job, "done", None);
-}
-
-/// Same emit rule as `set_status`: the poll hands back the identical view on
-/// every pass until the backend actually moves.
+/// Same emit rule as `set_status`: the poll repeats one view until it moves.
 fn apply_backend_view(app: &AppHandle, id: u64, generation: u64, view: &ConversionJob) -> bool {
     let manager = app.state::<JobManager>();
     let kind = view.route.as_ref().map(|route| route.kind.clone());
@@ -605,7 +520,8 @@ fn fail_backend_retryable(app: &AppHandle, id: u64, generation: u64, err: &str) 
     }
 }
 
-fn fail_backend_terminal(app: &AppHandle, id: u64, generation: u64, err: &str) {
+/// Generation-guarded: a submit can outlive Stop and file a false failure.
+fn fail(app: &AppHandle, id: u64, generation: u64, err: &str) {
     if let Some(updated) = app
         .state::<JobManager>()
         .update_if_generation(id, generation, |job| {
@@ -623,7 +539,9 @@ fn fail_backend_terminal(app: &AppHandle, id: u64, generation: u64, err: &str) {
     }
 }
 
-fn finish_backend(app: &AppHandle, id: u64, generation: u64, output_path: String) {
+/// The converted text is already on disk, so the job row carries only its path.
+/// Copy reads the file rather than shipping every result across IPC.
+fn finish(app: &AppHandle, id: u64, generation: u64, output_path: String) {
     let cleanup_path = output_path.clone();
     if let Some(updated) = app
         .state::<JobManager>()
@@ -646,9 +564,8 @@ fn finish_backend(app: &AppHandle, id: u64, generation: u64, output_path: String
     }
 }
 
-/// A backend download or fallback write creates its collision-safe file before
-/// control returns to the job task. If Stop retired the task meanwhile, remove
-/// exactly that newly-created path and leave the stopped row untouched.
+/// A download or fallback write creates its file before control returns here.
+/// If Stop retired the task meanwhile, remove exactly that new path.
 fn completed_output_if_current(
     current_generation: u64,
     expected_generation: u64,
@@ -663,19 +580,11 @@ fn completed_output_if_current(
     None
 }
 
-/// Write `text` into the job's output folder without clobbering an existing
-/// file. Uses `create_new` so two concurrent jobs whose sources share a
-/// basename can't both win the same candidate name and overwrite each other.
 /// Claim a free name in `output_dir` and hand back the file holding it.
-///
-/// `create_new` is the whole point: the claim and the existence check are one
-/// syscall, so two jobs finishing together cannot agree on the same name, and
-/// nothing already on disk is ever overwritten. A collision is numbered the
-/// way Finder numbers one.
-///
-/// Shared by the writer and the importer, so a result and the source it came
-/// from cannot be numbered by two different rules.
-fn claim_path(
+/// `create_new` makes the claim and the existence check one syscall, so two
+/// jobs finishing together cannot agree on a name and nothing is overwritten.
+/// Shared by the writer and the importer, so both number a collision alike.
+pub(crate) fn claim_path(
     output_dir: &str,
     file_name: &str,
     ext: &str,
@@ -685,8 +594,7 @@ fn claim_path(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
-    // A source can carry no extension at all. A result always has one, so this
-    // arm only ever runs for an import.
+    // A source can carry no extension, so this arm only runs for an import.
     let dotted = if ext.is_empty() {
         String::new()
     } else {
@@ -732,17 +640,11 @@ fn write_output(
 }
 
 /// Copy a source file into a folder, byte for byte, and say where it landed.
+/// Bytes, not `read_to_string`: this carries PDFs, office documents and video.
 ///
-/// Bytes rather than `read_to_string`: what this carries is PDFs, office
-/// documents, audio and video, none of which is UTF-8. That is also why
-/// `reuse_result` cannot stand in for it.
-///
-/// The modification time travels with the bytes, and that is load-bearing
-/// twice. `tree::pair_results` refuses a result older than its source, so a
-/// copy stamped with the current time would orphan the result imported beside
-/// it. And `history` checks a stored mtime before calling a result reusable,
-/// so a re-stamped copy would read as a document that changed and be paid for
-/// a second time.
+/// The modification time travels with the bytes. `tree::pair_results` refuses a
+/// result older than its source, and `history` refuses a source whose mtime
+/// moved, so a re-stamped copy is paid for twice.
 pub fn import_source(dir: &str, source: &Path) -> Result<String, String> {
     let file_name = source
         .file_name()
@@ -761,25 +663,17 @@ pub fn import_source(dir: &str, source: &Path) -> Result<String, String> {
     std::io::copy(&mut reader, &mut f)
         .and_then(|_| f.sync_all())
         .map_err(|e| format!("Could not write {}: {e}", candidate.display()))?;
-    // Best effort. A filesystem that refuses the stamp still holds the bytes,
-    // and the copy is worth more than its date.
+    // Best effort: a filesystem that refuses the stamp still holds the bytes.
     if let Some(when) = modified {
         let _ = f.set_modified(when);
     }
     Ok(candidate.to_string_lossy().to_string())
 }
 
-/// Satisfy a job from a result an earlier run already produced, instead of
-/// paying the provider for it again.
-///
-/// Reached when the history has a still-valid result for this exact file, job
-/// and format, but it lives in a different folder from the one now selected.
-/// The source is unchanged and the format matches, so the bytes a re-run would
-/// produce are the bytes we already have — copying is the same outcome for
-/// free. Goes through `write_output`, so it inherits the no-clobber rule.
-///
-/// Returns whether the copy succeeded; a failure is reported on the job like
-/// any other, and Retry then runs it for real.
+/// Satisfy a job from a result an earlier run produced, rather than paying for
+/// it again. Reached when the history holds a still-valid result for this file,
+/// job and format in another folder. Returns whether the copy succeeded: a
+/// failure lands on the job row, and Retry then runs it for real.
 pub fn reuse_result(app: &AppHandle, id: u64, generation: u64, existing: &str) -> bool {
     let Some(job) = app.state::<JobManager>().get(id) else {
         return false;
@@ -796,7 +690,7 @@ pub fn reuse_result(app: &AppHandle, id: u64, generation: u64, existing: &str) -
             return false;
         }
     };
-    // Take the extension from the file we are copying, so a result written
+    // The extension comes from the file being copied, so a result written
     // under an older format setting keeps its own suffix.
     let ext = Path::new(existing)
         .extension()
@@ -804,7 +698,7 @@ pub fn reuse_result(app: &AppHandle, id: u64, generation: u64, existing: &str) -
         .unwrap_or("txt");
     match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
         Ok(path) => {
-            finish(app, id, generation, Some(path));
+            finish(app, id, generation, path);
             true
         }
         Err(e) => {
@@ -822,21 +716,7 @@ enum BackendAction {
     NeedsRemote,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum NeedsRemoteDecision {
-    DatalabFallback,
-    RejectLocalOnly,
-}
-
-fn needs_remote_decision(profile: settings::ConversionProfile) -> NeedsRemoteDecision {
-    match profile {
-        settings::ConversionProfile::Standard => NeedsRemoteDecision::DatalabFallback,
-        settings::ConversionProfile::LocalOnly => NeedsRemoteDecision::RejectLocalOnly,
-    }
-}
-
-/// Terminal detection is deliberately an allowlist. A status added by a newer
-/// backend remains pending in this desktop instead of being misclassified.
+/// An allowlist: a status a newer backend adds stays pending, not terminal.
 fn backend_action(view: &ConversionJob) -> BackendAction {
     match view.status.as_str() {
         "succeeded" => BackendAction::Succeeded,
@@ -855,13 +735,9 @@ fn backend_action(view: &ConversionJob) -> BackendAction {
     }
 }
 
-/// The origin one request goes to, resolved at the moment of the request.
-///
-/// The kernel hands the sidecar a new port at every restart, so the origin a
-/// job was queued with is refused for the rest of the run once the supervisor
-/// relaunches the child. `held` is only the answer for the instant the host has
-/// none, mid-restart: the request then fails the way it fails today and the
-/// caller's error tolerance carries it to the next attempt.
+/// The origin one request goes to, resolved at the moment of the request. The
+/// kernel hands the sidecar a new port at every restart, so a queued origin is
+/// refused once the child relaunches. `held` covers only the mid-restart gap.
 fn request_origin(live: Result<String, String>, held: &str) -> String {
     live.unwrap_or_else(|_| held.to_string())
 }
@@ -923,11 +799,8 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         if !set_status(&app, id, generation, "processing", "Resuming conversion…") {
             return;
         }
-        // A recovered conversion resumes the instant the service reports ready,
-        // and the first request can still land before it answers. The 5s loop
-        // below tolerates a run of errors for the same reason. Without the same
-        // tolerance here, one refused connection fails a conversion the service
-        // is holding and has already done the work for.
+        // The first request can land before the service answers, and one
+        // refused connection must not fail work it has already done.
         let mut attempts = 0u32;
         loop {
             let origin = request_origin(backend_host::backend_origin(&app), &backend.backend_url);
@@ -1031,18 +904,18 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                     return;
                 };
                 match output {
-                    Ok(path) => finish_backend(&app, id, generation, path),
+                    Ok(path) => finish(&app, id, generation, path),
                     Err(error) => fail_backend_retryable(&app, id, generation, &error),
                 }
                 return;
             }
             BackendAction::Failed(error) => {
-                fail_backend_terminal(&app, id, generation, &error);
+                fail(&app, id, generation, &error);
                 return;
             }
             BackendAction::NeedsRemote => {
-                if needs_remote_decision(backend.profile) == NeedsRemoteDecision::RejectLocalOnly {
-                    fail_backend_terminal(
+                if backend.profile == settings::ConversionProfile::LocalOnly {
+                    fail(
                         &app,
                         id,
                         generation,
@@ -1129,14 +1002,13 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
     let Some(backend) = original.backend.clone() else {
         return;
     };
-    // A recorded provider with no request id means the previous process died
-    // between writing the ledger and learning the outcome. Datalab has no way
-    // to ask "did you accept my upload", so resubmitting risks a second
-    // charge. Stop and tell the user instead.
+    // A recorded provider with no request id means the process died between
+    // the ledger write and the outcome. Datalab cannot be asked whether it took
+    // the upload, so a resubmit risks a second charge.
     if let Some(fallback) = &backend.fallback {
         if fallback.request_id.is_none() {
             history::delete_in_flight(app, &backend.idempotency_key);
-            fail_backend_terminal(
+            fail(
                 app,
                 id,
                 generation,
@@ -1165,8 +1037,8 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    // A resumed request must be polled the way it was submitted, even if
-    // Settings changed the pipeline id in between.
+    // A resumed request is polled the way it was submitted, whatever Settings
+    // say about the pipeline id now.
     let via_pipeline = match backend.fallback.as_ref() {
         Some(fallback) => fallback.provider == DATALAB_PIPELINE_PROVIDER,
         None => pipeline.is_some(),
@@ -1203,15 +1075,9 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
             remote_id,
         },
         None => {
-            // Two writes before any billable request, both required.
-            //
-            // The ledger survives a crash; the in-memory context survives a
-            // Retry in this same process. Recording only one of them left a
-            // hole: an uncertain submit that never returned kept `fallback:
-            // None`, so Retry walked straight past the uncertainty guard and
-            // paid again without a restart.
-            // In-memory first: if the run was retired we leave without a
-            // ledger row claiming an uncertain submit that never happened.
+            // Two writes before any billable request: the ledger survives a
+            // crash, the in-memory context survives a Retry. In-memory first,
+            // so a retired run leaves no ledger row for a submit never sent.
             if app
                 .state::<JobManager>()
                 .update_if_generation(id, generation, |current| {
@@ -1228,17 +1094,15 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
                 return;
             }
             if !history::begin_fallback(app, &backend.idempotency_key, provider) {
-                // Nothing was sent, so drop the in-memory claim before failing.
-                // Left set, the next Retry hits the uncertainty guard, is told
-                // a request that never existed may have been billed, and fails
-                // terminally again. The file could never be converted.
+                // Nothing was sent, so drop the claim. Left set, every later
+                // Retry meets the uncertainty guard.
                 app.state::<JobManager>()
                     .update_if_generation(id, generation, |current| {
                         if let Some(context) = &mut current.backend {
                             context.fallback = None;
                         }
                     });
-                fail_backend_terminal(
+                fail(
                     app,
                     id,
                     generation,
@@ -1247,46 +1111,51 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
                 );
                 return;
             }
-            let result = match pipeline {
-                Some(pipeline_id) => {
-                    providers::datalab_pipeline_submit(
-                        &client,
-                        &api_key,
-                        pipeline_id,
-                        &original.source_path,
-                        &cfg.datalab_format,
-                    )
-                    .await
-                }
-                None => {
-                    providers::datalab_submit(
-                        &client,
-                        &api_key,
-                        &original.source_path,
-                        &cfg.datalab_format,
-                        cfg.datalab_high_accuracy,
-                    )
-                    .await
-                }
-            };
+            let result = providers::datalab_submit_any(
+                &client,
+                &api_key,
+                pipeline,
+                &original.source_path,
+                &cfg.datalab_format,
+                cfg.datalab_high_accuracy,
+            )
+            .await;
             if stale(app) {
                 return;
             }
             match result {
                 Ok(value) => value,
-                Err(error) => {
-                    fail_backend_retryable(app, id, generation, &error);
+                // Datalab answered and refused, so the claim above is a claim
+                // on nothing. Drop both halves, or Retry meets the guard.
+                Err(providers::SubmitError::Refused(error)) => {
+                    app.state::<JobManager>()
+                        .update_if_generation(id, generation, |current| {
+                            if let Some(context) = &mut current.backend {
+                                context.fallback = None;
+                            }
+                        });
+                    history::clear_fallback(app, &backend.idempotency_key);
+                    fail_backend_retryable(app, id, generation, error.as_str());
+                    return;
+                }
+                // No answer, so the upload may have landed with no id to poll.
+                // The claim stands and the row says so.
+                Err(providers::SubmitError::Uncertain(error)) => {
+                    fail(
+                        app,
+                        id,
+                        generation,
+                        &format!(
+                            "{error}. The upload may already have been charged. Convert this \
+                             file again only if that attempt produced nothing."
+                        ),
+                    );
                     return;
                 }
             }
         }
     };
-    let check_url = submitted.check_url.clone().unwrap_or_else(|| {
-        format!(
-            "https://www.datalab.to/api/v1/convert/{}",
-            submitted.remote_id
-        )
-    });
+    let check_url = submitted.datalab_check_url();
     history::attach_fallback_request(
         app,
         &backend.idempotency_key,
@@ -1335,18 +1204,24 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
         if stale(app) {
             return;
         }
-        let result = if via_pipeline {
-            providers::datalab_pipeline_poll(&client, &api_key, &submitted.remote_id).await
-        } else {
-            providers::datalab_poll(&client, &api_key, &check_url, &cfg.datalab_format).await
-        };
+        let result = providers::datalab_poll_any(
+            &client,
+            &api_key,
+            via_pipeline,
+            &submitted.remote_id,
+            &check_url,
+            &cfg.datalab_format,
+        )
+        .await;
         if stale(app) {
             return;
         }
         match result {
             Ok(PollResult::Done(text)) => break text,
+            // `Failed` is terminal. Filing it as retryable leaves a ledger row
+            // that resurrects on every launch, and no History entry.
             Ok(PollResult::Failed(error)) => {
-                fail_backend_retryable(app, id, generation, &error);
+                fail(app, id, generation, &error);
                 return;
             }
             Ok(PollResult::Pending) => consecutive_errors = 0,
@@ -1382,18 +1257,13 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
         return;
     };
     match output {
-        Ok(path) => finish_backend(app, id, generation, path),
+        Ok(path) => finish(app, id, generation, path),
         Err(error) => fail_backend_retryable(app, id, generation, &error),
     }
 }
 
-/// Point a context at the service running now, and drop the verdict the last
-/// launch left on it.
-///
-/// A recovery blocker records why a row could not be resumed at startup. It is
-/// not a verdict on a retry the user just pressed, and nothing else clears it,
-/// so leaving it in place makes Retry re-fail with the same stale message for
-/// the rest of the session.
+/// Point a context at the service running now, and clear the recovery blocker
+/// the last launch left. Nothing else clears it, so Retry re-fails all session.
 fn refresh_for_retry(context: &mut BackendContext, origin: Result<&str, String>) {
     match origin {
         Ok(origin) => {
@@ -1404,20 +1274,16 @@ fn refresh_for_retry(context: &mut BackendContext, origin: Result<&str, String>)
     }
 }
 
-/// Re-persist a backend job's durable row before a retry.
-///
-/// Stop deletes the ledger row, but the job stays in the list and Retry stays
-/// live. Without this the resubmit runs with no recovery row, so a crash
-/// during it loses the job and the source-change guard never fires.
+/// Re-persist a backend job's durable row before a retry. Stop deletes the
+/// ledger row while the job stays retryable, so without this a crash during the
+/// resubmit loses the job.
 pub fn restore_in_flight(app: &AppHandle, id: u64) {
     let manager = app.state::<JobManager>();
-    // Retry-all runs this over every failed row, so a direct job leaves before
-    // any of the reads below.
+    // Retry-all runs this over every failed row, so direct jobs leave here.
     if manager.get(id).is_none_or(|job| job.backend.is_none()) {
         return;
     }
-    // Read fresh rather than carried over: a sidecar that restarted since this
-    // job first ran is on a different port, and the retry has to follow it.
+    // Read fresh: a restarted sidecar is on a different port.
     let origin = backend_host::backend_origin(app);
     let Some(job) = manager.update(id, |current| {
         if let Some(context) = &mut current.backend {
@@ -1477,26 +1343,24 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
 pub(crate) enum LedgerReplay {
     AttachBackendJob(String),
     BeginFallback(String),
-    AttachFallbackRequest { request_id: String, check_url: String },
+    AttachFallbackRequest {
+        request_id: String,
+        check_url: String,
+    },
 }
 
 /// The writes that put a rebuilt in-flight row back where the deleted one was.
-///
-/// `upsert_in_flight` inserts a bare row: no backend job id, no fallback
-/// columns. Without this replay a Stop, then Retry, then crash reads "no
-/// fallback in flight" on restart and resubmits a request Datalab already
-/// billed, which is the hole the ledger exists to close.
-///
-/// Pure, and separate from the writes, because the app handle a real ledger
-/// needs cannot be built in a unit test.
+/// `upsert_in_flight` inserts a bare row, so without this replay Stop, Retry
+/// then a crash resubmits a request Datalab already billed. Pure, so a unit
+/// test reaches it without an app handle.
 fn ledger_replay(backend: &BackendContext) -> Vec<LedgerReplay> {
     let mut steps = Vec::new();
     if let Some(job_id) = &backend.backend_job_id {
         steps.push(LedgerReplay::AttachBackendJob(job_id.clone()));
     }
     if let Some(fallback) = &backend.fallback {
-        // The provider goes back first even when the request id is unknown.
-        // An uncertain fallback must stay uncertain, not vanish.
+        // The provider goes back even with no request id: an uncertain
+        // fallback must stay uncertain.
         steps.push(LedgerReplay::BeginFallback(fallback.provider.clone()));
         if let (Some(request_id), Some(check_url)) = (&fallback.request_id, &fallback.check_url) {
             steps.push(LedgerReplay::AttachFallbackRequest {
@@ -1508,9 +1372,8 @@ fn ledger_replay(backend: &BackendContext) -> Vec<LedgerReplay> {
     steps
 }
 
-/// Spawn the full lifecycle for one job on the async runtime. `generation` is
-/// the run this job belongs to; if the manager has moved on (a new run started,
-/// or the user hit Stop) the task exits without touching state or spending money.
+/// Spawn the full lifecycle for one job. If the manager has moved past
+/// `generation`, the task exits without spending money.
 pub fn run_job(app: AppHandle, id: u64, generation: u64) {
     tauri::async_runtime::spawn(async move {
         let stale = |app: &AppHandle| app.state::<JobManager>().generation() != generation;
@@ -1541,18 +1404,15 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
             }
         };
 
-        // Respect the concurrency cap for the whole job lifetime.
         let sem = app.state::<JobManager>().semaphore();
         let _permit = sem.acquire_owned().await;
-        // Waiting for a permit can take minutes; the run may be long gone.
+        // Waiting for a permit can take minutes, so the run may be long gone.
         if stale(&app) {
             return;
         }
 
-        // Guarded, like the backend path at the top of `run_backend_job`. Plain
-        // `update` drops the jobs lock before the emit, so a Stop landing in
-        // that window ships a stale "queued" row that `ACTIVE` counts as live,
-        // and `running` sticks on.
+        // Guarded: plain `update` drops the jobs lock before the emit, so a
+        // Stop in that window ships a stale "queued" row and `running` sticks.
         let manager = app.state::<JobManager>();
         let Some(updated) = manager.update_if_generation(id, generation, |current| {
             current.started_at = Some(now_secs());
@@ -1561,173 +1421,134 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
         };
         updated.emit(&app);
 
-        // Snapshot taken when the run started, so a Settings change mid-run
-        // can't give half the files a different output format.
+        // The run snapshot, so a mid-run Settings change splits no run.
         let cfg = app.state::<JobManager>().run_config();
         let client = provider_client();
 
-        {
-            if !set_status(&app, id, generation, "working", "Uploading…") {
-                return;
-            }
-            let datalab_format = cfg.datalab_format.clone();
-            let pipeline = cfg
-                .datalab_pipeline_id
-                .clone()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
+        if !set_status(&app, id, generation, "working", "Uploading…") {
+            return;
+        }
+        let datalab_format = cfg.datalab_format.clone();
+        let pipeline = cfg
+            .datalab_pipeline_id
+            .clone()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
-            let submitted = match job.job_type {
-                JobType::Convert => {
-                    let res = match &pipeline {
-                        Some(pid) => {
-                            providers::datalab_pipeline_submit(
-                                &client,
-                                &api_key,
-                                pid,
-                                &job.source_path,
-                                &datalab_format,
-                            )
-                            .await
-                        }
-                        None => {
-                            providers::datalab_submit(
-                                &client,
-                                &api_key,
-                                &job.source_path,
-                                &datalab_format,
-                                cfg.datalab_high_accuracy,
-                            )
-                            .await
-                        }
-                    };
-                    match res {
-                        Ok(s) => s,
-                        Err(e) => {
-                            if !stale(&app) {
-                                fail(&app, id, generation, &e);
-                            }
-                            return;
-                        }
-                    }
-                }
-                JobType::Transcribe => {
-                    match providers::revai_submit(&client, &api_key, &job.source_path).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            if !stale(&app) {
-                                fail(&app, id, generation, &e);
-                            }
-                            return;
-                        }
-                    }
-                }
-            };
-
-            // A submit carries the whole file and can run for half an hour,
-            // so Stop is very likely to land during one. Without this check
-            // the finished upload writes "processing" back over a row the
-            // user already stopped, and since the poll loop then bails on
-            // its own stale check, nothing ever moves that row to a
-            // terminal state: Run stays disabled behind a job with no task.
-            // The two arms above are guarded for the same reason — a
-            // stopped job must not be relabelled with a network error, or
-            // it lands in the history as a genuine failure.
-            if stale(&app) {
-                return;
-            }
-            if !set_status(&app, id, generation, "processing", "Processing…") {
-                return;
-            }
-            let convert_check_url = submitted.check_url.clone().unwrap_or_else(|| {
-                format!(
-                    "https://www.datalab.to/api/v1/convert/{}",
-                    submitted.remote_id
+        let submitted = match job.job_type {
+            JobType::Convert => {
+                let res = providers::datalab_submit_any(
+                    &client,
+                    &api_key,
+                    pipeline.as_deref(),
+                    &job.source_path,
+                    &datalab_format,
+                    cfg.datalab_high_accuracy,
                 )
-            });
-
-            let max_attempts: u32 = 720; // ~60 min at 5s
-            let mut attempt: u32 = 0;
-            // Consecutive network/parse errors. Transient blips are fine to
-            // ride out, but an endless stream of them should fail the job
-            // rather than silently burn the full 60-minute budget.
-            let mut consecutive_errors: u32 = 0;
-            let text = loop {
-                attempt += 1;
-                if attempt > max_attempts {
-                    fail(&app, id, generation, "Timed out waiting for the result.");
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                if stale(&app) {
-                    return;
-                }
-                let poll = match job.job_type {
-                    JobType::Convert => match &pipeline {
-                        Some(_) => {
-                            providers::datalab_pipeline_poll(
-                                &client,
-                                &api_key,
-                                &submitted.remote_id,
-                            )
-                            .await
+                .await;
+                match res {
+                    Ok(s) => s,
+                    Err(e) => {
+                        if !stale(&app) {
+                            fail(&app, id, generation, e.message());
                         }
-                        None => {
-                            providers::datalab_poll(
-                                &client,
-                                &api_key,
-                                &convert_check_url,
-                                &datalab_format,
-                            )
-                            .await
-                        }
-                    },
-                    JobType::Transcribe => {
-                        providers::revai_poll(&client, &api_key, &submitted.remote_id).await
-                    }
-                };
-                match poll {
-                    Ok(PollResult::Done(t)) => break t,
-                    Ok(PollResult::Failed(e)) => {
-                        fail(&app, id, generation, &e);
                         return;
                     }
-                    Ok(PollResult::Pending) => {
-                        consecutive_errors = 0;
-                        continue;
-                    }
+                }
+            }
+            JobType::Transcribe => {
+                match providers::revai_submit(&client, &api_key, &job.source_path).await {
+                    Ok(s) => s,
                     Err(e) => {
-                        consecutive_errors += 1;
-                        if consecutive_errors >= 12 {
-                            // ~1 minute of unbroken failure.
-                            fail(
-                                &app,
-                                id,
-                                generation,
-                                &format!("Lost contact while waiting for the result: {e}"),
-                            );
-                            return;
+                        if !stale(&app) {
+                            fail(&app, id, generation, &e);
                         }
-                        continue;
+                        return;
                     }
                 }
-            };
+            }
+        };
 
-            let ext = output_extension_for(job.job_type, &cfg);
+        // A submit runs for up to half an hour, so Stop lands inside one. An
+        // unguarded write here puts "processing" on a stopped row that no task
+        // will ever finish, and `running` sticks on. Same for the two arms
+        // above: a stopped job must not be relabelled with a network error.
+        if stale(&app) {
+            return;
+        }
+        if !set_status(&app, id, generation, "processing", "Processing…") {
+            return;
+        }
+        let convert_check_url = submitted.datalab_check_url();
+
+        let mut attempt: u32 = 0;
+        // A blip is fine, an endless stream should fail rather than burn 60min.
+        let mut consecutive_errors: u32 = 0;
+        let text = loop {
+            attempt += 1;
+            if attempt > BACKEND_MAX_POLLS {
+                fail(&app, id, generation, "Timed out waiting for the result.");
+                return;
+            }
+            tokio::time::sleep(BACKEND_POLL_INTERVAL).await;
             if stale(&app) {
                 return;
             }
-            match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
-                Ok(path) => finish(&app, id, generation, Some(path)),
-                Err(e) => fail(&app, id, generation, &e),
+            let poll = match job.job_type {
+                JobType::Convert => {
+                    providers::datalab_poll_any(
+                        &client,
+                        &api_key,
+                        pipeline.is_some(),
+                        &submitted.remote_id,
+                        &convert_check_url,
+                        &datalab_format,
+                    )
+                    .await
+                }
+                JobType::Transcribe => {
+                    providers::revai_poll(&client, &api_key, &submitted.remote_id).await
+                }
+            };
+            match poll {
+                Ok(PollResult::Done(t)) => break t,
+                Ok(PollResult::Failed(e)) => {
+                    fail(&app, id, generation, &e);
+                    return;
+                }
+                Ok(PollResult::Pending) => {
+                    consecutive_errors = 0;
+                    continue;
+                }
+                Err(e) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= BACKEND_MAX_CONSECUTIVE_ERRORS {
+                        fail(
+                            &app,
+                            id,
+                            generation,
+                            &format!("Lost contact while waiting for the result: {e}"),
+                        );
+                        return;
+                    }
+                    continue;
+                }
             }
+        };
+
+        let ext = output_extension_for(job.job_type, &cfg);
+        if stale(&app) {
+            return;
+        }
+        match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
+            Ok(path) => finish(&app, id, generation, path),
+            Err(e) => fail(&app, id, generation, &e),
         }
     });
 }
 
-/// `live` is the origin the resumed requests will actually go to, which in
-/// Sidecar mode is not what the row records: the ledger holds an alias there,
-/// and an alias is not a URL.
+/// `live` is the origin the resumed requests go to, not what the row records:
+/// in Sidecar mode the ledger holds an alias, and an alias is not a URL.
 fn validate_recovery_entry(
     entry: &history::InFlightEntry,
     live: &str,
@@ -1735,7 +1556,7 @@ fn validate_recovery_entry(
     conversion_service::validate_base_url(live)
         .map_err(|error| format!("Cannot recover conversion: {error}"))?;
     if let Some(job_id) = entry.backend_job_id.as_deref() {
-        conversion_service::validate_conversion_id(job_id)
+        conversion_service::validate_uuid(job_id, "conversion id")
             .map_err(|error| format!("Cannot recover conversion: {error}"))?;
     }
     if !history::in_flight_source_is_current(entry) {
@@ -1748,24 +1569,16 @@ fn validate_recovery_entry(
         .ok_or_else(|| "Cannot recover conversion with an unknown profile".into())
 }
 
-/// The keychain holds one backend token, so it is only the right credential
-/// for a recovered row if the configured origin still matches the one that row
-/// was submitted against. Sending the current token to a previously configured
-/// host would hand it to a service the user has since moved away from.
-///
-/// Both sides go through `backend_host::ledger_origin`, so in Sidecar mode both
-/// are the alias and the port is free to move. Comparing live URLs there would
-/// reject every row on every launch.
+/// The keychain holds one backend token, so it fits a recovered row only while
+/// the configured origin still matches the row's. Both sides go through
+/// `backend_host::ledger_origin`, so in Sidecar mode both are the alias.
 fn recovery_origin_still_configured(entry: &history::InFlightEntry, configured: &str) -> bool {
     entry.backend_url.trim_end_matches('/') == configured.trim_end_matches('/')
 }
 
-/// Recreate durable backend rows after startup. Invalid legacy origins and
-/// changed sources stay visible and stopped, but their durable rows are
-/// removed so they cannot resurrect forever or bind to current settings.
-///
-/// In Sidecar mode this runs on the first service that comes up rather than
-/// from `setup`, because the resume path needs a service that answers.
+/// Recreate durable backend rows after startup. Invalid origins and changed
+/// sources stay visible and stopped, with their durable rows removed. In
+/// Sidecar mode this runs on the first service that answers.
 pub(crate) fn recover_in_flight(app: AppHandle) {
     let Some(entries) = history::list_in_flight(&app) else {
         return;
@@ -1773,9 +1586,8 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
     if entries.is_empty() {
         return;
     }
-    // No origin means no recovery this time round, and the rows stay on the
-    // ledger. Deleting them here would throw away conversions the service has
-    // already been paid for and is still holding.
+    // No origin, no recovery: deleting the rows throws away conversions the
+    // service is still holding.
     let Ok(live_origin) = backend_host::backend_origin(&app) else {
         return;
     };
@@ -1814,8 +1626,7 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
                 check_url: entry.fallback_check_url.clone(),
             });
         let mut context = BackendContext::new(
-            // The live origin, never the recorded one: in Sidecar mode that is
-            // an alias, and `endpoint_url` would refuse it.
+            // The live origin, never the recorded alias `endpoint_url` refuses.
             live_origin.clone(),
             entry.client_run_id,
             entry.idempotency_key,
@@ -1861,10 +1672,16 @@ mod import_tests {
         let landed = import_source(into.to_str().unwrap(), &src).unwrap();
 
         assert_eq!(landed, into.join("deck.pdf").to_string_lossy());
-        assert_eq!(std::fs::read(&landed).unwrap(), std::fs::read(&src).unwrap());
-        // Load-bearing twice: the tree refuses to pair a result older than its
-        // source, and history refuses to reuse a result whose source moved on.
-        assert_eq!(std::fs::metadata(&landed).unwrap().modified().unwrap(), when);
+        assert_eq!(
+            std::fs::read(&landed).unwrap(),
+            std::fs::read(&src).unwrap()
+        );
+        // The tree refuses a result older than its source, history a source
+        // whose mtime moved.
+        assert_eq!(
+            std::fs::metadata(&landed).unwrap().modified().unwrap(),
+            when
+        );
     }
 
     #[test]
@@ -1879,14 +1696,15 @@ mod import_tests {
         let landed = import_source(into.to_str().unwrap(), &src).unwrap();
 
         assert_eq!(landed, into.join("deck (1).pdf").to_string_lossy());
-        assert_eq!(std::fs::read(into.join("deck.pdf")).unwrap(), b"do not lose me");
+        assert_eq!(
+            std::fs::read(into.join("deck.pdf")).unwrap(),
+            b"do not lose me"
+        );
     }
 
     #[test]
     fn importing_a_project_marker_cannot_break_the_folder_it_lands_in() {
-        // `create_new` is the guard. A dropped project.json overwriting the
-        // marker would hand the folder a different identity, and the index
-        // would then read a project id that belongs to nobody.
+        // `create_new` is the guard: an overwritten marker orphans the folder.
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("project.json");
         let into = dir.path().join("Inbox");
@@ -1912,7 +1730,7 @@ mod import_tests {
 
         let landed = import_source(into.to_str().unwrap(), &src).unwrap();
 
-        // Not "NOTES." — the dot only appears when there is an extension.
+        // Not "NOTES.": the dot only appears when there is an extension.
         assert_eq!(landed, into.join("NOTES").to_string_lossy());
     }
 }
@@ -1921,6 +1739,37 @@ mod import_tests {
 mod backend_tests {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
+
+    fn ledger_entry(recorded_origin: &str) -> history::InFlightEntry {
+        history::InFlightEntry {
+            source_path: "/tmp/report.pdf".into(),
+            file_name: "report.pdf".into(),
+            output_dir: "/tmp".into(),
+            backend_url: recorded_origin.into(),
+            client_run_id: "11111111-1111-4111-8111-111111111111".into(),
+            idempotency_key: "22222222-2222-4222-8222-222222222222".into(),
+            backend_job_id: None,
+            fallback_provider: None,
+            fallback_request_id: None,
+            fallback_check_url: None,
+            conversion_profile: "standard".into(),
+            ocr_language_correction: true,
+            ocr_custom_words: String::new(),
+            source_mtime: 1,
+            created_at: 1,
+        }
+    }
+
+    fn context(job_id: Option<&str>) -> BackendContext {
+        BackendContext::new(
+            "http://127.0.0.1:8080".into(),
+            "11111111-1111-4111-8111-111111111111".into(),
+            "22222222-2222-4222-8222-222222222222".into(),
+            job_id.map(str::to_owned),
+            settings::ConversionProfile::Standard,
+            conversion_service::OcrOptions::default(),
+        )
+    }
 
     fn view(status: &str) -> ConversionJob {
         ConversionJob {
@@ -1955,31 +1804,13 @@ mod backend_tests {
         );
     }
 
-    /// Everything that must be true before a Datalab fallback can be billed
-    /// twice, and the one state that stops it.
-    ///
     /// A submit whose outcome is unknown leaves the provider recorded with no
     /// request id. Both the ledger and the in-memory context carry that, so a
-    /// restart *and* a same-process Retry both refuse to resubmit. Recording
-    /// Stop deletes the ledger row and Retry rebuilds it. The rebuild used to
-    /// drop every remote column, so Stop, Retry, then a crash read "no fallback
-    /// in flight" on restart and resubmitted a request Datalab had already
-    /// billed. That is the exact hole the ledger exists to close.
+    /// restart and a same-process Retry both refuse to resubmit.
     #[test]
     fn a_rebuilt_ledger_row_replays_the_remote_state_stop_deleted() {
-        let context = |job_id: Option<&str>| {
-            BackendContext::new(
-                "http://127.0.0.1:8080".into(),
-                "11111111-1111-4111-8111-111111111111".into(),
-                "22222222-2222-4222-8222-222222222222".into(),
-                job_id.map(str::to_owned),
-                settings::ConversionProfile::Standard,
-                conversion_service::OcrOptions::default(),
-            )
-        };
-
         // An accepted fallback replays provider and request, so a restart
-        // resumes polling instead of paying again.
+        // resumes polling rather than paying.
         assert_eq!(
             ledger_replay(&context(None).resuming_fallback(FallbackContext {
                 provider: DATALAB_PROVIDER.to_owned(),
@@ -1995,8 +1826,8 @@ mod backend_tests {
             ],
         );
 
-        // An uncertain fallback replays the provider alone. Dropping it would
-        // silently downgrade "may have been billed" to "never started".
+        // An uncertain fallback replays the provider alone, or it reads as
+        // never started.
         assert_eq!(
             ledger_replay(&context(None).resuming_fallback(FallbackContext {
                 provider: DATALAB_PROVIDER.to_owned(),
@@ -2016,7 +1847,7 @@ mod backend_tests {
         assert!(ledger_replay(&context(None)).is_empty());
     }
 
-    /// only the ledger left Retry able to pay again with no restart involved.
+    /// The ledger alone leaves Retry able to pay again with no restart.
     #[test]
     fn an_uncertain_fallback_is_visible_to_both_restart_and_retry() {
         let uncertain = FallbackContext {
@@ -2030,30 +1861,12 @@ mod backend_tests {
             check_url: Some("https://example.test/1".to_owned()),
         };
 
-
-        let resumed = BackendContext::new(
-            "http://127.0.0.1:8080".into(),
-            "11111111-1111-4111-8111-111111111111".into(),
-            "22222222-2222-4222-8222-222222222222".into(),
-            None,
-            settings::ConversionProfile::Standard,
-            conversion_service::OcrOptions::default(),
-        )
-        .resuming_fallback(uncertain.clone());
+        let resumed = context(None).resuming_fallback(uncertain.clone());
         assert_eq!(resumed.phase, BackendPhase::DatalabFallback);
         assert_eq!(resumed.fallback, Some(uncertain));
 
-        // The recorded provider decides which endpoint a resume polls, not
-        // whatever the pipeline setting happens to be now.
-        let pipeline_resume = BackendContext::new(
-            "http://127.0.0.1:8080".into(),
-            "11111111-1111-4111-8111-111111111111".into(),
-            "33333333-3333-4333-8333-333333333333".into(),
-            None,
-            settings::ConversionProfile::Standard,
-            conversion_service::OcrOptions::default(),
-        )
-        .resuming_fallback(FallbackContext {
+        // The recorded provider decides which endpoint a resume polls.
+        let pipeline_resume = context(None).resuming_fallback(FallbackContext {
             provider: DATALAB_PIPELINE_PROVIDER.to_owned(),
             ..accepted
         });
@@ -2064,25 +1877,9 @@ mod backend_tests {
     }
 
     #[test]
-    fn needs_remote_falls_back_only_for_standard() {
-        assert_eq!(
-            needs_remote_decision(settings::ConversionProfile::Standard),
-            NeedsRemoteDecision::DatalabFallback
-        );
-        assert_eq!(
-            needs_remote_decision(settings::ConversionProfile::LocalOnly),
-            NeedsRemoteDecision::RejectLocalOnly
-        );
-    }
-
-    #[test]
     fn stale_completed_output_removes_only_the_new_collision_safe_path() {
-        let root = std::env::temp_dir().join(format!(
-            "tool-kit-stale-backend-output-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         let existing = root.join("report.md");
         let created = root.join("report (1).md");
         std::fs::write(&existing, b"existing").unwrap();
@@ -2107,8 +1904,6 @@ mod backend_tests {
             completed_output_if_current(2, 1, Err("stale network error".into())),
             None
         );
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2200,9 +1995,7 @@ mod backend_tests {
         assert!(serialized.get("outputText").is_none());
     }
 
-    /// The service folds the OCR options into the replay fingerprint, so a
-    /// recovered submit that reads them from Settings resubmits the stored
-    /// idempotency key under a changed fingerprint and 409s forever.
+    /// The OCR options are in the replay fingerprint, so reading Settings 409s.
     #[test]
     fn a_recovered_context_carries_the_recorded_ocr_options() {
         let recorded = conversion_service::OcrOptions::from_wire(false, "Uniwise\nDatalab");
@@ -2215,8 +2008,7 @@ mod backend_tests {
             recorded,
         );
 
-        // Settings have since gone back to the defaults. The context must not
-        // follow them, because the submit reads it and nothing else.
+        // Settings are back at the defaults, and the context must not follow.
         let now = settings::Settings::default();
         assert!(now.language_correction && now.custom_words.is_empty());
         assert!(!context.ocr.language_correction);
@@ -2226,12 +2018,8 @@ mod backend_tests {
 
     #[test]
     fn invalid_recovery_rows_are_rejected_before_resume_and_cleanup() {
-        let root = std::env::temp_dir().join(format!(
-            "tool-kit-recovery-validation-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         let source = root.join("report.pdf");
         std::fs::write(&source, b"pdf").unwrap();
         let source = std::fs::canonicalize(source).unwrap();
@@ -2242,27 +2030,14 @@ mod backend_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        let mut entry = history::InFlightEntry {
-            source_path: source.to_string_lossy().into_owned(),
-            file_name: "report.pdf".into(),
-            output_dir: root.to_string_lossy().into_owned(),
-            backend_url: "http://127.0.0.1:8080".into(),
-            client_run_id: "11111111-1111-4111-8111-111111111111".into(),
-            idempotency_key: "22222222-2222-4222-8222-222222222222".into(),
-            backend_job_id: Some("33333333-3333-4333-8333-333333333333".into()),
-            fallback_provider: None,
-            fallback_request_id: None,
-            fallback_check_url: None,
-            conversion_profile: "standard".into(),
-            ocr_language_correction: true,
-            ocr_custom_words: String::new(),
-            source_mtime,
-            created_at: 1,
-        };
+        let mut entry = ledger_entry("http://127.0.0.1:8080");
+        entry.source_path = source.to_string_lossy().into_owned();
+        entry.output_dir = root.to_string_lossy().into_owned();
+        entry.backend_job_id = Some("33333333-3333-4333-8333-333333333333".into());
+        entry.source_mtime = source_mtime;
         let live = "http://127.0.0.1:8080";
         assert!(validate_recovery_entry(&entry, live).is_ok());
-        // The one keychain slot holds one token. A row bound to an origin the
-        // user has since replaced must not receive the new credential.
+        // One slot, one token: a replaced origin must not get the new one.
         assert!(recovery_origin_still_configured(
             &entry,
             "http://127.0.0.1:8080/"
@@ -2286,38 +2061,12 @@ mod backend_tests {
         assert!(validate_recovery_entry(&entry, live)
             .unwrap_err()
             .contains("source changed or is missing"));
-        let _ = std::fs::remove_dir_all(root);
     }
 
-    fn ledger_entry(recorded_origin: &str) -> history::InFlightEntry {
-        history::InFlightEntry {
-            source_path: "/tmp/report.pdf".into(),
-            file_name: "report.pdf".into(),
-            output_dir: "/tmp".into(),
-            backend_url: recorded_origin.into(),
-            client_run_id: "11111111-1111-4111-8111-111111111111".into(),
-            idempotency_key: "22222222-2222-4222-8222-222222222222".into(),
-            backend_job_id: None,
-            fallback_provider: None,
-            fallback_request_id: None,
-            fallback_check_url: None,
-            conversion_profile: "standard".into(),
-            ocr_language_correction: true,
-            ocr_custom_words: String::new(),
-            source_mtime: 1,
-            created_at: 1,
-        }
-    }
-
-    /// The bug this alias exists for: the kernel hands out a different port on
-    /// every launch, so comparing live URLs abandoned every in-flight row on
-    /// every relaunch and left its Retry button dead.
+    /// A different port every launch, so comparing live URLs abandons every row.
     #[test]
     fn a_sidecar_row_survives_the_port_the_next_launch_is_given() {
-        // The port is no longer an argument, so this is now a property of the
-        // type rather than of the value passed in. The test stays because the
-        // guarantee it names is the one that broke Retry, and a future arm
-        // that reached for a live URL again would fail right here.
+        // A property of the type now. An arm reaching for a live URL fails here.
         let recorded = backend_host::ledger_origin(&backend_host::Deployment::Sidecar);
         assert_eq!(recorded, backend_host::SIDECAR_ALIAS);
         let entry = ledger_entry(recorded);
@@ -2327,14 +2076,16 @@ mod backend_tests {
         assert!(recovery_origin_still_configured(&entry, now));
     }
 
-    /// Manual mode is untouched: the user names the service, so a row bound to
-    /// one they have moved away from must not be handed the current token.
+    /// Manual mode names the service, so a row bound to one the user moved away
+    /// from must not be handed the current token.
     #[test]
     fn a_manual_row_still_refuses_a_service_the_user_replaced() {
         let manual = |url: &str| backend_host::Deployment::Manual {
             origin: url.to_string(),
         };
-        let entry = ledger_entry(backend_host::ledger_origin(&manual("http://127.0.0.1:8080")));
+        let entry = ledger_entry(backend_host::ledger_origin(&manual(
+            "http://127.0.0.1:8080",
+        )));
 
         assert!(recovery_origin_still_configured(
             &entry,
@@ -2346,8 +2097,8 @@ mod backend_tests {
         ));
     }
 
-    /// The alias names the service, it does not locate it, so recovery has to
-    /// validate the origin the resumed requests are actually going to.
+    /// The alias names the service without locating it, so recovery validates
+    /// the origin the resumed requests go to.
     #[test]
     fn recovery_validates_the_live_origin_and_never_the_alias() {
         let entry = ledger_entry(backend_host::SIDECAR_ALIAS);
@@ -2355,8 +2106,7 @@ mod backend_tests {
         assert!(validate_recovery_entry(&entry, backend_host::SIDECAR_ALIAS)
             .unwrap_err()
             .contains("Backend URL"));
-        // Fails later, on the source that does not exist, which is proof the
-        // origin passed.
+        // Fails later, on the missing source, which proves the origin passed.
         assert!(validate_recovery_entry(&entry, "http://127.0.0.1:64707")
             .unwrap_err()
             .contains("source changed or is missing"));
@@ -2364,9 +2114,7 @@ mod backend_tests {
 
     #[test]
     fn a_request_follows_the_service_to_the_port_it_restarted_on() {
-        // The supervisor relaunched the child on a fresh ephemeral port. A job
-        // queued against the old one has to follow, or a run that is minutes
-        // from finishing dies against a service that is up and healthy.
+        // A job queued against the old port has to follow the restart.
         assert_eq!(
             request_origin(
                 Ok("http://127.0.0.1:64707".into()),
@@ -2375,9 +2123,7 @@ mod backend_tests {
             "http://127.0.0.1:64707"
         );
 
-        // Mid-restart the host has no port to give. The queued origin keeps the
-        // request shaped the way it is today, and the caller counts the refusal
-        // as one more transient error.
+        // Mid-restart there is no port, so the queued origin stands.
         assert_eq!(
             request_origin(
                 Err("The conversion service is starting.".into()),
@@ -2401,14 +2147,15 @@ mod backend_tests {
 
         refresh_for_retry(&mut context, Ok("http://127.0.0.1:64707"));
 
-        // Nothing else in the tree clears this, so without it Retry re-fails
-        // with the same stale message for the rest of the session.
+        // Nothing else clears this, so without it Retry re-fails all session.
         assert_eq!(context.recovery_blocker, None);
         assert_eq!(context.backend_url, "http://127.0.0.1:64707");
 
-        // A service that is not up yet replaces the verdict rather than letting
-        // the retry run at a port that is no longer listening.
-        refresh_for_retry(&mut context, Err("The conversion service is starting.".into()));
+        // A service that is not up replaces the verdict rather than retrying.
+        refresh_for_retry(
+            &mut context,
+            Err("The conversion service is starting.".into()),
+        );
         assert_eq!(
             context.recovery_blocker.as_deref(),
             Some("The conversion service is starting.")

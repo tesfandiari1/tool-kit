@@ -1,17 +1,8 @@
-/* Tree — a disclosure tree of folders and files.
-
-   The indent is one rung of the spacing grammar: --s3 per level, which is both
-   "items in a list" and AppKit's measured indentationPerLevel. It caps at four
-   levels, because a fifth walks the name off a 300px pane with no error
-   anywhere. See UI.md.
-
-   Nothing here spends colour. The row says place with a surface step, and the
-   twisty and the glyph inherit the row's ink. */
+/* A disclosure tree. The indent is --s3 a level and caps at four, or a deep
+   name walks off the pane. Nothing here spends colour. See UI.md. */
 
 .ui-tree {
-  /* Matching the app's project rows rather than AppKit's 24px source list:
-     disagreeing with the rest of this window is worse than disagreeing with
-     the platform. One property to change if it reads wrong in the app. */
+  /* The app's project rows, not AppKit's 24px source list. */
   --tree-row-h: 32px;
 }
 
@@ -25,8 +16,7 @@
   gap: var(--s1);
 }
 
-/* A nested group is part of the row above it, not a sibling of it, so it sits
-   at the same --s1 the rows keep between each other. */
+/* A group belongs to the row above it, at the same --s1. */
 .ui-tree__group {
   margin-block-start: var(--s1);
 }
@@ -45,14 +35,12 @@
   transition: background var(--dur-fast) var(--ease);
 }
 
-/* One state, and it is a surface rather than the accent: cobalt is the control
-   you press, and a selected row is a statement of place. */
+/* A surface step, never cobalt: that is the control you press. */
 .ui-tree__item.is-selected > .ui-tree__row {
   background: var(--surface-raised);
 }
 
-/* The ring belongs on the row, not on the item: the item also contains its
-   whole open subtree, and a ring around that is a box the size of the pane. */
+/* On the row, not the item: the item contains its whole open subtree. */
 .ui-tree__item:focus-visible {
   outline: none;
 }
@@ -61,9 +49,7 @@
   outline-offset: -2px;
 }
 
-/* Drawn with a border rather than shipped as an icon, the same technique
-   Disclosure uses, so it inherits the row's colour and cannot be given a tint
-   of its own. The slot is held on leaves too. */
+/* A border rather than an icon, so it inherits the row's ink. */
 .ui-tree__twisty {
   position: relative;
   flex: none;
@@ -73,9 +59,8 @@
   place-items: center;
   color: var(--ink-3);
 }
-/* The triangle is one indent rung wide, and a 12px target is one a pointer
-   misses. This hands it the row's full height and part of the gap beside it,
-   which is dead space in Finder too. It paints nothing and moves nothing. */
+/* A 12px target is one a pointer misses, so this takes the row's height and
+   the dead gap beside it. */
 .ui-tree__twisty.is-branch::after {
   content: "";
   position: absolute;
@@ -95,10 +80,8 @@
   transform: rotate(90deg) translateY(1px);
 }
 
-/* A fixed slot, the width of the glyph it usually holds. The caller swaps that
-   glyph for a status dot while a job runs, and a slot sized by its content
-   would shift the whole row nine pixels when the job starts and back when it
-   ends — the reflow rule 2 exists to forbid. */
+/* Fixed, because the caller swaps the glyph for a status dot mid-run and a
+   content-sized slot would shift the row nine pixels (UI.md rule 2). */
 .ui-tree__icon {
   flex: none;
   inline-size: var(--s4);
@@ -124,8 +107,12 @@
   color: var(--ink);
 }
 
+/* Content-sized, capped at half the row. The cap is against `.ui-tree__row`,
+   which has a definite width, or the percentage measures this box. */
 .ui-tree__end {
-  flex: none;
+  flex: 0 1 auto;
+  min-inline-size: 0;
+  max-inline-size: 50%;
   display: flex;
   align-items: center;
   gap: var(--s2);

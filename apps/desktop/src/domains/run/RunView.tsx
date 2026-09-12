@@ -20,6 +20,7 @@ import {
   Panel,
   Row,
   Segmented,
+  Select,
   Spacer,
   Stack,
   StatusDot,
@@ -27,22 +28,18 @@ import {
   Well,
 } from "@ui";
 import { ACTIVE } from "@/app/types";
-import type { Job, JobId, Scan, Settings } from "@/app/types";
+import type { InputNode, Job, JobId, ProjectSummary, Scan, Settings } from "@/app/types";
 import { basename, fmtElapsed } from "@/app/format";
 import { FlowLayout } from "@/shell/FlowLayout";
 import { jobDetailItems, jobDetailText } from "./details";
 import { JOBS, type JobDef } from "./jobs";
 import { runServiceDescription } from "./plan";
 
-/// A job's status mapped onto the design system's tones. The library knows
-/// nothing about our five statuses, and this one line is the whole cost of
-/// keeping it that way. The queue specimen uses the dot, not a glyph: colour
-/// is the signal, and the slot never changes size.
+/// Five job statuses onto three library tones. `@ui` knows neither.
 function toneFor(status: Job["status"]) {
   if (status === "done") return "pass" as const;
   if (status === "failed") return "fault" as const;
-  // Queued is waiting for a permit, not being worked on. Amber here would
-  // claim a provider is already spending money on it.
+  // Queued waits for a permit: amber would claim a provider is spending.
   if (status === "queued") return "queued" as const;
   return "live" as const;
 }
@@ -51,6 +48,8 @@ export function RunView({
   settings,
   scan,
   jobs,
+  runJobs,
+  projects,
   dragging,
   now,
   running,
@@ -59,17 +58,13 @@ export function RunView({
   hint,
   hintActionable,
   note,
-  finished,
-  total,
-  doneCount,
-  failedCount,
   job,
   selectedId,
-  expanded,
   persist,
   onAddFiles,
   onAddFolders,
   onPickOutput,
+  onPickProject,
   onRemoveInput,
   onClearInputs,
   onRun,
@@ -85,6 +80,10 @@ export function RunView({
   settings: Settings;
   scan: Scan;
   jobs: Job[];
+  /// This run's rows: the queue keeps every row of the session.
+  runJobs: Job[];
+  /// Empty only before onboarding binds a workspace.
+  projects: ProjectSummary[];
   dragging: boolean;
   now: number;
   running: boolean;
@@ -94,21 +93,14 @@ export function RunView({
   /// When false, the hint is status prose, not a control `onHint` answers.
   hintActionable: boolean;
   note: string | null;
-  finished: number;
-  total: number;
-  doneCount: number;
-  failedCount: number;
   job: JobDef;
-  /// The open document's output path, so the queue can mark which row you are
-  /// reading. Null whenever nothing is open.
+  /// The open document's output path, so the queue can mark its row.
   selectedId: string | null;
-  /// A document is open, so the column is a workspace rather than a launcher.
-  /// The controls above the queue compress and the queue takes the rest.
-  expanded: boolean;
   persist: (patch: Partial<Settings>) => void;
   onAddFiles: () => void;
   onAddFolders: () => void;
   onPickOutput: () => void;
+  onPickProject: (rel: string) => void;
   onRemoveInput: (path: string) => void;
   onClearInputs: () => void;
   onRun: () => void;
@@ -122,141 +114,18 @@ export function RunView({
   onHint: () => void;
 }) {
   const inputCount = settings.jobType === "transcribe" ? scan.transcribe : scan.convert;
+  const total = jobs.length;
+  const doneCount = jobs.filter((j) => j.status === "done").length;
+  const failedCount = jobs.filter((j) => j.status === "failed").length;
+  // Progress is this run's. Retry and Finder act on the whole list.
+  const runTotal = runJobs.length;
+  const finished = runJobs.filter(
+    (j) => j.status === "done" || j.status === "failed",
+  ).length;
 
   const jobPanel = (
-    <JobPanel
-      settings={settings}
-      scan={scan}
-      job={job}
-      expanded={expanded}
-      running={running}
-      canRun={canRun}
-      runLabel={runLabel}
-      hint={hint}
-      hintActionable={hintActionable}
-      note={note}
-      finished={finished}
-      total={total}
-      persist={persist}
-      onRun={onRun}
-      onStop={onStop}
-      onHint={onHint}
-    />
-  );
-
-  const queuePanel =
-    jobs.length > 0 ? (
-      <Panel
-        className="queue"
-        title="Queue"
-        bare
-        actions={
-          <Row gap={2}>
-            {!running && failedCount > 0 && (
-              <Button variant="link" onClick={onRetryFailed}>
-                Retry {failedCount} failed
-              </Button>
-            )}
-            {!running && doneCount > 0 && settings.outputDir && (
-              <Button variant="link" onClick={onRevealOutput}>
-                Show in Finder
-              </Button>
-            )}
-            <Badge square>{total}</Badge>
-          </Row>
-        }
-      >
-        <JobList
-          jobs={jobs}
-          now={now}
-          selectedId={selectedId}
-          onOpen={onPreview}
-          onCopy={onCopy}
-          onReveal={onRevealJob}
-          onRetry={onRetryJob}
-        />
-      </Panel>
-    ) : null;
-
-  const inputs = (
-    <>
-      <InputPicker
-        inputs={settings.inputs}
-        count={inputCount}
-        dragging={dragging}
-        onAddFiles={onAddFiles}
-        onAddFolders={onAddFolders}
-        onRemove={onRemoveInput}
-        onClear={onClearInputs}
-      />
-      <FolderField
-        path={settings.outputDir}
-        placeholder="Choose where results are saved"
-        onPick={onPickOutput}
-      />
-    </>
-  );
-
-  /// Compact launcher: inputs and queue scroll; Job (with Run) stays pinned.
-  /// Workspace: one column, queue grows, controls compress via `.flow--workspace`.
-  if (!expanded) {
-    return (
-      <FlowLayout foot={jobPanel}>
-        {inputs}
-        {queuePanel}
-      </FlowLayout>
-    );
-  }
-
-  return (
-    <FlowLayout variant="workspace">
-      {inputs}
-      {jobPanel}
-      {queuePanel}
-    </FlowLayout>
-  );
-}
-
-function JobPanel({
-  settings,
-  scan,
-  job,
-  expanded,
-  running,
-  canRun,
-  runLabel,
-  hint,
-  hintActionable,
-  note,
-  finished,
-  total,
-  persist,
-  onRun,
-  onStop,
-  onHint,
-}: {
-  settings: Settings;
-  scan: Scan;
-  job: JobDef;
-  expanded: boolean;
-  running: boolean;
-  canRun: boolean;
-  runLabel: string;
-  hint: string | null;
-  /// When false, the hint is status prose, not a control `onHint` answers.
-  hintActionable: boolean;
-  note: string | null;
-  finished: number;
-  total: number;
-  persist: (patch: Partial<Settings>) => void;
-  onRun: () => void;
-  onStop: () => void;
-  onHint: () => void;
-}) {
-  return (
-    /* The message slot sits outside the Panel: it holds two lines open whether
-       or not it has anything to say, and that reservation reads as a failure
-       inside a border. See `.job-msg` in App.css. */
+    /* Outside the Panel: two lines held open inside a border read as a
+       failure. */
     <>
       <Panel title="Job">
         <Stack gap={3}>
@@ -277,8 +146,7 @@ function JobPanel({
                 };
               })}
             />
-            {/* The line belongs to the control above it, so it sits closer to
-                the segmented than the segmented sits to Run. */}
+            {/* Closer to the control above it than that is to Run (rule 4). */}
             <Text size="xs" tone="faint" className="run-desc">
               {runServiceDescription({
                 description: job.desc,
@@ -290,24 +158,22 @@ function JobPanel({
             </Text>
           </Stack>
           <Row gap={2} align="stretch" className="job-run">
-            {/* `lg` is the launcher's single actuator. With a document open the
-                queue is what the column is for, so Run steps down a size rather
-                than staying the loudest thing on screen. */}
+            {/* The column's single actuator, at one size. */}
             <Button
               variant="primary"
-              size={expanded ? "md" : "lg"}
+              size="lg"
               block
               busy={running}
               disabled={!canRun}
               onClick={onRun}
               icon={running ? <CircleNotchIcon className="spin" weight="bold" /> : <PlayIcon weight="fill" />}
             >
-              {running ? `Working… ${String(finished)} of ${String(total)}` : runLabel}
+              {running ? `Working… ${String(finished)} of ${String(runTotal)}` : runLabel}
             </Button>
             {running && (
               <Button
                 variant="quiet"
-                size={expanded ? "md" : "lg"}
+                size="lg"
                 onClick={onStop}
                 title="Stop this run"
                 icon={<StopIcon weight="fill" />}
@@ -319,7 +185,7 @@ function JobPanel({
         </Stack>
       </Panel>
       <div className="job-msg">
-        {running && <Meter value={total ? finished / total : 0} label="Run progress" />}
+        {running && <Meter value={runTotal ? finished / runTotal : 0} label="Run progress" />}
         {!running && hint && hintActionable && (
           <button type="button" className="hint" onClick={onHint}>
             <WarningCircleIcon weight="fill" />
@@ -344,6 +210,105 @@ function JobPanel({
       </div>
     </>
   );
+
+  const queuePanel =
+    jobs.length > 0 ? (
+      <Panel
+        className="queue"
+        title="Queue"
+        bare
+        actions={
+          <Row gap={2}>
+            {!running && failedCount > 0 && (
+              <Button variant="link" onClick={onRetryFailed}>
+                Retry {failedCount} failed
+              </Button>
+            )}
+            {!running && doneCount > 0 && (
+              <Button variant="link" onClick={onRevealOutput}>
+                Show in Finder
+              </Button>
+            )}
+            <Badge square>{total}</Badge>
+          </Row>
+        }
+      >
+        <JobList
+          jobs={jobs}
+          now={now}
+          selectedId={selectedId}
+          onOpen={onPreview}
+          onCopy={onCopy}
+          onReveal={onRevealJob}
+          onRetry={onRetryJob}
+        />
+      </Panel>
+    ) : null;
+
+  const inputs = (
+    <>
+      <InputPicker
+        inputs={settings.inputs}
+        nodes={scan.nodes}
+        jobType={settings.jobType}
+        count={inputCount}
+        dragging={dragging}
+        onAddFiles={onAddFiles}
+        onAddFolders={onAddFolders}
+        onRemove={onRemoveInput}
+        onClear={onClearInputs}
+      />
+      {projects.length > 0 ? (
+        <ProjectField
+          projects={projects}
+          value={settings.activeProjectPath}
+          onPick={onPickProject}
+        />
+      ) : (
+        <FolderField
+          path={settings.outputDir}
+          placeholder="Choose where results are saved"
+          onPick={onPickOutput}
+        />
+      )}
+    </>
+  );
+
+  /// Inputs and queue scroll, and the Job panel stays pinned. One layout,
+  /// because Run owns the end pane whole whenever it is on screen.
+  return (
+    <FlowLayout foot={jobPanel}>
+      {inputs}
+      {queuePanel}
+    </FlowLayout>
+  );
+}
+
+
+/// A project, not a folder: the run writes beside the imported copy, which is
+/// what pairs a source and its result on one tree row.
+function ProjectField({
+  projects,
+  value,
+  onPick,
+}: {
+  projects: ProjectSummary[];
+  value: string | null;
+  onPick: (rel: string) => void;
+}) {
+  return (
+    <Panel title="Save to">
+      <Select
+        label="Project"
+        hint="Dropped files are filed here, and results land beside them."
+        value={value ?? ""}
+        onChange={(e) => {
+          onPick(e.target.value);
+        }}
+        options={projects.map((p) => ({ value: p.path, label: p.title }))}
+      />
+    </Panel>
+  );
 }
 
 function FolderField({
@@ -367,15 +332,23 @@ function FolderField({
       <button type="button" className="folder-hit" onClick={onPick} title={path ?? placeholder}>
         <Row gap={2}>
           {path ? <FolderOpenIcon weight="fill" /> : <FolderIcon />}
-          <Mono truncate>{path ? (path.split(/[\\/]/).filter(Boolean).pop() ?? path) : placeholder}</Mono>
+          <Mono truncate>{path ? basename(path) : placeholder}</Mono>
         </Row>
       </button>
     </Panel>
   );
 }
 
+/// The drop well: what a run would take out of the selection, which a dropped
+/// folder's name cannot answer.
+///
+/// Rows are built from `inputs` and only enriched by `scan.nodes`, which empties
+/// on every unrelated refresh. The nesting lights up, it does not appear
+/// (UI.md rule 2).
 function InputPicker({
   inputs,
+  nodes,
+  jobType,
   count,
   dragging,
   onAddFiles,
@@ -384,6 +357,8 @@ function InputPicker({
   onClear,
 }: {
   inputs: string[];
+  nodes: InputNode[];
+  jobType: JobId;
   count: number;
   dragging: boolean;
   onAddFiles: () => void;
@@ -391,79 +366,149 @@ function InputPicker({
   onRemove: (p: string) => void;
   onClear: () => void;
 }) {
-  const isFile = (p: string) => /\.[^/\\]+$/.test(p);
+  const described = new Map(nodes.map((node) => [node.path, node]));
+  // Finder's guess until the host answers.
+  const looksLikeFile = (p: string) => /\.[^/\\]+$/.test(p);
+
   return (
     <Panel
       className="drop"
       title="Input"
-      actions={count > 0 ? <Badge square>{count}</Badge> : undefined}
+      actions={
+        <Row gap={2}>
+          {inputs.length > 0 && (
+            <>
+              <Button variant="link" onClick={onClear}>
+                Clear
+              </Button>
+              {/* Holds its slot once the panel has anything in it, so a scan
+                  landing does not resize the header (UI.md rule 2). */}
+              <Badge square>{count > 0 ? count : ""}</Badge>
+            </>
+          )}
+        </Row>
+      }
     >
       <Stack gap={3}>
-        <Well className={dragging ? "is-dropping" : undefined} selectable={false}>
+        {/* The well is the picker. A click on a row belongs to that row. */}
+        <Well
+          className={`drop-well${dragging ? " is-dropping" : ""}`}
+          selectable={false}
+          onClick={(e) => {
+            if (e.target instanceof Element && e.target.closest("button, .drop-node")) return;
+            onAddFiles();
+          }}
+        >
           {inputs.length === 0 ? (
-            <div className="drop-empty">
-              <Text size="sm" tone="faint">
-                Drop files or folders here
+            <button type="button" className="drop-empty" onClick={onAddFiles}>
+              <FolderOpenIcon weight="light" aria-hidden />
+              <Text size="sm" tone="default">
+                Choose files or folders
               </Text>
               <Text size="xs" tone="ghost" className="drop-hint">
-                The job is matched to what you drop
+                Or drop them here. The job is matched to what you drop.
               </Text>
-            </div>
+            </button>
           ) : (
-            <Stack gap={3}>
-              {inputs.map((p) => (
-                <Row key={p} gap={2} className="drop-item" title={p}>
-                  {isFile(p) ? <FileTextIcon /> : <FolderOpenIcon weight="fill" />}
-                  <Mono size="xs" truncate>
-                    {basename(p)}
-                  </Mono>
-                  <Spacer />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    iconOnly
-                    icon={<XIcon />}
-                    title="Remove"
-                    aria-label="Remove"
-                    onClick={() => {
-                      onRemove(p);
-                    }}
-                  />
-                </Row>
+            <ul className="drop-list">
+              {inputs.map((path) => (
+                <InputRow
+                  key={path}
+                  path={path}
+                  node={described.get(path)}
+                  fallbackIsDir={!looksLikeFile(path)}
+                  jobType={jobType}
+                  onRemove={onRemove}
+                />
               ))}
-            </Stack>
+            </ul>
           )}
         </Well>
-        {/* Wraps because the column can be a third of the window: Clear drops
-            to its own line there rather than pushing past the panel. */}
+        {/* Wraps, or the second button pushes past the panel. */}
         <Row gap={2} wrap>
           <Button size="sm" icon={<FileTextIcon />} onClick={onAddFiles}>
-            Files
+            {inputs.length > 0 ? "Add files" : "Files"}
           </Button>
           <Button size="sm" icon={<FolderOpenIcon />} onClick={onAddFolders}>
             Folder
           </Button>
-          {inputs.length > 0 && (
-            <>
-              <Spacer />
-              <Button size="sm" variant="ghost" onClick={onClear}>
-                Clear
-              </Button>
-            </>
-          )}
         </Row>
       </Stack>
     </Panel>
   );
 }
 
-/// The queue, once a document is open, is how you move between results — so it
-/// is a real listbox and not a log you happen to be able to click.
-///
-/// Arrows move focus and Enter opens, rather than selection following focus the
-/// way `Tabs` does. That rule bends exactly where a panel costs something:
-/// switching tab is free, but opening a result reads a file off disk and
-/// resizes the window, so walking past four rows must not do it four times.
+/// One dropped path and what a run would take from it. Matches list flat: the
+/// well answers "what gets parsed", which a tree puts three clicks away.
+function InputRow({
+  path,
+  node,
+  fallbackIsDir,
+  jobType,
+  onRemove,
+}: {
+  path: string;
+  node: InputNode | undefined;
+  fallbackIsDir: boolean;
+  jobType: JobId;
+  onRemove: (p: string) => void;
+}) {
+  const isDir = node?.isDir ?? fallbackIsDir;
+  const matches = node?.matches ?? [];
+  const taken = matches.filter((m) => m.job === jobType).length;
+  // Still shown: a vanished row reads as the drop having missed it.
+  const inactive = node !== undefined && !isDir && node.job !== jobType;
+
+  return (
+    <li className="drop-node">
+      <div className="drop-item" title={path}>
+        {isDir ? <FolderOpenIcon weight="fill" /> : <FileTextIcon />}
+        <Mono size="xs" truncate tone={inactive ? "ghost" : "ink"}>
+          {node?.name ?? basename(path)}
+        </Mono>
+        <Spacer />
+        {/* Holds its slot whether or not it reads, so the well does not
+            reflow when a scan lands (UI.md rule 2). */}
+        <Mono size="xs" tone={taken > 0 ? "default" : "ghost"} className="drop-count">
+          {isDir && node !== undefined ? String(taken) : ""}
+        </Mono>
+        <Button
+          variant="ghost"
+          size="sm"
+          iconOnly
+          icon={<XIcon />}
+          title="Remove"
+          aria-label={`Remove ${node?.name ?? basename(path)}`}
+          onClick={() => {
+            onRemove(path);
+          }}
+        />
+      </div>
+      {matches.length > 0 && (
+        <ul className="drop-matches">
+          {matches.map((match) => (
+            <li key={match.path} className="drop-match" title={match.path}>
+              <Mono size="xs" truncate tone={match.job === jobType ? "default" : "ghost"}>
+                {match.name}
+              </Mono>
+            </li>
+          ))}
+          {node !== undefined && node.truncated > 0 && (
+            <li className="drop-match">
+              <Text size="xs" tone="ghost">
+                and {node.truncated} more
+              </Text>
+            </li>
+          )}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+/// A real listbox, not a log you can click. Arrows move focus and Enter opens,
+/// unlike `Tabs`: opening a result reads a file off disk, so walking past four
+/// rows must not do it four times.
 function JobList({
   jobs,
   now,
@@ -492,9 +537,7 @@ function JobList({
     opts[Math.min(Math.max(i, 0), opts.length - 1)].focus();
   };
 
-  /// Which row holds focus, read from the row rather than the focused element:
-  /// a click lands on an action button, and the arrows still have to work from
-  /// there.
+  /// Read from the row, not the focused element: a click lands on a button.
   const current = () => {
     const row = document.activeElement?.closest(".job");
     if (!row) return -1;
@@ -510,8 +553,7 @@ function JobList({
       className="job-list"
       role="listbox"
       aria-label="Results"
-      /// A list, not a ring: the arrows stop at the ends and Home/End jump to
-      /// them, so holding a key cannot cycle you past the row you were reading.
+      /// A list, not a ring: holding a key cannot cycle past the open row.
       onKeyDown={(e) => {
         const i = current();
         if (i < 0) return;
@@ -536,9 +578,8 @@ function JobList({
           job={j}
           now={now}
           selected={i === selectedIndex}
-          /// Roving tabindex: the queue is one stop in the tab order and the
-          /// arrows move inside it. The row you are reading is the way back in,
-          /// or the first row when nothing is open.
+          /// Roving tabindex: the queue is one stop and the arrows move
+          /// inside it.
           stop={i === (selectedIndex === -1 ? 0 : selectedIndex)}
           onOpen={() => {
             onOpen(j);
@@ -591,13 +632,10 @@ function JobRow({
       ? "muted"
       : "ghost";
   return (
-    /* Not a <button>: the row already holds three of them, and nesting is
-       invalid. The name is the primary control and the actions are its
-       siblings, the same shape `Tabs` uses for a tab and its close control.
-       The rest of the row forwards a click to that control so the whole row
-       stays the target it looks like. */
+    /* Not a <button>: the row holds three already and nesting is invalid. The
+       rest of the row forwards its click to the name. */
     <div
-      className={`job ${job.status}${selected ? " is-selected" : ""}`}
+      className={`job${selected ? " is-selected" : ""}`}
       onClick={(e) => {
         if (!done) return;
         if (e.target instanceof Element && e.target.closest("button")) return;
@@ -610,9 +648,8 @@ function JobRow({
           type="button"
           role="option"
           aria-selected={selected}
-          /// A row still queued or in flight has nothing to open yet. It stays
-          /// in the listbox so the arrows walk the whole queue, and says so
-          /// rather than answering a click with silence.
+          /// Nothing to open yet. It stays in the listbox so the arrows walk
+          /// the whole queue, and says so rather than fall silent.
           aria-disabled={!done}
           tabIndex={stop ? 0 : -1}
           className="job-open"
@@ -647,10 +684,8 @@ function JobRow({
       <Mono size="xs" tone={active ? "ink" : "ghost"} className="job-time">
         {time}
       </Mono>
-      {/* Out of the tab order on purpose, the way a tab's close control is:
-          the queue is one stop, and every action here has a keyboard route
-          elsewhere — the open document's own header copies and reveals it, and
-          the results head retries the failures. */}
+      {/* Out of the tab order: every action here has a keyboard route in the
+          document header or the results head. */}
       <div className="job-actions">
         {done && (
           <>

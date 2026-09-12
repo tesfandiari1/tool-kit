@@ -16,7 +16,6 @@ function job(id: number, sourcePath: string, status: Status): Job {
     failure: null,
     outputPath: null,
     error: null,
-    createdAt: 0,
     startedAt: null,
   };
 }

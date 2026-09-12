@@ -17,41 +17,26 @@ import type {
 } from "./types";
 import type { ServiceRequestPayload, ServiceResponsePayload } from "./api/transport";
 
-/// Typed IPC boundary. Views import `commands`, never `invoke` with a raw
-/// string. This module is the only frontend door to native work, same shape as
-/// Yaak/Helios `lib/ipc`; `@/platform/host` covers the other host surfaces
-/// (dialogs, window, drag-drop). Conversion-service HTTP stays in Rust (M6),
-/// and the OpenAPI-typed client for it lives in `./api`.
+/// Typed IPC boundary. `@/platform/host` covers dialogs, window, drag-drop.
 export const commands = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: async (settings: Settings): Promise<void> => {
     await invoke("save_settings", { settings });
   },
-  /// Where a workspace should go when the user has not said. The host picks
-  /// it; first run only confirms it.
   suggestedWorkspacePath: () => invoke<string>("suggested_workspace_path"),
-  /// Whether a workspace is already there. Read-only: nothing is written until
-  /// `setupWorkspace`, so first run can name what the button is about to do
-  /// before the user commits to it.
+  /// Read-only: nothing is written until `setupWorkspace`.
   inspectWorkspacePath: (path: string) => invoke<boolean>("inspect_workspace_path", { path }),
-  /// Creates the workspace, or adopts the one already there, and guarantees an
-  /// Inbox project either way.
+  /// Creates or adopts the workspace, and guarantees a catch-all project.
   setupWorkspace: (path: string) => invoke<WorkspaceInfo>("setup_workspace", { path }),
-  /// Adopts the configured workspace on an ordinary launch. Answers with a
-  /// `welcomePath` only on the launch that actually wrote the file, so the
-  /// welcome document opens once and never greets the user again.
+  /// Answers with a `welcomePath` only on the launch that wrote the file.
   ensureWorkspace: () => invoke<WorkspaceInfo | null>("ensure_workspace"),
   listProjects: () => invoke<ProjectSummary[]>("list_projects"),
   createProject: (title: string) => invoke<ProjectSummary>("create_project", { title }),
-  /// One directory level, lazily. `rel` is workspace-relative, so the webview
-  /// never does string surgery on a filesystem path.
-  ///
-  /// Rejects with a `ListError`, not a string: see `listFailure` in
-  /// `useProjectTree`.
+  /// One directory level, `rel` workspace-relative. Rejects with a `ListError`,
+  /// not a string: see `listFailure` in `useProjectTree`.
   listProjectFiles: (rel: string) => invoke<DirListing>("list_project_files", { rel }),
-  /// True while the app runs the conversion service itself. The bearer token
-  /// is then the host's own, minted per launch for its child, so Settings
-  /// offers no field for it and `setSecret("backend", …)` is refused.
+  /// While true the token is the host's own, and `setSecret("backend", …)` is
+  /// refused.
   appOwnsBackend: () => invoke<boolean>("app_owns_backend"),
   secretStatus: () => invoke<SecretStatus>("secret_status"),
   setSecret: async (provider: SecretId, value: string): Promise<void> => {
@@ -59,15 +44,20 @@ export const commands = {
   },
   listJobs: () => invoke<Job[]>("list_jobs"),
   scanInputs: (inputs: string[]) => invoke<Scan>("scan_inputs", { inputs }),
-  runPipeline: (inputs: string[], outputDir: string, jobType: JobId) =>
-    invoke<RunResult>("run_pipeline", { inputs, outputDir, jobType }),
-  /// Which of these folders moved since the tree listed them. One `stat` per
-  /// folder, against a `read_dir` plus a `stat` per entry for a listing, so the
-  /// focus reconcile asks this first and re-lists only what it names.
+  /// No destination argument: the host derives it from the same settings the
+  /// scan's counts came from.
+  runPipeline: (inputs: string[], jobType: JobId) =>
+    invoke<RunResult>("run_pipeline", { inputs, jobType }),
+  /// Answers with the paths to run: a copy for anything from outside, the file
+  /// itself for anything already there.
+  importIntoProject: (inputs: string[], projectRel: string) =>
+    invoke<string[]>("import_into_project", { inputs, projectRel }),
+  /// Moves the file and the result beside it. Rejects during a run.
+  moveToProject: (rel: string, projectRel: string) =>
+    invoke<string>("move_to_project", { rel, projectRel }),
+  /// One `stat` a folder, against a `read_dir` plus a `stat` per entry.
   changedProjectDirs: (known: KnownDir[]) => invoke<string[]>("changed_project_dirs", { known }),
-  /// Convert one file into the folder it already sits in. The host answers
-  /// with a verdict, so the tree renders the answer rather than planning the
-  /// conversion. Never joins a run that is already going.
+  /// Answers a verdict rather than an error. Never joins a run in flight.
   convertOne: (rel: string) => invoke<ConvertOneOutcome>("convert_one", { rel }),
   stopRun: () => invoke<number>("stop_run"),
   retryJob: async (id: number): Promise<void> => {
@@ -77,14 +67,11 @@ export const commands = {
   revealPath: async (path: string): Promise<void> => {
     await invoke("reveal_path", { path });
   },
-  readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
   readDocument: (path: string) => invoke<{ text: string; mtimeMs: number }>("read_document", { path }),
-  /// Copy's reader. Same file, no preview cap: a result too large to open in
-  /// the pane is still worth copying.
+  /// Copy's reader. Same file, no preview cap.
   readDocumentText: (path: string) => invoke<string>("read_document_text", { path }),
-  /// Saves only when the file on disk still has `expectedMtimeMs`; otherwise it
-  /// rejects rather than overwriting an edit made outside the app. Resolves to
-  /// the new mtime, which the caller carries into its next save.
+  /// Rejects unless the file still has `expectedMtimeMs`. Resolves to the new
+  /// mtime, which the caller carries into its next save.
   writeDocument: (path: string, text: string, expectedMtimeMs: number) =>
     invoke<number>("write_document", { path, text, expectedMtimeMs }),
   listHistory: (query: string, limit: number) => invoke<HistoryEntry[]>("list_history", { query, limit }),
@@ -94,23 +81,13 @@ export const commands = {
   quitApp: async (): Promise<void> => {
     await invoke("quit_app");
   },
-  /// One replayed HTTP call against the conversion service. The host resolves
-  /// the base URL, attaches the Keychain bearer token, and streams multipart
-  /// sources from disk, so neither the token nor file bytes reach the webview.
-  /// Only `@/app/api/transport` calls this — it is the `fetch` openapi-fetch
-  /// runs on, not something a view invokes. The generic door refuses Markdown
-  /// artifacts so a large result can never cross IPC as a response body.
+  /// Only `@/app/api/transport` calls this. It refuses Markdown artifacts, so
+  /// a large result never crosses IPC.
   serviceRequest: (request: ServiceRequestPayload) =>
     invoke<ServiceResponsePayload>("service_request", { request }),
-  /// Streams one published Markdown artifact to a collision-safe file in the
-  /// host and returns only its path. Artifact bytes never enter the webview.
-  downloadConversionMarkdown: (conversionId: string, outputDir: string, fileName: string) =>
-    invoke<string>("download_conversion_markdown", { conversionId, outputDir, fileName }),
   onJobUpdated: (handler: (job: Job) => void) => listen<Job>("job-updated", (e) => {
     handler(e.payload);
   }),
-  /// The app menu's Settings… item, at ⌘,. A real menu item rather than a
-  /// webview keydown, which would compete with the editor in the same window.
   onOpenSettings: (handler: () => void) => listen("open-settings", () => {
     handler();
   }),

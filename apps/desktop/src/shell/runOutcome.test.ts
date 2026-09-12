@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Job, Status } from "@/app/types";
-import { autoOpenTarget, newlyDone, terminalIds } from "./runOutcome";
+import { autoOpenTarget, newlyDone, resultDirs, terminalIds } from "./runOutcome";
 
 function job(id: number, status: Status, outputPath: string | null = `/out/${String(id)}.md`): Job {
   return {
@@ -17,7 +17,6 @@ function job(id: number, status: Status, outputPath: string | null = `/out/${Str
     failure: null,
     outputPath: status === "done" ? outputPath : null,
     error: null,
-    createdAt: 0,
     startedAt: null,
   };
 }
@@ -81,5 +80,34 @@ describe("autoOpenTarget", () => {
   it("refuses a done job that wrote nowhere", () => {
     const wrote = { ...job(1, "done"), outputPath: null };
     expect(autoOpenTarget(new Set(), [wrote])).toBeNull();
+  });
+});
+
+describe("resultDirs", () => {
+  function wrote(id: number, outputPath: string): Job {
+    return { ...job(id, "done"), outputPath };
+  }
+
+  it("names the folder a result landed in, not the project it was filed under", () => {
+    // An imported folder keeps its shape, so the run wrote a level down from
+    // the active project and opening that project alone shows nothing new.
+    expect(resultDirs("/ws", [wrote(1, "/ws/Inbox/Reports/deck.md")])).toEqual([
+      "Inbox",
+      "Inbox/Reports",
+    ]);
+  });
+
+  it("opens every branch a batch wrote to, once", () => {
+    const dirs = resultDirs("/ws", [
+      wrote(1, "/ws/Inbox/a.md"),
+      wrote(2, "/ws/Inbox/Reports/b.md"),
+      wrote(3, "/ws/Inbox/Reports/c.md"),
+    ]);
+    expect(dirs).toEqual(["Inbox", "Inbox/Reports"]);
+  });
+
+  it("skips results written outside the workspace and rows that wrote nothing", () => {
+    const nowhere = { ...job(9, "done"), outputPath: null };
+    expect(resultDirs("/ws", [wrote(1, "/elsewhere/a.md"), nowhere])).toEqual([]);
   });
 });

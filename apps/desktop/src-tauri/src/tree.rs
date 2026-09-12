@@ -1,10 +1,8 @@
 //! One directory level of the library, read straight from disk.
 //!
-//! Disk is authoritative and `.toolkit/index.db` is a rebuildable index over
-//! it, so the tree never asks the database what a folder holds. `workspace.rs`
-//! owns project identity and that database. This module owns the listing rules
-//! and nothing else, which is why it carries no Tauri types: the pairing rule,
-//! the sort, and the escape check are all unit-testable on their own.
+//! Disk is authoritative and `.toolkit/index.db` is a rebuildable index, so the
+//! tree never asks the database what a folder holds. No Tauri types here, so
+//! the pairing rule, the sort and the escape check are unit-testable.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -15,24 +13,19 @@ use serde::Serialize;
 use crate::jobs::{self, JobType};
 use crate::settings::Settings;
 
-/// How many entries one listing may carry. A folder past this renders a
-/// "N more" row rather than N more rows.
+/// How many entries one listing carries before a "N more" row.
 pub const MAX_ENTRIES: usize = 500;
 
-/// The one file in a project folder the app wrote rather than the user. A
-/// click on it can only break the project, so it is hidden the way Finder
-/// hides a dotfile. Only at a project root, which is the only place the app
-/// puts one.
+/// The one file in a project folder the app wrote. Hidden, because a click on
+/// it can only break the project. Only at a project root.
 const PROJECT_MARKER: &str = "project.json";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileRow {
-    /// Absolute. The only path the webview hands back to a command that opens
-    /// or reveals a file.
+    /// Absolute. The only path the webview hands back to open or reveal.
     pub path: String,
-    /// Workspace-relative. What expansion and selection are keyed on, so a
-    /// workspace renamed in Finder does not strand every entry.
+    /// Workspace-relative, so a rename in Finder strands no expanded row.
     pub rel: String,
     pub name: String,
     pub is_dir: bool,
@@ -41,47 +34,37 @@ pub struct FileRow {
     pub media_type: String,
     pub size: u64,
     pub modified_ms: u64,
-    /// "convert" | "transcribe", from `JobType::accepts`, so the webview never
-    /// mirrors the extension table. None means neither job takes this file.
+    /// From `JobType::accepts`, so the webview never mirrors the table.
     pub job: Option<String>,
     /// The sibling result this source already has. Absolute.
     pub result_path: Option<String>,
     /// That result's file name, for the row's trailing marker.
     pub result_name: Option<String>,
     /// True when this file opens in the document pane: a text extension under
-    /// `MAX_PREVIEW_BYTES`. Decided here so one rule answers for a source row
-    /// and the result it pairs with. It cannot answer for the encoding, which
-    /// only a decode can, so the caller still falls back to the card when the
-    /// read refuses.
+    /// `MAX_PREVIEW_BYTES`. It cannot answer for the encoding, so the caller
+    /// still falls back to the card when the read refuses.
     pub openable: bool,
-    /// The same test, applied to `result_path`. A click on a paired source
-    /// opens its result, and an `html` result is not a document this pane
-    /// reads, so the answer cannot be inferred from the source row.
+    /// The same test on `result_path`: a click on a paired source opens its
+    /// result, and an `html` result is not one this pane reads.
     pub result_openable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirListing {
-    /// The directory's own mtime, so a focus reconcile can skip a folder that
-    /// did not change.
+    /// The directory's own mtime, so a focus reconcile can skip it.
     pub modified_ms: u64,
     pub entries: Vec<FileRow>,
     /// Entries past `MAX_ENTRIES`, dropped from `entries`.
     pub truncated: usize,
-    /// Files with a job and no result. Fills the project row's reserved count
-    /// slot. Counted before truncation, because the count describes the folder
-    /// rather than the rows that fit.
+    /// Files with a job and no result. Counted before truncation, so it
+    /// describes the folder and not the rows shown.
     pub pending: usize,
 }
 
-/// Why a listing failed, in the one distinction its caller has to act on.
-///
-/// A folder that is gone has lost its place in the tree and in the persisted
-/// expansion. Everything else — a volume asleep, a server that timed out, a
-/// permission the user can grant — is a folder that is still there, and
-/// answering it by forgetting every row the user had open would empty
-/// `expandedPaths` for good on the way through.
+/// Why a listing failed, in the one distinction its caller acts on. Only a
+/// folder that is gone loses its place in the persisted expansion. A sleeping
+/// volume or a permission error is a folder that is still there.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListError {
@@ -105,9 +88,8 @@ impl ListError {
         }
     }
 
-    /// Only the two kinds that prove the folder itself is gone. Everything
-    /// else, `PermissionDenied` and a dropped network volume included, leaves
-    /// the row alone.
+    /// Only the two kinds that prove the folder is gone. A permission error or
+    /// a dropped volume leaves the row alone.
     fn from_io(error: &std::io::Error) -> Self {
         use std::io::ErrorKind::{NotADirectory, NotFound};
         if matches!(error.kind(), NotFound | NotADirectory) {
@@ -119,11 +101,8 @@ impl ListError {
 }
 
 /// Resolve a workspace-relative path, refusing anything that leaves the
-/// workspace.
-///
-/// `..` is refused outright rather than normalized away. A symlinked folder
-/// makes lexical normalization lie about where the path lands, and there is
-/// nothing under the workspace a user needs `..` to reach.
+/// workspace. `..` is refused outright, because a symlinked folder makes
+/// lexical normalization lie about where the path lands.
 pub fn resolve(workspace: &Path, rel: &str) -> Result<PathBuf, String> {
     let candidate = Path::new(rel);
     for part in candidate.components() {
@@ -137,31 +116,25 @@ pub fn resolve(workspace: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(workspace.join(candidate))
 }
 
-/// The mtime one directory carries right now, in the same units `DirListing`
-/// reports.
-///
-/// The cheap half of the focus reconcile: one `stat`, where `list` costs a
-/// `read_dir` plus a `stat` per entry. `None` for a path that escapes, is gone,
-/// or is no longer a folder, which the caller reads as "changed" and answers
-/// with a real listing.
+/// The mtime one directory carries now, in the units `DirListing` reports. The
+/// cheap half of the focus reconcile: one `stat`, against a `read_dir` plus a
+/// `stat` per entry. `None` reads as "changed".
 pub fn modified(workspace: &Path, rel: &str) -> Option<u64> {
     let dir = resolve(workspace, rel).ok()?;
     let meta = std::fs::metadata(dir).ok()?;
     meta.is_dir().then(|| modified_ms(&meta))
 }
 
-/// List one directory level under the workspace. `rel` is workspace-relative
-/// and is refused if it escapes.
+/// List one directory level under the workspace, refusing a `rel` that escapes.
 pub fn list(workspace: &Path, rel: &str, cfg: &Settings) -> Result<DirListing, ListError> {
-    // A path that escapes names no folder inside the workspace, so it is as
-    // gone as a deleted one and loses its place the same way.
+    // A path that escapes names no folder here, so it is as gone as a deleted.
     let dir = resolve(workspace, rel).map_err(ListError::gone)?;
     let dir_meta = std::fs::metadata(&dir).map_err(|e| ListError::from_io(&e))?;
     if !dir_meta.is_dir() {
         return Err(ListError::gone("Not a folder"));
     }
-    // Only a project root holds a project.json the app wrote. A folder deeper
-    // in the tree carrying that name belongs to the user.
+    // Only a project root holds a project.json the app wrote. Deeper down, that
+    // name belongs to the user.
     let at_project_root = Path::new(rel).components().count() == 1;
 
     let mut raws = read_level(&dir, at_project_root)?;
@@ -208,9 +181,23 @@ pub fn list(workspace: &Path, rel: &str, cfg: &Settings) -> Result<DirListing, L
     })
 }
 
+/// The result sitting beside the file at `rel`. Runs the listing and the
+/// pairing the tree runs, so a move cannot carry a different set and split the
+/// pair the user is looking at.
+pub fn paired_result(workspace: &Path, rel: &str, cfg: &Settings) -> Option<PathBuf> {
+    let source = resolve(workspace, rel).ok()?;
+    let dir = source.parent()?;
+    let name = source.file_name()?.to_str()?;
+    // The same test `list` makes: the parent is a project root when the file
+    // sits directly inside it.
+    let at_project_root = Path::new(rel).components().count() == 2;
+    let raws = read_level(dir, at_project_root).ok()?;
+    let index = raws.iter().position(|raw| raw.name == name)?;
+    pair_results(&raws, cfg).of[index].map(|hit| raws[hit].path.clone())
+}
+
 /// Whether the document pane can read this file: a text extension under the
-/// preview cap. One rule, so a source row and the result it pairs with answer
-/// it the same way.
+/// preview cap. One rule for a source and its result.
 fn opens_in_pane(raw: &Raw) -> bool {
     !raw.is_dir
         && raw.size <= crate::MAX_PREVIEW_BYTES
@@ -228,8 +215,8 @@ struct Raw {
 }
 
 fn read_level(dir: &Path, at_project_root: bool) -> Result<Vec<Raw>, ListError> {
-    // Finder hides dotfiles, and .git, .DS_Store and .toolkit are never what
-    // the user came here to read. Same predicate the input walk uses.
+    // Finder hides dotfiles, and .git and .toolkit are not what the user came
+    // to read. Same predicate the input walk uses.
     let hidden = |name: &str| name.starts_with('.');
 
     let mut raws = Vec::new();
@@ -241,9 +228,8 @@ fn read_level(dir: &Path, at_project_root: bool) -> Result<Vec<Raw>, ListError> 
         if hidden(&name) || (at_project_root && name == PROJECT_MARKER) {
             continue;
         }
-        // Neither call follows a symlink, so a symlinked folder lists as a
-        // file and is never descended. That is also what the escape check
-        // above exists for.
+        // Neither call follows a symlink, so one lists as a file, never
+        // descended.
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
@@ -263,34 +249,25 @@ fn read_level(dir: &Path, at_project_root: bool) -> Result<Vec<Raw>, ListError> 
     Ok(raws)
 }
 
-/// Which source rows carry a result, and which result rows were folded into
-/// one. A folded result is not a row of its own: `deck.pdf` and `deck.md` are
-/// one line that names both.
+/// Which source rows carry a result, and which results were folded into one.
+/// `deck.pdf` and `deck.md` are one line that names both.
 struct Pairing {
     of: Vec<Option<usize>>,
     claimed: Vec<bool>,
 }
 
-/// How much older than its source a result may be and still be its result.
+/// How much older than its source a result may be and still be its result. A
+/// file that predates its source did not come from it, and without this rule a
+/// hand-written `deck.md` folds `deck.pdf` in and that file never converts.
 ///
-/// A conversion writes the result after reading the source, so a file that
-/// predates its source did not come from it. Without this rule a `deck.md` the
-/// user wrote by hand folds `deck.pdf` into its row, and that file then reads
-/// as converted and never converts: silent, and the opposite of what the row
-/// says.
-///
-/// The grace absorbs one bulk write pass. A checkout, an unzip, or a folder
-/// copy lays a directory down in name order, so `deck.md` landing a few
-/// milliseconds ahead of `deck.pdf` is ordering rather than evidence. Erring
-/// this way costs a visible Convert button rather than a silent skip, and
-/// history reuse then satisfies that press from the earlier result for free.
+/// The grace absorbs one bulk write pass: a checkout lays a directory down in
+/// name order, so a few milliseconds is ordering, not evidence. Erring this way
+/// costs a visible Convert button rather than a silent skip.
 const PAIR_GRACE_MS: u64 = 2_000;
 
 fn pair_results(raws: &[Raw], cfg: &Settings) -> Pairing {
     // Every file that could be a result, keyed by the stem and extension a
-    // conversion would have produced. `numbered` holds the same file under the
-    // stem it came from: `write_output` answers a collision with
-    // `deck (1).md`, and a plain stem match would never find it.
+    // conversion would produce. `numbered` re-keys `deck (1).md` under `deck`.
     let mut exact: HashMap<(String, String), Vec<usize>> = HashMap::new();
     let mut numbered: HashMap<(String, String), Vec<usize>> = HashMap::new();
     for (index, raw) in raws.iter().enumerate() {
@@ -305,7 +282,10 @@ fn pair_results(raws: &[Raw], cfg: &Settings) -> Pairing {
                 .or_default()
                 .push(index);
         }
-        exact.entry((stem, raw.ext.clone())).or_default().push(index);
+        exact
+            .entry((stem, raw.ext.clone()))
+            .or_default()
+            .push(index);
     }
 
     let mut pairing = Pairing {
@@ -320,16 +300,13 @@ fn pair_results(raws: &[Raw], cfg: &Settings) -> Pairing {
             continue;
         };
         let stem = stem_of(&raw.name).to_lowercase();
-        // Every extension this route can write, not just the chosen format: on
-        // the Backend route the service writes `.md` whatever the format says.
-        // Asking for the format alone leaves a converted file reading as
-        // unconverted, and the row goes on offering to spend.
+        // Every extension this route can write: the service writes `.md`
+        // whatever the format says, so the format alone reads as unconverted.
         let keys: Vec<(String, String)> = jobs::result_extensions_for(jt, cfg)
             .into_iter()
             .map(|ext| (stem.clone(), ext.to_string()))
             .collect();
-        // The plain name a first conversion writes wins over a numbered one,
-        // whatever the sort order says.
+        // The plain name a first conversion writes beats a numbered one.
         let hit = keys
             .iter()
             .flat_map(|key| exact.get(key))
@@ -348,7 +325,7 @@ fn pair_results(raws: &[Raw], cfg: &Settings) -> Pairing {
     pairing
 }
 
-fn job_for(ext: &str) -> Option<JobType> {
+pub(crate) fn job_for(ext: &str) -> Option<JobType> {
     [JobType::Convert, JobType::Transcribe]
         .into_iter()
         .find(|jt| jt.accepts(ext))
@@ -376,9 +353,8 @@ fn extension_of(name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// `write_output` numbers a collision rather than clobbering it, so a second
-/// conversion of `deck.pdf` lands as `deck (1).md`. Strip that suffix so the
-/// pairing rule still recognizes the file as `deck`'s result.
+/// `write_output` numbers a collision, so a second conversion of `deck.pdf`
+/// lands as `deck (1).md`. Strip the suffix, or the pairing rule misses it.
 fn result_stem(stem: &str) -> &str {
     let Some(rest) = stem.strip_suffix(')') else {
         return stem;
@@ -402,8 +378,7 @@ fn modified_ms(meta: &std::fs::Metadata) -> u64 {
 }
 
 /// Finder's `localizedStandardCompare` in the small: case-insensitive, with
-/// runs of digits compared as numbers. `img2` before `img10` is the kind of
-/// thing a Mac user reads as a broken list.
+/// runs of digits compared as numbers. `img10` before `img2` reads as broken.
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
@@ -419,9 +394,8 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
             while j < b.len() && b[j].is_ascii_digit() {
                 j += 1;
             }
-            // Leading zeros carry no value, so compare length first and then
-            // digit by digit. That reads a run of any width without parsing it
-            // into an integer that could overflow.
+            // Leading zeros carry no value, so compare length then digits.
+            // That reads any width without an integer parse.
             let da = without_leading_zeros(&a[start_a..i]);
             let db = without_leading_zeros(&b[start_b..j]);
             let ord = da.len().cmp(&db.len()).then_with(|| da.cmp(db));
@@ -465,8 +439,7 @@ mod tests {
         }
     }
 
-    /// Datalab over the network, which writes the chosen format and nothing
-    /// else.
+    /// Datalab over the network, which writes the chosen format alone.
     fn direct(format: &str) -> Settings {
         Settings {
             conversion_route: crate::settings::ConversionRoute::Direct,
@@ -495,6 +468,38 @@ mod tests {
             .iter()
             .find(|e| e.name == name)
             .unwrap_or_else(|| panic!("{name} is not in the listing"))
+    }
+
+    /// `paired_result` is what a move carries, so it answers with the file the
+    /// row draws or the move splits the pair.
+    #[test]
+    fn the_result_a_move_carries_is_the_one_the_row_draws() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.pdf", "deck.md", "lonely.pdf"]);
+        let cfg = settings("markdown");
+
+        assert_eq!(
+            paired_result(&root, "Inbox/deck.pdf", &cfg),
+            Some(root.join("Inbox/deck.md")),
+        );
+        assert_eq!(paired_result(&root, "Inbox/lonely.pdf", &cfg), None);
+        assert_eq!(paired_result(&root, "Inbox/gone.pdf", &cfg), None);
+        // Same answer the listing gives, which is the whole point of reusing it.
+        let listing = list(&root, "Inbox", &cfg).unwrap();
+        assert_eq!(
+            row(&listing, "deck.pdf").result_path.as_deref(),
+            Some(root.join("Inbox/deck.md").to_string_lossy().as_ref()),
+        );
+    }
+
+    /// A result the pairing rule refuses is not one a move may carry either.
+    #[test]
+    fn a_result_too_old_to_pair_is_not_carried() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["deck.pdf", "deck.md"]);
+        age(&root.join("Inbox/deck.md"), 7 * 24 * 60 * 60);
+
+        assert_eq!(paired_result(&root, "Inbox/deck.pdf", &settings("markdown")), None);
     }
 
     #[test]
@@ -527,8 +532,7 @@ mod tests {
 
         let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
 
-        // Two rows, not one: the note is its own file and the deck still needs
-        // converting. Folding them hid the deck behind a result it never made.
+        // Two rows: the note is its own file, the deck still needs converting.
         assert_eq!(names(&listing), ["deck.md", "deck.pdf"]);
         assert_eq!(row(&listing, "deck.pdf").result_name, None);
         assert_eq!(listing.pending, 1);
@@ -538,9 +542,8 @@ mod tests {
     fn a_source_edited_after_its_result_needs_converting_again() {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["deck.pdf", "deck.md"]);
-        // Same shape by another route: the run wrote the result, then the user
-        // changed the source. Settings promises this runs again, so the tree
-        // must not go on calling it done.
+        // Same shape by another route: the source changed after the run, and
+        // Settings promises this runs again.
         age(&root.join("Inbox/deck.md"), 60);
 
         let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
@@ -552,15 +555,17 @@ mod tests {
     fn one_write_pass_still_pairs_whatever_order_it_landed_in() {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["deck.pdf", "deck.md"]);
-        // A checkout or an unzip lays a directory down in name order, so the
-        // result can land a moment before the source. That is ordering, not
-        // evidence, and the grace is what tells the two apart.
+        // A checkout lays a directory down in name order, so the result lands
+        // a moment early. The grace absorbs that.
         age(&root.join("Inbox/deck.md"), 1);
 
         let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
 
         assert_eq!(names(&listing), ["deck.pdf"]);
-        assert_eq!(row(&listing, "deck.pdf").result_name.as_deref(), Some("deck.md"));
+        assert_eq!(
+            row(&listing, "deck.pdf").result_name.as_deref(),
+            Some("deck.md")
+        );
     }
 
     #[test]
@@ -571,13 +576,15 @@ mod tests {
         let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
 
         assert_eq!(names(&listing), ["deck.pdf"]);
-        assert_eq!(row(&listing, "deck.pdf").result_name.as_deref(), Some("deck.md"));
+        assert_eq!(
+            row(&listing, "deck.pdf").result_name.as_deref(),
+            Some("deck.md")
+        );
         assert_eq!(listing.pending, 0);
     }
 
-    /// The output format decides the extension, so the same folder pairs
-    /// differently under `html`. A tree that read only `.md` would offer to
-    /// convert a file that already has its result.
+    /// The output format decides the extension, so one folder pairs differently
+    /// under `html`. Reading only `.md` offers to convert a finished file.
     #[test]
     fn the_output_format_decides_which_sibling_counts_as_the_result() {
         let dir = tempfile::tempdir().unwrap();
@@ -589,14 +596,15 @@ mod tests {
 
         let html = list(&root, "Inbox", &settings("html")).unwrap();
         assert_eq!(names(&html), ["deck.pdf"]);
-        assert_eq!(row(&html, "deck.pdf").result_name.as_deref(), Some("deck.html"));
+        assert_eq!(
+            row(&html, "deck.pdf").result_name.as_deref(),
+            Some("deck.html")
+        );
     }
 
-    /// The conversion service writes Markdown whatever the format setting
-    /// says, so a file it converted has to read as converted under every
-    /// format. Pairing on the format alone left the row offering Convert after
-    /// a finished conversion, and every press spent again with nothing on
-    /// screen changing.
+    /// The service writes Markdown whatever the format says, so a file it
+    /// converted reads as converted under every format. Pairing on the format
+    /// alone leaves the row offering Convert, and every press spends.
     #[test]
     fn a_service_result_pairs_under_a_format_the_service_never_writes() {
         let dir = tempfile::tempdir().unwrap();
@@ -605,7 +613,10 @@ mod tests {
         let listing = list(&root, "Inbox", &settings("html")).unwrap();
 
         assert_eq!(names(&listing), ["deck.pdf"]);
-        assert_eq!(row(&listing, "deck.pdf").result_name.as_deref(), Some("deck.md"));
+        assert_eq!(
+            row(&listing, "deck.pdf").result_name.as_deref(),
+            Some("deck.md")
+        );
         assert_eq!(listing.pending, 0);
     }
 
@@ -619,7 +630,10 @@ mod tests {
         let listing = list(&root, "Inbox", &settings("html")).unwrap();
 
         assert_eq!(names(&listing), ["deck.pdf"]);
-        assert_eq!(row(&listing, "deck.pdf").result_name.as_deref(), Some("deck.html"));
+        assert_eq!(
+            row(&listing, "deck.pdf").result_name.as_deref(),
+            Some("deck.html")
+        );
     }
 
     /// Direct is one writer and it writes the chosen format, so a stray `.md`
@@ -650,9 +664,7 @@ mod tests {
         );
     }
 
-    /// Two sources want one `deck.md`. The first in sort order takes it and
-    /// the other still offers to convert, which is deterministic rather than
-    /// silent.
+    /// Two sources want one `deck.md`. The first in sort order takes it.
     #[test]
     fn the_first_source_in_sort_order_claims_a_shared_result() {
         let dir = tempfile::tempdir().unwrap();
@@ -661,7 +673,10 @@ mod tests {
         let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
 
         assert_eq!(names(&listing), ["deck.docx", "deck.pdf"]);
-        assert_eq!(row(&listing, "deck.docx").result_name.as_deref(), Some("deck.md"));
+        assert_eq!(
+            row(&listing, "deck.docx").result_name.as_deref(),
+            Some("deck.md")
+        );
         assert_eq!(row(&listing, "deck.pdf").result_name, None);
         assert_eq!(listing.pending, 1);
     }
@@ -691,15 +706,17 @@ mod tests {
         assert!(resolve(&root, "/etc").is_err());
     }
 
-    /// The one distinction the webview acts on. Only a folder that is really
-    /// gone loses its place in the persisted expansion, so a listing that
-    /// fails for any other reason must not claim it is.
+    /// Only a folder that is really gone loses its persisted expansion.
     #[test]
     fn only_a_missing_folder_reports_itself_as_gone() {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["deck.pdf"]);
 
-        assert!(list(&root, "Inbox/gone", &settings("markdown")).unwrap_err().gone);
+        assert!(
+            list(&root, "Inbox/gone", &settings("markdown"))
+                .unwrap_err()
+                .gone
+        );
         assert!(
             list(&root, "Inbox/deck.pdf", &settings("markdown"))
                 .unwrap_err()
@@ -782,7 +799,10 @@ mod tests {
 
         assert_eq!(names(&listing), ["call.m4a"]);
         assert_eq!(row(&listing, "call.m4a").job.as_deref(), Some("transcribe"));
-        assert_eq!(row(&listing, "call.m4a").result_name.as_deref(), Some("call.txt"));
+        assert_eq!(
+            row(&listing, "call.m4a").result_name.as_deref(),
+            Some("call.txt")
+        );
     }
 
     #[test]
@@ -798,9 +818,8 @@ mod tests {
         assert_eq!(names(&listing), ["project.json"]);
     }
 
-    /// The reconcile's cheap question has to answer with the same number the
-    /// listing carries, or every focus would look like a change and the stat
-    /// would buy nothing.
+    /// The cheap question answers with the number the listing carries, or every
+    /// focus looks like a change.
     #[test]
     fn the_folder_mtime_matches_the_one_its_listing_reports() {
         let dir = tempfile::tempdir().unwrap();
@@ -811,8 +830,7 @@ mod tests {
         assert_eq!(modified(&root, "Inbox"), Some(listing.modified_ms));
     }
 
-    /// A folder that is gone, a file, and a path out of the workspace all
-    /// answer the same way: ask the listing, which owns what those mean.
+    /// A gone folder, a file, and an escaping path all defer to the listing.
     #[test]
     fn nothing_that_is_not_a_folder_here_reports_an_mtime() {
         let dir = tempfile::tempdir().unwrap();

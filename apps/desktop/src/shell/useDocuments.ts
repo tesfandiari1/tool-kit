@@ -2,31 +2,22 @@ import { useCallback, useState } from "react";
 import { commands } from "@/app/commands";
 import { basename } from "@/app/format";
 import type { FileRow, HistoryEntry, Job } from "@/app/types";
-import { isDirty, type DocMode, type OpenDoc, type SaveState } from "@/domains/thread/model";
+import { isDirty, type DocMode, type OpenDoc } from "@/domains/thread/model";
 import { confirm } from "@/platform/host";
-import { activateOrInsert, NO_DOCS, removeDoc } from "./documents";
+import { activateOrInsert, NO_DOCS, removeDoc, renameDoc } from "./documents";
 
-/// Every result the user has opened, and which one the document pane is
-/// showing. Documents are a list beside the queue, not a view that replaces it,
-/// so nothing here touches `view`: reading a result and changing a setting are
-/// independent, and one must not close the other.
-///
-/// Both doors — a finished job row and a history entry — read the file from
-/// disk, which is the only copy there is: the job row carries a path, not the
-/// converted text.
+/// Every open result and which one the pane shows. Nothing here touches
+/// `view`. Every door reads the file from disk: a job row carries a path,
+/// never the converted text.
 export function useDocuments({ showToast }: { showToast: (msg: string) => void }) {
   const [{ docs, activeId }, setList] = useState(NO_DOCS);
   const [mode, setMode] = useState<DocMode>("read");
-  /// The file the inspector card is reporting on, layered over the pane. It
-  /// lives here because this hook already owns what the pane shows, which makes
-  /// "opening a document dismisses the card" an invariant of the pane's owner
-  /// rather than three call sites that have to remember.
+  /// The inspector card's file. Here, so "opening a document dismisses the
+  /// card" is an invariant rather than three call sites.
   const [preview, setPreview] = useState<FileRow | null>(null);
 
-  /// Reports whether the pane ended up showing the file. A caller with somewhere
-  /// else to put it can then act: the library falls back to the inspector card,
-  /// because `openable` is decided from the extension and the size and only a
-  /// decode can answer for the encoding.
+  /// Reports whether the pane showed the file: `openable` cannot answer for
+  /// the encoding, so a caller needs somewhere else to put it.
   const open = useCallback(
     async (title: string, outputPath: string | null): Promise<boolean> => {
       if (!outputPath) {
@@ -34,8 +25,7 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
         return false;
       }
       setPreview(null);
-      // An open document is already the file on disk, plus any unsaved edit.
-      // Re-reading it here would throw that edit away to learn nothing.
+      // Re-reading an open document throws its edit away to learn nothing.
       if (docs.some((d) => d.id === outputPath)) {
         setList((cur) => ({ ...cur, activeId: outputPath }));
         return true;
@@ -68,10 +58,7 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
     [open],
   );
 
-  /// The library tree's door. The doc id is the path and `activateOrInsert`
-  /// dedupes on it, so a file opened from the tree, a job row and the history
-  /// is one tab, with the autosave, ⌘S, the mtime handshake and the close
-  /// confirm all coming free.
+  /// The doc id is the path, so three doors open one tab.
   const openPath = useCallback((path: string) => open(basename(path), path), [open]);
 
   const select = useCallback((id: string) => {
@@ -79,11 +66,8 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
     setList((cur) => ({ ...cur, activeId: id }));
   }, []);
 
-  /// Reports whether the document closed, so a caller closing several (or
-  /// quitting) can stop at the one the user kept.
-  ///
-  /// A save the host refused leaves the state `error`, not `edited`, and the
-  /// edit is still only in memory — so that asks too. See `isDirty`.
+  /// Reports whether it closed, so a caller closing several can stop. A
+  /// refused save reads `error`, and that edit is still in memory.
   const closeDoc = useCallback(
     async (id: string): Promise<boolean> => {
       const doc = docs.find((d) => d.id === id);
@@ -102,9 +86,13 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
     [docs],
   );
 
-  /// Only a real change marks the document dirty. The editor reports its value
-  /// on mount as well as on a keystroke, and a document that goes dirty by
-  /// being looked at would make the unsaved-changes prompt meaningless.
+  /// Follow a file the host moved, tab and autosave with it.
+  const rename = useCallback((from: string, to: string) => {
+    setList((cur) => renameDoc(cur.docs, cur.activeId, from, to));
+  }, []);
+
+  /// Only a real change marks it dirty: the editor reports on mount too, and
+  /// a document that dirties by being read makes the prompt meaningless.
   const edit = useCallback((id: string, text: string) => {
     setList((cur) => ({
       ...cur,
@@ -114,8 +102,7 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
     }));
   }, []);
 
-  /// What a save reports back: the state, and the mtime the write produced,
-  /// which the next save has to offer as the expected one.
+  /// The state, and the mtime the next save has to offer back.
   const setDocMeta = useCallback(
     (id: string, patch: Partial<Pick<OpenDoc, "text" | "save" | "mtimeMs">>) => {
       setList((cur) => ({
@@ -124,13 +111,6 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
       }));
     },
     [],
-  );
-
-  const setSave = useCallback(
-    (id: string, save: SaveState) => {
-      setDocMeta(id, { save });
-    },
-    [setDocMeta],
   );
 
   return {
@@ -145,8 +125,8 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
     select,
     closeDoc,
     edit,
+    renameDoc: rename,
     setMode,
-    setSave,
     setDocMeta,
   };
 }

@@ -13,17 +13,8 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
 import { tags } from "@lezer/highlight";
 
-/// Syntax highlighting with no hue in it.
-///
-/// The first rule of this system is that colour is signal: amber is live,
-/// green passed, red failed, cobalt the control you press. A conventional
-/// syntax theme would spend four more colours on markdown and leave the user
-/// unable to tell a heading from a running job at a glance.
-///
-/// So the structure is drawn with the ink ramp and weight instead. Headings
-/// brighten and thicken, the marks that produce them (`##`, `**`, `>`) fall
-/// back to the ghost tone, and code sits at the body tone in mono. It reads as
-/// structure without spending a single signal colour.
+/// Highlighting with no hue: colour is signal here, so structure is drawn with
+/// the ink ramp and weight (UI.md rule 1).
 const inkOnly = HighlightStyle.define([
   { tag: tags.heading, color: "var(--ink)", fontWeight: "600" },
   { tag: tags.heading1, color: "var(--ink)", fontWeight: "700" },
@@ -34,14 +25,13 @@ const inkOnly = HighlightStyle.define([
   { tag: tags.monospace, color: "var(--ink-2)" },
   { tag: tags.quote, color: "var(--ink-2)", fontStyle: "italic" },
   { tag: tags.list, color: "var(--ink-2)" },
-  /// Every syntactic mark the author typed but does not want to look at.
+  /// Marks the author typed and does not want to look at.
   { tag: tags.processingInstruction, color: "var(--ink-ghost)" },
   { tag: tags.meta, color: "var(--ink-ghost)" },
   { tag: tags.contentSeparator, color: "var(--ink-ghost)" },
 ]);
 
-/// Chrome. Everything that is not the text itself, mapped onto tokens so a
-/// theme swap moves the editor with the rest of the app.
+/// Chrome, on tokens, so a theme swap moves the editor with the app.
 const chrome = EditorView.theme({
   "&": {
     height: "100%",
@@ -65,8 +55,7 @@ const chrome = EditorView.theme({
     border: "none",
     borderRight: "1px solid var(--rule)",
     color: "var(--ink-ghost)",
-    /// Line numbers tick, so they get the same tabular treatment as every
-    /// other number in the app.
+    /// Line numbers tick, so they set tabular (UI.md rule 2).
     fontVariantNumeric: "tabular-nums",
     paddingRight: "var(--s1)",
     minWidth: "44px",
@@ -80,54 +69,35 @@ const chrome = EditorView.theme({
     color: "var(--ink-3)",
   },
   ".cm-activeLine": { backgroundColor: "var(--surface-well)" },
-  /* `drawSelection` paints its own layer, and CodeMirror's base theme targets
-     it as `.cm-selectionLayer .cm-selectionBackground`. Matching that
-     specificity is the point: the single-class rule this replaces lost to the
-     base theme, so a select-all came out in WebKit's default lavender. The
-     native `::selection` is here too, for the unfocused editor and for the
-     read surface beside it. */
+  /* Match the base theme's `.cm-selectionLayer .cm-selectionBackground`
+     specificity, or a select-all comes out in WebKit's lavender. */
   ".cm-selectionLayer .cm-selectionBackground, &.cm-focused .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection, ::selection":
     {
       backgroundColor: "var(--select)",
     },
   ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent-hover)" },
 });
-/// Deliberately no `{ dark: true }`. That flag is baked in at module load, and
-/// this app has two themes the user can be in — graphite or paper — so any
-/// static answer is wrong half the time. Nothing here needs it: every colour
-/// the editor draws is overridden above and resolves from the token layer, so
-/// the editor follows the theme without being told which one it is in.
+/// No `{ dark: true }`: it is baked in at module load, and the app has two
+/// themes. Every colour resolves from the token layer instead.
 
 export interface SourceEditorProps {
   value: string;
   onChange?: (value: string) => void;
   readOnly?: boolean;
-  /// Announced as the editor's name, since the text area has no visible label.
   label?: string;
   className?: string;
 }
 
-/// A plain-text editing surface with a line-number gutter.
-///
-/// CodeMirror rather than a textarea, for the one reason that matters here: a
-/// gutter must stay aligned with soft-wrapped lines. A textarea plus a
-/// hand-drawn column of numbers drifts the moment a line wraps, and a
-/// conversion of a 31-page PDF wraps constantly.
-///
-/// The library knows nothing about the product. It takes a string and hands
-/// one back.
+/// CodeMirror rather than a textarea for one reason: a gutter has to stay
+/// aligned with soft-wrapped lines.
 export function SourceEditorImpl({ value, onChange, readOnly = false, label, className }: SourceEditorProps) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const editable = useRef(new Compartment());
-  /// Held in a ref so the mount effect never depends on it. Depending on the
-  /// prop would tear down and rebuild the editor on every parent render,
-  /// losing the cursor, the selection and the whole undo history with it.
+  /// In a ref, or the mount effect rebuilds the editor on every parent render
+  /// and loses the cursor and the undo history.
   const emit = useRef(onChange);
-  /// Kept fresh in an effect rather than assigned during render: a ref write
-  /// in the render body is a side effect, and React may discard that render.
-  /// `useRef` already seeded it with the first `onChange`, so the mount effect
-  /// below always has a live callback.
+  /// Written in an effect: a ref write during render is a side effect.
   useEffect(() => {
     emit.current = onChange;
   }, [onChange]);
@@ -161,15 +131,12 @@ export function SourceEditorImpl({ value, onChange, readOnly = false, label, cla
       v.destroy();
       view.current = null;
     };
-    // Mount once. `value` seeds the initial document; the effect below keeps
-    // it in sync afterwards.
+    // Mount once. `value` seeds the document and the effect below syncs it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /// Pull in a change that came from outside — a different document opening,
-  /// or a reload from disk. Guarded on inequality, because echoing the user's
-  /// own keystroke back into the document resets their cursor to the start on
-  /// every character typed.
+  /// A change from outside. Guarded on inequality: echoing the user's own
+  /// keystroke back resets the cursor on every character.
   useEffect(() => {
     const v = view.current;
     if (!v || v.state.doc.toString() === value) return;

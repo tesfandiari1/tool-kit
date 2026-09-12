@@ -12,16 +12,11 @@ pub enum ConversionRoute {
     Direct,
     /// The conversion service, which ships inside the app.
     ///
-    /// The default, because the service is in the bundle and a fresh install
-    /// should convert without an API key and without sending a document
-    /// anywhere. Direct stays a choice for the formats the local engines hand
-    /// back, and Rev.ai transcription is untouched either way.
+    /// The default, because a fresh install should convert without an API key
+    /// and without sending a document anywhere.
     ///
-    /// Nobody arrives here by surprise. A settings.json that predates the
-    /// route names none, so `#[serde(default)]` would move it, but that same
-    /// file has no `workspace_path` either and the onboarding gate reads that
-    /// as first run and asks. The gate writes the route explicitly, so this
-    /// default only decides the frame before someone answers.
+    /// A settings.json that predates the route names none, so this default moves
+    /// it. That file has no `workspace_path` either, so onboarding asks first.
     #[default]
     Backend,
 }
@@ -51,9 +46,9 @@ impl ConversionProfile {
     }
 }
 
-/// `#[serde(default)]` on the struct is load-bearing: without it, a settings.json
-/// written before a new field existed fails to parse, and `load()` silently falls
-/// back to defaults — wiping the user's output folder and job choice.
+/// `#[serde(default)]` on the struct is load-bearing: without it an older
+/// settings.json fails to parse, and `load()` falls back to defaults, wiping the
+/// user's output folder and job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -67,50 +62,38 @@ pub struct Settings {
     pub datalab_format: String,
     /// Optional Datalab pipeline id (pl_...). Blank uses the /convert endpoint.
     pub datalab_pipeline_id: Option<String>,
-    /// High-accuracy Convert profile: re-OCR every page and run an LLM pass.
-    /// Much better on scanned, table-heavy documents; slower and costs more
-    /// credits, and unnecessary for clean digital PDFs.
+    /// High-accuracy Convert: re-OCR every page and run an LLM pass.
     pub datalab_high_accuracy: bool,
-    /// Reversible M6 route selection. Routing remains per-file when the
-    /// backend path is wired; unsupported formats continue to use Datalab.
+    /// Route selection. Routing stays per-file, and unsupported formats go to
+    /// Datalab.
     pub conversion_route: ConversionRoute,
-    /// Backend routing profile. `best_quality` is intentionally unavailable
-    /// until the backend implements it instead of returning 409.
+    /// Backend routing profile. `best_quality` is unavailable until the backend
+    /// implements it rather than returning 409.
     pub conversion_profile: ConversionProfile,
-    /// Whether local OCR corrects the words it recognizes. Read only by the
-    /// backend's image engine, so it changes nothing on the direct route.
+    /// Whether local OCR corrects what it recognizes. Read only by the image
+    /// engine, so it changes nothing on the direct route.
     pub language_correction: bool,
-    /// Words local OCR should prefer when it is unsure. Sent to the backend
-    /// one per line.
+    /// Words local OCR should prefer, sent to the backend one per line.
     pub custom_words: Vec<String>,
-    /// Leave a file alone when the history says it already has a result on
-    /// disk. On by default: paying twice for the same conversion is the thing
-    /// the history layer exists to prevent.
+    /// Leave a file alone when the history says it already has a result.
     pub skip_already_done: bool,
     /// Last SplitPane layout, percentages keyed by pane id (`start` / `end`).
     pub split_layout: Option<BTreeMap<String, f64>>,
     /// Inner window size while the document pane is open.
     pub expanded_width: Option<u32>,
     pub expanded_height: Option<u32>,
-    /// Webview page-zoom factor, not a font size. `#[serde(default)]` on the
-    /// struct fills a missing field from the `Default` impl below, so an
-    /// existing settings.json loads at 1.0 rather than at 0.0.
+    /// Webview page-zoom factor, not a font size. `#[serde(default)]` fills a
+    /// missing field, so an old file loads at 1.0 and not 0.0.
     pub zoom: f64,
-    /// First-launch workspace setup has run. Until it has, the app shows the
-    /// workspace picker instead of the library.
-    pub onboarding_complete: bool,
     /// The one workspace folder this install is bound to.
     pub workspace_path: Option<String>,
-    /// Stable id from `.toolkit/workspace.json`, so a renamed folder is still
-    /// the same workspace.
-    pub workspace_id: Option<String>,
-    /// Library tree rows the user left open, workspace-relative so a folder
-    /// renamed in Finder does not strand every entry.
-    ///
-    /// A `Vec`, never an `Option<Vec>`: the frontend spreads the host's answer
-    /// over `DEFAULT_SETTINGS`, where an explicit `null` beats the default and
-    /// an absent key falls through to it.
+    /// Library tree rows the user left open, workspace-relative so a rename in
+    /// Finder strands none. A `Vec`, never an `Option<Vec>`: the frontend
+    /// spreads this over its defaults, where an explicit `null` would win.
     pub expanded_paths: Vec<String>,
+    /// The project a drop is filed into, workspace-relative. This, not
+    /// `output_dir`, is where a run writes whenever a workspace is bound.
+    pub active_project_path: Option<String>,
 }
 
 impl Default for Settings {
@@ -131,10 +114,9 @@ impl Default for Settings {
             expanded_width: None,
             expanded_height: None,
             zoom: 1.0,
-            onboarding_complete: false,
             workspace_path: None,
-            workspace_id: None,
             expanded_paths: Vec::new(),
+            active_project_path: None,
         }
     }
 }
@@ -153,11 +135,9 @@ pub fn load(app: &AppHandle) -> Settings {
         .unwrap_or_default()
 }
 
-/// Written to a temp file and renamed into place. `fs::write` truncates first,
-/// so a reader landing mid-write — or a crash — would see a half-file, and
-/// `load()` answers a parse failure with `unwrap_or_default()`: the user's
-/// output folder and job silently reset. Rename is atomic, so a reader sees
-/// either the old file or the new one.
+/// Written to a temp file and renamed in. `fs::write` truncates first, so a
+/// crash leaves a half-file, and `load()` answers that by resetting the user's
+/// output folder and job.
 pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let path = settings_path(app)?;
     let bytes = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
@@ -179,10 +159,8 @@ mod tests {
     }
 
     /// `backend_url` is gone: `backend_host::Deployment` carries the Manual
-    /// origin. Every install that ever used the Settings field has the key in
-    /// its file, and `load()` answers a parse failure by resetting the user's
-    /// output folder and job, so the stale key has to be ignored rather than
-    /// rejected.
+    /// origin. Ignored, not rejected, because `load()` resets on a parse
+    /// failure and every install that used it still has the key.
     #[test]
     fn a_settings_file_naming_the_removed_backend_url_still_loads() {
         let settings: Settings = serde_json::from_str(
@@ -232,23 +210,17 @@ mod tests {
         assert!(!settings.datalab_high_accuracy);
         assert!(!settings.skip_already_done);
         // The route this file never named now defaults to the bundled service.
-        // Safe because the same file has no workspace_path, so onboarding runs
-        // and asks before a single conversion goes anywhere.
+        // Safe: the same file has no workspace_path, so onboarding asks first.
         assert_eq!(settings.conversion_route, ConversionRoute::Backend);
         assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
         // A file written before `zoom` existed must load at 100%, not at 0.0.
         assert_eq!(settings.zoom, 1.0);
-        // Same rule for the workspace fields: an existing install has not
-        // onboarded and owns no workspace yet.
-        assert!(!settings.onboarding_complete);
+        // Same rule for the workspace: an existing install owns none yet.
         assert_eq!(settings.workspace_path, None);
-        assert_eq!(settings.workspace_id, None);
     }
 
-    /// The library tree persists what the user left open. Every settings.json
-    /// on disk predates the field, and `load()` answers a parse failure by
-    /// resetting the output folder and the job, so an absent key has to arrive
-    /// as an empty list rather than as a rejection.
+    /// Every settings.json on disk predates this field, and `load()` resets on
+    /// a parse failure, so an absent key must arrive as an empty list.
     #[test]
     fn settings_from_before_the_library_tree_gain_an_empty_expansion_list() {
         let settings: Settings = serde_json::from_str(
@@ -265,12 +237,9 @@ mod tests {
         assert_eq!(settings.workspace_path.as_deref(), Some("/tmp/workspace"));
     }
 
-    /// The library tree selects rows, so the project the sidebar used to
-    /// highlight is a field nothing reads any more. Every settings.json
-    /// written before it went carries the key, and `load()` answers a parse
-    /// failure by resetting the output folder, so it has to be ignored rather
-    /// than rejected. This is what proves the struct has no
-    /// `deny_unknown_fields`.
+    /// A field nothing reads, still on disk in every older settings.json.
+    /// Ignored rather than rejected, because `load()` resets on a parse failure.
+    /// The proof that the struct has no `deny_unknown_fields`.
     #[test]
     fn a_settings_file_still_naming_the_active_project_loads() {
         let settings: Settings = serde_json::from_str(
@@ -286,8 +255,7 @@ mod tests {
         assert_eq!(settings.workspace_path.as_deref(), Some("/tmp/workspace"));
     }
 
-    /// A `Vec`, so the wire carries `[]` and never `null`. The frontend
-    /// spreads this over its defaults and an explicit `null` would win.
+    /// A `Vec`, so the wire carries `[]` and never a `null` that would win.
     #[test]
     fn the_expansion_list_serializes_as_an_array() {
         let value = serde_json::to_value(Settings::default()).expect("settings should serialize");
@@ -313,8 +281,7 @@ mod tests {
         assert_eq!(settings.conversion_route, ConversionRoute::Backend);
         assert_eq!(settings.conversion_profile, ConversionProfile::LocalOnly);
         assert_eq!(settings.zoom, 1.1);
-        // Absent fields arrive as on and empty, matching the backend's own
-        // defaults for the two parts.
+        // Absent fields arrive as on and empty, the backend's own defaults.
         assert!(settings.language_correction);
         assert!(settings.custom_words.is_empty());
     }

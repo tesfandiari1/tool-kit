@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   autodetectJob,
   canStartRun,
-  effectiveSkipAlreadyDone,
   largeRunConfirmation,
   planRun,
   runButtonLabel,
@@ -140,15 +139,6 @@ describe("runButtonLabel", () => {
     expect(runButtonLabel("Convert", 3, 2)).toBe("Convert 3 files");
     expect(runButtonLabel("Convert", 0, 2)).toBe("Copy 2 results");
     expect(runButtonLabel("Convert", 0, 0)).toBe("Run");
-  });
-});
-
-describe("effectiveSkipAlreadyDone", () => {
-  it("disables reuse only for backend-routed conversion", () => {
-    expect(effectiveSkipAlreadyDone("convert", "backend", true)).toBe(false);
-    expect(effectiveSkipAlreadyDone("convert", "direct", true)).toBe(true);
-    expect(effectiveSkipAlreadyDone("transcribe", "backend", true)).toBe(true);
-    expect(effectiveSkipAlreadyDone("convert", "backend", false)).toBe(false);
   });
 });
 

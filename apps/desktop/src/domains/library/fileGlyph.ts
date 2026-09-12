@@ -17,15 +17,8 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 
-/// Extension to glyph.
-///
-/// Its own module because a helper exported beside a component fails
-/// `react-refresh/only-export-components`, the same reason `pathCrumbs.ts` and
-/// `splitLayout.ts` are separate files.
-///
-/// Monochrome throughout. Every glyph inherits the row's ink, so the tree
-/// spends no colour on a file type: colour is signal here, and "this is a PDF"
-/// is not one (UI.md rule 1).
+/// Extension to glyph, its own module so fast refresh keeps working. Every
+/// glyph inherits the row's ink: "this is a PDF" is not signal (UI.md rule 1).
 const BY_EXT: Record<string, Icon> = {
   pdf: FilePdfIcon,
   md: FileMdIcon,
@@ -69,8 +62,7 @@ const BY_EXT: Record<string, Icon> = {
   zip: FileZipIcon,
 };
 
-/// The glyph a tree row wears. `ext` is the host's: lowercase and without the
-/// dot, so nothing here parses a file name.
+/// `ext` is the host's: lowercase, no dot, and nothing here parses a name.
 export function fileGlyph(ext: string, isDir: boolean): Icon {
   if (isDir) return FolderIcon;
   return BY_EXT[ext] ?? FileIcon;

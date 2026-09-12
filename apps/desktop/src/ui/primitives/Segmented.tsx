@@ -6,11 +6,8 @@ import "./Segmented.css";
 export interface SegmentedOption<T extends string> {
   value: T;
   label: string;
-  /// Optional leading glyph. Receives whether this option is selected, so an
-  /// icon set with filled and outline weights can reflect the state.
   icon?: (selected: boolean) => ReactNode;
-  /// Trailing count. Its slot is held at every value, so selecting an option
-  /// never shifts the label beside it.
+  /// Holds its slot at every value (UI.md rule 2).
   count?: number;
 }
 
@@ -18,7 +15,6 @@ export interface SegmentedProps<T extends string> {
   options: SegmentedOption<T>[];
   value: T;
   onChange: (value: T) => void;
-  /// Names the group for assistive technology.
   label?: string;
   size?: "sm" | "md";
   className?: string;
@@ -26,11 +22,8 @@ export interface SegmentedProps<T extends string> {
 
 /// Mutually exclusive modes, shown side by side.
 ///
-/// A `radiogroup`, deliberately not a `tablist`. The ARIA tabs pattern promises
-/// a tabpanel each tab controls, and nothing here has one: callers use this to
-/// switch a persisted mode, not to reveal a panel. Announcing "tab 1 of 2" for
-/// something that shows no panel is a worse lie than the extra keystroke a
-/// radio group costs.
+/// A `radiogroup`, never a `tablist`: callers switch a persisted mode, and no
+/// panel exists for a tab to control.
 ///
 /// Keyboard model matches the radio pattern: one stop in the tab order (roving
 /// tabindex), then arrows move and select. Home and End jump to the ends.

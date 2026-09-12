@@ -7,8 +7,7 @@ import "./SplitPane.css";
 
 export type { SplitLayout };
 
-/// Frame budget for the restore below. Roughly 1.5s, because it waits out a
-/// native window resize, not just a render.
+/// Roughly 1.5s: the restore waits out a native window resize.
 const RESTORE_FRAMES = 90;
 /// Percentage points within which a restored layout counts as applied.
 const RESTORE_EPSILON = 0.5;
@@ -16,53 +15,30 @@ const RESTORE_EPSILON = 0.5;
 export interface SplitPaneProps {
   start: ReactNode;
   end: ReactNode;
-  /// Percentage width of the starting pane before the user has dragged. Ignored
-  /// when `layout` is supplied.
+  /// Ignored when `layout` is supplied.
   defaultStart?: number;
-  /// Floors for the two panes, as CSS lengths.
-  ///
-  /// They deliberately carry different units. The start pane holds controls
-  /// whose width is a fact about their content, so its floor is in pixels and
-  /// does not move when the window does — a percentage floor is only wide
-  /// enough at some window sizes, and silently clips at the rest. The end pane
-  /// holds the document, so its floor is a share of the window: half is the
-  /// least worth opening a reading pane for.
+  /// The units differ on purpose: the start pane's floor is a fact about its
+  /// content, the end pane's a share of the window.
   minStart?: string;
   minEnd?: string;
-  /// A previously saved layout, to restore where the user left the divider.
   layout?: SplitLayout;
-  /// Fired when the user settles a drag or resizes with the keyboard, and at no
-  /// other time. Persist from here.
+  /// Only a settled drag or a keyboard resize. Persist from here.
   onLayoutChanged?: (layout: SplitLayout) => void;
-  /// Drop the seam and the end pane, leaving the start pane the whole width.
-  ///
-  /// A prop rather than the caller rendering `start` on its own, because those
-  /// are two different positions in the tree and React answers a move by
-  /// remounting: whatever the start pane had in local state — a half-typed key,
-  /// a search box — is thrown away every time the split opens or closes. Here
-  /// the start pane stays the first child either way and keeps its instance.
+  /// Drop the seam and the end pane. A prop rather than the caller rendering
+  /// `start` alone, because moving it in the tree remounts it.
   collapsed?: boolean;
   className?: string;
 }
 
-/// Two panes and a divider you can drag.
-///
-/// The library is here for the parts that are tedious rather than hard:
-/// pointer capture that survives leaving the window, a divider that answers
-/// arrow keys, and double-click to reset. The hairline itself is ours.
-///
-/// Persistence is deliberately not delegated. The library can save to
-/// localStorage; this app already has `settings.json` and a `save_settings`
-/// command, and a desktop app keeping half its window state in the webview's
-/// storage is how you get a layout that survives a reload but not a reinstall.
-/// So the layout comes in as a prop and goes out as a callback.
+/// Two panes and a divider you can drag. The library covers pointer capture,
+/// arrow keys and double-click to reset. Persistence is not delegated: its
+/// localStorage survives a reload but not a reinstall, so the layout comes in
+/// as a prop and goes out as a callback.
 export function SplitPane({
   start,
   end,
-  // These three repeat `SPLIT` in src/shell/geometry.ts by hand, because
-  // nothing under src/ui may import from the app. App.tsx passes the canonical
-  // values, so these only cover a caller that passes none. Change one, change
-  // the other.
+  // These three repeat `SPLIT` in src/shell/geometry.ts by hand, because nothing
+  // under src/ui may import from the app. Change one, change the other.
   defaultStart = 26,
   minStart = "240px",
   minEnd = "50%",
@@ -73,27 +49,18 @@ export function SplitPane({
 }: SplitPaneProps) {
   const groupRef = useGroupRef();
   const wasCollapsed = useRef(collapsed);
-  /// Owed at mount, not just on the collapsed -> expanded edge. `defaultLayout`
-  /// is validated against the panels the group has registered, and the second
-  /// one arrives a render later, so a split that never collapses drops the
-  /// layout whole and hands out an even split with nothing to correct it.
+  /// Owed at mount too: `defaultLayout` is validated against the panels then
+  /// registered, and the second arrives a render later.
   const owedRestore = useRef(true);
   // Never spread from `layout`: `setLayout` is positional, so key order picks
   // which pane gets which width. See `paneLayout`.
   const intended = useMemo(() => paneLayout(layout, defaultStart), [layout, defaultStart]);
 
-  /* Restore the seam when the split opens. `defaultLayout` is only honored when
-     its ids match the panels present at mount, and collapsed there is one, so
-     `end` arrives to an even split instead of the saved layout.
-
-     It retries because two things arrive late: the group registers its second
-     panel a render after this runs, and the window is still growing from
-     launcher width, where 33% falls under `minStart` and gets clamped there for
-     good. So it re-applies until it reads back what it asked for.
-
-     Only on the collapsed -> expanded edge, or it would pull the seam out from
-     under a drag. Nothing here persists: the library marks imperative layouts
-     `isUserInteraction: false` and the callback below drops those. */
+  /* Restore the seam when the split opens: `defaultLayout` is honored only
+     when its ids match the panels present at mount. It retries because the
+     second panel registers a render later and the window is still growing,
+     where the start percentage is clamped under `minStart` for good. Only on
+     the collapsed to expanded edge, or it pulls the seam out from a drag. */
   useEffect(() => {
     if (wasCollapsed.current && !collapsed) owedRestore.current = true;
     wasCollapsed.current = collapsed;
@@ -131,10 +98,8 @@ export function SplitPane({
       groupRef={groupRef}
       className={cx("ui-split", collapsed && "ui-split--collapsed", className)}
       defaultLayout={intended}
-      /* Only a real drag or a keyboard resize. The library also fires this on
-         mount, on a constraint recompute and after any imperative call, all
-         with `isUserInteraction: false` — forwarding those lets a layout the
-         window merely clamped get saved as the one the user chose. */
+      /* The library also fires on mount, on a recompute and after any
+         imperative call, and saving those records a clamp as a choice. */
       onLayoutChanged={
         onLayoutChanged &&
         ((next, meta) => {
@@ -145,9 +110,8 @@ export function SplitPane({
       <Panel id="start" minSize={collapsed ? "0%" : minStart} className="ui-split__pane">
         {start}
       </Panel>
-      {/* A 1px rule with a 9px grab area around it. The seam stays a hairline
-          at rest — widening it on hover would make the window twitch every
-          time the pointer crossed the middle. */}
+      {/* A 1px rule with a 9px grab area. Widening it on hover twitches the
+          window whenever the pointer crosses the middle. */}
       {!collapsed && (
         <>
           <Separator className="ui-split__handle" />

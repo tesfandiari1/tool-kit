@@ -5,8 +5,7 @@ import { commands } from "@/app/commands";
 import { fmtWhen, tildePath } from "@/app/format";
 import type { FileRow } from "@/app/types";
 
-/// How much of a text file the card shows. Enough to recognize the document,
-/// short enough that the card stays a card.
+/// Enough to recognize the document, short enough to stay a card.
 const PREVIEW_LINES = 12;
 
 function fmtBytes(bytes: number): string {
@@ -21,19 +20,15 @@ function fmtBytes(bytes: number): string {
   return `${value < 10 ? value.toFixed(1) : String(Math.round(value))} ${units[unit]}`;
 }
 
-/// What a file is, said in the way the row says it: the extension, or Folder.
+/// The extension, or Folder.
 function kindOf(row: FileRow): string {
   if (row.isDir) return "Folder";
   return row.ext === "" ? "File" : row.ext.toUpperCase();
 }
 
-/// A Quick Look card over the document pane.
-///
-/// It follows the tree's selection, so nothing here opens anything and nothing
-/// here converts anything: it reports, and the caller acts.
-///
-/// Not `role="dialog"`: there is no task and no dismissal contract. Not
-/// `aria-modal`: that would hide the tab strip this design keeps live.
+/// A Quick Look card over the document pane: it reports, and the caller acts.
+/// Not `role="dialog"` and not `aria-modal`, which would hide the live tab
+/// strip.
 export function FileInspector({
   row,
   primary,
@@ -41,8 +36,7 @@ export function FileInspector({
   onClose,
 }: {
   row: FileRow;
-  /// The one thing worth doing with this file, decided by the caller: opening
-  /// the result it already has, or converting it. Absent when there is neither.
+  /// The one thing worth doing with this file. Absent when there is none.
   primary?: ReactNode;
   onReveal: (path: string) => void;
   onClose: () => void;
@@ -52,16 +46,9 @@ export function FileInspector({
   const restoreTo = useRef<HTMLElement | null>(null);
   const [nowMs] = useState(() => Date.now());
 
-  // Every control in here is a real tab stop, and both ways out unmount the
-  // whole card: Close, and the primary action that opens a document. An
-  // element that unmounts holding focus drops it on <body>, which ends
-  // keyboard navigation with nothing on screen to say so. Put focus back where
-  // it came from — the tree row that raised the card — but only if the card
-  // still holds it, so a click somewhere else is never yanked back.
-  //
-  // Layout, not passive: React runs a passive cleanup for a deleted subtree
-  // after the mutation, by which time the card is off the page and focus is
-  // already on `<body>`, so the test would never see it.
+  // Both ways out unmount the card, and focus would land on <body>. Only when
+  // the card still holds it, so a click elsewhere is not yanked back. Layout,
+  // not passive: a passive cleanup runs after the mutation, too late to see.
   useLayoutEffect(() => {
     const el = card.current;
     restoreTo.current =
@@ -74,8 +61,7 @@ export function FileInspector({
       restoreTo.current = null;
     };
   }, []);
-  /// Keyed on the path rather than reset in an effect, so arrowing to the next
-  /// row never shows the previous file's opening lines for a frame.
+  /// Keyed on the path, so an arrow never shows the last file's lines.
   const [head, setHead] = useState<{ path: string; text: string } | null>(null);
 
   useEffect(() => {
@@ -118,26 +104,28 @@ export function FileInspector({
           />
         </Row>
 
-        <Stack gap={3} className="doc-inspect__body">
-          {/* Focus never moves when the card swaps, so an arrow press would
-              change the pane silently. One line announces it. The whole card
-              inside a live region would read every field on every press. */}
+        <Stack gap={4} className="doc-inspect__body">
+          {/* Focus never moves when the card swaps, so one line announces it.
+              A live region over the card reads every field on every press. */}
           <Text size="sm" tone="default" aria-live="polite" aria-atomic="true">
             {state === "" ? row.name : `${row.name}, ${state}`}
           </Text>
 
           <Row gap={2}>
             <Badge>{row.isDir ? "Folder" : fmtBytes(row.size)}</Badge>
-            <Mono size="xs" tone="ghost">
+            {/* `truncate` is the library's only nowrap, and the date needs
+                it beside the media type. */}
+            <Mono size="xs" tone="ghost" truncate>
               {fmtWhen(Math.floor(row.modifiedMs / 1000), nowMs)}
             </Mono>
-            <Spacer />
-            {!row.isDir && row.mediaType !== "" && (
-              <Mono size="xs" tone="ghost" truncate>
-                {row.mediaType}
-              </Mono>
-            )}
           </Row>
+
+          {/* Its own line: the longest string in the card. */}
+          {!row.isDir && row.mediaType !== "" && (
+            <Mono size="xs" tone="ghost" truncate>
+              {row.mediaType}
+            </Mono>
+          )}
 
           <Path path={tildePath(row.path)} />
 

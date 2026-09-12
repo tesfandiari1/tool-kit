@@ -5,9 +5,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const TOAST_MS = 3400;
 
 /// The app's one channel for errors that never reach a job row: key saves,
-/// reveal failures, clipboard. Owning the timer here is the point — the
+/// reveal failures, clipboard. Owning the timer here is the point, because the
 /// previous timeout has to be cleared both when a new message replaces it and
-/// when the app unmounts, and those two cleanups sat 20 lines apart.
+/// when the app unmounts.
 export function useToast() {
   const [toast, setToast] = useState<string | null>(null);
   const timer = useRef<number | null>(null);

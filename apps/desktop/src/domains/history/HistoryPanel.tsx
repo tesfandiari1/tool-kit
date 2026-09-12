@@ -7,9 +7,14 @@ import { HISTORY_LIMIT, type HistoryEntry } from "@/app/types";
 import { confirm } from "@/platform/host";
 import { FlowLayout } from "@/shell/FlowLayout";
 
-/// Every finished job, newest first. Reveal-only on purpose: the extracted
-/// text is not stored, so the database stays small and the files stay the
-/// single source of truth.
+/// Wrote a result and it is still on disk. The table remembers where a result
+/// went, never whether it is still there.
+function hasResult(e: HistoryEntry): e is HistoryEntry & { outputPath: string } {
+  return e.outputPath !== null && e.outputExists;
+}
+
+/// Every finished job, newest first. The text is not stored, so files stay
+/// authoritative.
 export function HistoryPanel({
   refreshKey,
   onChanged,
@@ -17,21 +22,29 @@ export function HistoryPanel({
   onToast,
 }: {
   refreshKey: number;
-  /// Call after anything that changes what the history says, so the
-  /// already-done counts on the run screen stop citing rows we just deleted.
+  /// Call after any change, or the run screen cites deleted rows.
   onChanged: () => void;
   onOpen: (entry: HistoryEntry) => void;
   onToast: (msg: string) => void;
 }) {
   const [query, setQuery] = useState("");
-  // null while the first read is in flight, so an empty history and a pending
-  // one don't show the same thing.
+  // Null while the first read is in flight: empty and pending differ.
   const [rows, setRows] = useState<HistoryEntry[] | null>(null);
-  const [nowMs] = useState(() => Date.now());
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // Without a tick, a row that opened saying "just now" says it an hour
+  // later. `fmtWhen`'s finest bucket is a minute.
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 30_000);
+    return () => {
+      window.clearInterval(t);
+    };
+  }, []);
 
   useEffect(() => {
     let live = true;
-    // Debounced so typing a search doesn't fire a query per keystroke.
     const t = window.setTimeout(() => {
       void commands
         .listHistory(query, HISTORY_LIMIT)
@@ -52,11 +65,8 @@ export function HistoryPanel({
     if (!ok) return;
     try {
       await commands.clearHistory();
-      // Empty the list now rather than waiting on the refetch debounce.
       setRows([]);
-      // Without this the run screen keeps its cached already-done counts, so
-      // Run stays disabled insisting the files are already done — citing a
-      // history that no longer exists.
+      // Or Run stays disabled citing a history that no longer exists.
       onChanged();
       onToast("History cleared");
     } catch (e) {
@@ -64,10 +74,9 @@ export function HistoryPanel({
     }
   };
 
-  // The result if it is still there, otherwise the file it came from — which
-  // is the useful answer for a row that failed.
+  // The result, or the source it came from: the answer for a failed row.
   const reveal = (e: HistoryEntry) => {
-    void commands.revealPath(e.outputPath ?? e.sourcePath).catch((err: unknown) => {
+    void commands.revealPath(hasResult(e) ? e.outputPath : e.sourcePath).catch((err: unknown) => {
       onToast(String(err));
     });
   };
@@ -88,7 +97,9 @@ export function HistoryPanel({
             </Badge>
             <Button
               variant="link"
-              disabled={!rows || rows.length === 0}
+              /* `clear_history` deletes the whole table, so a search matching
+                 nothing must not disable it. */
+              disabled={!rows || (rows.length === 0 && query === "")}
               onClick={() => void clear()}
             >
               Clear history
@@ -133,31 +144,31 @@ export function HistoryPanel({
       ) : (
         <div className="hist-list">
           {rows.map((e) => {
-            /// A failed row, and a row whose result the run never wrote, have
-            /// nothing to open. They stay in the list, because the failure is
-            /// the useful answer, and say so rather than answering a click
-            /// with silence.
-            const openable = e.status === "done" && e.outputPath !== null;
+            /// Nothing to open. The row stays and says so.
+            const openable = e.status === "done" && hasResult(e);
+            const resultGone = e.outputPath !== null && !e.outputExists;
             return (
               <div
                 className="job"
                 key={e.id}
-                /* The row forwards a click to its primary control, so the whole
-                   row is the target it already looks like, and bails on
-                   anything inside a button so the two actions cannot fire
-                   twice. The run queue's row is this shape for this reason. */
+                /* The row forwards its click to the primary control, and bails
+                   inside a button or the two fire twice. */
                 onClick={(ev) => {
                   if (!openable) return;
                   if (ev.target instanceof Element && ev.target.closest("button")) return;
                   onOpen(e);
                 }}
               >
-                <StatusDot tone={e.status === "done" ? "pass" : "fault"} label={e.status} />
+                {/* Green means a result you can open, so a deleted one goes
+                    neutral. */}
+                <StatusDot
+                  tone={e.status === "failed" ? "fault" : resultGone ? "idle" : "pass"}
+                  label={resultGone ? "result deleted" : e.status}
+                />
                 <div className="job-body">
                   <button
                     type="button"
-                    /// Bare on purpose: the row is already the affordance, so a
-                    /// second button shell inside it would be a card in a card.
+                    /// Bare on purpose: the row is already the affordance.
                     aria-disabled={!openable}
                     className="job-open"
                     title={e.sourcePath}
@@ -179,8 +190,16 @@ export function HistoryPanel({
                     </Text>
                   ) : (
                     e.outputPath && (
-                      <Text as="span" size="xs" tone="faint" className="job-sub" title={e.outputPath}>
-                        {basename(e.outputPath)}
+                      <Text
+                        as="span"
+                        size="xs"
+                        tone={resultGone ? "ghost" : "faint"}
+                        className="job-sub"
+                        title={e.outputPath}
+                      >
+                        {resultGone
+                          ? `${basename(e.outputPath)} (no longer on disk)`
+                          : basename(e.outputPath)}
                       </Text>
                     )
                   )}
@@ -189,7 +208,7 @@ export function HistoryPanel({
                   {fmtWhen(e.finishedAt, nowMs)}
                 </Mono>
                 <div className="job-actions">
-                  {e.status === "done" && e.outputPath && (
+                  {openable && (
                     <Button
                       variant="ghost"
                       size="sm"
@@ -207,7 +226,7 @@ export function HistoryPanel({
                     size="sm"
                     iconOnly
                     icon={<FolderOpenIcon />}
-                    title={e.outputPath ? "Show the result in Finder" : "Show the file in Finder"}
+                    title={hasResult(e) ? "Show the result in Finder" : "Show the file in Finder"}
                     aria-label="Show in Finder"
                     onClick={() => {
                       reveal(e);

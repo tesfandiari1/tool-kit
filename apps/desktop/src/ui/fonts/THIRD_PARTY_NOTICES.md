@@ -7,7 +7,7 @@ no network access.
 
 ## Instrument Serif
 
-- Files: `InstrumentSerif-Regular.woff2`, `InstrumentSerif-Italic.woff2`
+- File: `InstrumentSerif-Regular.woff2`
 - Copyright: Rodrigo Fuenzalida and Instrument
 - License: SIL Open Font License 1.1
 - Source: https://github.com/Instrument/instrument-serif

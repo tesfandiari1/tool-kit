@@ -1,8 +1,5 @@
-/* Tabs — the strip of open documents.
-
-   The label treatment is the signature of the language: JetBrains Mono,
-   uppercase, .09em tracked, at --t-label. A tab is a button, and every button
-   in this system is set that way. */
+/* The strip of open documents. A tab is a button, so it wears the label
+   treatment every button in this system wears. */
 
 .ui-tabs {
   display: flex;
@@ -31,16 +28,13 @@
   background: var(--surface-raised);
 }
 
-/* The active tab is the only cobalt in the pane, and it is deliberate: a tab
-   is a control you press, which is exactly what cobalt is reserved for. It
-   also matches every editor the user already has open. The fill stays
-   neutral so the colour is carrying one job, not two. */
+/* The only cobalt in the pane: a tab is a control you press. The fill stays
+   neutral, so the colour carries one job. */
 .ui-tabs__tab.is-active {
   background: var(--surface-raised);
 }
-/* Flush with the strip's inner edge, deliberately not -1px on top of the
-   container's own hairline: the strip is a horizontal scroller, so overflow-y
-   is hidden and a rule one pixel outside it is clipped away entirely. */
+/* Flush with the inner edge, never -1px: the strip is a horizontal scroller,
+   so a rule one pixel outside it is clipped away. */
 .ui-tabs__tab.is-active::after {
   content: "";
   position: absolute;
@@ -80,8 +74,7 @@
   border-radius: var(--r-control);
 }
 
-/* Rule 2: the slot is held at every state. Clean, dirty and closing all
-   occupy the same 20px, so the strip never reflows. */
+/* Clean, dirty and closing share one 20px slot (UI.md rule 2). */
 .ui-tabs__mark {
   position: relative;
   flex: none;

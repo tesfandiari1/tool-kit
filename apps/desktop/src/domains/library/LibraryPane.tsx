@@ -1,26 +1,26 @@
 import { useState } from "react";
 import { FolderOpenIcon, GearSixIcon, PlusIcon } from "@phosphor-icons/react";
-import { Button, Input, Label, Mono, Path, Row, Spacer, Stack } from "@ui";
+import { Button, Input, Label, Mono, Path, Row, Select, Spacer, Stack } from "@ui";
 import type { FileRow, Job, ProjectSummary } from "@/app/types";
 import { basename, tildePath } from "@/app/format";
 import type { ProjectTreeState } from "@/shell/useProjectTree";
 import { ProjectTree } from "./ProjectTree";
 
-/// The library: the workspace it belongs to, its projects as a disclosure tree,
-/// and the two ways out of it.
-///
-/// The whole left column, not a sidebar beside a centre column. Run and History
-/// take the same pane when the nav asks for them, which is why the tree gets
-/// the full width rather than a fixed 200px track.
+/// The workspace, its projects as a tree, and the two ways out.
 export function LibraryPane({
   workspacePath,
   projects,
+  catchAllPath,
+  activeProjectPath,
+  selected,
   tree,
   jobs,
   onSelect,
   onActivate,
   onInspect,
   onConvert,
+  onSetActiveProject,
+  onMoveToProject,
   onOpenSettings,
   onCreateProject,
   onRevealPath,
@@ -28,14 +28,19 @@ export function LibraryPane({
 }: {
   workspacePath: string;
   projects: ProjectSummary[];
+  catchAllPath: string | null;
+  activeProjectPath: string | null;
+  /// What the Move control acts on. Null on a folder or a project root.
+  selected: FileRow | null;
   tree: ProjectTreeState;
   jobs: Job[];
-  /// The selection moved. Null on a project root, which has no `FileRow` of
-  /// its own.
+  /// Null on a project root, which has no `FileRow`.
   onSelect: (row: FileRow | null) => void;
   onActivate: (row: FileRow) => void;
   onInspect: (row: FileRow) => void;
   onConvert: (row: FileRow) => void;
+  onSetActiveProject: (rel: string) => void;
+  onMoveToProject: (row: FileRow, projectRel: string) => void;
   onOpenSettings: () => void;
   onCreateProject: (title: string) => Promise<void>;
   onRevealPath: (path: string) => void;
@@ -44,6 +49,10 @@ export function LibraryPane({
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+
+  /// The project the file already sits in is dropped: that move does nothing.
+  const holding = selected === null ? null : selected.rel.split("/")[0];
+  const movable = projects.filter((p) => p.path !== holding);
 
   const commitProject = async () => {
     const title = draft.trim();
@@ -77,14 +86,37 @@ export function LibraryPane({
       <div className="lib-side__list">
         <ProjectTree
           projects={projects}
+          catchAllPath={catchAllPath}
+          activeProjectPath={activeProjectPath}
           tree={tree}
           jobs={jobs}
           onSelect={onSelect}
           onActivate={onActivate}
           onInspect={onInspect}
           onConvert={onConvert}
+          onSetActiveProject={onSetActiveProject}
         />
       </div>
+
+      {/* A popup rather than a drag: Tauri owns the drag-and-drop channel for
+          the native file drop, so an HTML5 drag has nowhere to land. */}
+      {movable.length > 0 && selected !== null && (
+        <div className="lib-side__move">
+          <Select
+            label="Move to"
+            aria-label={`Move ${selected.name} to another project`}
+            value=""
+            onChange={(e) => {
+              const rel = e.target.value;
+              if (rel) onMoveToProject(selected, rel);
+            }}
+            options={[
+              { value: "", label: selected.name },
+              ...movable.map((p) => ({ value: p.path, label: p.title })),
+            ]}
+          />
+        </div>
+      )}
 
       <div className="lib-side__actions">
         {creating ? (
@@ -100,9 +132,7 @@ export function LibraryPane({
               onKeyDown={(e) => {
                 if (e.key === "Enter") void commitProject();
                 if (e.key === "Escape") {
-                  // The app's one Escape handler closes the open document.
-                  // Stopping here is what keeps that from firing while the user
-                  // is only abandoning a name.
+                  // Abandoning a name must not reach App's Escape handler.
                   e.stopPropagation();
                   setCreating(false);
                   setDraft("");
@@ -155,8 +185,7 @@ export function LibraryPane({
           Reveal
         </Button>
         <Spacer />
-        {/* The gear stays here, where the user asked for it. A Mac user's first
-            look is the app menu, which now carries a real Settings… at ⌘,. */}
+        {/* A second door. The app menu carries the real Settings… at ⌘,. */}
         <Button variant="ghost" size="sm" icon={<GearSixIcon />} onClick={onOpenSettings}>
           Settings
         </Button>

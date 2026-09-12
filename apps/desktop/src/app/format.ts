@@ -6,7 +6,7 @@ export function basename(p: string) {
 /// `/Users/me/Desktop/a.md` -> `~/Desktop/a.md`.
 ///
 /// macOS only, so the home directory is `/Users/<name>` and a regex beats a
-/// host call. Worst case it does not match and the full path shows.
+/// host call. Unmatched, the full path shows.
 export function tildePath(p: string) {
   return p.replace(/^\/Users\/[^/]+/, "~");
 }

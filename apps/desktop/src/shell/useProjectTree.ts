@@ -3,25 +3,15 @@ import { commands } from "@/app/commands";
 import type { DirListing, ListError, ProjectSummary } from "@/app/types";
 import { onWindowFocused } from "@/platform/host";
 
-/// How far one Option-click descends. `NSOutlineView` opens the whole subtree,
-/// but a workspace can hold a folder nobody meant to walk, and one click that
-/// fires a thousand `read_dir` calls is a frozen tree with nothing on screen to
-/// explain it.
+/// One click that fires a thousand `read_dir` calls is a frozen tree.
 const DEEP_EXPAND_DEPTH = 6;
 
-/// How many folders one Option-click may open in total.
-///
-/// The depth cap bounds the rounds, not the width, and width is where the
-/// damage is: a project holding a JS checkout has thousands of package folders
-/// on one level, and `node_modules` is not a dotfile. Every one of them would
-/// be an invoke, a row, and a line in the persisted expansion that every launch
-/// and every finished run then re-reads. The walk stops when the budget is
-/// spent, the same way it stops at the depth cap.
+/// The depth cap bounds the rounds, not the width, and a JS checkout is
+/// thousands of package folders on one level.
 const DEEP_EXPAND_BUDGET = 200;
 
-/// How many listings are ever in flight at once. Each one is a `read_dir` plus
-/// a `stat` per entry on the host's blocking pool, so a whole level issued at
-/// once is a level-sized spike on a network volume.
+/// A listing is a `read_dir` plus a `stat` per entry, so a whole level at once
+/// is a level-sized spike on a network volume.
 const READ_LIMIT = 8;
 
 /// Run `job` over `items`, never more than `limit` at a time.
@@ -37,9 +27,7 @@ async function mapLimit<A, B>(
   return out;
 }
 
-/// What a failed listing means. The host answers with a `ListError`, and only a
-/// folder that is really gone may cost the user their persisted expansion.
-/// Anything else — an unknown rejection included — is read as still there.
+/// Only a folder the host reports as gone may cost the persisted expansion.
 export function listFailure(e: unknown): ListError {
   if (typeof e === "object" && e !== null && "gone" in e && "message" in e) {
     return {
@@ -50,8 +38,7 @@ export function listFailure(e: unknown): ListError {
   return { gone: false, message: String(e) };
 }
 
-/// The folders a finished level of a deep expand hands to the next one, capped
-/// by what is left of the budget.
+/// The folders one level of a deep expand hands to the next, within budget.
 export function childDirs(level: readonly (DirListing | null)[], budget: number): string[] {
   const dirs: string[] = [];
   for (const listing of level) {
@@ -64,10 +51,8 @@ export function childDirs(level: readonly (DirListing | null)[], budget: number)
   return dirs;
 }
 
-/// Where the selection goes when `doomed` and everything under it is about to
-/// unmount: to its parent, and only when the selection is inside it. Null when
-/// there is nothing to move, or when `doomed` is a project root, whose parent
-/// is the workspace and has no row.
+/// Where the selection goes when `doomed` unmounts: its parent, and only when
+/// the selection is inside it. Null on a project root, which has no parent row.
 export function climbTarget(selected: string | null, doomed: string): string | null {
   if (selected === null) return null;
   if (selected !== doomed && !selected.startsWith(`${doomed}/`)) return null;
@@ -75,27 +60,19 @@ export function climbTarget(selected: string | null, doomed: string): string | n
   return cut > 0 ? doomed.slice(0, cut) : null;
 }
 
-/// How long the focus reconcile waits, and how long it then stays quiet.
 /// `Focused(true)` is AppKit's `windowDidBecomeKey:`, so it arrives on every
-/// ⌘Tab return, after every file picker, and after every confirm this app
-/// raises itself. The debounce coalesces one burst and the floor keeps a run of
-/// them from becoming a run of `read_dir` calls.
+/// ⌘Tab return, file picker and confirm.
 const FOCUS_DEBOUNCE_MS = 250;
 const FOCUS_FLOOR_MS = 1500;
 
-/// Why a folder is being read.
-///
 /// - `click`: the user asked, so a failure gets a toast.
-/// - `refresh`: mount, and once per finished run. Silent, still marks busy.
-/// - `reconcile`: the window came back to the front. Silent, no busy flag, and
-///   the answer is dropped unless the folder's own mtime moved. Only folders
-///   the host has already named as moved are read this way, so a ⌘Tab round
-///   trip over an untouched workspace costs one `stat` a folder and no render.
+/// - `refresh`: mount and finished run. Silent, still marks busy.
+/// - `reconcile`: window focus. Silent, no busy flag, and the answer is dropped
+///   unless the folder's own mtime moved.
 type ReadMode = "click" | "refresh" | "reconcile";
 
-/// Every folder worth re-reading: each project root, plus whatever the user
-/// left open inside one. An expanded path whose project is gone would read as
-/// an error on every refresh, so it is dropped here rather than asked for.
+/// Every folder worth re-reading. An expanded path whose project is gone is
+/// dropped here rather than asked for and failed on every refresh.
 function reconcileTargets(projects: ProjectSummary[], expanded: readonly string[]): string[] {
   const roots = projects.map((p) => p.path);
   const targets = new Set(roots);
@@ -106,11 +83,9 @@ function reconcileTargets(projects: ProjectSummary[], expanded: readonly string[
 }
 
 export interface ProjectTreeState {
-  /// One directory level per workspace-relative path. Undefined until it is
-  /// read, which is what makes an open branch render a loading row instead of
-  /// an empty group.
+  /// Undefined until read, which makes an open branch render a loading row
+  /// rather than an empty group.
   listings: Readonly<Record<string, DirListing | undefined>>;
-  /// Folders whose children were asked for and have not arrived.
   busy: ReadonlySet<string>;
   expanded: ReadonlySet<string>;
   selected: string | null;
@@ -119,22 +94,9 @@ export interface ProjectTreeState {
   toggle: (rel: string, open: boolean, deep: boolean) => void;
 }
 
-/// The library tree's session state: which folders are open, what each one
-/// holds, and which row is selected.
-///
-/// It lives here beside `useDocuments` rather than inside the tree component,
-/// because App picks the left column with a switch on `view`, so the tree
-/// unmounts on every Library-to-Run trip. Expansion would survive that on its
-/// own (it persists through Settings), but the children cache and the selection
-/// would not, and every open folder would re-list on the way back.
-///
-/// Everything is keyed on the workspace-relative path, never on an array index.
-/// A refresh reorders rows, and an index-keyed selection then lands on a
-/// different file with nothing to say so.
-///
-/// It also owns freshness. The tree re-reads on a finished run and when the
-/// window comes back to the front, and both merge into the same cache, so a
-/// refresh never remounts the tree or throws away what the user has open.
+/// The library tree's session state, keyed on the workspace-relative path and
+/// never on an index: a refresh reorders rows. It owns freshness too, and both
+/// re-reads merge into the same cache rather than replace it.
 export function useProjectTree({
   projects,
   expandedPaths,
@@ -143,26 +105,20 @@ export function useProjectTree({
   showToast,
 }: {
   projects: ProjectSummary[];
-  /// Persisted, workspace-relative. The tree is the reader; Settings is the
-  /// store.
+  /// Persisted, workspace-relative. The tree reads it, Settings stores it.
   expandedPaths: string[];
   onExpandedChange: (paths: string[]) => void;
-  /// Re-lists the roots and everything open when it changes. It carries the
-  /// finished-run counter and every setting the host's pairing rule reads, so
-  /// changing the output format cannot leave a converted file marked
-  /// unconverted until the folder itself moves.
+  /// The finished-run counter plus every setting the host's pairing rule reads.
   refreshKey: string;
   showToast: (message: string) => void;
 }): ProjectTreeState {
   const [listings, setListings] = useState<Record<string, DirListing>>({});
   const [busy, setBusy] = useState<string[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  /// The cache `listings` renders. `read` is its only writer and has to compare
-  /// against what it already holds, which a `setListings` updater cannot answer:
-  /// React decides when to run one, so a read cannot get its answer back out.
+  /// The cache `listings` renders. `read` compares against what it holds, which
+  /// a `setListings` updater cannot answer: React decides when to run one.
   const cache = useRef<Record<string, DirListing>>({});
-  /// Dedupes concurrent reads of one folder. A ref rather than `busy`, because
-  /// two clicks in one frame both read the same stale state.
+  /// A ref rather than `busy`: two clicks in one frame read the same state.
   const inFlight = useRef(new Set<string>());
   const expandedRef = useRef(expandedPaths);
   const projectsRef = useRef(projects);
@@ -189,9 +145,8 @@ export function useProjectTree({
     [onExpandedChange],
   );
 
-  /// A row that unmounts while it holds focus drops focus on `<body>`, which
-  /// ends keyboard navigation with nothing on screen to say so. Move the
-  /// selection, and the focus with it, to the parent of the row that is going.
+  /// A row that unmounts holding focus drops it on `<body>`, which silently
+  /// ends keyboard navigation.
   const climbFrom = useCallback((doomed: string) => {
     const target = climbTarget(selectedRef.current, doomed);
     if (target === null) return;
@@ -204,17 +159,13 @@ export function useProjectTree({
     setSelected(target);
   }, []);
 
-  /// Deleting the selected file in Finder unmounts its row on the next
-  /// reconcile, so the selection climbs before the children are replaced.
+  /// The selection climbs before a reconcile replaces the children.
   const keepFocusInside = useCallback(
     (rel: string, listing: DirListing) => {
       const current = selectedRef.current;
       if (!current?.startsWith(`${rel}/`)) return;
-      // The direct child that carries the selection, whether that is the row
-      // itself or something deeper inside it. A deeper row's own folder
-      // usually answers for it, but a folder deleted in Finder never gets that
-      // far: its own listing fails, and this is the last one that can see the
-      // whole subtree go.
+      // A folder deleted in Finder cannot answer for its own rows, so this is
+      // the last listing that sees the whole subtree go.
       const child = `${rel}/${current.slice(rel.length + 1).split("/")[0]}`;
       if (listing.entries.some((entry) => entry.rel === child)) return;
       climbFrom(child);
@@ -222,11 +173,8 @@ export function useProjectTree({
     [climbFrom],
   );
 
-  /// Read one folder. A folder the host reports as gone loses its children, its
-  /// place in the persisted expansion and, if the selection was inside it, the
-  /// focus; every other failure changes nothing, because a volume asleep is not
-  /// a folder deleted. A background read stays silent either way, so a folder
-  /// deleted in Finder does not toast once per finished run.
+  /// Read one folder. Only a `gone` answer drops its children, its expansion
+  /// and its focus: a volume asleep is not a folder deleted.
   const read = useCallback(
     async (rel: string, mode: ReadMode): Promise<DirListing | null> => {
       if (inFlight.current.has(rel)) return null;
@@ -235,14 +183,12 @@ export function useProjectTree({
       if (marks) setBusy((cur) => (cur.includes(rel) ? cur : [...cur, rel]));
       try {
         const listing = await commands.listProjectFiles(rel);
-        // `in` rather than a truth test on the lookup: the index signature
-        // types every key as present, so a bare read of a folder nobody has
-        // listed yet would take a property off undefined.
+        // `in` rather than a truth test: the index signature types every key
+        // as present, so a bare read takes a property off undefined.
         const moved =
           !(rel in cache.current) || cache.current[rel].modifiedMs !== listing.modifiedMs;
-        // An untouched folder keeps the object it already has. A new identity
-        // would re-render every row under it and buy nothing, which is the
-        // whole reason the listing carries the directory's own mtime.
+        // An untouched folder keeps its object: a new identity re-renders
+        // every row under it and buys nothing.
         if (moved || mode !== "reconcile") {
           if (moved) keepFocusInside(rel, listing);
           cache.current = { ...cache.current, [rel]: listing };
@@ -252,18 +198,12 @@ export function useProjectTree({
       } catch (e) {
         const failure = listFailure(e);
         if (mode === "click") showToast(failure.message);
-        // A folder that is still there keeps its children and its place in the
-        // persisted expansion. Dropping both on every failure meant one
-        // sleeping volume, or one read that raced the settings write, emptied
-        // `expandedPaths` for good — silently, on a background read the user
-        // never asked for.
+        // Dropping these on every failure lets one sleeping volume empty
+        // `expandedPaths` for good.
         if (!failure.gone) {
-          // The user clicked and it did not open, so the row closes again. The
-          // toast above says why.
           if (mode === "click") setExpanded((cur) => cur.filter((p) => p !== rel));
           return null;
         }
-        // Gone. Its whole subtree is about to unmount, focus and all.
         climbFrom(rel);
         cache.current = Object.fromEntries(
           Object.entries(cache.current).filter(([path]) => path !== rel),
@@ -279,12 +219,8 @@ export function useProjectTree({
     [climbFrom, keepFocusInside, setExpanded, showToast],
   );
 
-  /// Which of these folders are worth a listing: everything the cache has
-  /// never seen, plus everything the host says has moved.
-  ///
-  /// A failure answers "all of them". The stat is an optimisation, and a
-  /// reconcile that stops happening because the cheap call failed is a tree
-  /// that quietly stops telling the truth.
+  /// Unseen folders plus the ones the host says moved. A failure answers all
+  /// of them, because the stat is only an optimisation.
   const staleAmong = useCallback(async (targets: string[]): Promise<string[]> => {
     const known = targets
       .filter((rel) => rel in cache.current)
@@ -298,9 +234,8 @@ export function useProjectTree({
     }
   }, []);
 
-  /// One level, or the whole subtree. Level by level rather than depth first,
-  /// so a deep open costs one round of reads per level instead of one per
-  /// folder.
+  /// Level by level rather than depth first, so a deep open costs one round of
+  /// reads per level.
   const load = useCallback(
     async (rel: string, deep: boolean, mode: ReadMode) => {
       let level = [rel];
@@ -314,12 +249,8 @@ export function useProjectTree({
         opened.push(...next);
         level = next;
       }
-      // Only if the user still has the branch open. These awaits can run for a
-      // second over a network volume, and a click that collapses `rel` in the
-      // middle of one used to be answered by writing all six levels of its
-      // descendants into the persisted expansion anyway — invisibly, because
-      // `rel` itself is gone from the list, until the next click opened the
-      // whole subtree at once.
+      // A click that collapses `rel` during these awaits must not persist six
+      // levels of its descendants.
       if (opened.length > 0 && expandedRef.current.includes(rel)) {
         setExpanded((cur) => Array.from(new Set([...cur, ...opened])));
       }
@@ -327,39 +258,21 @@ export function useProjectTree({
     [read, setExpanded],
   );
 
-  // Every project root, one shallow read each: it fills the count on every
-  // project row and warms the cache for the first expansion, and it re-lists
-  // whatever the user left open.
-  //
-  // Keyed on `projects`, which is also the gate. App reads the project list
-  // behind the pending settings save, so by the time a project exists here the
-  // host can answer `list_project_files` from that same settings.json. Asking
-  // ahead of the write returns "No workspace configured".
+  // Keyed on `projects`, which is also the gate: App reads that list behind the
+  // pending settings save, which is the file the host answers from.
   useEffect(() => {
     const targets = reconcileTargets(projects, expandedRef.current);
     void mapLimit(targets, READ_LIMIT, (rel) => read(rel, "refresh"));
   }, [projects, read, refreshKey]);
 
-  // The window came back to the front, so re-read what changed. This is the
-  // reconcile the north star asks for instead of a watcher: a change the user
-  // made in Finder while the app was in the background shows up the moment they
-  // come back to it, and nothing has to run while it is not frontmost.
-  //
-  // Ask the cheap question first. A listing is a `read_dir` plus a `stat` per
-  // entry, and the answer is thrown away when the folder did not move, so a
-  // cancelled file picker over a large folder on a network volume was paying
-  // for a full walk to learn nothing. `changed_project_dirs` costs one `stat`
-  // a folder and names the ones worth reading.
-  //
-  // Deliberately not on `job-updated`: a 200-file run emits hundreds of those
-  // events, and the tree would walk the disk hundreds of times per run. The
-  // run-finished door is `refreshKey` above.
+  // The reconcile the app runs instead of a watcher. Ask the cheap question
+  // first, or a cancelled file picker pays for a full walk to learn nothing.
+  // Never on `job-updated`: a 200-file run emits hundreds of those.
   useEffect(() => {
     let timer = 0;
     let last = 0;
     const un = onWindowFocused(() => {
-      // One pending reconcile is enough. The burst that follows a file picker
-      // would otherwise queue one per event.
+      // One pending reconcile is enough: a focus burst queues one per event.
       if (timer !== 0) return;
       const wait = Math.max(FOCUS_DEBOUNCE_MS, FOCUS_FLOOR_MS - (Date.now() - last));
       timer = window.setTimeout(() => {
@@ -387,9 +300,7 @@ export function useProjectTree({
       }
       const inside = (path: string) => path === rel || path.startsWith(`${rel}/`);
       setExpanded((cur) => cur.filter((p) => (deep ? !inside(p) : p !== rel)));
-      // A row that unmounts while it holds focus drops focus on <body>, which
-      // silently ends keyboard navigation. Move the selection up to the folder
-      // being closed before its children go.
+      // See `climbFrom`: a row unmounting with focus ends keyboard navigation.
       setSelected((cur) => (cur !== null && cur !== rel && inside(cur) ? rel : cur));
     },
     [load, setExpanded],

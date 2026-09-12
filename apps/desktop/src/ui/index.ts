@@ -1,15 +1,7 @@
-/// Tool-Kit UI — the design system's entire public surface.
+/// The design system's entire public surface. Import from `@ui`, never deeper.
 ///
-/// Import from `@ui` and nothing deeper:
-///
-///     import { Button, Panel, Label } from "@ui";
-///
-/// This module has one hard rule, enforced by ESLint: nothing under `src/ui`
-/// may import from `@/domains`, `@/app`, `@/platform`, or `@tauri-apps/*`. The
-/// library knows about React and CSS, and nothing about Tool-Kit. That is what
-/// keeps it lift-and-shift into `packages/ui` the day a second client needs it.
-///
-/// See UI.md for the design language and the rules for extending it.
+/// One hard rule, enforced by ESLint: nothing under `src/ui` may import from
+/// `@/domains`, `@/app`, `@/platform` or `@tauri-apps/*`. See UI.md.
 
 import "./base.css";
 
@@ -32,25 +24,11 @@ export type {
 export { Button } from "./primitives/Button";
 export type { ButtonProps, ButtonVariant, ButtonSize } from "./primitives/Button";
 
-export { Panel, CellGrid, Cell, Well, Divider } from "./primitives/Surface";
-export type {
-  PanelProps,
-  PanelTone,
-  CellGridProps,
-  CellProps,
-  WellProps,
-  DividerProps,
-} from "./primitives/Surface";
+export { Panel, Well, Divider } from "./primitives/Surface";
+export type { PanelProps, PanelTone, WellProps, DividerProps } from "./primitives/Surface";
 
-export { Badge, Status, StatusDot } from "./primitives/Badge";
-export type {
-  BadgeProps,
-  Tone,
-  StatusProps,
-  StatusTone,
-  StatusDotProps,
-  DotTone,
-} from "./primitives/Badge";
+export { Badge, StatusDot } from "./primitives/Badge";
+export type { BadgeProps, Tone, StatusDotProps, DotTone } from "./primitives/Badge";
 
 export { Tabs } from "./primitives/Tabs";
 
@@ -67,9 +45,6 @@ export type { SplitPaneProps, SplitLayout } from "./primitives/SplitPane";
 
 export { Segmented } from "./primitives/Segmented";
 export type { SegmentedProps, SegmentedOption } from "./primitives/Segmented";
-
-export { Disclosure } from "./primitives/Disclosure";
-export type { DisclosureProps } from "./primitives/Disclosure";
 
 /// A modal card over the whole window, on a native `<dialog>`.
 export { Sheet } from "./primitives/Sheet";
@@ -90,7 +65,7 @@ export type {
 } from "./primitives/Field";
 
 export { Stack, Row, Spacer } from "./primitives/Layout";
-export type { StackProps, RowProps, Gap, Align, Justify } from "./primitives/Layout";
+export type { StackProps, RowProps, Gap, Align } from "./primitives/Layout";
 
 export { Meter } from "./primitives/Meter";
-export type { MeterProps, MeterTone } from "./primitives/Meter";
+export type { MeterProps } from "./primitives/Meter";

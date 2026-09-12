@@ -32,14 +32,46 @@ pub struct Submitted {
     pub check_url: Option<String>,
 }
 
+impl Submitted {
+    /// Datalab's own status URL when it sent one, else the documented default.
+    pub fn datalab_check_url(&self) -> String {
+        self.check_url
+            .clone()
+            .unwrap_or_else(|| format!("{DATALAB_BASE}/api/v1/convert/{}", self.remote_id))
+    }
+}
+
 pub enum PollResult {
     Pending,
     Done(String),
     Failed(String),
 }
 
+/// Whether sending this submit again can bill the same file twice.
+#[derive(Debug)]
+pub enum SubmitError {
+    /// The provider answered and refused, so a retry buys the first one.
+    Refused(String),
+    /// No outcome came back: the upload may have landed with no id to poll.
+    Uncertain(String),
+}
+
+impl SubmitError {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Refused(message) | Self::Uncertain(message) => message,
+        }
+    }
+}
+
+/// Everything that fails before the body is sent is a refusal.
+impl From<String> for SubmitError {
+    fn from(message: String) -> Self {
+        Self::Refused(message)
+    }
+}
+
 const DATALAB_BASE: &str = "https://www.datalab.to";
-const DATALAB_CONVERT: &str = "https://www.datalab.to/api/v1/convert";
 const REVAI_JOBS: &str = "https://api.rev.ai/speechtotext/v1/jobs";
 
 /// Pull the first present, non-null value from `keys`, as text.
@@ -56,14 +88,35 @@ fn pick_string(body: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-/// Read a file once into memory, returning (bytes, filename, mime) so a
-/// multipart body can be rebuilt cheaply on each retry attempt.
-///
-/// `Bytes`, not `Vec<u8>`, because `send_retrying` takes `Fn`: the buffer stays
-/// alive in the closure for the whole call, so a `Vec` clone per attempt held
-/// two copies of the file at once. Transcribe accepts video and has no size
-/// cap, and four permits means four uploads in flight, so the doubling was the
-/// largest allocation in the app. A `Bytes` clone is a refcount bump.
+/// Read a submit response: the body on success, the server's message on
+/// failure. All three submits answer the same shape.
+async fn submit_body(resp: reqwest::Response, who: &str) -> Result<Value, SubmitError> {
+    let status = resp.status();
+    let body: Value = match resp.json().await {
+        Ok(body) => body,
+        // An unreadable body under a success status is an accepted upload whose
+        // id we lost, not a refusal.
+        Err(e) => {
+            let message = format!("Bad response from {who}: {e}");
+            return Err(if status.is_success() {
+                SubmitError::Uncertain(message)
+            } else {
+                SubmitError::Refused(message)
+            });
+        }
+    };
+    if !status.is_success() {
+        return Err(SubmitError::Refused(
+            pick_string(&body, &["error", "detail", "message", "title"])
+                .unwrap_or_else(|| format!("{who} error ({status})")),
+        ));
+    }
+    Ok(body)
+}
+
+/// Read a file once, so a multipart body can be rebuilt cheaply per attempt.
+/// `Bytes`, not `Vec<u8>`: `send_retrying` takes `Fn`, so a `Vec` clone per
+/// attempt holds two copies of the file at once.
 async fn read_file_bytes(
     path: &str,
     default_name: &str,
@@ -82,22 +135,18 @@ async fn read_file_bytes(
 }
 
 fn bytes_part(bytes: bytes::Bytes, name: &str, mime: &str) -> reqwest::multipart::Part {
-    // `stream_with_length` rather than `Part::bytes`, which would take a
-    // `Cow<'static, [u8]>` and copy the buffer back out of the `Bytes`. The
-    // length is required: without it the body is chunked, and neither provider
-    // accepts a chunked upload.
+    // `stream_with_length`, not `Part::bytes`, which copies the buffer back
+    // out. The length is required, or the body is chunked and both refuse.
     let len = bytes.len() as u64;
     let part = reqwest::multipart::Part::stream_with_length(reqwest::Body::from(bytes), len)
         .file_name(name.to_string());
-    // A panic here would abort the spawned job task, leaving the row stuck on
-    // "Uploading…" forever, so fall back instead of unwrapping.
+    // A panic aborts the job task and strands the row on "Uploading…".
     part.mime_str(mime)
         .unwrap_or_else(|_| reqwest::multipart::Part::bytes(Vec::new()).file_name(name.to_string()))
 }
 
-/// Seconds to wait per `retry-after`, capped so a large server-supplied delay
-/// can't pin a concurrency permit for hours. The integer form is the only one
-/// these APIs send; an HTTP-date falls back to our own backoff.
+/// Seconds per `retry-after`, capped so a large one cannot pin a permit for
+/// hours. Only the integer form is sent, and a date falls back to our backoff.
 fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
     resp.headers()
         .get(reqwest::header::RETRY_AFTER)
@@ -106,14 +155,14 @@ fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
         .map(|s| s.min(60))
 }
 
-/// Upload timeout. Submits carry the whole file, so they need far longer than a
-/// poll — a 300s cap made large Transcribe files impossible to submit at all.
+/// Upload timeout. A submit carries the whole file, so it needs far longer
+/// than a poll.
 pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-/// Poll timeout. Polls are tiny GETs; if one hangs, the next tick retries.
+/// Poll timeout. A poll is a tiny GET, and the next tick retries a hang.
 pub const POLL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Turn a non-success poll response into a terminal failure where the status
-/// says retrying can't help. 5xx and 429 stay transient (caller keeps polling).
+/// Terminal where the status says retrying cannot help. 5xx and 429 stay
+/// transient.
 fn terminal_poll_error(status: reqwest::StatusCode, body: &Value, who: &str) -> Option<PollResult> {
     if status.is_success() || status.is_server_error() || status.as_u16() == 429 {
         return None;
@@ -141,9 +190,8 @@ where
         match make().await {
             Ok(resp) => {
                 let code = resp.status().as_u16();
-                // Only retry statuses that mean the request was refused before
-                // any work happened. A 500 may mean the job was created and
-                // then errored — retrying it would bill the user twice.
+                // Only statuses meaning the request was refused before any work
+                // happened. A 500 may mean the job was created, then errored.
                 let transient = matches!(code, 429 | 502 | 503 | 504 | 529);
                 if transient && attempt < MAX_TRIES {
                     let wait = retry_after_secs(&resp).unwrap_or(2u64.pow(attempt));
@@ -153,9 +201,8 @@ where
                 return Ok(resp);
             }
             Err(e) => {
-                // Same reasoning: a failure while connecting means the body was
-                // never sent. A timeout or a mid-body error might have reached
-                // the server, so don't resend and risk a duplicate charge.
+                // A connect failure means the body never went. A timeout or a
+                // mid-body error may have reached the server.
                 if e.is_connect() && attempt < MAX_TRIES {
                     tokio::time::sleep(Duration::from_secs(2u64.pow(attempt))).await;
                     continue;
@@ -176,7 +223,7 @@ pub async fn datalab_submit(
     path: &str,
     output_format: &str,
     high_accuracy: bool,
-) -> Result<Submitted, String> {
+) -> Result<Submitted, SubmitError> {
     let (bytes, name, mime) = read_file_bytes(path, "file").await?;
     let resp = send_retrying(|| {
         // Page delimiters are always on so any figure can be cited to a page.
@@ -184,14 +231,9 @@ pub async fn datalab_submit(
             .part("file", bytes_part(bytes.clone(), &name, &mime))
             .text("output_format", output_format.to_string())
             .text("paginate", "true");
-        // High-accuracy profile, tuned for SIM/CIM source docs (tax returns,
-        // P&Ls, balance sheets — frequently scanned and table-heavy). It trades
-        // credits and latency for fidelity, which is the right default when
-        // every extracted figure ends up cited in a buyer-facing memorandum,
-        // and wasted effort on a clean digital PDF:
-        //   use_llm      — LLM pass that markedly improves tables/forms/layout
-        //   force_ocr    — re-OCR every page, ignoring unreliable embedded text
-        //   format_lines — reconstruct lines cleanly (keeps financial rows intact)
+        // High-accuracy profile for scanned, table-heavy documents: an LLM
+        // pass over tables and layout, a re-OCR of every page ignoring embedded
+        // text, and clean line reconstruction. Wasted on a digital PDF.
         if high_accuracy {
             form = form
                 .text("use_llm", "true")
@@ -199,33 +241,25 @@ pub async fn datalab_submit(
                 .text("format_lines", "true");
         }
         client
-            .post(DATALAB_CONVERT)
+            .post(format!("{DATALAB_BASE}/api/v1/convert"))
             .header("X-API-Key", api_key)
             .timeout(UPLOAD_TIMEOUT)
             .multipart(form)
             .send()
     })
-    .await?;
-    parse_datalab_submit(resp).await
-}
-
-async fn parse_datalab_submit(resp: reqwest::Response) -> Result<Submitted, String> {
-    let status = resp.status();
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Bad response from Datalab: {e}"))?;
-    if !status.is_success() {
-        return Err(pick_string(&body, &["error", "detail", "message"])
-            .unwrap_or_else(|| format!("Datalab error ({status})")));
-    }
+    .await
+    // No answer, so the request id is unknowable either way.
+    .map_err(SubmitError::Uncertain)?;
+    let body = submit_body(resp, "Datalab").await?;
     if !body
         .get("success")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
-        return Err(pick_string(&body, &["error", "detail"])
-            .unwrap_or_else(|| "Datalab rejected the request".into()));
+        return Err(SubmitError::Refused(
+            pick_string(&body, &["error", "detail"])
+                .unwrap_or_else(|| "Datalab rejected the request".into()),
+        ));
     }
     Ok(Submitted {
         remote_id: body
@@ -279,8 +313,7 @@ pub async fn datalab_poll(
             "chunks" => &["chunks", "json", "output"],
             _ => &["markdown", "output", "content"],
         };
-        // An absent/empty result field used to be written out as a 0-byte file
-        // and reported as a success. Fail the job instead.
+        // An empty result field would otherwise be a 0-byte file called done.
         return Ok(match pick_string(&body, keys) {
             Some(text) if !text.trim().is_empty() => PollResult::Done(text),
             _ => PollResult::Failed(
@@ -306,7 +339,7 @@ pub async fn datalab_pipeline_submit(
     pipeline_id: &str,
     path: &str,
     output_format: &str,
-) -> Result<Submitted, String> {
+) -> Result<Submitted, SubmitError> {
     let url = format!("{DATALAB_BASE}/api/v1/pipelines/{pipeline_id}/run");
     let (bytes, name, mime) = read_file_bytes(path, "file").await?;
     let resp = send_retrying(|| {
@@ -320,20 +353,16 @@ pub async fn datalab_pipeline_submit(
             .multipart(form)
             .send()
     })
-    .await?;
-    let status = resp.status();
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Bad response from Datalab pipeline: {e}"))?;
-    if !status.is_success() {
-        return Err(pick_string(&body, &["error", "detail", "message"])
-            .unwrap_or_else(|| format!("Datalab pipeline error ({status})")));
-    }
+    .await
+    .map_err(SubmitError::Uncertain)?;
+    let body = submit_body(resp, "Datalab pipeline").await?;
+    // An accepted run with no id in the answer: started, and unpollable.
     let exec_id = body
         .get("execution_id")
         .and_then(|v| v.as_str())
-        .ok_or("Datalab pipeline did not return an execution id")?;
+        .ok_or_else(|| {
+            SubmitError::Uncertain("Datalab pipeline did not return an execution id".into())
+        })?;
     Ok(Submitted {
         remote_id: exec_id.to_string(),
         check_url: None,
@@ -368,9 +397,8 @@ pub async fn datalab_pipeline_poll(
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            // Take the last *completed* step. Defaulting to step 0 when nothing
-            // completed fetched a failed step's error payload and wrote it to
-            // disk as if it were the converted document.
+            // The last *completed* step. Step 0 fetches a failed step's error
+            // payload and writes it to disk as the document.
             let step_index = steps
                 .iter()
                 .filter(|s| s.get("status").and_then(|v| v.as_str()) == Some("completed"))
@@ -393,8 +421,7 @@ pub async fn datalab_pipeline_poll(
                 .await
                 .map_err(|e| e.to_string())?;
             let rhttp = rresp.status();
-            // Same rule as the transcript fetch: the pipeline run is already
-            // paid for, so a 5xx on collecting the result is worth another tick.
+            // The run is already paid for, so a 5xx here is worth another tick.
             if rhttp.is_server_error() || rhttp.as_u16() == 429 {
                 return Err(format!("Datalab step result returned {rhttp}"));
             }
@@ -425,6 +452,37 @@ pub async fn datalab_pipeline_poll(
     }
 }
 
+/// A pipeline id switches Convert from /convert to a pipeline run. Both the
+/// fallback and the direct path come here, so neither picks its own endpoint.
+pub async fn datalab_submit_any(
+    client: &reqwest::Client,
+    api_key: &str,
+    pipeline: Option<&str>,
+    path: &str,
+    output_format: &str,
+    high_accuracy: bool,
+) -> Result<Submitted, SubmitError> {
+    match pipeline {
+        Some(id) => datalab_pipeline_submit(client, api_key, id, path, output_format).await,
+        None => datalab_submit(client, api_key, path, output_format, high_accuracy).await,
+    }
+}
+
+pub async fn datalab_poll_any(
+    client: &reqwest::Client,
+    api_key: &str,
+    pipeline: bool,
+    remote_id: &str,
+    check_url: &str,
+    output_format: &str,
+) -> Result<PollResult, String> {
+    if pipeline {
+        datalab_pipeline_poll(client, api_key, remote_id).await
+    } else {
+        datalab_poll(client, api_key, check_url, output_format).await
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Rev.ai — speech to text
 // ---------------------------------------------------------------------------
@@ -446,15 +504,10 @@ pub async fn revai_submit(
             .send()
     })
     .await?;
-    let status = resp.status();
-    let body: Value = resp
-        .json()
+    // Transcribe has no uncertainty guard, so its job row carries the failure.
+    let body = submit_body(resp, "Rev.ai")
         .await
-        .map_err(|e| format!("Bad response from Rev.ai: {e}"))?;
-    if !status.is_success() {
-        return Err(pick_string(&body, &["detail", "message", "title", "error"])
-            .unwrap_or_else(|| format!("Rev.ai error ({status})")));
-    }
+        .map_err(|e| e.message().to_string())?;
     let id = body
         .get("id")
         .and_then(|v| v.as_str())
@@ -495,10 +548,8 @@ pub async fn revai_poll(
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
-            // The transcription is finished and already billed by the time we
-            // ask for it, so a transient blip here must not discard it. `Err`
-            // sends the caller's poll loop round again (it tolerates ~1 minute
-            // of unbroken failure); only a client error is worth giving up on.
+            // The transcription is already billed by the time we ask, so a blip
+            // must not discard it. `Err` polls again, a client error ends it.
             let ts = tresp.status();
             if ts.is_server_error() || ts.as_u16() == 429 {
                 return Err(format!("Transcript fetch returned {ts}"));

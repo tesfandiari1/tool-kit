@@ -17,6 +17,8 @@
     "core:window:allow-set-max-size",
     "core:window:allow-set-resizable",
     "core:window:allow-current-monitor",
+    "core:window:allow-show",
+    "core:window:allow-set-position",
     "core:webview:allow-set-webview-zoom"
   ]
 }

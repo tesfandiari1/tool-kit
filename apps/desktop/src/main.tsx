@@ -1,15 +1,9 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 
-/// `?gallery` renders the design system's specimen page instead of the app.
-/// It runs in a plain browser tab with no Tauri bridge, which is what makes the
-/// UI reviewable without a native build.
-///
-/// Both branches import dynamically, and that is load-bearing rather than
-/// stylistic: a static `import App` would pull `App.css` into the gallery too,
-/// where its `:root` tokens and `body` rules collide with the library's. The
-/// specimen page would then be judging whichever stylesheet happened to load
-/// last. Each entry point loads exactly one design system.
+/// `?gallery` renders the specimen page in a plain browser tab. Both branches
+/// import dynamically, or `App.css` follows into the gallery and its `:root`
+/// tokens collide with the library's.
 const showGallery = new URLSearchParams(window.location.search).has("gallery");
 
 async function mount() {
@@ -17,10 +11,8 @@ async function mount() {
   if (!el) throw new Error("root element missing");
   const root = ReactDOM.createRoot(el);
 
-  // `import.meta.env.DEV` is substituted with `false` in a production build,
-  // so Rollup drops this branch and the dynamic import with it. The packaged
-  // webview loads `tauri://localhost` with no query string and has no way to
-  // ask for the gallery, so the chunk was shipping dead.
+  // Substituted with `false` in a production build, so Rollup drops the
+  // branch and its import rather than ship a dead chunk.
   if (import.meta.env.DEV && showGallery) {
     const { Gallery } = await import("@ui/gallery/Gallery");
     root.render(

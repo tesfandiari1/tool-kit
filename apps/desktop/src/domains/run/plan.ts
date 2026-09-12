@@ -1,15 +1,9 @@
 import type { ConversionProfile, ConversionRoute, JobId, Scan } from "@/app/types";
 
-/// The job a selection implies, paired with the selection that answer belongs
-/// to. Null when nothing should change.
-///
-/// `answered` is the selection the caller last acted on, and it is the whole
-/// point of this function. The scan round-trips through an empty result every
-/// time something unrelated refreshes it — a new output folder, a format
-/// change, a finished run — and the counts coming back afterwards read as a
-/// change. Detecting again there wrote the guess over a job the user had
-/// clicked by hand, which is the one thing autodetect must never do. One
-/// answer per selection, so a new drop still re-detects.
+/// The job a selection implies, with the selection it answers. `answered` is
+/// the point: the scan round-trips through an empty result on every unrelated
+/// refresh, and detecting again there writes over a manual click. One answer
+/// per selection, so a new drop still re-detects.
 export function autodetectJob(
   inputs: readonly string[],
   answered: string | null,
@@ -21,17 +15,14 @@ export function autodetectJob(
   return { selection, jobType: scan.transcribe > scan.convert ? "transcribe" : "convert" };
 }
 
-/// The buckets a selection costs. Extracted so the numbers the Run button
-/// promises can be tested without mounting the app — getting them wrong
+/// What a selection costs, testable without mounting the app: wrong here
 /// either over-bills or silently skips work.
 export interface RunPlan {
   skipping: number;
   copying: number;
   toRun: number;
-  /// Files that already have an output in this folder and will still be sent,
-  /// because skip is off. `write_output` refuses to clobber, so each one lands
-  /// as a numbered copy (`report (1).md`) rather than replacing the edit.
-  /// Zero when skip is on: those files are `skipping` instead.
+  /// Sent again with skip off. `write_output` refuses to clobber, so each
+  /// lands as a numbered copy. Zero when skip is on.
   colliding: number;
 }
 
@@ -77,17 +68,6 @@ export function runButtonLabel(verb: string, toRun: number, copying: number): st
   if (toRun > 0) return `${verb} ${toRun} file${toRun > 1 ? "s" : ""}`;
   if (copying > 0) return `Copy ${copying} result${copying > 1 ? "s" : ""}`;
   return "Run";
-}
-
-/// The native backend route deliberately does not reuse direct-provider
-/// history yet: a backend result is not interchangeable with a Datalab result.
-/// Keep the UI's counts and route plan on that same conservative policy.
-export function effectiveSkipAlreadyDone(
-  jobType: JobId,
-  conversionRoute: ConversionRoute,
-  requested: boolean,
-): boolean {
-  return requested && !(jobType === "convert" && conversionRoute === "backend");
 }
 
 export function largeRunConfirmation({

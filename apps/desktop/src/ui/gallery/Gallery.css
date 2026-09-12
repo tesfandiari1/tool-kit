@@ -1,9 +1,7 @@
 .gal {
   height: 100%;
   overflow: auto;
-  /* Opaque, unlike the app window. The gallery runs in a plain browser tab
-     with no NSVisualEffectView behind it, so the app's semi-transparent scrim
-     would composite against white and wash every specimen out. */
+  /* Opaque: a browser tab has no NSVisualEffectView behind it. */
   background: var(--surface-solid);
   padding: var(--s6) var(--s6) var(--s8);
   -webkit-user-select: text;
@@ -42,8 +40,7 @@
   border-bottom: 1px solid var(--rule);
 }
 
-/* Specimens sit on a subtly different ground so component edges are visible
-   against the page. */
+/* A different ground, so component edges are visible. */
 .gal__specimen {
   padding: var(--s4);
   border: 1px solid var(--rule);
@@ -79,8 +76,7 @@
   gap: var(--s4);
 }
 
-/* Split-pane specimen: the panes must fill their half, or the seam is the only
-   thing the specimen actually shows. */
+/* The panes must fill their half, or only the seam shows. */
 .gal__splitpane {
   flex: 1;
   min-height: 0;
@@ -89,27 +85,22 @@
   background: var(--surface-well);
 }
 
-/* Sheet specimen. `--bar-h` is the app's title-bar height, published on `.app`
-   there and set here so the specimen shows the band the card leaves clear and
-   the drag strip that fills it. */
+/* `--bar-h` is set here so the specimen shows the band the card clears. */
 .gal__sheethost {
   --bar-h: 40px;
 }
 
-/* Tinted only so the strip is visible in a browser tab. In the app it is a
-   bare `data-tauri-drag-region` div and paints nothing. */
+/* Tinted only for the browser tab: in the app the strip paints nothing. */
 .gal__sheetdrag {
   background: var(--rule);
 }
 
-/* The sheet body brings no padding of its own, because it holds a panel that
-   already has a measure. A specimen has no panel, so it supplies one. */
+/* The sheet body has no padding, so a panel-less specimen supplies its own. */
 .gal__sheetbody {
   padding: var(--s4);
 }
 
-/* The app's `.toast` in miniature: fixed, and drawn from inside the dialog.
-   Outside it, the top layer would hide it completely. */
+/* Fixed, and drawn from inside the dialog: the top layer would hide it. */
 .gal__toast {
   position: fixed;
   bottom: var(--s5);
@@ -124,9 +115,7 @@
   z-index: 60;
 }
 
-/* The tree ships in a pane whose floor is 300px. Reviewing it any wider hides
-   the two things the width decides: where a name truncates, and what the
-   depth cap is worth. */
+/* Reviewed at the pane's floor, which is where a name truncates. */
 .gal__tree {
   max-width: 300px;
 }

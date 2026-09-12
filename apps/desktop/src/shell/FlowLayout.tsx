@@ -1,31 +1,19 @@
 import type { ReactNode } from "react";
 
-/// Left-column layout: head, body, optional foot in a vertical stack.
-///
-/// The default variant holds the head and foot still and scrolls the body
-/// between them. The workspace variant passes children through flat so
-/// `.flow--workspace` rules can rank the queue and compress controls inside a
-/// fixed 100vh frame.
+/// Left-column layout: head, body, optional foot in a vertical stack. The head
+/// and foot hold still and the body scrolls between them.
 export function FlowLayout({
-  variant = "default",
   head,
   foot,
   children,
   className,
 }: {
-  variant?: "default" | "workspace";
   head?: ReactNode;
   foot?: ReactNode;
   children: ReactNode;
   className?: string;
 }) {
-  const mainClass = ["flow", variant === "workspace" ? "flow--workspace" : "", className]
-    .filter(Boolean)
-    .join(" ");
-
-  if (variant === "workspace") {
-    return <main className={mainClass}>{children}</main>;
-  }
+  const mainClass = ["flow", className].filter(Boolean).join(" ");
 
   return (
     <main className={mainClass}>

@@ -2,13 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { commands } from "@/app/commands";
 import { confirm, currentWindow, onDragDrop } from "@/platform/host";
 
-/// The window itself: how files get in, how the chrome reacts to focus, and
-/// what closing means. Three separate host subscriptions, each with its own
-/// unsubscribe, grouped because they are all "the OS talking to us" and none
-/// of them is about jobs.
+/// Three host subscriptions: drop, focus and close.
 
-/// Files arrive by drop anywhere in the window. Returns whether a drag is
-/// currently over it, which the input well renders as an affordance.
+/// Reports whether a drag is over the window, which the well renders.
 export function useDragDrop(onDrop: (paths: string[]) => void) {
   const [dragging, setDragging] = useState(false);
 
@@ -26,8 +22,7 @@ export function useDragDrop(onDrop: (paths: string[]) => void) {
   return dragging;
 }
 
-/// macOS dims an inactive window's accents; mirror it on `<body>` so the
-/// stylesheet can follow with `body.inactive`.
+/// Mirrored on `<body>`, so the stylesheet follows with `body.inactive`.
 export function useWindowFocusClass() {
   useEffect(() => {
     const win = currentWindow();
@@ -39,14 +34,10 @@ export function useWindowFocusClass() {
   }, []);
 }
 
-/// This is a menu-bar app: closing the window hides it rather than quitting,
-/// so the tray and ⌥⌘V keep working. Quit via the tray menu or ⌘Q. Closing
-/// mid-run would abandon files already paid for upstream, so that asks first.
-///
-/// The handler is registered once and reads `running` / `activeCount` /
-/// `dirtyCount` through refs. Re-registering on every job event would be a
-/// subscription churn on a 200-file run, and the closure would still be one
-/// render stale at the moment it matters.
+/// Closing hides the window rather than quit, so the tray keeps working, and
+/// it asks first mid-run because those files are already paid for. The handler
+/// registers once and reads the counts through refs, or a 200-file run churns
+/// the subscription.
 export function useCloseConfirm(running: boolean, activeCount: number, dirtyCount: number) {
   const runningRef = useRef(running);
   const activeRef = useRef(activeCount);
@@ -62,13 +53,8 @@ export function useCloseConfirm(running: boolean, activeCount: number, dirtyCoun
     const win = currentWindow();
     const un = win.onCloseRequested(async (e) => {
       e.preventDefault();
-      // Hiding keeps the webview alive, so an unsaved edit survives it. Quitting
-      // does not, and the quit below is one click away — so an edit that is
-      // still only in memory has to be said out loud before either.
-      //
-      // Reached when the autosave has not landed yet, or when the host refused
-      // the write because the file changed underneath us. That second case is
-      // the one that matters: it will not fix itself by waiting.
+      // Hiding keeps an unsaved edit alive, and the quit below does not. The
+      // case that matters is a refused write, which waiting does not fix.
       const dirty = dirtyRef.current;
       if (dirty > 0) {
         const keep = await confirm(

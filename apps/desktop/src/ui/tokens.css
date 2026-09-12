@@ -1,64 +1,37 @@
-/* ===========================================================================
-   Tool-Kit UI — design tokens
-
-   Every value in the system lives here. Components reference tokens and never
-   literal colours, sizes, or fonts, which is what lets a theme swap be a
-   20-line override instead of a rewrite.
-
-   The palette derives from AssemblyAI's published theme (their `--color-*`
-   scale), retuned for a macOS instrument panel rather than a marketing page.
-   Two themes ship:
-
-     :root                  "graphite"  warm charcoal, the desktop default
-     [data-theme="paper"]   "paper"     warm cream, for any future web surface
-
-   Only the surface, ink, and accent groups differ between them. Type, space,
-   radius, and motion are shared, so a component styled once works in both.
-   =========================================================================== */
+/* Design tokens. Components reference these and never a literal colour, size
+   or font. Two themes ship, `:root` graphite and `[data-theme="paper"]`, and
+   only surface, ink and accent differ between them. */
 
 :root {
-  /* --- Warm neutral ramp ------------------------------------------------
-     Every step carries a yellow cast. This is the single most important
-     property of the palette: a cool grey next to these reads as broken. */
+  /* Warm neutral ramp. Every step carries a yellow cast, and a cool grey
+     beside these reads as broken. */
   --warm-950: #14120f;
   --warm-900: #1d1b16;
   --warm-800: #26241e;
-  --warm-700: #2f2c25;
   --warm-600: #4a4945;
   --warm-500: #777673;
   --warm-400: #a5a4a2;
   --warm-300: #c7c3b2;
-  --warm-200: #dad7cb;
   --warm-100: #ecebe5;
   --warm-050: #f5f3eb;
   --warm-000: #fdfcf8;
 
-  /* --- Cobalt: the action colour ---------------------------------------
-     Reserved for "this is the control you press". Never decorative. */
+  /* Cobalt: the control you press, never decoration (UI.md rule 1). */
   --cobalt-600: #2d1a9e;
   --cobalt-500: #3923c7;
   --cobalt-400: #614fd2;
   --cobalt-300: #887bdd;
   --cobalt-200: #b0a7e9;
-  --cobalt-100: #d7d3f4;
 
-  /* --- Status: the signal colours --------------------------------------
-     Amber means live, green means passed, red means failed. Nothing else in
-     the app is ever coloured with these. */
+  /* Live, passed, failed. Nothing else is coloured with these. */
   --amber: #e0a33c;
-  --amber-ink: #2a1e08;
   --green-400: #2d915c;
   --green-300: #6dab89;
   --red-500: #f04438;
-  --red-300: #ec9d92;
 
-  /* =====================================================================
-     Semantic layer — the only names components are allowed to use.
-     ===================================================================== */
+  /* Semantic layer: the only names components may use. */
 
-  /* Surfaces are semi-opaque because they sit on the window's
-     NSVisualEffectView. Enough body to keep text crisp, sheer enough that the
-     material still reads as depth. */
+  /* Semi-opaque: they sit on the window's NSVisualEffectView. */
   --surface-scrim: #14120fcc;
   --surface: #1d1b16b8;
   --surface-raised: #26241ecc;
@@ -79,28 +52,21 @@
   --accent-active: var(--cobalt-500);
   --accent-ink: #ffffff;
   --accent-quiet: var(--cobalt-200);
-  --accent-wash: #614fd21f;
 
   --live: var(--amber);
-  --live-ink: var(--amber-ink);
   --pass: var(--green-300);
   --fault: var(--red-500);
-  --fault-quiet: var(--red-300);
 
   --focus: #7d8cff;
 
-  /* Selected text. The one wash the accent is allowed outside a control,
-     because macOS tints selection with the system accent and matching it is
-     what makes the app feel native. Alpha rather than a solid, so the ink
-     under it keeps its own tone and stays readable. */
+  /* The one accent wash outside a control, because macOS tints selection.
+     Alpha, so the ink under it stays readable. */
   --select: color-mix(in srgb, var(--accent) 34%, transparent);
 
   color-scheme: dark;
 }
 
-/* --- Paper theme ---------------------------------------------------------
-   AssemblyAI's cream surface, for a web client or a light-mode desktop.
-   Overrides only what changes: surfaces, ink, and the accent's contrast pair. */
+/* Paper theme: overrides surfaces, ink and the accent's contrast pair. */
 [data-theme="paper"] {
   --surface-scrim: var(--warm-000);
   --surface: var(--warm-000);
@@ -122,40 +88,29 @@
   --accent-active: var(--cobalt-600);
   --accent-ink: #ffffff;
   --accent-quiet: var(--cobalt-500);
-  --accent-wash: var(--cobalt-100);
 
   --live: #a8710f;
-  --live-ink: #fdfcf8;
   --pass: var(--green-400);
   --fault: var(--red-500);
-  --fault-quiet: #b42318;
 
   /* The graphite ring is tuned for a dark ground and washes out on cream. */
   --focus: #3923c7;
 
-  /* Cream needs less of the accent: the ink over it is dark, so the same
-     strength that reads on charcoal buries it here. */
+  /* Cream needs less accent: the strength that reads on charcoal buries it. */
   --select: color-mix(in srgb, var(--accent) 20%, transparent);
 
   color-scheme: light;
 }
 
-/* --- Typography ----------------------------------------------------------
-   Three families with three distinct jobs, and the jobs never overlap:
-
-     --font-display  Instrument Serif. Panel titles and headline numbers only.
-     --font-body     SF Pro via -apple-system. All prose and UI copy.
-     --font-mono     JetBrains Mono. Labels, tabs, buttons, paths, counts.
-
-   The mono-uppercase-letterspaced label is the signature of this design
-   language. It carries more of the identity than any colour does. */
+/* Three families, three jobs, never overlapping: display for panel titles,
+   body for prose, mono for every label. The tracked mono uppercase label is
+   the signature of the language. */
 :root {
   --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
   --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
-  /* Desktop scale. Smaller than a marketing site's, because a tool window
-     shows twenty rows where a landing page shows one headline. */
+  /* Desktop scale: a tool window shows twenty rows, not one headline. */
   --t-label: 10px;
   --t-xs: 11px;
   --t-sm: 12px;
@@ -170,19 +125,16 @@
   --lh-snug: 1.35;
   --lh-body: 1.55;
 
-  /* Serif display sets tight, mono labels set wide. Both are deliberate and
-     both come straight from the reference. */
+  /* Serif sets tight, mono labels wide. */
   --track-display: -0.02em;
   --track-label: 0.09em;
   --track-mono: 0.02em;
 
   --weight-normal: 400;
   --weight-medium: 500;
-  --weight-bold: 700;
 }
 
-/* --- Space ---------------------------------------------------------------
-   4px grid. No other spacing value exists anywhere in the system. */
+/* 4px grid. No other spacing value exists in the system. */
 :root {
   --s1: 4px;
   --s2: 8px;
@@ -194,18 +146,14 @@
   --s8: 48px;
 }
 
-/* --- Radius --------------------------------------------------------------
-   Controls get a small radius. Grid cells get none: the hairline lattice of
-   square cells is what makes the reference look engineered rather than soft. */
+/* Controls get a small radius. Grid cells get none. */
 :root {
   --r-control: 4px;
   --r-panel: 6px;
-  --r-cell: 0px;
   --r-pill: 999px;
 }
 
-/* --- Motion --------------------------------------------------------------
-   Fast and flat. No bounce, no spring. */
+/* Fast and flat. No bounce, no spring. */
 :root {
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-out: cubic-bezier(0, 0, 0.2, 1);
@@ -214,13 +162,9 @@
   --dur-slow: 260ms;
 }
 
-/* Vibrancy is a system preference, not ours to insist on. When the user turns
-   it off, surfaces go fully opaque so nothing depends on the material.
-
-   Scoped away from the paper theme: unscoped, this painted cream surfaces
-   near-black while the ink stayed dark, so a reduced-transparency user on the
-   light theme got black-on-black. Paper's surfaces are already opaque, so it
-   needs no substitute. */
+/* Surfaces go opaque when the user turns vibrancy off. Scoped away from
+   paper, whose surfaces are opaque already: unscoped it paints them near-black
+   under dark ink. */
 @media (prefers-reduced-transparency: reduce) {
   :root:not([data-theme="paper"]) {
     --surface-scrim: var(--warm-950);

@@ -1,3 +1,4 @@
+import { basename } from "@/app/format";
 import type {
   ConversionProfile,
   ConversionRoute,
@@ -5,20 +6,14 @@ import type {
   SecretStatus,
 } from "@/app/types";
 
-/// AnyDoc has no local Format variant for these file types. They are an
-/// intentional permanent Datalab route, even if a future service advertises
-/// their MIME types by mistake. Images are not on the list: the Vision engine
-/// exists only on macOS 26 and up, so the same build has to route an image
-/// either way depending on what the service it is talking to advertises. This
-/// set must stay identical to `PERMANENT_DIRECT_FORMATS` in `lib.rs`, which
-/// does the authoritative routing at run time.
+/// No local Format variant exists for these, so they route to Datalab even if
+/// a service advertises them. Images are not here: Vision is macOS 26 and up.
+/// Must stay identical to `PERMANENT_DIRECT_FORMATS` in `lib.rs`.
 const PERMANENT_DIRECT_EXTENSIONS = new Set(["html", "htm"]);
 
 export type ConversionCapabilities =
   | { state: "idle" | "loading" }
-  /// `message` is what the host said when the probe failed. Nothing in
-  /// Settings moves the service, so that sentence is the only thing the run
-  /// hint has to offer the user.
+  /// The host's own reason: nothing in Settings moves the service.
   | { state: "unavailable"; message?: string }
   | { state: "ready"; acceptingJobs: boolean; inputFormats: readonly string[] };
 
@@ -130,8 +125,7 @@ function normalizeMediaType(mediaType: string): string {
 }
 
 function isPermanentDirect(sourcePath: string): boolean {
-  const pathParts = sourcePath.replace(/\\/gu, "/").split("/");
-  const fileName = pathParts[pathParts.length - 1] ?? "";
+  const fileName = basename(sourcePath);
   const dot = fileName.lastIndexOf(".");
   if (dot < 0) return false;
   return PERMANENT_DIRECT_EXTENSIONS.has(fileName.slice(dot + 1).toLowerCase());

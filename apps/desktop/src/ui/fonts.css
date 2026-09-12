@@ -12,14 +12,6 @@
   font-display: block;
 }
 
-@font-face {
-  font-family: "Instrument Serif";
-  src: url("./fonts/InstrumentSerif-Italic.woff2") format("woff2");
-  font-weight: 400;
-  font-style: italic;
-  font-display: block;
-}
-
 /* One variable file covers the whole weight range we use. */
 @font-face {
   font-family: "JetBrains Mono";

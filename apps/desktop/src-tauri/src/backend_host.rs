@@ -1,28 +1,13 @@
-//! The conversion service as a child process the app owns.
+//! The conversion service as a child process the app owns: started, tokened,
+//! restarted when it dies, killed on the way out.
 //!
-//! In Sidecar mode the user deploys nothing: `tool-kit-converter` ships inside
-//! the bundle beside the app binary, and this module starts it, hands it a
-//! token, finds out which port the kernel gave it, restarts it when it dies,
-//! and kills it on the way out.
+//! The port is ephemeral, because a fixed one hands the bearer token to
+//! whatever squats on it. The service logs the address it got, and that one
+//! stdout line is the whole handshake.
 //!
-//! Three details carry most of the weight.
-//!
-//! The port is ephemeral. A fixed port hands the bearer token to whatever
-//! process squats on it, and the origin guard cannot tell the difference
-//! because both URLs match. So the service binds `127.0.0.1:0` and logs the
-//! address it actually got, and the one line it writes on stdout is the whole
-//! handshake.
-//!
-//! The stdin pipe is both the parent-death signal and the shutdown channel. The
-//! service quits on stdin EOF, which fires even when the app is killed outright
-//! and can signal nothing, so that one pipe covers the orphan case
-//! `RunEvent::Exit` cannot reach. The write handle is held for the life of the
-//! child and closed only by a deliberate stop, which closes it *before* the
-//! signal for the reason `stop` gives.
-//!
-//! Every signal goes through `/bin/kill`. `unsafe_code = "forbid"` blocks
-//! `libc::kill` and an inner `#[allow]` cannot lift it, and neither
-//! `tokio::process` nor the shell plugin can send anything but SIGKILL.
+//! The child quits on stdin EOF, which covers the orphan case `RunEvent::Exit`
+//! cannot reach. Signals go through `/bin/kill`, because `unsafe_code =
+//! "forbid"` blocks `libc::kill`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -34,7 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tauri::path::BaseDirectory;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::{oneshot, watch};
@@ -49,8 +34,8 @@ const CONVERTER_BIN: &str = "tool-kit-converter";
 /// The service logs this once, as JSON on stdout, with the bound address.
 const LISTENING_MESSAGE: &str = "conversion service listening";
 
-/// Matches the Docker start period. Cold start is milliseconds; this budget is
-/// for a machine under load, not for a healthy launch.
+/// Matches the Docker start period. Cold start is milliseconds, so this is
+/// for a machine under load.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -60,17 +45,15 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_GRACE_SECS: u64 = 5;
 
 /// How long SIGTERM gets before SIGKILL. The service force-cancels its runner
-/// at the end of its own grace window, so waiting longer than that only ever
-/// waits on a process that was never going to exit.
+/// at the end of its grace window, so a longer wait buys nothing.
 const TERM_WAIT: Duration = Duration::from_secs(5);
 const KILL_WAIT: Duration = Duration::from_millis(1500);
 
-/// The cap on the `RunEvent::Exit` path. A blocking drain there sits inside
-/// `applicationWillTerminate`, so a long one reads to the user as a hang.
+/// The cap on the `RunEvent::Exit` path, which runs inside
+/// `applicationWillTerminate`, where a long wait reads as a hang.
 const EXIT_BUDGET: Duration = Duration::from_secs(7);
 
-/// The budget everywhere the app is not being torn down under us, so a service
-/// finishing a job gets the whole of its own grace window.
+/// The budget off the exit path, so a service finishing a job gets its grace.
 pub(crate) const STOP_BUDGET: Duration = Duration::from_secs(10);
 
 const LOG_CAP_BYTES: u64 = 2 * 1024 * 1024;
@@ -78,8 +61,8 @@ const LOG_CAP_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RESTARTS: usize = 5;
 const RESTART_WINDOW: Duration = Duration::from_secs(300);
 
-/// How long to wait for the stderr drain to finish after a failed start, so
-/// the message the user sees is the last thing the service actually said.
+/// How long the stderr drain gets after a failed start, so the message shown
+/// is the last thing the service said.
 const STDERR_FLUSH: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -90,90 +73,38 @@ pub(crate) enum BackendState {
     Running {
         port: u16,
         pid: u32,
-        vision: bool,
     },
     Failed {
         message: String,
     },
 }
 
-/// The webview's view of the state. Flat on purpose: the status row holds every
-/// slot at every state and dims what it does not know yet.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct BackendStatus {
-    state: &'static str,
-    port: Option<u16>,
-    pid: Option<u32>,
-    vision: bool,
-    message: Option<String>,
-}
-
-impl From<&BackendState> for BackendStatus {
-    fn from(state: &BackendState) -> Self {
-        match state {
-            BackendState::Stopped => Self {
-                state: "stopped",
-                port: None,
-                pid: None,
-                vision: false,
-                message: None,
-            },
-            BackendState::Starting => Self {
-                state: "starting",
-                port: None,
-                pid: None,
-                vision: false,
-                message: None,
-            },
-            BackendState::Running { port, pid, vision } => Self {
-                state: "running",
-                port: Some(*port),
-                pid: Some(*pid),
-                vision: *vision,
-                message: None,
-            },
-            BackendState::Failed { message } => Self {
-                state: "failed",
-                port: None,
-                pid: None,
-                vision: false,
-                message: Some(message.clone()),
-            },
-        }
-    }
-}
-
 #[derive(Default)]
 struct Inner {
     state: BackendState,
-    /// Bumped by every stop and every restart. The supervisor captures it once
-    /// and quits the moment it stops matching, which is what makes a stop that
-    /// lands mid-launch still terminate the child it never saw.
+    /// Bumped by every stop and restart. The supervisor captures it once and
+    /// quits once it stops matching, so a stop mid-launch still kills the
+    /// child it never saw.
     epoch: u64,
     pid: Option<u32>,
-    /// The write end of the child's stdin, parked here rather than in the
-    /// supervisor so that a stop can close it. See `stop` for why that has to
-    /// happen before the signal.
+    /// The write end of the child's stdin, parked here so a stop can close it.
     stdin: Option<ChildStdin>,
     /// One token per app launch, reused across restarts.
     minted: bool,
     supervising: bool,
-    /// Set by the first `Running` of the launch. Recovery builds one job row
-    /// per ledger entry, so running it again after a restart would show every
-    /// still-unfinished conversion twice.
+    /// Set by the first `Running` of the launch. Recovery builds one row per
+    /// ledger entry, so running it again after a restart doubles them.
     recovered: bool,
 }
 
 struct Shared {
     inner: Mutex<Inner>,
-    /// False while a supervisor owns a child. `stop` waits on this rather than
-    /// on the process, because the supervisor is the only holder of the `Child`.
+    /// False while a supervisor owns a child. `stop` waits on this, because the
+    /// supervisor is the only holder of the `Child`.
     idle: watch::Sender<bool>,
-    /// Mirrors `Inner::epoch` so the supervisor can wait on a bump rather than
-    /// only read it between awaits. The restart backoff races this, which is
-    /// what stops a quit during the delay from spending `EXIT_BUDGET` waiting
-    /// on a child that no longer exists.
+    /// Mirrors `Inner::epoch` so the supervisor can wait on a bump. The restart
+    /// backoff races it, so a quit during the delay does not spend
+    /// `EXIT_BUDGET` on a child that no longer exists.
     epoch_bumped: watch::Sender<u64>,
 }
 
@@ -193,8 +124,8 @@ impl BackendHost {
         }
     }
 
-    /// Poisoning is recovered rather than propagated: the critical sections are
-    /// short, and one panic must not wedge every later transition.
+    /// Poisoning is recovered, not propagated: one panic must not wedge every
+    /// later transition.
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.shared
             .inner
@@ -211,10 +142,8 @@ impl BackendHost {
     }
 
     /// Take custody of the running child, unless a stop landed while it was
-    /// starting. Handing the pid and the stdin handle over under one lock is
-    /// what closes the handoff: either `stop` gets them and shuts the child
-    /// down, or it does not, and the stdin comes back here so the supervisor
-    /// can do it itself.
+    /// starting. Pid and stdin move under one lock: either `stop` gets them,
+    /// or the stdin comes back here.
     fn claim(&self, epoch: u64, pid: u32, stdin: ChildStdin) -> Result<(), ChildStdin> {
         let mut inner = self.lock();
         if inner.epoch != epoch {
@@ -239,17 +168,13 @@ impl BackendHost {
     }
 
     /// Wait out a restart backoff, or return the moment a stop bumps the epoch.
-    ///
-    /// A plain sleep here reads the epoch only after it returns, so a stop
-    /// during the delay finds no pid to signal and waits its whole budget on a
-    /// supervisor that is asleep with no child. On the `RunEvent::Exit` path
-    /// that budget is spent inside `applicationWillTerminate`, which is the
-    /// hang it was sized to bound.
+    /// A plain sleep reads the epoch only after it returns, so a stop during the
+    /// delay waits its whole budget inside `applicationWillTerminate`.
     async fn backoff(&self, delay: Duration, epoch: u64) {
         let mut bumped = self.shared.epoch_bumped.subscribe();
         let _ = tokio::time::timeout(delay, async {
-            // The current value first: the bump may have landed before the
-            // subscribe, and then no change is ever delivered.
+            // The current value first: a bump before the subscribe delivers
+            // no change at all.
             while *bumped.borrow_and_update() == epoch {
                 if bumped.changed().await.is_err() {
                     return;
@@ -269,28 +194,17 @@ impl BackendHost {
         !std::mem::replace(&mut self.lock().recovered, true)
     }
 
-    fn publish(&self, app: &AppHandle, state: BackendState) {
-        let status = {
-            let mut inner = self.lock();
-            if inner.state == state {
-                return;
-            }
+    /// Move the state machine. `backend_origin` is its only reader.
+    fn publish(&self, state: BackendState) {
+        let mut inner = self.lock();
+        if inner.state != state {
             inner.state = state;
-            BackendStatus::from(&inner.state)
-        };
-        let _ = app.emit("backend-status", status);
+        }
     }
 
-    fn status(&self) -> BackendStatus {
-        BackendStatus::from(&self.lock().state)
-    }
-
-    /// Mint the token once per launch and put it where both sides read it.
-    ///
-    /// The keychain write goes first and goes through `secrets::set_key`, which
-    /// is the only write that drops the process memo. Straight to the keychain
-    /// and every backend job fails with "Backend token is unavailable" for the
-    /// rest of the session, because a `None` read earlier is cached forever.
+    /// Mint the token once per launch and put it where both sides read it. The
+    /// keychain write goes first, through `secrets::set_key`, the only write
+    /// that drops the process memo of an earlier `None`.
     fn ensure_token(&self, layout: &Layout) -> Result<(), String> {
         if self.lock().minted {
             return Ok(());
@@ -307,18 +221,16 @@ fn host(app: &AppHandle) -> Option<BackendHost> {
     app.try_state::<BackendHost>().map(|state| (*state).clone())
 }
 
-/// Start the sidecar when this install owns the process. A no-op in Manual
-/// mode, where the user runs the service and the app only points at a URL.
+/// Start the sidecar when this install owns the process. A no-op in Manual.
 pub(crate) fn start(app: &AppHandle) {
     match deployment(app) {
         Ok(Deployment::Sidecar) => {}
         Ok(Deployment::Manual { .. }) => return,
-        // A broken override leaves nothing to point at and nothing to spawn.
-        // Publishing it puts the reason in the status row rather than leaving
-        // the app looking like it simply has no backend.
+        // Nothing to point at and nothing to spawn. Publish, so the status row
+        // carries the reason.
         Err(message) => {
             if let Some(host) = host(app) {
-                host.publish(app, BackendState::Failed { message });
+                host.publish(BackendState::Failed { message });
             }
             return;
         }
@@ -341,13 +253,10 @@ pub(crate) fn start(app: &AppHandle) {
     });
 }
 
-/// Stop the child and wait for it, giving up after `budget`.
-///
-/// Closing stdin comes first because it is the one path that needs no pid: the
-/// service reads EOF and quits in milliseconds. SIGTERM follows and reaches the
-/// same drain, so either alone is enough. Both go out because they fail in
-/// different places. Stdin does nothing to a build with the knob off, and the
-/// signal does nothing to a child whose pid we never learned.
+/// Stop the child and wait for it, giving up after `budget`. Stdin closes
+/// first, because it needs no pid. SIGTERM follows. Both go out because they
+/// fail in different places: stdin does nothing to a build with the knob off,
+/// the signal nothing to a child whose pid we never learned.
 pub(crate) async fn stop(app: &AppHandle, budget: Duration) {
     let Some(host) = host(app) else {
         return;
@@ -360,10 +269,8 @@ pub(crate) async fn stop(app: &AppHandle, budget: Duration) {
     }
 
     let Some(pid) = pid else {
-        // The supervisor is mid-launch or waiting out a restart backoff, and
-        // has no pid to signal in either state. It checks the epoch the moment
-        // the child is up and terminates it there, and `backoff` wakes on the
-        // bump `request_stop` just published, so neither wait is the budget.
+        // Mid-launch or mid-backoff, with no pid to signal. The supervisor
+        // checks the epoch once the child is up, and `backoff` wakes on it.
         let _ = tokio::time::timeout(budget, wait_idle(&mut idle)).await;
         return;
     };
@@ -378,9 +285,8 @@ pub(crate) async fn stop(app: &AppHandle, budget: Duration) {
     }
 }
 
-/// The last chance to take the child with us. Called from `RunEvent::Exit`,
-/// which is the only exit event this app sees: `ExitRequested` never fires on
-/// ⌘Q because the window hides instead of being destroyed.
+/// The last chance to take the child with us. `RunEvent::Exit` is the only exit
+/// event this app sees, because ⌘Q hides the window rather than destroying it.
 pub(crate) fn stop_on_exit(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::block_on(async move {
@@ -398,8 +304,8 @@ async fn wait_idle(idle: &mut watch::Receiver<bool>) {
 
 // ----------------------------------------------------------------- the address
 
-/// What a caller hears while the service is coming up. A refused connection
-/// says nothing anyone can act on, and the answer to this one is to wait.
+/// What a caller hears while the service is coming up, where a refused
+/// connection says nothing anyone can act on.
 const STARTING: &str = "The conversion service is starting. Try again in a moment.";
 
 /// Never a URL: it names the service rather than locating it, and
@@ -407,7 +313,7 @@ const STARTING: &str = "The conversion service is starting. Try again in a momen
 pub(crate) const SIDECAR_ALIAS: &str = "sidecar";
 
 /// The file a deployment drops beside `settings.json` to point this app at a
-/// conversion service it runs itself, a container being the reason to.
+/// service it runs itself.
 pub(crate) const OVERRIDE_FILE: &str = "backend-override.json";
 
 #[derive(Debug, Deserialize)]
@@ -416,14 +322,9 @@ struct BackendOverride {
     url: String,
 }
 
-/// Where the conversion service lives.
-///
-/// Sidecar unless a deployment dropped [`OVERRIDE_FILE`]. The app never writes
-/// that file and no control surfaces it, which is the point: the service ships
-/// inside the bundle, so running one somewhere else is a deployment act rather
-/// than a preference to wander into from Settings. It also means nobody can
-/// land in Manual by a stray click and then watch every job fail against a URL
-/// nothing is serving.
+/// Where the conversion service lives. Sidecar unless a deployment dropped
+/// [`OVERRIDE_FILE`]. The app never writes that file and no control surfaces
+/// it, so nobody lands in Manual by a stray click.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Deployment {
     Sidecar,
@@ -436,10 +337,8 @@ impl Deployment {
     }
 }
 
-/// An unreadable or malformed override is an error, never a quiet fall back to
-/// Sidecar. The file is there because someone deployed a container, so
-/// converting on this Mac instead is the one outcome they did not ask for, and
-/// silence is what would make it cost a day to find.
+/// A malformed override is an error, never a quiet fall back to Sidecar:
+/// converting on this Mac is the one outcome the deployer did not ask for.
 pub(crate) fn deployment(app: &AppHandle) -> Result<Deployment, String> {
     let Ok(directory) = app.path().app_config_dir() else {
         return Ok(Deployment::Sidecar);
@@ -458,8 +357,7 @@ pub(crate) fn deployment(app: &AppHandle) -> Result<Deployment, String> {
 fn parse_override(raw: &str) -> Result<Deployment, String> {
     let parsed: BackendOverride =
         serde_json::from_str(raw).map_err(|error| format!("is not readable: {error}"))?;
-    // Trailing slash trimmed here so the ledger's origin comparison, which is
-    // an exact string match, cannot fail on a URL that differs by punctuation.
+    // Trimmed here: the ledger compares origins by exact string.
     let origin = parsed.url.trim().trim_end_matches('/').to_string();
     if origin.is_empty() {
         return Err("names no url".to_string());
@@ -471,10 +369,7 @@ fn parse_override(raw: &str) -> Result<Deployment, String> {
 }
 
 /// The origin every backend request goes to, read at the moment of the request.
-///
-/// Nothing may hold on to this. The kernel picks the sidecar's port at each
-/// launch and again at each restart, so an origin kept from one run is refused
-/// by the next.
+/// Nothing may hold on to it: the port moves on every launch and restart.
 pub(crate) fn backend_origin(app: &AppHandle) -> Result<String, String> {
     match deployment(app)? {
         Deployment::Sidecar => sidecar_origin(app),
@@ -494,29 +389,21 @@ fn sidecar_origin(app: &AppHandle) -> Result<String, String> {
     }
 }
 
-/// The bearer token, from the one keychain slot both modes share. This app
-/// minted it and gave it to nothing but its own child in Sidecar mode; the user
-/// pasted it into Settings in Manual mode.
+/// The bearer token, from the one keychain slot both modes share.
 pub(crate) fn backend_token(app: &AppHandle) -> Result<String, String> {
     if let Some(token) = secrets::get_key("backend").filter(|value| !value.trim().is_empty()) {
         return Ok(token);
     }
     if deployment(app).is_ok_and(|which| which.is_sidecar()) {
-        // Minted at the top of the launch, so an empty slot means the launch
-        // has not got that far rather than that anything is missing.
+        // Minted at the top of the launch, so an empty slot means "not yet".
         return Err(STARTING.to_string());
     }
     Err("Backend token is unavailable. Add it in Settings, then retry.".to_string())
 }
 
-/// What the ledger records as the origin a row was submitted against.
-///
-/// The live URL cannot be it. Recovery compares the recorded origin to the
-/// configured one by exact equality, and the port moves every launch, so a live
-/// URL fails that comparison for every in-flight row on every relaunch and the
-/// row is deleted. The alias holds still and keeps the guarantee the comparison
-/// exists for: in Sidecar mode this app mints the token and hands it to its own
-/// child alone. Manual mode records the URL and its guard is untouched.
+/// What the ledger records as the origin a row was submitted against. Never the
+/// live URL: recovery compares by exact equality and the port moves every
+/// launch, so a live URL abandons every in-flight row. Manual records the URL.
 pub(crate) fn ledger_origin(deployment: &Deployment) -> &str {
     match deployment {
         Deployment::Sidecar => SIDECAR_ALIAS,
@@ -532,25 +419,25 @@ async fn supervise(app: AppHandle, host: BackendHost) {
     let layout = match Layout::resolve(&app) {
         Ok(layout) => layout,
         Err(message) => {
-            host.publish(&app, BackendState::Failed { message });
+            host.publish(BackendState::Failed { message });
             host.finish();
             return;
         }
     };
     reap_orphan(&layout.runtime_file).await;
     if let Err(message) = host.ensure_token(&layout) {
-        host.publish(&app, BackendState::Failed { message });
+        host.publish(BackendState::Failed { message });
         host.finish();
         return;
     }
 
-    // Instants of the failures still inside the window, not a running count, so
-    // an app left open for a week does not accumulate its way to Failed.
+    // Instants inside the window, not a running count, so a week of uptime does
+    // not accumulate its way to Failed.
     let mut failures: Vec<Instant> = Vec::new();
     let mut last_message;
 
     loop {
-        host.publish(&app, BackendState::Starting);
+        host.publish(BackendState::Starting);
         match launch(&app, &layout).await {
             Ok(running) => {
                 let Running {
@@ -558,19 +445,16 @@ async fn supervise(app: AppHandle, host: BackendHost) {
                     stdin,
                     pid,
                     port,
-                    vision,
                 } = running;
                 if let Err(stdin) = host.claim(epoch, pid, stdin) {
                     terminate(&mut child, pid, Some(stdin)).await;
                     break;
                 }
-                write_runtime(&layout.runtime_file, pid, port);
-                host.publish(&app, BackendState::Running { port, pid, vision });
+                write_runtime(&layout.runtime_file, pid);
+                host.publish(BackendState::Running { port, pid });
                 if host.claim_recovery() {
-                    // Recovery waits for a service that answers. It runs from
-                    // `setup` in Manual mode, but here the port does not exist
-                    // yet at that point, and the resume path fails a job on one
-                    // refused connection with no retry behind it.
+                    // Recovery needs a service that answers: at `setup` there
+                    // is no port, and one refused connection fails a job.
                     crate::jobs::recover_in_flight(app.clone());
                 }
                 let _ = child.wait().await;
@@ -588,7 +472,6 @@ async fn supervise(app: AppHandle, host: BackendHost) {
         failures.push(Instant::now());
         if failures.len() > MAX_RESTARTS {
             host.publish(
-                &app,
                 BackendState::Failed {
                     message: format!("{last_message}. It has been restarted five times in five minutes, so Tool-Kit stopped trying."),
                 },
@@ -597,19 +480,16 @@ async fn supervise(app: AppHandle, host: BackendHost) {
             return;
         }
 
-        host.publish(
-            &app,
-            BackendState::Failed {
-                message: last_message.clone(),
-            },
-        );
+        host.publish(BackendState::Failed {
+            message: last_message.clone(),
+        });
         host.backoff(restart_delay(failures.len() - 1), epoch).await;
         if host.stale(epoch) {
             break;
         }
     }
 
-    host.publish(&app, BackendState::Stopped);
+    host.publish(BackendState::Stopped);
     host.finish();
 }
 
@@ -622,19 +502,14 @@ fn restart_delay(attempt: usize) -> Duration {
 struct Running {
     child: Child,
     /// Held for the life of the child. Dropping it is EOF on the service's
-    /// stdin, which is how it learns the app died and how a deliberate stop
-    /// gets it to quit.
+    /// stdin, which is how it learns the app is gone.
     stdin: ChildStdin,
     pid: u32,
     port: u16,
-    vision: bool,
 }
 
 /// Spawn the service, drain both pipes, and wait for it to say where it is.
-///
-/// The spawn and the drain live in one function on purpose. Split them and a
-/// full pipe buffer blocks the service the first time it logs anything, which
-/// surfaces as a conversion that hangs for no visible reason.
+/// One function: split it and a full pipe buffer blocks the service.
 async fn launch(app: &AppHandle, layout: &Layout) -> Result<Running, String> {
     let binary = converter_binary()?;
     let bcmaps = bcmaps_dir(app)?;
@@ -669,8 +544,7 @@ async fn launch(app: &AppHandle, layout: &Layout) -> Result<Running, String> {
     let stderr_drain =
         tauri::async_runtime::spawn(drain_stderr(stderr, sink, Arc::clone(&last_error)));
 
-    // A closed channel means stdout reached EOF first, so the process is
-    // already gone and there is nothing to wait 30 seconds for.
+    // A closed channel means stdout hit EOF, so the process is already gone.
     let bound = match tokio::time::timeout(HANDSHAKE_TIMEOUT, port_rx).await {
         Ok(Ok(address)) => address,
         Ok(Err(_)) => {
@@ -692,30 +566,22 @@ async fn launch(app: &AppHandle, layout: &Layout) -> Result<Running, String> {
     };
 
     let port = bound.port();
-    let vision = match confirm_engines(port).await {
-        Ok(vision) => vision,
-        Err(headline) => {
-            let detail = failure_detail(stderr_drain, &last_error).await;
-            terminate(&mut child, pid, Some(stdin)).await;
-            return Err(join(&headline, detail));
-        }
-    };
+    if let Err(headline) = await_ready(port).await {
+        let detail = failure_detail(stderr_drain, &last_error).await;
+        terminate(&mut child, pid, Some(stdin)).await;
+        return Err(join(&headline, detail));
+    }
 
     Ok(Running {
         child,
         stdin,
         pid,
         port,
-        vision,
     })
 }
 
-/// The last line the service wrote to stderr, verbatim.
-///
-/// A configuration error is the common failure and it prints one
-/// `Debug`-formatted line and no JSON at all, because tracing initialises after
-/// the config is parsed. So the message has to come from that line rather than
-/// from a parsed field.
+/// The last line the service wrote to stderr, verbatim. A configuration error
+/// prints one `Debug` line and no JSON, because tracing starts after the parse.
 async fn failure_detail(
     stderr_drain: tauri::async_runtime::JoinHandle<()>,
     last_error: &Arc<Mutex<Option<String>>>,
@@ -772,22 +638,17 @@ fn parse_listening(line: &str) -> Option<SocketAddr> {
     fields.get("bind_address")?.as_str()?.parse().ok()
 }
 
-/// Wait for readiness, then record whether the Vision engine came up.
-///
-/// Both endpoints are unauthenticated. A missing Vision engine is a release
-/// defect rather than a runtime state, so it lands in the status row and
-/// `verify-release.sh` stays the real gate.
-async fn confirm_engines(port: u16) -> Result<bool, String> {
-    let client = reqwest::Client::builder()
-        .timeout(PROBE_TIMEOUT)
-        .build()
-        .map_err(|e| format!("Could not reach the conversion service: {e}"))?;
+/// Wait for the service to answer `/health/ready`, which is unauthenticated.
+/// Capabilities are the webview's own probe, not a second round trip here.
+async fn await_ready(port: u16) -> Result<(), String> {
+    let client = crate::conversion_service::http_client()?;
     let origin = origin_for(port);
 
     let deadline = Instant::now() + READY_TIMEOUT;
     loop {
         let ready = client
             .get(format!("{origin}/health/ready"))
+            .timeout(PROBE_TIMEOUT)
             .send()
             .await
             .is_ok_and(|response| response.status().is_success());
@@ -799,26 +660,7 @@ async fn confirm_engines(port: u16) -> Result<bool, String> {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-
-    let capabilities = client
-        .get(format!("{origin}/api/v1/capabilities"))
-        .send()
-        .await
-        .map_err(|e| format!("The conversion service did not report its capabilities: {e}"))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| format!("The conversion service reported unreadable capabilities: {e}"))?;
-
-    let vision = capabilities
-        .pointer("/data/conversion/engines")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|engines| {
-            engines
-                .iter()
-                .filter_map(|engine| engine.get("name").and_then(serde_json::Value::as_str))
-                .any(|name| name == "apple-vision")
-        });
-    Ok(vision)
+    Ok(())
 }
 
 fn origin_for(port: u16) -> String {
@@ -844,11 +686,8 @@ fn signal(pid: u32, sig: &str) {
         .status();
 }
 
-/// A converter left behind by a crash or a SIGKILL of the app.
-///
-/// Exactly one service may own a data root: startup recovery treats every
-/// in-flight row as a crash leftover with no liveness check, and the crate
-/// takes no process lock.
+/// A converter left behind by a crash. Exactly one service may own a data root,
+/// and the crate takes no process lock.
 async fn reap_orphan(runtime_file: &Path) {
     let recorded = std::fs::read(runtime_file)
         .ok()
@@ -857,8 +696,8 @@ async fn reap_orphan(runtime_file: &Path) {
     let Some(record) = recorded else {
         return;
     };
-    // The name check, not just liveness: a pid is reused within minutes on a
-    // busy Mac and killing whatever inherited it would be worse than the orphan.
+    // The name check, not just liveness: a pid is reused within minutes, and
+    // killing its heir is worse than leaving the orphan.
     if !is_converter(record.pid) {
         return;
     }
@@ -892,17 +731,10 @@ fn is_converter(pid: u32) -> bool {
 #[derive(Serialize, Deserialize)]
 struct RuntimeRecord {
     pid: u32,
-    port: u16,
-    origin: String,
 }
 
-fn write_runtime(path: &Path, pid: u32, port: u16) {
-    let record = RuntimeRecord {
-        pid,
-        port,
-        origin: origin_for(port),
-    };
-    if let Ok(bytes) = serde_json::to_vec_pretty(&record) {
+fn write_runtime(path: &Path, pid: u32) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(&RuntimeRecord { pid }) {
         let _ = std::fs::write(path, bytes);
     }
 }
@@ -925,8 +757,8 @@ impl Layout {
         std::fs::create_dir_all(&root)
             .map_err(|e| format!("Could not create {}: {e}", root.display()))?;
 
-        // Left alone otherwise: the service's artifact store creates it, and a
-        // symlink here would point every stored artifact somewhere else.
+        // The artifact store creates it. A symlink here would redirect every
+        // stored artifact.
         let data_dir = root.join("converter");
         if data_dir
             .symlink_metadata()
@@ -960,12 +792,9 @@ fn converter_binary() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// The CMap tables the PDF engine needs for CJK text.
-///
-/// A missing directory fails the start rather than starting without the
-/// variable. Unset, the engine falls back to a path inside the build machine's
-/// Cargo registry, so CJK PDFs would lose their ToUnicode mapping on every
-/// user's machine and on no developer's, with no error anywhere.
+/// The CMap tables the PDF engine needs for CJK text. A missing directory fails
+/// the start: unset, the engine falls back into the build machine's Cargo
+/// registry and CJK PDFs silently lose their ToUnicode mapping.
 fn bcmaps_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let path = app
         .path()
@@ -980,23 +809,19 @@ fn bcmaps_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Every variable the child gets, named here rather than inherited.
-///
-/// The environment is not cleared: the service needs `TMPDIR`, and its own
-/// workers clear theirs already. `RUST_LOG` is set rather than inherited
-/// because a quieter value would suppress the listening line and the handshake
-/// would hang with nothing to show for it.
+/// Every variable the child gets, named here rather than inherited. The
+/// environment is not cleared, because the service needs `TMPDIR`. `RUST_LOG`
+/// is set, because a quieter value suppresses the listening line.
 fn converter_env(layout: &Layout, bcmaps: &Path) -> BTreeMap<String, String> {
     let text = |path: &Path| path.to_string_lossy().into_owned();
     BTreeMap::from([
-        // Port 0 asks the kernel for a free port. Nothing to race, and no
-        // squatter to hand the bearer token to.
+        // Port 0 asks the kernel: no race, and no squatter to hand a token.
         (
             "TOOLKIT_CONVERTER_BIND_ADDR".to_string(),
             "127.0.0.1:0".to_string(),
         ),
-        // The Docker defaults are /data and /run/secrets/bootstrap_token,
-        // neither of which a sandboxed app can create.
+        // The Docker defaults are /data and /run/secrets, which a sandboxed
+        // app cannot create.
         (
             "TOOLKIT_CONVERTER_DATA_DIR".to_string(),
             text(&layout.data_dir),
@@ -1006,11 +831,10 @@ fn converter_env(layout: &Layout, bcmaps: &Path) -> BTreeMap<String, String> {
             text(&layout.token_file),
         ),
         ("TOOLKIT_CONVERTER_PDF_BCMAPS_DIR".to_string(), text(bcmaps)),
-        // The queue is durable and the runner is serial, so depth is free and a
-        // 429 at the ceiling is not.
+        // The queue is durable and the runner serial, so depth is free.
         ("TOOLKIT_CONVERTER_MAX_JOBS".to_string(), "512".to_string()),
-        // JobManager runs four jobs at once and the service uses try_acquire,
-        // not acquire, so a tight ceiling turns straight into refusals.
+        // JobManager runs four at once and the service uses try_acquire, so a
+        // tight ceiling turns straight into refusals.
         (
             "TOOLKIT_CONVERTER_MAX_CONCURRENT_UPLOADS".to_string(),
             "8".to_string(),
@@ -1035,8 +859,7 @@ fn converter_env(layout: &Layout, bcmaps: &Path) -> BTreeMap<String, String> {
     ])
 }
 
-/// 64 hex characters from two v4 UUIDs. The service takes 32 to 512 visible
-/// ASCII bytes, so this sits well inside the window and adds no dependency.
+/// 64 hex characters from two v4 UUIDs, inside the service's 32-to-512 window.
 fn mint_token() -> String {
     let mut token = Uuid::new_v4().simple().to_string();
     token.push_str(&Uuid::new_v4().simple().to_string());
@@ -1046,11 +869,9 @@ fn mint_token() -> String {
 fn write_token_file(path: &Path, token: &str) -> Result<(), String> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    // The mode is applied at creation, so an existing file would keep whatever
-    // bits it already had. `create_new` is what makes the unlink safe: a path
-    // that is back by the time we open it is a symlink somebody planted in the
-    // window, and following it would truncate its target and write the token
-    // there under the target's own permissions. Failing by name beats that.
+    // The mode applies at creation, so an existing file keeps its own bits.
+    // `create_new` makes the unlink safe: a path that is back by the open is a
+    // planted symlink, and following it writes the token into its target.
     let _ = std::fs::remove_file(path);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -1065,8 +886,8 @@ fn write_token_file(path: &Path, token: &str) -> Result<(), String> {
 
 // -------------------------------------------------------------------- the log
 
-/// Both pipes append here. Opened lazily and reopened once the cap is hit, so a
-/// service that logs a line per request cannot fill a disk.
+/// Both pipes append here. Reopened once the cap is hit, so a service logging
+/// a line per request cannot fill a disk.
 struct LogSink {
     path: PathBuf,
     state: Mutex<Option<std::fs::File>>,
@@ -1108,49 +929,12 @@ impl LogSink {
 
 // --------------------------------------------------------------- the commands
 
-#[tauri::command]
-pub(crate) fn backend_status(app: AppHandle) -> BackendStatus {
-    match host(&app) {
-        Some(host) => host.status(),
-        None => BackendStatus::from(&BackendState::Stopped),
-    }
-}
-
-/// Whether this app owns the conversion service process, which is what decides
-/// whether the bearer token is anybody's business but its own. Settings hides
-/// the token field on a true answer: the app mints that token for its own child
-/// once per launch, so a value typed there only breaks the running service.
-///
-/// A broken override answers false. Nothing was spawned, so the token has to
-/// come from the user.
+/// Whether this app owns the conversion service process, and so whether the
+/// bearer token is anybody's business but its own. A value typed into Settings
+/// on a true answer only breaks the running service.
 #[tauri::command]
 pub(crate) fn app_owns_backend(app: AppHandle) -> bool {
     deployment(&app).is_ok_and(|which| which.is_sidecar())
-}
-
-#[tauri::command]
-pub(crate) async fn restart_backend(app: AppHandle) -> Result<(), String> {
-    if !deployment(&app)?.is_sidecar() {
-        return Err(format!(
-            "Tool-Kit does not own the conversion service while {OVERRIDE_FILE} points it elsewhere"
-        ));
-    }
-    stop(&app, STOP_BUDGET).await;
-    start(&app);
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) fn open_backend_log(app: AppHandle) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-
-    let layout = Layout::resolve(&app)?;
-    if !layout.log_file.is_file() {
-        return Err("The conversion service has not logged anything yet".to_string());
-    }
-    app.opener()
-        .open_path(layout.log_file.to_string_lossy(), None::<&str>)
-        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1194,8 +978,8 @@ mod tests {
         assert_eq!(env.len(), 10);
     }
 
-    /// A quieter inherited filter drops the listening line and the handshake
-    /// then waits the full 30 seconds for something that will never arrive.
+    /// A quieter inherited filter drops the listening line, and the handshake
+    /// then waits 30 seconds for nothing.
     #[test]
     fn the_log_filter_is_set_rather_than_inherited() {
         let env = converter_env(&layout(), Path::new("/tmp/bcmaps"));
@@ -1219,8 +1003,7 @@ mod tests {
         let shutdown = r#"{"timestamp":"2026-08-20T06:32:03.850024Z","level":"INFO","fields":{"message":"shutdown signal received","reason":"stdin_eof"},"target":"tool_kit_converter"}"#;
         assert_eq!(parse_listening(shutdown), None);
 
-        // A config error prints this and no JSON at all, because tracing
-        // initialises after the config is parsed.
+        // A config error prints this and no JSON, because tracing starts late.
         assert_eq!(
             parse_listening(r#"Error: PdfEngine(InvalidWorker { path: "/x" })"#),
             None
@@ -1248,46 +1031,6 @@ mod tests {
         assert!((32..=512).contains(&token.len()));
         assert!(token.bytes().all(|byte| byte.is_ascii_graphic()));
         assert_ne!(token, mint_token());
-    }
-
-    #[test]
-    fn the_status_holds_every_slot_at_every_state() {
-        let starting = BackendStatus::from(&BackendState::Starting);
-        assert_eq!(starting.state, "starting");
-        assert_eq!(starting.port, None);
-        assert!(!starting.vision);
-
-        let running = BackendStatus::from(&BackendState::Running {
-            port: 64707,
-            pid: 4242,
-            vision: true,
-        });
-        assert_eq!(running.state, "running");
-        assert_eq!(running.port, Some(64707));
-        assert_eq!(running.pid, Some(4242));
-        assert!(running.vision);
-
-        let failed = BackendStatus::from(&BackendState::Failed {
-            message: "no CMap tables".to_string(),
-        });
-        assert_eq!(failed.state, "failed");
-        assert_eq!(failed.message.as_deref(), Some("no CMap tables"));
-    }
-
-    #[test]
-    fn the_status_serializes_flat_for_the_webview() {
-        let value = serde_json::to_value(BackendStatus::from(&BackendState::Running {
-            port: 8080,
-            pid: 11,
-            vision: false,
-        }))
-        .expect("the status should serialize");
-
-        assert_eq!(value["state"], "running");
-        assert_eq!(value["port"], 8080);
-        assert_eq!(value["pid"], 11);
-        assert_eq!(value["vision"], false);
-        assert!(value["message"].is_null());
     }
 
     #[test]
@@ -1319,10 +1062,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).expect("token"), token);
     }
 
-    /// The unlink can lose the race, and a symlink that is back before the open
-    /// must not be followed. The read-only parent is how the test loses that
-    /// race on purpose: `remove_file` cannot delete the link, so the open sees
-    /// exactly what a planted one would leave behind.
+    /// The unlink can lose the race, and a symlink back before the open must not
+    /// be followed. The read-only parent loses that race on purpose.
     #[test]
     fn a_token_path_that_is_back_before_the_open_is_refused() {
         use std::os::unix::fs::PermissionsExt;
@@ -1346,10 +1087,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&victim).expect("victim"), "keep me");
     }
 
-    /// A stop during the restart backoff has no pid to signal, so the only
-    /// thing that can end its wait is the supervisor waking up. Left as a plain
-    /// sleep this takes the whole delay, and on the exit path that is a hang
-    /// inside `applicationWillTerminate`.
+    /// A stop during the restart backoff has no pid, so only the supervisor
+    /// waking ends its wait. A plain sleep hangs `applicationWillTerminate`.
     #[tokio::test]
     async fn a_stop_during_the_backoff_wakes_the_supervisor_at_once() {
         let host = BackendHost::new();
@@ -1381,8 +1120,8 @@ mod tests {
         );
     }
 
-    /// The ledger compares origins by exact string, so a URL that differs only
-    /// by its trailing slash would abandon every in-flight row it recorded.
+    /// The ledger compares origins by exact string, so a trailing slash would
+    /// abandon every in-flight row it recorded.
     #[test]
     fn a_trailing_slash_does_not_make_a_second_origin() {
         assert_eq!(
@@ -1391,9 +1130,8 @@ mod tests {
         );
     }
 
-    /// Every one of these is a deployment that meant to point somewhere. The
-    /// alternative to an error is converting on this Mac while the container
-    /// the person deployed sits idle, with nothing anywhere saying so.
+    /// Each of these is a deployment that meant to point somewhere. The
+    /// alternative to an error is converting here while the container idles.
     #[test]
     fn an_override_that_names_nothing_usable_is_an_error_not_a_fall_back() {
         for (raw, expected) in [
@@ -1410,9 +1148,8 @@ mod tests {
         }
     }
 
-    /// `deny_unknown_fields` is the reason this one fails. A deployment that
-    /// wrote the wrong key should hear about it rather than get a silent
-    /// Sidecar, which is the same failure the whole type exists to prevent.
+    /// `deny_unknown_fields` is the reason this fails. A misspelled key must
+    /// not read as a silent Sidecar.
     #[test]
     fn a_misspelled_key_is_refused_rather_than_ignored() {
         assert!(parse_override(r#"{"url": "http://a.b:1", "extra": 1}"#).is_err());

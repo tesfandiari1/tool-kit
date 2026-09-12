@@ -2,18 +2,13 @@ import { useEffect } from "react";
 import { setWebviewZoom } from "@/platform/host";
 import { ZOOM } from "./geometry";
 
-/// Cmd +/-/0 scale the whole app: in a Tauri window the page is the app. The
-/// hook applies a factor and reports the next one. Persisting it is the
-/// caller's job.
+/// Cmd +/-/0 scale the whole app. The caller persists the factor.
 
-/// The rungs, built once. Stepping picks a rung rather than adding to the
-/// factor, because `1 + 0.1 - 0.1` is 0.9999999999999999 and arithmetic would
-/// drift off the ladder. Each rung is rounded to two decimals so a persisted
-/// factor compares equal to one.
+/// Stepping picks a rung rather than adding, because `1 + 0.1 - 0.1` is
+/// 0.9999999999999999. Rounded to two decimals, so a persisted factor matches.
 const LADDER = buildLadder();
 
-/// A factor that has been through JSON and back can land a hair off its rung.
-/// Treat that as on it, so a step still moves exactly one rung.
+/// A factor through JSON lands a hair off its rung. Treat it as on.
 const EPSILON = 1e-6;
 
 function buildLadder(): number[] {
@@ -25,7 +20,7 @@ function buildLadder(): number[] {
   return rungs;
 }
 
-/// One rung along the ladder, clamped at both ends. Direction 0 resets.
+/// One rung, clamped. Direction 0 resets.
 export function nextZoom(current: number, direction: -1 | 0 | 1): number {
   if (direction === 0) return ZOOM.default;
   if (direction === 1) {
@@ -40,27 +35,23 @@ export function nextZoom(current: number, direction: -1 | 0 | 1): number {
   return LADDER[0];
 }
 
-/// The factor as the toast says it: percent, no decimals.
 export function zoomLabel(factor: number): string {
   return `${Math.round(factor * 100)}%`;
 }
 
 export function useZoom(zoom: number, onChange: (next: number) => void): void {
   useEffect(() => {
-    // Published for chrome measured against the traffic lights. macOS draws
-    // those in logical pixels, which page zoom never touches, so App.css
-    // divides those lengths by `--zoom` to convert.
+    // For chrome measured against the traffic lights, which macOS draws in
+    // logical pixels that page zoom never touches.
     document.documentElement.style.setProperty("--zoom", String(zoom));
-    // The gallery runs in a plain browser tab with no webview to zoom, so
-    // swallow the failure.
+    // The gallery runs in a browser tab with no webview to zoom.
     void setWebviewZoom(zoom).catch(() => undefined);
   }, [zoom]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      // Meta, optionally with Shift, since Cmd++ and Cmd+_ are shifted keys.
-      // Any other modifier means a different command. Text fields are not
-      // exempt: Cmd+- zooms while you type, the same as every desktop app.
+      // Shift allowed, since Cmd++ and Cmd+_ are shifted keys. Text fields
+      // are not exempt, as in every desktop app.
       if (!event.metaKey || event.ctrlKey || event.altKey) return;
       const direction = zoomDirection(event);
       if (direction === null) return;
@@ -74,8 +65,7 @@ export function useZoom(zoom: number, onChange: (next: number) => void): void {
   }, [zoom, onChange]);
 }
 
-/// The numpad keys report a `key` that depends on Num Lock, so they are matched
-/// by `code` while the main row is matched by `key`.
+/// The numpad's `key` depends on Num Lock, so it is matched by `code`.
 function zoomDirection(event: KeyboardEvent): -1 | 0 | 1 | null {
   if (event.code === "NumpadAdd") return 1;
   if (event.code === "NumpadSubtract") return -1;

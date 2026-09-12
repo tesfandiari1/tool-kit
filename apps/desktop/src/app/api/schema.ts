@@ -361,12 +361,6 @@ export interface components {
                 "application/json": components["schemas"]["HealthResponse"];
             };
         };
-        BadRequest: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content?: never;
-        };
         /** @description Missing or invalid bearer token */
         Unauthorized: {
             headers: {
@@ -459,7 +453,7 @@ export interface components {
             };
         };
         /** @description Malformed request */
-        Error400: {
+        BadRequest: {
             headers: {
                 "X-Request-Id": components["headers"]["RequestId"];
                 [name: string]: unknown;

@@ -11,68 +11,49 @@ import {
 import "./Tree.css";
 
 export interface TreeProps {
-  /// Names the tree for assistive technology.
   label: string;
-  /// `TreeRow` elements. The tree reads its visible order off `[data-path]` in
-  /// its own DOM, so it holds no data model and cannot acquire one.
+  /// `TreeRow` elements. Their order is read off `[data-path]`, so this holds
+  /// no data model.
   children: ReactNode;
   className?: string;
-  /// The arrows, type-ahead or a click moved the selection. Nothing opens and
-  /// nothing runs: a macOS source list selects as you arrow.
+  /// Nothing opens and nothing runs: a source list selects as you arrow.
   onSelect: (path: string) => void;
-  /// Enter, Cmd+Down, or a click.
   onActivate: (path: string) => void;
-  /// Space.
   onInspect: (path: string) => void;
-  /// `open` is the state asked for, not the state left behind. `deep` is
-  /// Option+click on the twisty and Option+Right: the whole subtree, matching
-  /// NSOutlineView.expandItem(_:expandChildren:).
+  /// `open` is the state asked for. `deep` is Option: the whole subtree.
   onToggle: (path: string, open: boolean, deep: boolean) => void;
 }
 
 export interface TreeRowProps {
-  /// Identity, and the handle every event comes back on. Keyed on a path
-  /// rather than an index: a refresh reorders rows, and an index-keyed
-  /// selection then lands on a different file with nothing to say so.
+  /// Identity, and the handle every event comes back on. A path, never an
+  /// index: a refresh reorders rows.
   path: string;
   depth: number;
-  /// Undefined on a leaf, never false. `aria-expanded="false"` on a file makes
-  /// every file in the tree announce as a folder nobody has opened.
+  /// Undefined on a leaf, never false: `aria-expanded="false"` announces a
+  /// file as an unopened folder.
   open?: boolean;
-  /// Children requested, not arrived. Marks the row busy for assistive
-  /// technology; an open branch with no `group` stands a loading row in for
-  /// them whether or not this is set.
+  /// Requested, not arrived. An open branch with no `group` gets a loading
+  /// row either way.
   busy?: boolean;
   selected?: boolean;
-  /// Not focusable, not selectable, not counted by type-ahead. The "Empty",
-  /// "Loading…" and "N more files" rows.
+  /// Not focusable, selectable or counted by type-ahead.
   quiet?: boolean;
   icon?: ReactNode;
-  /// The trailing slot: the paired result's name, a Convert control, or a
-  /// reserved ghost. Anything focusable in here belongs at `tabIndex={-1}`, or
-  /// Tab through the pane costs two stops a row.
+  /// The trailing slot. Anything focusable in here belongs at `tabIndex={-1}`,
+  /// or Tab costs two stops a row.
   end?: ReactNode;
-  /// The label.
   children: ReactNode;
-  /// The rows one level down. Wrapped in the nested `ul[role=group]` here, so
-  /// pass it only while the branch is open.
+  /// Wrapped in the nested `ul[role=group]`, so pass it only while open.
   group?: ReactNode;
   title?: string;
 }
 
-/// A disclosure tree with Finder's key map.
+/// A disclosure tree with Finder's key map, hand-rolled per UI.md. The rules
+/// live in `treeKeys.ts`.
 ///
-/// Hand-rolled rather than taken from a library, because what this needs is
-/// list navigation and not accessible overlay behaviour, which is the escape
-/// hatch UI.md actually names. The keyboard rules live in `treeKeys.ts` and are
-/// tested there.
-///
-/// Rows are `li` and `span`, never `<button>`: a button's own Space and Enter
-/// semantics would fight the inspect binding, and a control in the trailing
-/// slot would nest one button inside another.
-///
-/// The caller owns expansion, selection and the data. This owns the keyboard,
-/// the focus, and the shape.
+/// Rows are `li` and `span`, never `<button>`: a button's Space and Enter
+/// fight the inspect binding, and the trailing slot would nest one button in
+/// another. The caller owns expansion, selection and data.
 export function Tree({
   label,
   children,
@@ -85,9 +66,7 @@ export function Tree({
   const ref = useRef<HTMLUListElement>(null);
   const typed = useRef({ buffer: "", at: 0 });
 
-  /// The rows on screen, in the order they are drawn, read from the tree's own
-  /// markup. The same mechanism the run queue uses for its roving tabindex.
-  /// Quiet rows are skipped: they answer no key and hold no selection.
+  /// The rows on screen, in draw order. Quiet rows answer no key.
   const rowEls = () =>
     Array.from(ref.current?.querySelectorAll<HTMLElement>("[data-path]:not([data-quiet])") ?? []);
 
@@ -106,9 +85,7 @@ export function Tree({
     ref.current?.querySelector<HTMLElement>('[data-path][aria-selected="true"]')?.dataset.path ??
     null;
 
-  /// Selection and focus move together, which is what makes Left and Right
-  /// keep working after they land. The row is already on screen, so this does
-  /// not wait for the caller's re-render.
+  /// Selection and focus move together, without waiting for a re-render.
   const focusRow = (path: string) => {
     ref.current?.querySelector<HTMLElement>(`[data-path="${CSS.escape(path)}"]`)?.focus();
   };
@@ -131,10 +108,8 @@ export function Tree({
     }
   };
 
-  /// One stop in the tab order. The selected row is the way back in, and with
-  /// nothing selected it is the first row — which a row cannot decide for
-  /// itself, so it is decided here. No dependency list on purpose: every
-  /// render can add, drop or reorder rows.
+  /// One stop in the tab order, which a row cannot decide for itself. No
+  /// dependency list: every render can add, drop or reorder rows.
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -150,14 +125,12 @@ export function Tree({
       aria-label={label}
       className={cx("ui-tree", className)}
       onKeyDown={(e) => {
-        // A control in the trailing slot answers its own keys.
         if (e.target instanceof HTMLElement && e.target.closest(".ui-tree__end")) return;
         const rows = rowInfo(rowEls());
         const current = selectedPath();
         const action = treeAction(rows, current, e);
         if (action) {
-          // Space would scroll the pane out from under the row, and the arrows
-          // would scroll it out from under the selection.
+          // Space and the arrows scroll the pane out from under the row.
           e.preventDefault();
           apply(action);
           return;
@@ -172,17 +145,17 @@ export function Tree({
       }}
       onClick={(e) => {
         if (!(e.target instanceof HTMLElement)) return;
-        if (e.target.closest(".ui-tree__end")) return;
-        // Bail on the quiet row itself, before looking for a path. The loading
-        // row carries none, so the search would walk past it to the branch that
-        // owns it and activate a folder the user did not click.
+        // The slot also holds inert labels, and bailing on those makes a dead
+        // strip on the row.
+        if (e.target.closest(".ui-tree__end :is(button, a, input)")) return;
+        // Bail before looking for a path: a quiet row carries none, so the
+        // search would climb to the branch and activate it.
         if (e.target.closest("[data-quiet]")) return;
         const row = e.target.closest<HTMLElement>("[data-path]");
         const path = row?.dataset.path;
         if (!row || path === undefined) return;
-        // Branches only. The slot is reserved on leaves too, so without the
-        // qualifier the blank 12px box in front of every file name is a
-        // disclosure control: clicking it asked the host to list a file.
+        // Branches only: the slot is reserved on leaves, and unqualified the
+        // blank box would ask the host to list a file.
         if (e.target.closest(".ui-tree__twisty.is-branch")) {
           onToggle(path, row.getAttribute("aria-expanded") !== "true", e.altKey);
           return;
@@ -210,10 +183,8 @@ export function TreeRow({
   group,
   title,
 }: TreeRowProps) {
-  // An open branch always has a group. A read still in flight has not sent one
-  // yet, and a read that failed and left the row open never will, and
   // `aria-expanded="true"` over nothing is the one shape the tree pattern has
-  // no answer for.
+  // no answer for, and a failed read never sends a group.
   const body = group ?? (open === true ? loadingRow(depth + 1) : undefined);
   return (
     <li
@@ -231,8 +202,8 @@ export function TreeRow({
       style={{ "--tree-depth": depth } as CSSProperties}
     >
       <span className="ui-tree__row">
-        {/* Reserved on leaves as well as branches, or sibling labels sit out of
-            line and the whole column reads as broken. */}
+        {/* Reserved on leaves as well as branches, or sibling labels sit out
+            of line. */}
         <span className={cx("ui-tree__twisty", open !== undefined && "is-branch")} aria-hidden />
         {icon !== undefined && (
           <span className="ui-tree__icon" aria-hidden>
@@ -251,9 +222,7 @@ export function TreeRow({
   );
 }
 
-/// Stands in for children that were asked for and have not arrived. Written
-/// here rather than left to the caller so an expanded branch is never an empty
-/// group, which is the one shape the tree pattern has no answer for.
+/// Stands in for children not yet arrived, so no branch is an empty group.
 function loadingRow(depth: number) {
   return (
     <li

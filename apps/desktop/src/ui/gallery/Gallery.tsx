@@ -3,9 +3,6 @@ import type { ReactNode } from "react";
 import {
   Badge,
   Button,
-  Cell,
-  CellGrid,
-  Disclosure,
   Display,
   Divider,
   Field,
@@ -23,7 +20,6 @@ import {
   SplitPane,
   Spacer,
   Stack,
-  Status,
   StatusDot,
   Switch,
   Tabs,
@@ -36,15 +32,10 @@ import {
 import type { SplitLayout } from "../index";
 import "./Gallery.css";
 
-/// Every primitive in every state, in both themes. This is the review surface
-/// for the design system: if a component is not here, it cannot be checked, so
-/// adding a primitive means adding its specimen in the same commit.
-///
-/// Open with `?gallery` in dev, or in the browser preview harness.
+/// Every primitive in every state. A component without a specimen here cannot
+/// be reviewed, so add both in one commit. Open with `?gallery` in dev.
 
-/// Real conversion output, not lorem. The gutter has to be checked against
-/// lines that actually wrap, and the ink-only highlighting has to be checked
-/// against every mark markdown can produce.
+/// Real conversion output: the gutter has to be checked against wrapped lines.
 const SAMPLE = `# Strategic Partner Agreement
 
 **Parties.** Schild Technologies, a Delaware corporation, and the Partner identified in Exhibit A.
@@ -74,10 +65,9 @@ export function Gallery() {
   const [theme, setTheme] = useState<Theme>(
     () => (localStorage.getItem(THEME_KEY) as Theme | null) ?? "graphite",
   );
-  // Interactive specimens: a segmented control and a disclosure are only
-  // reviewable if you can actually operate them.
+  // Interactive specimens: a segmented control and a disclosure are reviewable
+  // only if you can operate them.
   const [job, setJob] = useState<"convert" | "transcribe">("convert");
-  const [advanced, setAdvanced] = useState(false);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -180,10 +170,8 @@ export function Gallery() {
             <Stack gap={4}>
               <Row gap={2} wrap>
                 <Button variant="primary">Convert 3 files</Button>
-                <Button variant="secondary">Contact sales</Button>
                 <Button variant="quiet">Stop</Button>
                 <Button variant="ghost">Clear</Button>
-                <Button variant="danger">Delete</Button>
               </Row>
               <Row gap={2} wrap>
                 <Button variant="primary" size="sm">
@@ -198,8 +186,8 @@ export function Gallery() {
                 {/* link: a text action with no box, still label-treated. */}
                 <Button variant="link">Clear history</Button>
               </Row>
-              {/* The four treatments the app actually ships on its run screen:
-                  lg actuator, its outlined busy state, and icon-only chrome. */}
+              {/* What the run screen ships: the lg actuator, its busy state,
+                  and icon-only chrome. */}
               <Row gap={2} align="stretch" wrap>
                 <Button variant="primary" size="lg" icon="▶">
                   Convert 3 files
@@ -234,34 +222,14 @@ export function Gallery() {
                   </Row>
                 ))}
               </Row>
-              {/* Status over StatusDot wherever the glyph's shape carries meaning
-                  the colour cannot, such as a spinner for work in flight. */}
-              <Row gap={4} wrap>
-                {(
-                  [
-                    { tone: "queued", glyph: "◌", name: "queued" },
-                    { tone: "live", glyph: "◌", name: "live" },
-                    { tone: "pass", glyph: "✓", name: "pass" },
-                    { tone: "fault", glyph: "!", name: "fault" },
-                    { tone: "idle", glyph: "·", name: "idle" },
-                  ] as const
-                ).map((s) => (
-                  <Row key={s.name} gap={2}>
-                    <Status tone={s.tone} label={s.name}>
-                      {s.glyph}
-                    </Status>
-                    <Label>{s.name}</Label>
-                  </Row>
-                ))}
-              </Row>
               <Divider />
               <Row gap={2} wrap>
                 <Badge>Universal-3.5 Pro</Badge>
-                <Badge tone="accent">Markdown</Badge>
-                <Badge tone="live">Running</Badge>
                 <Badge tone="pass">Done</Badge>
-                <Badge tone="fault">Failed</Badge>
                 <Badge square>24</Badge>
+                {/* Rule 2: the empty square badge is the same width as the one
+                    beside it, so a count landing never moves its neighbours. */}
+                <Badge square>{""}</Badge>
               </Row>
               <Divider />
               <Stack gap={2}>
@@ -269,10 +237,6 @@ export function Gallery() {
                 <Meter label="Converting" />
                 <Label>Determinate 62%</Label>
                 <Meter value={0.62} />
-                <Label>Passed</Label>
-                <Meter value={1} tone="pass" />
-                <Label>Failed</Label>
-                <Meter value={0.4} tone="fault" />
               </Stack>
             </Stack>
           </div>
@@ -345,42 +309,12 @@ export function Gallery() {
                   { value: "transcribe", label: "Edit" },
                 ]}
               />
-              <Divider />
-              <Disclosure open={advanced} onToggle={setAdvanced}>
-                Advanced
-              </Disclosure>
-              {advanced && (
-                <Text size="sm" tone="muted">
-                  The trigger does not own its content, so a collapsed section skips mounting
-                  entirely rather than hiding with CSS.
-                </Text>
-              )}
             </Stack>
           </div>
         </Section>
 
-        <Section title="Surfaces" note="Cells share hairlines: one lattice, not a row of cards.">
+        <Section title="Surfaces" note="A panel is a titled region; a well is a recessed one.">
           <Stack gap={4}>
-            <CellGrid columns={3}>
-              {[
-                ["Convert", "PDF, DOCX, images and more into clean Markdown."],
-                ["Transcribe", "Audio and video into text, with speaker turns."],
-                ["History", "Every result, and where it went."],
-              ].map(([title, body]) => (
-                <Cell key={title} interactive>
-                  <Stack gap={3}>
-                    <Display size="lg">{title}</Display>
-                    <Text size="sm" tone="muted">
-                      {body}
-                    </Text>
-                    <Row gap={2} wrap>
-                      <Badge>Datalab</Badge>
-                    </Row>
-                  </Stack>
-                </Cell>
-              ))}
-            </CellGrid>
-
             <div className="gal__grid2">
               <Panel title="Queue" actions={<Badge square>6</Badge>}>
                 <Stack gap={3}>
@@ -535,13 +469,8 @@ export function Gallery() {
   );
 }
 
-/// The sheet, its drag strip, and the toast that has to draw above it.
-///
-/// `--bar-h` is set on the host below, so the specimen shows the band the card
-/// leaves clear for the title bar. The app sets the same property on `.app`.
-/// The toast is deliberately a plain fixed-position box: it is the app's
-/// `.toast` in miniature, and the point of the specimen is that a fixed element
-/// outside the dialog would be invisible under it.
+/// The sheet, its drag strip, and the toast that has to draw above it. The
+/// toast is a plain fixed box, which outside the dialog would be invisible.
 function SheetSpecimen() {
   const [open, setOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -593,25 +522,6 @@ function SheetSpecimen() {
           </Button>
         }
         overlay={toast !== null && <div className="gal__toast">{toast}</div>}
-        footer={
-          <>
-            <Button
-              onClick={() => {
-                setOpen(false);
-              }}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              onClick={() => {
-                setOpen(false);
-              }}
-            >
-              Done
-            </Button>
-          </>
-        }
       >
         <div className="gal__sheetbody">
           <Stack gap={4}>
@@ -661,12 +571,19 @@ interface SpecNode {
 
 const TREE_SPEC: SpecNode[] = [
   {
-    path: "Inbox",
-    name: "Inbox",
+    path: "Drop Box",
+    name: "Drop Box",
     children: [
-      { path: "Inbox/welcome.md", name: "welcome.md" },
-      { path: "Inbox/board-deck.pdf", name: "board-deck.pdf", result: "board-deck.md" },
-      { path: "Inbox/scan_0043.pdf", name: "scan_0043.pdf", convertible: true },
+      { path: "Drop Box/welcome.md", name: "welcome.md" },
+      { path: "Drop Box/board-deck.pdf", name: "board-deck.pdf", result: "board-deck.md" },
+      /* A source longer than the pane, paired. The trailing slot says the
+         result's kind, so the name keeps the row it is about. */
+      {
+        path: "Drop Box/2022_NASA_Technology_Roadmap.pdf",
+        name: "2022_NASA_Technology_Roadmap.pdf",
+        result: "2022_NASA_Technology_Roadmap.md",
+      },
+      { path: "Drop Box/scan_0043.pdf", name: "scan_0043.pdf", convertible: true },
     ],
   },
   {
@@ -721,15 +638,12 @@ function subtree(nodes: SpecNode[], path: string): string[] {
   return found;
 }
 
-/// Three levels, one branch loading, one empty branch, one truncated listing,
-/// a paired result and an unpaired convertible. Narrow on purpose: the tree
-/// ships in a pane whose floor is 300px, and the depth cap is what keeps a
-/// name readable down there.
+/// Every tree state at once, at the pane's 240px floor.
 function TreeSpecimen() {
   const [open, setOpen] = useState(
     () =>
       new Set([
-        "Inbox",
+        "Drop Box",
         "Acme",
         "Acme/Contracts",
         "Acme/Contracts/2026",
@@ -738,7 +652,7 @@ function TreeSpecimen() {
         "Research",
       ]),
   );
-  const [selected, setSelected] = useState("Inbox/board-deck.pdf");
+  const [selected, setSelected] = useState("Drop Box/board-deck.pdf");
   const [last, setLast] = useState("selected board-deck.pdf");
 
   const toggle = (path: string, next: boolean, deep: boolean) => {
@@ -769,7 +683,9 @@ function TreeSpecimen() {
           title={node.result === undefined ? node.name : `${node.name} → ${node.result}`}
           end={
             node.result !== undefined ? (
-              <Mono size="xs">{node.result}</Mono>
+              <Mono size="xs" tone="ghost">
+                {node.result.split(".").pop()?.toUpperCase()}
+              </Mono>
             ) : node.convertible === true ? (
               /* The in-row control: out of the tab order, because Enter on the
                  row is the keyboard route to the same thing. */
@@ -840,8 +756,7 @@ function TreeSpecimen() {
   );
 }
 
-/// Monochrome, like every glyph in this system. A coloured folder would be the
-/// only colour on screen carrying no signal.
+/// Monochrome: a coloured folder is the only colour carrying no signal.
 function FolderGlyph() {
   return (
     <svg
@@ -875,15 +790,8 @@ function FileGlyph() {
   );
 }
 
-/// Both states of the seam, plus the reason `collapsed` is a prop rather than
-/// the caller rendering `start` on its own: the counter is local state inside
-/// the start pane, and it has to survive the toggle. Rendering `start` outside
-/// the split when collapsed moves it in the tree, React remounts it, and the
-/// count goes back to zero — which in the app was a half-typed API key.
-///
-/// The layout is held here the way `App.tsx` holds it in `settings.json`, so
-/// the readout also shows the restore: drag the seam, collapse, open again, and
-/// the pair comes back rather than resetting to an even split.
+/// Both states of the seam. The counter shows why `collapsed` is a prop:
+/// rendering `start` outside the split remounts it and resets the count.
 function SplitPaneSpecimen() {
   const [collapsed, setCollapsed] = useState(false);
   const [layout, setLayout] = useState<SplitLayout>();

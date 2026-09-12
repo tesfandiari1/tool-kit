@@ -37,33 +37,11 @@
   gap: var(--s6);
 }
 
-.ui-align-start {
-  align-items: flex-start;
-}
 .ui-align-center {
   align-items: center;
 }
-.ui-align-end {
-  align-items: flex-end;
-}
 .ui-align-stretch {
   align-items: stretch;
-}
-.ui-align-baseline {
-  align-items: baseline;
-}
-
-.ui-justify-start {
-  justify-content: flex-start;
-}
-.ui-justify-center {
-  justify-content: center;
-}
-.ui-justify-end {
-  justify-content: flex-end;
-}
-.ui-justify-between {
-  justify-content: space-between;
 }
 
 /* Pushes everything after it to the far edge of a row. */

@@ -1,24 +1,16 @@
 //! API keys in the macOS **data protection** keychain, so secrets never reach
 //! the webview or a plaintext file.
 //!
-//! macOS has two keychains and the difference is the whole point of this
-//! module. The legacy file-based store grants access through a per-item ACL
-//! bound to the reader's designated requirement, so any change to the app's
-//! signature voids every "Always Allow" and the dialogs come back. The data
-//! protection store has no ACLs at all: access is the `keychain-access-groups`
-//! entitlement, matched on team ID, so no dialog exists in that path.
+//! The legacy store's per-item ACL is bound to the reader's designated
+//! requirement, so any signature change voids "Always Allow" and the dialogs
+//! return. The data protection store has no ACLs: access is the
+//! `keychain-access-groups` entitlement, matched on team ID.
 //!
-//! That entitlement is restricted and is only honoured when an embedded
-//! provisioning profile authorises it. A bundled `.app` carries one at
-//! `Contents/embedded.provisionprofile`; a bare `cargo run` binary has nowhere
-//! to put it. So the dev loop falls back to the legacy store and keeps its own
-//! separate copy of every key. Use `pnpm tauri build --debug` to exercise the
-//! real path.
+//! That entitlement is restricted and needs an embedded provisioning profile,
+//! which a bundled `.app` carries and a `cargo run` binary cannot. The dev loop
+//! falls back to the legacy store with its own copy of every key.
 //!
-//! Reads stay memoised for the life of the process. The old reason was prompt
-//! count, which no longer applies: the reason now is latency, because a
-//! 200-file run reads the same key once per file and each read is a round trip
-//! to `securityd`.
+//! Reads are memoised for the process, because each one is a `securityd` trip.
 
 use security_framework::base::Error as SecError;
 use security_framework::os::macos::keychain::SecKeychain;
@@ -44,23 +36,20 @@ type Cache = HashMap<String, Option<String>>;
 fn cache() -> MutexGuard<'static, Cache> {
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     let lock = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    // Poisoning is recovered rather than propagated: the critical section spans
-    // a keychain call, and one panic in there must not fail every later read.
+    // Poisoning is recovered: one panic must not fail every later read.
     lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Read `name` through the cache, calling `read` only on a miss.
-///
-/// The lock spans `read` on purpose: four jobs starting together would
-/// otherwise make four separate round trips for the same account.
+/// Read `name` through the cache, calling `read` only on a miss. The lock spans
+/// `read`, or four jobs starting together make four round trips.
 fn memoized(name: &str, read: impl FnOnce() -> Option<String>) -> Option<String> {
     let mut cache = cache();
     if let Some(hit) = cache.get(name) {
         return hit.clone();
     }
     let value = read();
-    // A missing key is memoised as `None` too, so a run over 200 files does not
-    // re-ask for a key that is not there. Settings drops the memo on write.
+    // A miss is memoised too, so a 200-file run does not re-ask. `set_key`
+    // drops the memo.
     cache.insert(name.to_owned(), value.clone());
     value
 }
@@ -77,7 +66,7 @@ enum Store {
 }
 
 /// Only a missing entitlement rules the data protection keychain out. Every
-/// other outcome, `errSecItemNotFound` included, proves it answered us.
+/// other outcome proves it answered.
 fn classify(probe: Result<Vec<u8>, SecError>) -> Store {
     match probe {
         Err(error) if error.code() == MISSING_ENTITLEMENT => Store::Legacy,
@@ -90,9 +79,8 @@ fn store() -> Store {
     *STORE.get_or_init(|| {
         let selected = classify(generic_password(protected(PROBE_ACCOUNT)));
         if selected == Store::Legacy {
-            // Expected under `cargo run`, which cannot carry the profile. In a
-            // release bundle it means the entitlement or the profile is missing
-            // and the keychain dialogs are about to come back.
+            // Expected under `cargo run`. In a release bundle it means the
+            // dialogs are about to come back.
             eprintln!(
                 "[tool-kit] no keychain-access-groups entitlement, falling back \
                  to the legacy keychain"
@@ -107,14 +95,12 @@ fn protected(account: &str) -> PasswordOptions {
     let mut options = PasswordOptions::new_generic_password(SERVICE, account);
     options.use_protected_keychain();
     options.set_access_group(ACCESS_GROUP);
-    // These are machine-local credentials. Roaming them through iCloud Keychain
-    // would copy them to every Mac signed into the account.
+    // Machine-local credentials: iCloud roaming would copy them to every Mac.
     options.set_access_synchronized(Some(false));
     options
 }
 
-/// Keychain Access lists items by label, and the service name alone reads as a
-/// bare bundle id there.
+/// Keychain Access lists items by label, where a service name is a bundle id.
 fn label(account: &str) -> String {
     format!("Tool-Kit ({account})")
 }
@@ -167,9 +153,7 @@ pub fn set_key(name: &str, value: &str) -> Result<(), String> {
     } else {
         write(name, value)
     };
-    // Drop the memo whatever happened. A failed write must not leave the old
-    // value cached as though it were still what the keychain holds, and the
-    // Settings panel re-reads the status the moment this returns.
+    // Drop the memo whatever happened, or a failed write leaves a stale read.
     forget(name);
     result
 }
@@ -201,7 +185,11 @@ mod tests {
         for _ in 0..10 {
             assert_eq!(memoized("test-read-once", read), Some("secret".into()));
         }
-        assert_eq!(reads.load(Ordering::SeqCst), 1, "one round trip, not eleven");
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "one round trip, not eleven"
+        );
     }
 
     #[test]
@@ -236,15 +224,16 @@ mod tests {
         );
     }
 
-    /// The sidecar mints its token during the launch, after something has
-    /// already asked for it and been told there is none. `set_key` is the only
-    /// write that drops that memo, which is why `backend_host` goes through it
-    /// rather than writing the keychain directly: skip it and every backend job
-    /// fails for the rest of the session against a token that is really there.
+    /// The sidecar mints its token after something asked and was told there is
+    /// none. `set_key` is the only write that drops that memo, so skipping it
+    /// fails every backend job against a token that is really there.
     #[test]
     fn minting_the_backend_token_replaces_a_memoised_absence() {
         assert_eq!(memoized("test-backend-mint", || None), None);
-        assert_eq!(memoized("test-backend-mint", || Some("minted".into())), None);
+        assert_eq!(
+            memoized("test-backend-mint", || Some("minted".into())),
+            None
+        );
 
         forget("test-backend-mint");
 
@@ -260,8 +249,8 @@ mod tests {
             classify(Err(SecError::from_code(MISSING_ENTITLEMENT))),
             Store::Legacy
         );
-        // errSecItemNotFound. The probe account holds nothing, which is the
-        // expected answer and still proves the entitlement is in force.
+        // errSecItemNotFound: the probe account holds nothing, which still
+        // proves the entitlement is in force.
         assert_eq!(classify(Err(SecError::from_code(-25300))), Store::Protected);
         assert_eq!(classify(Ok(b"key".to_vec())), Store::Protected);
     }
@@ -271,10 +260,8 @@ mod tests {
     ///
     ///   cargo test --lib secrets::tests::an_unsigned -- --ignored --nocapture
     ///
-    /// A test binary is ad-hoc signed and carries no profile, so this asserts
-    /// the exact condition the dev-loop fallback depends on. If it ever stops
-    /// reporting -34018, the fallback is dead code and dev reads are silently
-    /// hitting a different store than they used to.
+    /// A test binary is ad-hoc signed and carries no profile. If it stops
+    /// reporting -34018, the dev-loop fallback is dead code.
     #[test]
     #[ignore]
     fn an_unsigned_binary_is_refused_the_data_protection_keychain() {
@@ -287,9 +274,8 @@ mod tests {
 
     #[test]
     fn the_access_group_is_prefixed_with_the_team_id() {
-        // codesign rejects a group that does not start with the team that signs
-        // the app, and the failure surfaces as a runtime -34018, not a build
-        // error, so assert the shape here.
+        // codesign rejects a group not starting with the signing team, and it
+        // surfaces as a runtime -34018 rather than a build error.
         assert!(ACCESS_GROUP.starts_with("92MA44797J."));
         assert!(ACCESS_GROUP.ends_with(SERVICE));
     }

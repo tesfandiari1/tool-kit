@@ -14,9 +14,7 @@ import {
 import { commands } from "@/app/commands";
 import { type SecretId, type SecretStatus, type Settings } from "@/app/types";
 
-/// Which band of settings the sheet is showing. Session state, deliberately
-/// not persisted: a setting is looked up, changed, and left, and reopening on
-/// last week's tab is a worse default than reopening on the first one.
+/// Session state: reopening on last week's tab is a worse default.
 type Group = "conversion" | "providers" | "runs" | "advanced";
 
 const GROUPS: { value: Group; label: string }[] = [
@@ -26,13 +24,8 @@ const GROUPS: { value: Group; label: string }[] = [
   { value: "advanced", label: "Advanced" },
 ];
 
-/// Settings, in four bands behind one nav.
-///
-/// It used to be every control in one scroll, wrapped in `FlowLayout` — which
-/// is the *window column's* layout, so the form carried the window's own
-/// margins inside a 620px card, and its scroll region never resolved a height
-/// against the sheet body that was already scrolling. The panel is a plain
-/// column now, and the sheet body is the only thing that scrolls.
+/// Four bands behind one nav. A plain column, never `FlowLayout`, whose scroll
+/// region cannot resolve a height inside a sheet body that already scrolls.
 export function SettingsPanel({
   settings,
   secrets,
@@ -43,10 +36,8 @@ export function SettingsPanel({
 }: {
   settings: Settings;
   secrets: SecretStatus;
-  /// The app runs the conversion service itself, so the bearer token is its
-  /// own business: it mints one per launch and hands it to nothing but its
-  /// child. A token typed here would replace that one and 401 every
-  /// conversion until the next launch, so the field is not offered.
+  /// The app mints the service's token per launch, and one typed here would
+  /// 401 every conversion until the next one. The field is not offered.
   appOwnsBackend: boolean;
   onPersist: (patch: Partial<Settings>) => void;
   onSecrets: (s: SecretStatus) => void;
@@ -54,23 +45,31 @@ export function SettingsPanel({
 }) {
   const [group, setGroup] = useState<Group>("conversion");
 
+  /// Only Datalab reads the format, the pipeline id and high accuracy, and
+  /// local-only never reaches it. See `domains/run/routes.ts`.
+  const datalabReachable =
+    settings.conversionRoute === "direct" || settings.conversionProfile === "standard";
+  const groups = datalabReachable ? GROUPS : GROUPS.filter((g) => g.value !== "advanced");
+
+  /// Reports whether the write landed, so a refused key stays in the field.
   const saveKey = async (provider: SecretId, value: string) => {
     try {
       await commands.setSecret(provider, value);
       onSecrets(await commands.secretStatus());
       onToast(value ? "Key saved" : "Key cleared");
+      return true;
     } catch (e) {
       onToast(String(e));
+      return false;
     }
   };
 
   return (
     <div className="settings">
-      {/* Sticky rather than a second flex row, so the sheet body stays the one
-          scroll container. Two nested scrollers is what broke the old panel. */}
+      {/* Sticky, so the sheet body stays the one scroll container. */}
       <div className="settings__nav">
         <Segmented
-          options={GROUPS}
+          options={groups}
           value={group}
           onChange={setGroup}
           label="Settings section"
@@ -123,6 +122,7 @@ export function SettingsPanel({
                   onCommit={(customWords) => {
                     onPersist({ customWords });
                   }}
+                  onToast={onToast}
                 />
               </Stack>
             )}
@@ -135,20 +135,20 @@ export function SettingsPanel({
               label="Datalab"
               hint="X-API-Key"
               saved={secrets.datalab}
-              onSave={(v) => void saveKey("datalab", v)}
+              onSave={(v) => saveKey("datalab", v)}
             />
             <KeyField
               label="Rev.ai"
               hint="Access token"
               saved={secrets.revai}
-              onSave={(v) => void saveKey("revai", v)}
+              onSave={(v) => saveKey("revai", v)}
             />
             {!appOwnsBackend && (
               <KeyField
                 label="Backend token"
                 hint="Bearer token"
                 saved={secrets.backend}
-                onSave={(v) => void saveKey("backend", v)}
+                onSave={(v) => saveKey("backend", v)}
               />
             )}
           </Stack>
@@ -164,14 +164,16 @@ export function SettingsPanel({
                 onPersist({ skipAlreadyDone: e.target.checked });
               }}
             />
-            <Switch
-              label="High-accuracy convert"
-              hint="Re-OCRs every page and runs an LLM pass. Best for scans and tables, and slower for more credits."
-              checked={settings.datalabHighAccuracy}
-              onChange={(e) => {
-                onPersist({ datalabHighAccuracy: e.target.checked });
-              }}
-            />
+            {datalabReachable && (
+              <Switch
+                label="High-accuracy convert"
+                hint="Re-OCRs every page and runs an LLM pass. Best for scans and tables, and slower for more credits."
+                checked={settings.datalabHighAccuracy}
+                onChange={(e) => {
+                  onPersist({ datalabHighAccuracy: e.target.checked });
+                }}
+              />
+            )}
           </Stack>
         )}
 
@@ -179,6 +181,9 @@ export function SettingsPanel({
           <Stack gap={3}>
             <Select
               label="Convert output format"
+              /* The backend writes Markdown whatever this says, so the label
+                 has to admit the format is Datalab's alone. */
+              hint="Applies to files Datalab converts. The conversion backend always writes Markdown."
               value={settings.datalabFormat}
               onChange={(e) => {
                 onPersist({ datalabFormat: e.target.value });
@@ -202,13 +207,8 @@ export function SettingsPanel({
   );
 }
 
-/// Held in local state and committed on blur or Enter, never per keystroke.
-///
-/// The pipeline id is folded into the history's output-format key, so every
-/// intermediate prefix the user types would otherwise be persisted, re-scan
-/// the whole input selection from disk, and churn the already-done counts that
-/// decide the Run button's label. It would also leave a truncated id in
-/// settings.json if the window were hidden mid-edit.
+/// Committed on blur or Enter, never per keystroke: the pipeline id is folded
+/// into the history key, so every prefix would re-scan the whole selection.
 function PipelineField({
   value,
   onCommit,
@@ -237,38 +237,51 @@ function PipelineField({
   );
 }
 
-/// The contract caps every multipart text part at 256 bytes. The list travels
-/// as one part, newline joined, so an over-long list fails every job in the run
-/// with a 422 that names neither this field nor Settings.
+/// The contract caps a multipart text part at 256 bytes, and this list travels
+/// as one, so an over-long list 422s every job in the run.
 const CUSTOM_WORDS_MAX_BYTES = 256;
 
 function customWordsBytes(words: string[]) {
   return new TextEncoder().encode(words.join("\n")).length;
 }
 
-/// A list in the model, one text box in the UI, committed on blur or Enter for
-/// the same reason as the pipeline id: a half-typed word is not a word.
+function parseCustomWords(draft: string) {
+  return draft
+    .split(/[,\n]/)
+    .map((w) => w.trim())
+    .filter(Boolean);
+}
+
+/// A list in the model, one box in the UI. A half-typed word is not a word.
 function CustomWordsField({
   value,
   onCommit,
+  onToast,
 }: {
   value: string[];
   onCommit: (value: string[]) => void;
+  onToast: (msg: string) => void;
 }) {
   const [draft, setDraft] = useState(value.join(", "));
   const commit = () => {
+    const typed = parseCustomWords(draft);
     const words: string[] = [];
-    for (const word of draft
-      .split(/[,\n]/)
-      .map((w) => w.trim())
-      .filter(Boolean)) {
+    for (const word of typed) {
       if (customWordsBytes([...words, word]) > CUSTOM_WORDS_MAX_BYTES) break;
       words.push(word);
     }
     setDraft(words.join(", "));
     onCommit(words);
+    // The box rewriting itself shorter is not a sign anything was dropped.
+    if (words.length < typed.length) {
+      onToast(
+        `Over ${String(CUSTOM_WORDS_MAX_BYTES)} bytes: kept the first ${String(words.length)} words`,
+      );
+    }
   };
-  const left = CUSTOM_WORDS_MAX_BYTES - customWordsBytes(value);
+  // Off the draft: a counter that moves only on commit reads "256 left" right
+  // up to the truncation it should warn of.
+  const left = CUSTOM_WORDS_MAX_BYTES - customWordsBytes(parseCustomWords(draft));
   return (
     <TextInput
       label="Custom words (optional)"
@@ -277,11 +290,14 @@ function CustomWordsField({
           Words local OCR should prefer when it is unsure. Worth setting for names and jargon it keeps
           getting wrong.{" "}
           <Mono as="span" size="xs" tone="ghost">
-            {left} of {CUSTOM_WORDS_MAX_BYTES} bytes left
+            {left < 0
+              ? `${String(-left)} bytes over`
+              : `${String(left)} of ${String(CUSTOM_WORDS_MAX_BYTES)} bytes left`}
           </Mono>
         </>
       }
       type="text"
+      invalid={left < 0}
       value={draft}
       placeholder="Comma separated"
       onChange={(e) => {
@@ -304,7 +320,7 @@ function KeyField({
   label: string;
   hint: string;
   saved: boolean;
-  onSave: (value: string) => void;
+  onSave: (value: string) => Promise<boolean>;
 }) {
   const [typed, setTyped] = useState(false);
   const inputId = useId();
@@ -312,9 +328,12 @@ function KeyField({
   const commit = () => {
     const input = document.getElementById(inputId);
     if (!(input instanceof HTMLInputElement)) return;
-    onSave(input.value.trim());
-    input.value = "";
-    setTyped(false);
+    // Clear only once the write lands, or a rejected save loses the key.
+    void onSave(input.value.trim()).then((ok) => {
+      if (!ok) return;
+      input.value = "";
+      setTyped(false);
+    });
   };
 
   return (
@@ -339,8 +358,8 @@ function KeyField({
           }}
         />
         <div className="settings-key__actions">
-          {/* Save is disabled on an empty box: it used to delete the stored key,
-              which looked identical to a no-op because of the masked placeholder. */}
+          {/* Saving nothing deletes the stored key, and the masked
+              placeholder makes that look like a no-op. */}
           <Button disabled={!typed} onClick={commit}>
             Save
           </Button>
@@ -348,7 +367,7 @@ function KeyField({
             <Button
               variant="ghost"
               onClick={() => {
-                onSave("");
+                void onSave("");
               }}
               title={`Remove the ${label} key`}
             >

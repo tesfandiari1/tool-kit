@@ -39,11 +39,8 @@ fn secret_status() -> SecretStatus {
 #[tauri::command]
 fn set_secret(app: AppHandle, provider: String, value: String) -> Result<(), String> {
     match provider.as_str() {
-        // The keychain slot is shared with the sidecar handshake, and the child
-        // validates against the token `ensure_token` minted at launch. Writing
-        // it here 401s every conversion for the rest of the session, and the
-        // mint runs once per process, so nothing re-mints. Settings hides the
-        // field in this mode. This is the door it cannot be reached through.
+        // The child validates against the token `ensure_token` mints at
+        // launch, and nothing re-mints. Writing it here 401s every conversion.
         "backend" if backend_host::app_owns_backend(app) => Err(
             "Tool-Kit mints the backend token itself while it runs the conversion service".into(),
         ),
@@ -73,40 +70,32 @@ fn suggested_workspace_path() -> String {
     workspace::suggested_workspace_path()
 }
 
-/// Whether the picked folder is already a Tool-Kit workspace, so onboarding
-/// can offer "adopt" instead of "create".
+/// Whether the picked folder is already a Tool-Kit workspace, for "adopt".
 #[tauri::command]
 fn inspect_workspace_path(path: String) -> bool {
     workspace::inspect_workspace_path(&path)
 }
 
-/// First-launch setup: the folder is created or adopted and its ids come back
-/// for the gate to carry. Nothing is persisted here.
-///
-/// Binding this install to the workspace is one write at the gate's last beat,
-/// together with the conversion answer. Writing it here bound the workspace
-/// before that question was asked, and the gate is keyed on the workspace
-/// path, so quitting between the two beats skipped the question forever and
-/// left the route and profile on defaults nobody chose.
+/// First-launch setup: create or adopt the folder and return its ids. Nothing
+/// is persisted here: the gate binds the workspace at its last beat.
 #[tauri::command]
-fn setup_workspace(path: String) -> Result<workspace::WorkspaceInfo, String> {
-    workspace::setup_workspace(&path)
+fn setup_workspace(app: AppHandle, path: String) -> Result<workspace::WorkspaceInfo, String> {
+    let info = workspace::setup_workspace(&path)?;
+    workspace::migrate_settings(&app);
+    Ok(info)
 }
 
-/// Adopts the configured workspace on an ordinary launch, and reports a welcome
-/// file only when this call is the one that wrote it.
-///
-/// Onboarding is the only other door to `setup_workspace`, so without this a
-/// user who bound their workspace before the welcome file existed would never
-/// get one: their marker is already on disk, so the gate never runs again.
-/// `setup_workspace` is idempotent and the marker makes the seed once-only, so
-/// the cost on every later launch is one small read.
+/// Adopt the configured workspace on an ordinary launch. Reports a welcome file
+/// only when this call wrote it, so an already-bound workspace still gets one.
 #[tauri::command]
 fn ensure_workspace(app: AppHandle) -> Result<Option<workspace::WorkspaceInfo>, String> {
-    match settings::load(&app).workspace_path {
-        Some(path) => workspace::setup_workspace(&path).map(Some),
-        None => Ok(None),
-    }
+    let Some(path) = settings::load(&app).workspace_path else {
+        return Ok(None);
+    };
+    let info = workspace::setup_workspace(&path)?;
+    // After the folder rename, never before: the settings name that path.
+    workspace::migrate_settings(&app);
+    Ok(Some(info))
 }
 
 #[tauri::command]
@@ -120,17 +109,14 @@ fn create_project(app: AppHandle, title: String) -> Result<workspace::ProjectSum
 }
 
 /// One directory level of the library, lazily. `rel` is workspace-relative.
-///
-/// The walk runs on the blocking pool because the tree calls this on every
-/// disclosure click, and `read_dir` plus one `stat` per entry is a per-file
-/// round trip on a network volume. A sync command would run it inline on the
-/// AppKit main thread and freeze the window while it went.
+/// On the blocking pool: a sync command runs inline on the AppKit main thread.
 #[tauri::command]
-async fn list_project_files(app: AppHandle, rel: String) -> Result<tree::DirListing, tree::ListError> {
+async fn list_project_files(
+    app: AppHandle,
+    rel: String,
+) -> Result<tree::DirListing, tree::ListError> {
     let cfg = settings::load(&app);
-    // Not `gone`: the tree asks for its first folders while the onboarding
-    // write is still in flight, and answering that by dropping every expanded
-    // row would empty the persisted expansion on the way in.
+    // Not `gone`: onboarding is still writing, and `gone` drops expandedPaths.
     let workspace = cfg
         .workspace_path
         .clone()
@@ -148,17 +134,9 @@ struct KnownDir {
     modified_ms: u64,
 }
 
-/// Which of these folders moved since the webview last listed them.
-///
-/// The cheap question the focus reconcile asks before the expensive one. A
-/// window becomes key on every ⌘Tab return and after every file picker, and
-/// re-listing every open folder to find that none of them changed costs a
-/// `read_dir` plus a `stat` per entry, which is a visible pause on a network
-/// volume. This costs one `stat` per folder.
-///
-/// A folder that cannot be stat'd is reported as changed. The listing is the
-/// one place that decides what a missing folder means, and it already drops
-/// the row and closes it.
+/// Which of these folders moved since the webview last listed them. One `stat`
+/// each, not the `read_dir` plus per-entry `stat` a listing costs. A folder that
+/// cannot be stat'd reads as changed.
 #[tauri::command]
 async fn changed_project_dirs(app: AppHandle, known: Vec<KnownDir>) -> Result<Vec<String>, String> {
     let workspace = settings::load(&app)
@@ -176,20 +154,12 @@ async fn changed_project_dirs(app: AppHandle, known: Vec<KnownDir>) -> Result<Ve
     .map_err(|e| e.to_string())
 }
 
-/// How deep a dropped folder is walked. Deep enough for real project trees,
-/// shallow enough that dropping a home folder can't wander forever.
+/// How deep a dropped folder is walked, so a dropped home folder cannot
+/// wander forever.
 const MAX_SCAN_DEPTH: usize = 8;
 
-/// Expand the selected inputs (files and/or folders) into the concrete list of
-/// files this job will process. Folders are walked recursively for files the
-/// job accepts; individual files are included if they match.
-///
-/// Deliberately does **not** exclude the output folder. An earlier version did,
-/// to stop a second run re-processing its own results — but since results are
-/// written alongside their sources by default, that excluded the inputs
-/// themselves and nothing was ever eligible. The case it guarded against needs
-/// Convert with `html` output re-reading its own `.html`, which is narrow and
-/// self-limiting; `write_output` numbers collisions rather than clobbering.
+/// Expand the selected inputs into the concrete file list this job processes.
+/// Never excludes the output folder: results land beside their sources.
 fn collect_input_files(inputs: &[String], jt: JobType) -> Vec<std::path::PathBuf> {
     let accepts = |p: &Path| -> bool {
         p.extension()
@@ -200,8 +170,7 @@ fn collect_input_files(inputs: &[String], jt: JobType) -> Vec<std::path::PathBuf
     collect_files_where(inputs, &accepts)
 }
 
-/// Broad discovery only. The live capability MIME set is intersected below;
-/// this function never decides that an arbitrary file is convertible.
+/// Broad discovery only. The live capability MIME set is intersected below.
 fn collect_backend_candidates(inputs: &[String]) -> Vec<std::path::PathBuf> {
     let accepts = |path: &Path| {
         let extension = path
@@ -218,9 +187,7 @@ fn collect_files_where(
     inputs: &[String],
     accepts: &dyn Fn(&Path) -> bool,
 ) -> Vec<std::path::PathBuf> {
-    // Skip dotfiles and dot-directories: .git, .DS_Store, and friends are never
-    // what the user meant to convert. Only applies while walking *into* a
-    // folder — a dot-path dropped explicitly is still honoured.
+    // Dotfiles only while walking in. A dropped dot-path is still honoured.
     let hidden = |p: &Path| -> bool {
         p.file_name()
             .and_then(|n| n.to_str())
@@ -263,8 +230,7 @@ fn collect_files_where(
             files.push(path.to_path_buf());
         }
     }
-    // Canonicalize before dedup so the same file reached two ways (a file plus
-    // its enclosing folder) is only queued once.
+    // Canonicalize so a file reached twice, itself and its folder, queues once.
     files.sort();
     files.dedup();
     let mut seen = std::collections::HashSet::new();
@@ -272,22 +238,14 @@ fn collect_files_where(
     files
 }
 
-/// Formats that are already plain text. There is nothing to extract from them,
-/// so they are skipped rather than sent to a provider — but they are counted so
-/// the UI can say "already text" instead of reporting an unexplained zero.
-///
-/// The library tree reads the same list to decide which rows open in the
-/// document pane. One list, because a row that offers to open a file
-/// `read_document` will refuse is a click that ends in a toast.
+/// Formats that are already plain text. Counted, never sent to a provider. The
+/// tree reads the same list to decide which rows open in the document pane.
 pub(crate) const ALREADY_TEXT: &[&str] = &[
     "txt", "md", "markdown", "text", "rst", "org", "csv", "tsv", "json",
 ];
 
-/// These formats have no local engine and intentionally bypass the backend
-/// forever. Every other decision comes from live `capabilities.inputFormats`,
-/// images included: the Vision engine only exists on macOS 26 and up, so the
-/// same build has to route an image either way depending on what the service
-/// it is talking to actually advertises.
+/// No local engine, so these bypass the backend forever. Everything else comes
+/// from live `capabilities.inputFormats`: the Vision engine needs macOS 26.
 const PERMANENT_DIRECT_FORMATS: &[&str] = &["html", "htm"];
 
 fn is_permanent_direct(path: &Path) -> bool {
@@ -334,8 +292,7 @@ fn route_conversion_candidates(
     plan
 }
 
-/// Named because `convert_one` turns it back into a reason code, and matching
-/// on a sentence written somewhere else is how that silently stops working.
+/// Named because `convert_one` matches on it to build a reason code.
 const BACKEND_NOT_ACCEPTING: &str = "The local conversion service is not accepting jobs";
 
 fn require_backend_capacity(
@@ -396,65 +353,153 @@ struct ReuseSummary {
     by_source: HashMap<String, ReuseDisposition>,
 }
 
+/// How many matches a dropped folder lists before the well says "and N more".
+const MAX_INPUT_CHILDREN: usize = 40;
+
+/// One file a run would take, inside a dropped folder.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InputMatch {
+    path: String,
+    /// Relative to the dropped folder, so the well shows `slides/deck.pdf`.
+    name: String,
+    job: &'static str,
+}
+
+/// One dropped path, and what a run would take from it. Built here, because the
+/// host owns the walk, the dotfile rule and the depth cap.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InputNode {
+    path: String,
+    name: String,
+    is_dir: bool,
+    /// The job this file feeds. Null for a folder and for a file neither takes.
+    job: Option<&'static str>,
+    /// Matches inside a dropped folder, capped.
+    matches: Vec<InputMatch>,
+    /// Matches past the cap.
+    truncated: usize,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Scan {
-    /// Matching file count per job, so the UI can pick the job that fits the
-    /// selection and show what each one would process.
+    /// Matching file count per job, so the UI can pick the job that fits.
     convert: usize,
     transcribe: usize,
-    /// Files whose result is already sitting in the chosen output folder.
-    /// Nothing at all happens to these. Reported per job so switching job
-    /// reads a number already in hand rather than triggering a fresh scan.
+    /// Files whose result already sits in the chosen output folder. Per job.
     already_here_convert: usize,
     already_here_transcribe: usize,
-    /// Files whose result exists, but in some other folder. These are copied
-    /// rather than sent to the provider again — real work, but free.
+    /// Files whose result exists in another folder. Copied, not bought again.
     reusable_convert: usize,
     reusable_transcribe: usize,
-    /// Concrete Convert files and their MIME/reuse disposition. This is
-    /// metadata only: no file bytes cross IPC. The webview uses it to plan
-    /// each pending file against live backend capabilities.
+    /// Concrete Convert files with MIME and reuse. No file bytes cross IPC.
     convert_files: Vec<ScannedConversionFile>,
     /// Files skipped because they are already text.
     already_text: usize,
-    /// The folder to default the output to: the dropped folder itself, or the
-    /// folder holding the dropped files when they all share one.
+    /// The folder to default the output to: the dropped folder, or a shared one.
     suggested_output: Option<String>,
+    /// The selection as the drop well draws it, one node per dropped path.
+    nodes: Vec<InputNode>,
 }
 
-/// Count what each job would process across the selected inputs, and how much
-/// of that has already been done.
-///
-/// `(async)` on a sync fn moves the body off the main thread. This runs on
-/// every drop and walks the tree three times, then canonicalizes and stats
-/// every match — fine on a local SSD, but on a network volume the per-file
-/// round-trips would freeze the window while it ran.
+/// Describe each dropped path for the drop well. One walk per input, and the
+/// same walk the run makes, so the well and the run cannot disagree.
+fn describe_inputs(inputs: &[String]) -> Vec<InputNode> {
+    let takeable = |path: &Path| -> bool {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| tree::job_for(&ext.to_lowercase()))
+            .is_some()
+    };
+    let job_of = |path: &Path| -> Option<&'static str> {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| tree::job_for(&ext.to_lowercase()))
+            .map(|jt| jt.id())
+    };
+    let name_of = |path: &Path| -> String {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned())
+    };
+
+    inputs
+        .iter()
+        .map(|input| {
+            let path = Path::new(input);
+            if !path.is_dir() {
+                return InputNode {
+                    name: name_of(path),
+                    path: input.clone(),
+                    is_dir: false,
+                    job: job_of(path),
+                    matches: Vec::new(),
+                    truncated: 0,
+                };
+            }
+            let found = collect_files_where(std::slice::from_ref(input), &takeable);
+            let truncated = found.len().saturating_sub(MAX_INPUT_CHILDREN);
+            let matches = found
+                .iter()
+                .take(MAX_INPUT_CHILDREN)
+                .filter_map(|file| {
+                    Some(InputMatch {
+                        name: file
+                            .strip_prefix(path)
+                            .unwrap_or(file)
+                            .to_string_lossy()
+                            .into_owned(),
+                        job: job_of(file)?,
+                        path: file.to_string_lossy().into_owned(),
+                    })
+                })
+                .collect();
+            InputNode {
+                name: name_of(path),
+                path: input.clone(),
+                is_dir: true,
+                job: None,
+                matches,
+                truncated,
+            }
+        })
+        .collect()
+}
+
+/// Count what each job would process, and how much is already done. `(async)`
+/// on a sync fn moves three tree walks and a stat per match off the main thread.
 #[tauri::command]
 async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String> {
     let cfg = settings::load(&app);
-    let convert = if cfg.conversion_route == settings::ConversionRoute::Backend {
-        // A service still starting reads the same here as one that cannot
-        // answer: either way the scan falls back to direct-eligible metadata.
+    // `run_pipeline` keeps the backend-routed tail out of the reuse lookup too.
+    let (convert, direct_len) = if cfg.conversion_route == settings::ConversionRoute::Backend {
+        // A service still starting reads the same as one that cannot answer.
         let planned = match backend_host::backend_origin(&app) {
             Ok(origin) => plan_backend_conversion_files(&inputs, &origin).await,
             Err(error) => Err(error),
         };
         match planned {
             Ok(mut plan) => {
+                let direct_len = plan.direct.len();
                 plan.direct.append(&mut plan.backend);
-                plan.direct
+                (plan.direct, direct_len)
             }
-            // The frontend's independent capability probe owns the actionable
-            // outage message. Preserve direct-eligible scan metadata here so
-            // it is not masked by an empty selection.
-            Err(_) => collect_input_files(&inputs, JobType::Convert),
+            // The frontend's own probe owns the outage message. Keep metadata.
+            Err(_) => {
+                let files = collect_input_files(&inputs, JobType::Convert);
+                let direct_len = files.len();
+                (files, direct_len)
+            }
         }
     } else {
-        collect_input_files(&inputs, JobType::Convert)
+        let files = collect_input_files(&inputs, JobType::Convert);
+        let direct_len = files.len();
+        (files, direct_len)
     };
     let transcribe = collect_input_files(&inputs, JobType::Transcribe);
-    let convert_reuse = split_reusable(&app, &convert, JobType::Convert, &cfg);
+    let convert_reuse = split_reusable(&app, &convert[..direct_len], JobType::Convert, &cfg);
     let transcribe_reuse = split_reusable(&app, &transcribe, JobType::Transcribe, &cfg);
     let convert_files = describe_conversion_files(&convert, &convert_reuse);
     Ok(Scan {
@@ -467,13 +512,46 @@ async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String
         transcribe: transcribe.len(),
         already_text: count_matching(&inputs, ALREADY_TEXT),
         suggested_output: suggested_output_dir(&inputs),
+        nodes: describe_inputs(&inputs),
     })
 }
 
-/// Split the files that need no provider call into (already in the output
-/// folder, copyable from elsewhere). The two are counted apart because they
-/// mean different things to the user: the first is "nothing happens", the
-/// second is "a file appears, for free".
+/// Where a run writes, and the only answer to that question. The scan judges
+/// "already in this folder" against it, so a second answer would report one
+/// folder and write to another. `output_dir` is the workspace-less case alone.
+fn output_dir_for(cfg: &Settings) -> Option<String> {
+    if let (Some(workspace), Some(project)) = (&cfg.workspace_path, &cfg.active_project_path) {
+        // The tree's own check, so a hand-edited settings.json cannot escape.
+        if let Ok(dir) = tree::resolve(Path::new(workspace), project) {
+            // Never the legacy folder: it sits where the tree sees nothing.
+            return dir.is_dir().then(|| dir.to_string_lossy().into_owned());
+        }
+    }
+    cfg.output_dir.clone()
+}
+
+/// Why a run has nowhere to write. A bound project means no folder picker.
+fn no_destination_message(cfg: &Settings) -> String {
+    if cfg.workspace_path.is_some() && cfg.active_project_path.is_some() {
+        "That project folder is not there any more. Pick another project.".into()
+    } else {
+        "Choose an output folder first".into()
+    }
+}
+
+/// Where **this file's** result goes. Beside the source inside the workspace,
+/// which keeps the tree's pairing rule true. Outside it, the one destination.
+fn output_dir_for_source(source: &Path, cfg: &Settings) -> Option<String> {
+    if let (Some(workspace), Some(parent)) = (&cfg.workspace_path, source.parent()) {
+        if parent.starts_with(workspace) && parent.is_dir() {
+            return Some(parent.to_string_lossy().into_owned());
+        }
+    }
+    output_dir_for(cfg)
+}
+
+/// Split the files needing no provider call into (already in the output folder,
+/// copyable from elsewhere). The first does nothing, the second copies.
 fn split_reusable(
     app: &AppHandle,
     files: &[std::path::PathBuf],
@@ -486,8 +564,8 @@ fn split_reusable(
     let found = history::reusable(app, files, jt.id(), &jobs::output_format_for(jt, cfg));
     let mut summary = ReuseSummary::default();
     for (source, output) in found {
-        let disposition = if cfg
-            .output_dir
+        // Per source, not per run: a dropped folder keeps its shape.
+        let disposition = if output_dir_for_source(Path::new(&source), cfg)
             .as_deref()
             .is_some_and(|dir| history::is_in_dir(&output, dir))
         {
@@ -510,10 +588,7 @@ fn describe_conversion_files(
         .iter()
         .map(|path| {
             let source_path = path.to_string_lossy().into_owned();
-            let media_type = mime_guess::from_path(path)
-                .first_or_octet_stream()
-                .essence_str()
-                .to_string();
+            let media_type = media_type(path);
             ScannedConversionFile {
                 reuse: reuse
                     .by_source
@@ -527,7 +602,7 @@ fn describe_conversion_files(
         .collect()
 }
 
-/// Newest first. `query` filters on file name or folder; empty means everything.
+/// Newest first. `query` filters on file name or folder. Empty means all.
 #[tauri::command]
 fn list_history(app: AppHandle, query: String, limit: u32) -> Vec<history::Entry> {
     history::list(&app, &query, limit)
@@ -538,52 +613,17 @@ fn clear_history(app: AppHandle) -> Result<(), String> {
     history::clear(&app)
 }
 
-/// Count selected files whose extension is in `exts`, walking folders the same
-/// way `collect_input_files` does so the two counts describe the same set.
+/// Count files whose extension is in `exts`, walking folders as the run does.
 fn count_matching(inputs: &[String], exts: &[&str]) -> usize {
-    fn walk(dir: &Path, depth: usize, exts: &[&str], n: &mut usize) {
-        if depth > MAX_SCAN_DEPTH {
-            return;
-        }
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s.starts_with('.'))
-            {
-                continue;
-            }
-            match entry.file_type() {
-                Ok(t) if t.is_dir() => walk(&p, depth + 1, exts, n),
-                Ok(t) if t.is_file() && has_ext(&p, exts) => *n += 1,
-                _ => {}
-            }
-        }
-    }
-    fn has_ext(p: &Path, exts: &[&str]) -> bool {
+    let has_ext = |p: &Path| {
         p.extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| exts.contains(&e.to_lowercase().as_str()))
-    }
-
-    let mut n = 0;
-    for input in inputs {
-        let path = Path::new(input);
-        if path.is_dir() {
-            walk(path, 0, exts, &mut n);
-        } else if path.is_file() && has_ext(path, exts) {
-            n += 1;
-        }
-    }
-    n
+    };
+    collect_files_where(inputs, &has_ext).len()
 }
 
-/// Where results should land by default: alongside the input. A dropped folder
-/// is its own answer; dropped files use their containing folder, but only when
-/// they agree, so a mixed selection doesn't silently pick one at random.
+/// Where results land by default: alongside the input, when the inputs agree.
 fn suggested_output_dir(inputs: &[String]) -> Option<String> {
     let mut candidate: Option<std::path::PathBuf> = None;
     for input in inputs {
@@ -633,23 +673,25 @@ async fn run_pipeline(
     app: AppHandle,
     state: State<'_, JobManager>,
     inputs: Vec<String>,
-    output_dir: String,
     job_type: String,
 ) -> Result<RunResult, String> {
     let jt = JobType::from_id(&job_type).ok_or("Unknown job type")?;
     if inputs.is_empty() {
         return Err("Choose at least one file or folder".into());
     }
-    if !Path::new(&output_dir).is_dir() {
-        return Err("Choose an output folder first".into());
-    }
-    // Loaded once and reused: the same config decides collection, routing,
-    // history reuse, and what the run itself produces.
+    // Loaded once: one config decides collection, routing, reuse and output.
     let cfg = settings::load(&app);
+    // Derived here, not passed in, so the counts and the writes name one folder.
+    // Only a guard that a destination exists: each result goes beside its source.
+    let filing_dir = output_dir_for(&cfg).ok_or_else(|| no_destination_message(&cfg))?;
+    if !Path::new(&filing_dir).is_dir() {
+        return Err(no_destination_message(&cfg));
+    }
+    let output_dir_of = |source: &Path| -> String {
+        output_dir_for_source(source, &cfg).unwrap_or_else(|| filing_dir.clone())
+    };
     let mut backend_files = Vec::new();
-    // Read once for the whole run. Every ledger row and every job context has
-    // to name the origin the submit actually goes to, and in Sidecar mode that
-    // is a port this launch was handed rather than anything in Settings.
+    // Read once. In Sidecar mode the origin is this launch's own port.
     let mut backend_origin = String::new();
     let mut files =
         if jt == JobType::Convert && cfg.conversion_route == settings::ConversionRoute::Backend {
@@ -674,26 +716,25 @@ async fn run_pipeline(
             collect_input_files(&inputs, jt)
         };
     if files.is_empty() {
-        return Err(format!(
-            "No {} files in your selection",
-            jt.label().to_lowercase()
-        ));
+        return Err(format!("No {} files in your selection", jt.id()));
     }
 
-    // Three buckets. A file whose result is already in the output folder is
-    // left alone; one whose result exists elsewhere is copied, because the
-    // source is unchanged and the format matches, so paying the provider again
-    // would buy bytes we already have; everything else runs.
+    // Three buckets: already here is left alone, elsewhere is copied, rest runs.
     let mut to_copy: Vec<(std::path::PathBuf, String)> = Vec::new();
     let mut skipped = 0;
-    if cfg.skip_already_done
-        && !(jt == JobType::Convert && cfg.conversion_route == settings::ConversionRoute::Backend)
-    {
-        let found = history::reusable(&app, &files, jt.id(), &jobs::output_format_for(jt, &cfg));
+    if cfg.skip_already_done {
+        // Per file, not per route: every file the service refuses goes to
+        // Datalab and is filed under this key.
+        let direct: Vec<std::path::PathBuf> = files
+            .iter()
+            .filter(|file| !backend_files.contains(file))
+            .cloned()
+            .collect();
+        let found = history::reusable(&app, &direct, jt.id(), &jobs::output_format_for(jt, &cfg));
         if !found.is_empty() {
             files.retain(|p| match found.get(p.to_string_lossy().as_ref()) {
                 None => true,
-                Some(existing) if history::is_in_dir(existing, &output_dir) => {
+                Some(existing) if history::is_in_dir(existing, &output_dir_of(p)) => {
                     skipped += 1;
                     false
                 }
@@ -704,11 +745,10 @@ async fn run_pipeline(
             });
         }
     }
-    // Nothing to run and nothing to copy. Say so rather than starting an empty
-    // run that finishes instantly and looks like a bug.
+    // Say so rather than starting an empty run that reads as a bug.
     if files.is_empty() && to_copy.is_empty() {
         return Err(format!(
-            "Already done — all {skipped} file{} already have results in this folder. \
+            "Already done — all {skipped} file{} already have a result beside them. \
              Turn off “Skip files already done” in Settings to run them again.",
             if skipped == 1 { "" } else { "s" }
         ));
@@ -716,15 +756,11 @@ async fn run_pipeline(
 
     let backend_needed = files.iter().any(|file| backend_files.contains(file));
     let direct_needed = files.iter().any(|file| !backend_files.contains(file));
-    // What the ledger records a backend row against, read once for the run.
-    // Re-reading the override per file would let a half-written one split a run
-    // across two recorded origins, and reading it below, after the queue is
-    // cleared and the copies are done, made a malformed override abort a
-    // transcription that never touches the service.
+    // Read once for the run, or a half-written override splits it across two
+    // recorded origins.
     let mut ledger_origin = String::new();
     if backend_needed {
-        // Through the accessor, so Sidecar mode says the service is starting
-        // rather than telling the user to paste a token it mints itself.
+        // Through the accessor: Sidecar mode mints this token itself.
         backend_host::backend_token(&app)?;
         ledger_origin = backend_host::ledger_origin(&backend_host::deployment(&app)?).to_string();
     }
@@ -735,24 +771,21 @@ async fn run_pipeline(
         }
     }
 
-    // Fresh slate per run. Bumping the generation retires any task still alive
-    // from a previous run so it can't keep spending credits or writing files.
+    // Fresh slate: the new generation retires any task still alive and spending.
     let generation = state.new_generation();
     delete_backend_inflight(&app, &state.list());
-    // Set before any copy lands: `finish` reads this config to decide what
-    // format to file the new history row under.
+    // Set before any copy lands: `finish` reads it to pick the history format.
     state.set_run_config(cfg.clone());
     state.clear();
 
-    // Copies first, so the free results are on screen before the paid ones
-    // start crawling.
+    // Copies first, so the free results land before the paid ones start.
     let mut copied = 0;
     for (source, existing) in &to_copy {
         let id = state.next_id();
         let job = Job::new(
             id,
             source.to_string_lossy().to_string(),
-            output_dir.clone(),
+            output_dir_of(source),
             jt,
         );
         state.insert(job.clone());
@@ -763,9 +796,7 @@ async fn run_pipeline(
     }
 
     let client_run_id = uuid::Uuid::new_v4().to_string();
-    // From the run snapshot, so editing the OCR settings mid-run cannot split
-    // one run across two recognizers. Carried on each job and recorded on its
-    // ledger row, because the service folds both into the replay fingerprint.
+    // From the run snapshot: the service folds OCR into the replay key.
     let ocr = conversion_service::OcrOptions {
         language_correction: cfg.language_correction,
         custom_words: cfg.custom_words.clone(),
@@ -774,6 +805,7 @@ async fn run_pipeline(
     for source in &files {
         let id = state.next_id();
         let source_path = source.to_string_lossy().into_owned();
+        let output_dir = output_dir_of(source);
         let job = if backend_files.contains(source) {
             let idempotency_key = uuid::Uuid::new_v4().to_string();
             let file_name = source
@@ -831,8 +863,7 @@ struct ConvertOneOutcome {
     /// "backend_unavailable" | "backend_not_accepting" |
     /// "local_only_requires_remote" | "missing_key".
     reason: Option<String>,
-    /// The sentence the frontend shows verbatim. A verdict, not an error
-    /// string the webview parses.
+    /// The sentence the frontend shows verbatim.
     message: Option<String>,
 }
 
@@ -862,15 +893,8 @@ impl ConvertOneOutcome {
     }
 }
 
-/// Whether `convert_one` may still append to the queue, given the generation
-/// it read before its preflight.
-///
-/// Two questions, one answer, because both mean the same thing to this
-/// command: a run owns `run_config` for its whole life and `log_history` reads
-/// it at finish time, so appending is safe only while nothing else is running
-/// and nothing else has started. A Stop moves the generation too, so this says
-/// no a little more often than it must, and the refusal says only that the
-/// queue moved.
+/// Whether `convert_one` may still append, given the generation it read before
+/// its preflight. A run owns `run_config` for its whole life.
 fn queue_is_free(state: &JobManager, since: u64) -> bool {
     state.generation() == since
         && !state
@@ -879,71 +903,184 @@ fn queue_is_free(state: &JobManager, since: u64) -> bool {
             .any(|job| matches!(job.status.as_str(), "queued" | "working" | "processing"))
 }
 
-/// Convert one file from the library tree, into the folder it already sits in.
-///
-/// Modelled on `retry_job`, never on `run_pipeline`. It reads the generation
-/// instead of bumping it, appends one job instead of clearing the queue, and
-/// never touches the backend ledger of a run in flight. Fired after a batch,
-/// `run_pipeline`'s opening four lines would wipe every row the user is still
-/// reading with no warning.
-///
-/// Every refusal comes back as a verdict rather than an `Err`, because the
-/// tree renders the answer: it stages the file in Run and shows the host's
-/// sentence. The route plan, the key checks and the reuse rule stay here, so
-/// there is one planner and not a second one in the webview.
-/// Copy dropped files into a project, so the library holds the work rather
-/// than pointing at it.
-///
-/// The result of a run lands beside its source, and the tree pairs a source
-/// with a sibling result. A file converted where it was dropped therefore
-/// leaves the workspace holding neither half, which is what made a drop feel
-/// like it went nowhere.
-///
-/// Returns the paths that should actually be run: a copy for anything from
-/// outside, and the file itself for anything already inside the destination,
-/// so dragging a row out of the library and back in cannot duplicate it.
+/// Copy dropped files into a project. Returns the paths a run should take: a
+/// copy from outside, the file itself from inside, so a round trip cannot
+/// duplicate a row.
 #[tauri::command(async)]
 fn import_into_project(
     app: AppHandle,
     inputs: Vec<String>,
-    job_type: String,
     project_rel: String,
 ) -> Result<Vec<String>, String> {
-    let jt = JobType::from_id(&job_type).ok_or("Unknown job type")?;
     let cfg = settings::load(&app);
     let workspace = cfg
         .workspace_path
         .clone()
         .ok_or_else(|| "No workspace configured".to_string())?;
-    // The same check the tree's own listing makes, so a destination cannot be
-    // talked into pointing outside the workspace.
+    // The tree's own check, so a destination cannot point outside the workspace.
     let dir = tree::resolve(Path::new(&workspace), &project_rel)?;
     if !dir.is_dir() {
         return Err("That project folder is not there any more".into());
     }
-    let dir_str = dir.to_string_lossy().to_string();
+    // Anything either job takes: a drop is filed before it is classified.
+    let importable = |p: &Path| -> bool {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| tree::job_for(&e.to_lowercase()).is_some())
+    };
 
-    let mut landed = Vec::new();
-    for source in collect_input_files(&inputs, jt) {
-        // Already where it belongs. Copying would give the user two rows for
-        // one document and bill the second one.
+    // Copy one file in unless it is already there, and carry its results over.
+    // Reuse is keyed on the source path, so an import otherwise pays again.
+    let take = |into: &Path, source: &Path| -> Result<String, String> {
         if source
             .parent()
-            .is_some_and(|parent| history::same_dir(parent, &dir))
+            .is_some_and(|parent| history::same_dir(parent, into))
         {
-            landed.push(source.to_string_lossy().to_string());
+            return Ok(source.to_string_lossy().into_owned());
+        }
+        std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
+        let to = jobs::import_source(&into.to_string_lossy(), source)?;
+        history::carry_forward(&app, &source.to_string_lossy(), &to);
+        Ok(to)
+    };
+
+    let mut landed = Vec::new();
+    for input in &inputs {
+        let root = Path::new(input);
+        // Already filed. Copying gives two rows for one document, and bills.
+        if root.starts_with(&workspace) {
+            landed.push(input.clone());
             continue;
         }
-        let to = jobs::import_source(&dir_str, &source)?;
-        // Before the run reads it. Reuse is keyed on the source path, so
-        // without this an already-converted file is bought a second time the
-        // moment it is imported.
-        history::carry_forward(&app, &source.to_string_lossy(), &to);
-        landed.push(to);
+        let matches = collect_files_where(std::slice::from_ref(input), &importable);
+        // Stage the path as dropped: a file that leaves no trace reads as a
+        // drop that missed the window.
+        if matches.is_empty() {
+            landed.push(input.clone());
+            continue;
+        }
+
+        if !root.is_dir() {
+            for source in &matches {
+                landed.push(take(&dir, source)?);
+            }
+            continue;
+        }
+
+        // A dropped folder keeps its shape, so the tree pairs results where
+        // they sit. It merges by name. `claim_path` numbers collisions.
+        for source in &matches {
+            take(&import_destination(&dir, root, source), source)?;
+        }
+        // One staged path per dropped folder. The run walks it again.
+        landed.push(import_destination(&dir, root, root).to_string_lossy().into_owned());
     }
     Ok(landed)
 }
 
+/// The folder one imported file lands in: the project, the dropped folder's own
+/// name, then whatever sat between. `root == source` is that folder itself.
+fn import_destination(dir: &Path, root: &Path, source: &Path) -> std::path::PathBuf {
+    let Some(folder) = root.file_name() else {
+        return dir.to_path_buf();
+    };
+    let inner = source
+        .strip_prefix(root)
+        .ok()
+        .and_then(|rel| rel.parent())
+        .filter(|rel| !rel.as_os_str().is_empty());
+    match inner {
+        Some(rel) => dir.join(folder).join(rel),
+        None => dir.join(folder),
+    }
+}
+
+/// File one library file, and the result beside it, into another project. Both
+/// move or neither does, or the source reads as unconverted and offers to spend.
+/// A collision is refused, not numbered. Answers with the new relative path.
+#[tauri::command(async)]
+fn move_to_project(app: AppHandle, rel: String, project_rel: String) -> Result<String, String> {
+    let state = app.state::<JobManager>();
+    // The rule `convert_one` refuses on: a run writes beside the source it
+    // recorded, so a move lands the result in the folder just left.
+    if !queue_is_free(&state, state.generation()) {
+        return Err("A run is going. Wait for it to finish, then move the file.".into());
+    }
+
+    let cfg = settings::load(&app);
+    let workspace = cfg
+        .workspace_path
+        .clone()
+        .ok_or_else(|| "No workspace configured".to_string())?;
+    let root = Path::new(&workspace);
+
+    let source = tree::resolve(root, &rel)?;
+    if !source.is_file() {
+        return Err("That file is not there any more".into());
+    }
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "That file has no name".to_string())?
+        .to_string();
+    let dir = tree::resolve(root, &project_rel)?;
+    if !dir.is_dir() {
+        return Err("That project folder is not there any more".into());
+    }
+    let from_dir = source
+        .parent()
+        .ok_or_else(|| "That file has no folder".to_string())?;
+    if history::same_dir(from_dir, &dir) {
+        return Ok(rel);
+    }
+
+    let result = tree::paired_result(root, &rel, &cfg);
+    for path in [Some(&source), result.as_ref()].into_iter().flatten() {
+        let Some(taken) = path.file_name() else {
+            continue;
+        };
+        if dir.join(taken).exists() {
+            return Err(format!(
+                "{} is already in that project. Rename one of them first.",
+                taken.to_string_lossy()
+            ));
+        }
+    }
+
+    let source_path = source.to_string_lossy().into_owned();
+    let result_path = result.as_ref().map(|p| p.to_string_lossy().into_owned());
+    // Canonicalized while both files are still where the history says they are.
+    let before = history::MovedFrom::snapshot(&source_path, result_path.as_deref());
+
+    let moved_source = dir.join(&name);
+    std::fs::rename(&source, &moved_source).map_err(|e| format!("Could not move {name}: {e}"))?;
+
+    let mut moved_result = None;
+    if let Some(existing) = &result {
+        let landing = existing
+            .file_name()
+            .map(|taken| dir.join(taken))
+            .ok_or_else(|| "That result has no name".to_string())?;
+        if let Err(e) = std::fs::rename(existing, &landing) {
+            // Put the source back: a split pair offers to convert a done file.
+            let _ = std::fs::rename(&moved_source, &source);
+            return Err(format!("Could not move the result beside it: {e}"));
+        }
+        moved_result = Some(landing.to_string_lossy().into_owned());
+    }
+
+    history::relocate(
+        &app,
+        &before,
+        &moved_source.to_string_lossy(),
+        moved_result.as_deref(),
+    );
+    Ok(format!("{project_rel}/{name}"))
+}
+
+/// Convert one file from the library tree, into the folder it already sits in.
+/// Modelled on `retry_job`, never `run_pipeline`: it appends one job instead of
+/// clearing the queue. Every refusal is a verdict, because the tree renders it.
 #[tauri::command]
 async fn convert_one(
     app: AppHandle,
@@ -967,23 +1104,15 @@ async fn convert_one(
         .and_then(|extension| extension.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let Some(jt) = [JobType::Convert, JobType::Transcribe]
-        .into_iter()
-        .find(|jt| jt.accepts(&extension))
-    else {
+    let Some(jt) = tree::job_for(&extension) else {
         return Ok(ConvertOneOutcome::blocked(
             "not_convertible",
             "Tool-Kit has no job that takes this kind of file.",
         ));
     };
 
-    // A run owns `run_config` for its whole life and `log_history` reads it at
-    // finish time, so joining one would either convert under the batch's
-    // format or overwrite a config a running task is reading. Refuse, and let
-    // the frontend stage the file in Run.
-    //
-    // Read the generation first, so the re-check after the preflight below can
-    // tell whether a run began in between.
+    // A run owns `run_config` for its whole life, so joining one converts under
+    // the batch's format. Read the generation first, for the re-check below.
     let generation = state.generation();
     if !queue_is_free(&state, generation) {
         return Ok(ConvertOneOutcome::blocked(
@@ -992,8 +1121,7 @@ async fn convert_one(
         ));
     }
 
-    // Results land beside the source. That is what keeps the tree's pairing
-    // rule true the next time this folder is listed.
+    // Beside the source, which keeps the tree's pairing rule true.
     let output_dir = source
         .parent()
         .ok_or_else(|| "That file has no folder".to_string())?
@@ -1007,8 +1135,7 @@ async fn convert_one(
         .to_string();
     let inputs = vec![source_path.clone()];
 
-    // The same preflight a run does, one file wide. Each failure maps to a
-    // reason the tree can act on rather than to a toast the user cannot use.
+    // The same preflight a run does, mapped to reasons the tree can act on.
     let mut backend_origin = String::new();
     let mut ledger_origin = String::new();
     let mut use_backend = false;
@@ -1041,8 +1168,7 @@ async fn convert_one(
         }
     }
     if use_backend {
-        // Through the accessor, so Sidecar mode says the service is starting
-        // rather than telling the user to paste a token it mints itself.
+        // Through the accessor: Sidecar mode mints this token itself.
         match backend_host::backend_token(&app) {
             Ok(_) => {}
             Err(error) => return Ok(ConvertOneOutcome::blocked("backend_unavailable", error)),
@@ -1062,25 +1188,17 @@ async fn convert_one(
         }
     }
 
-    // The preflight above carries an HTTP round trip, so the refusal at the
-    // top of this command is as stale as that call was slow. A run started
-    // inside that window would be joined rather than refused, and the write
-    // below would land on the config its tasks are reading. Ask again.
+    // The preflight carries a round trip, so the refusal at the top is stale.
     if !queue_is_free(&state, generation) {
         return Ok(ConvertOneOutcome::blocked(
             "run_in_progress",
             "The queue moved while this file was being checked. It is staged in Run, ready for when that finishes.",
         ));
     }
-    // Safe here and nowhere else in this command: the check above proved no
-    // task is reading it. `generation` is still the live one, so a later Stop
-    // cancels this job too.
+    // Safe only here: the check above proved no task reads it.
     state.set_run_config(cfg.clone());
 
-    // The tree pairs on siblings and is blind to a result the user moved, so
-    // this is what keeps "never do the same work twice" true through the new
-    // door. Same gate a run uses: the backend route files its rows under its
-    // own format and has no reuse rule yet.
+    // The tree is blind to a result the user moved, so this gate still runs.
     if cfg.skip_already_done && !use_backend {
         let found = history::reusable(
             &app,
@@ -1153,9 +1271,7 @@ async fn convert_one(
     Ok(ConvertOneOutcome::queued())
 }
 
-/// Stop the current run: retire in-flight tasks and mark anything unfinished
-/// as stopped. Work already submitted upstream still costs what it cost, but
-/// nothing further is started and no more results are written.
+/// Stop the run. Work already submitted upstream still costs what it cost.
 #[tauri::command]
 fn stop_run(app: AppHandle, state: State<JobManager>) -> Result<usize, String> {
     state.new_generation();
@@ -1189,16 +1305,14 @@ fn retry_job(app: AppHandle, state: State<JobManager>, id: u64) -> Result<(), St
             j.started_at = None;
         })
         .ok_or_else(|| "Job not found".to_string())?;
-    // Emit immediately: acquiring a concurrency permit can take minutes, and
-    // without this the row keeps its failed state and invites a second click.
+    // Emit now: a permit can take minutes, and a failed row invites a click.
     let _ = app.emit("job-updated", updated);
     jobs::restore_in_flight(&app, id);
     jobs::run_job(app.clone(), id, generation);
     Ok(())
 }
 
-/// Re-queue every failed job. A transient upstream blip can fail a handful of
-/// files in a large batch, and retrying them one row at a time is busywork.
+/// Re-queue every failed job. An upstream blip can fail a handful of a batch.
 #[tauri::command]
 fn retry_failed(app: AppHandle, state: State<JobManager>) -> Result<usize, String> {
     let generation = state.generation();
@@ -1223,19 +1337,17 @@ fn retry_failed(app: AppHandle, state: State<JobManager>) -> Result<usize, Strin
     Ok(ids.len())
 }
 
-/// Quit for real. The close button only hides the window (this is a menu-bar
-/// app), so "Stop and quit" needs an explicit way out.
+/// Quit for real. The close button only hides the window (menu-bar app).
 #[tauri::command]
 async fn quit_app(app: AppHandle) {
-    // The sidecar goes down here rather than in `RunEvent::Exit`, which runs
-    // inside applicationWillTerminate where a wait reads to the user as a hang.
+    // Not `RunEvent::Exit`: a wait inside applicationWillTerminate reads as a
+    // hang.
     backend_host::stop(&app, backend_host::STOP_BUDGET).await;
     app.exit(0);
 }
 
-/// Show something in Finder. `reveal_item_in_dir` selects an item *inside its
-/// parent*, which is right for a result file but opens the level above when
-/// handed a folder — so directories are opened directly instead.
+/// Show something in Finder. `reveal_item_in_dir` opens the level above a
+/// folder, so folders are opened directly.
 #[tauri::command]
 fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -1250,26 +1362,11 @@ fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
     }
 }
 
-/// Read a result file into the viewer. Capped so a huge dump can't freeze the
-/// webview; UTF-8 only, because this path is Markdown and transcripts.
+/// Read a result file into the viewer. Capped, and UTF-8 only.
 pub(crate) const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
 
-#[tauri::command]
-fn read_text_file(path: String) -> Result<String, String> {
-    let p = Path::new(&path);
-    let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("Not a file".into());
-    }
-    if meta.len() > MAX_PREVIEW_BYTES {
-        return Err("File is too large to preview".into());
-    }
-    std::fs::read_to_string(p).map_err(|e| e.to_string())
-}
-
-/// Reading and writing an editable document. Kept free of Tauri types so the
-/// filesystem rules — the size cap, UTF-8 only, and the mtime check that stops
-/// a save from overwriting an edit made outside the app — are unit-testable.
+/// Reading and writing a document. Free of Tauri types, so the size cap, the
+/// UTF-8 rule and the mtime check are unit-testable.
 mod document_io {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -1298,9 +1395,8 @@ mod document_io {
         }
     }
 
-    /// A hidden sibling so the rename stays on the same filesystem (a temp-dir
-    /// staging file would fall back to a copy, which is not atomic) and a
-    /// failed write doesn't leave visible cruft in the user's folder.
+    /// A hidden sibling, so the rename stays on one filesystem and stays
+    /// atomic.
     fn temp_sibling(path: &Path) -> Result<PathBuf, String> {
         let name = path.file_name().ok_or_else(|| "Not a file".to_string())?;
         let mut tmp = OsString::from(".");
@@ -1327,10 +1423,8 @@ mod document_io {
         })
     }
 
-    /// Save, refusing when the file has changed since it was read. Written to a
-    /// temp file and renamed in: `fs::write` truncates the destination first, so
-    /// a crash or a full disk mid-write would leave the user's document
-    /// half-length with no copy of the original anywhere.
+    /// Save, refusing when the file changed since it was read. Temp file then
+    /// rename: `fs::write` truncates, so a crash leaves a half-length document.
     pub fn write(path: &Path, text: &str, expected_mtime_ms: u64) -> Result<u64, String> {
         let meta = file_meta(path)?;
         if mtime_ms(&meta)? != expected_mtime_ms {
@@ -1363,10 +1457,7 @@ fn read_document(path: String) -> Result<DocumentPayload, String> {
     })
 }
 
-/// Copy reads the result off disk rather than a copy held in the webview, so it
-/// needs a ceiling of its own. `MAX_PREVIEW_BYTES` exists to keep the editor
-/// responsive, and a result too large to edit is still worth copying. This one
-/// matches the backend's output ceiling, the largest result the app produces.
+/// Copy's own ceiling: a result too large to edit is still worth copying.
 const MAX_COPY_BYTES: u64 = 50 * 1024 * 1024;
 
 #[tauri::command]
@@ -1379,7 +1470,6 @@ fn write_document(path: String, text: String, expected_mtime_ms: u64) -> Result<
     document_io::write(Path::new(&path), &text, expected_mtime_ms)
 }
 
-#[cfg(desktop)]
 fn show_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -1388,14 +1478,8 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
-/// Quit from the tray, asking first if a run is in flight.
-///
-/// The red close button already asks (it only hides the window, so leaving a
-/// run going is the point). But once the window is hidden the tray is the
-/// *only* way out, and that is exactly the state a background run sits in —
-/// so quitting there silently discarded work the provider had already billed
-/// for. Stop can't refund that either, but the user should get to decide.
-#[cfg(desktop)]
+/// Quit from the tray, asking first if a run is in flight. Once the window is
+/// hidden the tray is the only way out, and a background run is already billed.
 fn quit_with_confirm(app: &AppHandle) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -1410,8 +1494,8 @@ fn quit_with_confirm(app: &AppHandle) {
         return;
     }
 
-    // Clicking a menu-bar item doesn't activate the app, so an unparented
-    // alert can open behind whatever is frontmost and Quit looks like a no-op.
+    // A menu-bar click does not activate the app, so an unparented alert opens
+    // behind whatever is frontmost.
     show_main_window(app);
     let handle = app.clone();
     app.dialog()
@@ -1426,8 +1510,7 @@ fn quit_with_confirm(app: &AppHandle) {
             "Quit anyway".into(),
             "Keep working".into(),
         ))
-        // `show` is non-blocking, which is what makes this safe to call from
-        // the menu event on the main thread; `blocking_show` would deadlock.
+        // `show` is non-blocking. `blocking_show` deadlocks the main thread.
         .show(move |quit| {
             if quit {
                 handle.exit(0);
@@ -1435,7 +1518,6 @@ fn quit_with_confirm(app: &AppHandle) {
         });
 }
 
-#[cfg(desktop)]
 fn toggle_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let visible = w.is_visible().unwrap_or(false);
@@ -1450,7 +1532,6 @@ fn toggle_main_window(app: &AppHandle) {
     }
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1467,10 +1548,10 @@ pub fn run() {
             run_pipeline,
             convert_one,
             import_into_project,
+            move_to_project,
             stop_run,
             retry_job,
             reveal_path,
-            read_text_file,
             read_document,
             read_document_text,
             write_document,
@@ -1487,32 +1568,31 @@ pub fn run() {
             list_project_files,
             changed_project_dirs,
             conversion_service::service_request,
-            conversion_service::download_conversion_markdown,
-            backend_host::app_owns_backend,
-            backend_host::backend_status,
-            backend_host::restart_backend,
-            backend_host::open_backend_log
+            backend_host::app_owns_backend
         ])
         .setup(|app| {
-            // Opened once and held for the process. A database that can't be
-            // opened degrades to "no history" rather than failing startup.
+            // Opened once. A database that cannot open degrades to no history.
             app.manage(history::init(app.handle()));
-            // Manual only. In Sidecar mode there is no port yet, and the
-            // resume path fails a job on one refused connection, so recovery
-            // waits for the first service that answers (see `backend_host`).
-            // A broken override reports itself through `start` below, and
-            // recovering against a backend we cannot name would be worse.
+            // Manual only. Sidecar mode has no port yet, and the resume path
+            // fails a job on one refused connection.
             if matches!(
                 backend_host::deployment(app.handle()),
                 Ok(backend_host::Deployment::Manual { .. })
             ) {
                 jobs::recover_in_flight(app.handle().clone());
             }
-            // Nothing waits on this: the sidecar comes up on its own task and
-            // the window opens whether or not it made it.
+            // Nothing waits on this: the window opens whether or not it starts.
             backend_host::start(app.handle());
 
-            #[cfg(desktop)]
+            // The window opens hidden and the frontend shows it once placed.
+            // Reveal it anyway if it never gets there. `show` is idempotent.
+            if let Some(w) = app.get_webview_window("main") {
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let _ = w.show();
+                });
+            }
+
             {
                 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
                 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -1521,9 +1601,7 @@ pub fn run() {
                 let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
                 let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
 
-                // The menu bar wants a monochrome template image, not the full
-                // colour app icon — macOS then tints it for light/dark menu
-                // bars and inverts it while the menu is open.
+                // A template image, not the colour app icon: macOS tints it.
                 let tray_icon =
                     tauri::image::Image::from_bytes(include_bytes!("../icons/tray@2x.png"));
 
@@ -1560,8 +1638,7 @@ pub fn run() {
                 use tauri_plugin_global_shortcut::{
                     Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
                 };
-                // Not SUPER|SHIFT+V: that is macOS "Paste and Match Style",
-                // which this would hijack system-wide in every app.
+                // Not SUPER|SHIFT+V: macOS "Paste and Match Style", system-wide.
                 let toggle = Shortcut::new(Some(Modifiers::ALT | Modifiers::SUPER), Code::KeyV);
                 let toggle_for_handler = toggle;
                 app.handle().plugin(
@@ -1579,13 +1656,8 @@ pub fn run() {
                     eprintln!("[tool-kit] could not register global shortcut: {e}");
                 }
 
-                // Settings is a sheet over the window, and a Mac user looks in
-                // the app menu for it. Spliced into the menu Tauri already
-                // installed, never `set_menu`: a fresh menu drops Edit, View,
-                // Window and Help without saying so.
-                //
-                // The default app submenu is About, separator, Services, so
-                // index 2 with its own separator gives the native order.
+                // Spliced, never `set_menu`: a fresh menu drops Edit, View,
+                // Window and Help. Index 2 is the native slot.
                 let settings_i = MenuItem::with_id(
                     app,
                     "toolkit:settings",
@@ -1603,13 +1675,11 @@ pub fn run() {
                     app_menu.insert(&settings_i, 2)?;
                     app_menu.insert(&separator, 3)?;
                 }
-                // Prefixed, because the tray's `on_menu_event` above is a
-                // global menu listener matching the bare strings "show" and
-                // "quit". A prefixed id falls to its `_ => {}` arm.
+                // Prefixed: the tray's `on_menu_event` is a global listener
+                // matching the bare "show" and "quit".
                 app.on_menu_event(|app, event| {
                     if event.id.as_ref() == "toolkit:settings" {
-                        // A menu-bar app's window may be hidden, and this
-                        // blocks on nothing: a wait here stalls AppKit.
+                        // The window may be hidden. A wait here stalls AppKit.
                         show_main_window(app);
                         let _ = app.emit("open-settings", ());
                     }
@@ -1620,20 +1690,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // Not ExitRequested: it never fires on ⌘Q here, because the window
-            // hides instead of being destroyed. This is the last point at which
-            // the sidecar can be taken down with us.
+            // Not ExitRequested: ⌘Q hides the window and never fires it.
             if let tauri::RunEvent::Exit = event {
                 backend_host::stop_on_exit(app);
             }
-            // Closing the window only hides it, so the Dock icon has to be a
-            // way back in — otherwise the app looks dead but is still running.
-            #[cfg(target_os = "macos")]
+            // Closing only hides the window, so the Dock icon is the way back.
             if let tauri::RunEvent::Reopen { .. } = event {
                 show_main_window(app);
             }
-            #[cfg(not(target_os = "macos"))]
-            let _ = (app, event);
         });
 }
 
@@ -1642,7 +1706,6 @@ mod scan_tests {
     use super::*;
     use std::fs;
 
-    /// Build a temp tree and return its root.
     fn tree(name: &str, files: &[&str]) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!("toolkit-scan-{name}"));
         let _ = fs::remove_dir_all(&root);
@@ -1655,6 +1718,141 @@ mod scan_tests {
         root
     }
 
+    #[test]
+    fn a_bound_workspace_sends_a_run_to_its_active_project() {
+        let root = tree("outdir", &["Inbox/keep.md", "Acme/keep.md"]);
+        let cfg = Settings {
+            workspace_path: Some(root.to_string_lossy().into_owned()),
+            active_project_path: Some("Acme".into()),
+            // Left over from before the library existed. Never read again.
+            output_dir: Some("/Users/someone/Desktop".into()),
+            ..Settings::default()
+        };
+
+        assert_eq!(
+            output_dir_for(&cfg),
+            Some(root.join("Acme").to_string_lossy().into_owned())
+        );
+    }
+
+    /// A dropped folder arrives as a folder, and what was nested stays nested.
+    #[test]
+    fn a_dropped_folder_keeps_its_shape_inside_the_project() {
+        let dir = Path::new("/ws/Acme");
+        let root = Path::new("/Users/someone/Desktop/slides");
+
+        assert_eq!(
+            import_destination(dir, root, root),
+            Path::new("/ws/Acme/slides")
+        );
+        assert_eq!(
+            import_destination(dir, root, Path::new("/Users/someone/Desktop/slides/q3.pdf")),
+            Path::new("/ws/Acme/slides")
+        );
+        assert_eq!(
+            import_destination(
+                dir,
+                root,
+                Path::new("/Users/someone/Desktop/slides/appendix/charts.pdf")
+            ),
+            Path::new("/ws/Acme/slides/appendix")
+        );
+    }
+
+    /// A dropped folder keeps its shape, so two files in one run have two
+    /// destinations. The project root leaves the nested one reading unconverted.
+    #[test]
+    fn a_result_lands_beside_its_source_not_at_the_project_root() {
+        let root = tree("outdir-nested", &["Acme/deck.pdf", "Acme/slides/q3.pdf"]);
+        let cfg = Settings {
+            workspace_path: Some(root.to_string_lossy().into_owned()),
+            active_project_path: Some("Acme".into()),
+            output_dir: Some("/Users/someone/Desktop".into()),
+            ..Settings::default()
+        };
+
+        assert_eq!(
+            output_dir_for_source(&root.join("Acme/deck.pdf"), &cfg),
+            Some(root.join("Acme").to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            output_dir_for_source(&root.join("Acme/slides/q3.pdf"), &cfg),
+            Some(root.join("Acme/slides").to_string_lossy().into_owned())
+        );
+    }
+
+    /// A file outside the library falls back to the one destination there is.
+    #[test]
+    fn a_source_outside_the_workspace_falls_back_to_the_filing_folder() {
+        let root = tree("outdir-outside", &["Acme/keep.md"]);
+        let cfg = Settings {
+            workspace_path: Some(root.to_string_lossy().into_owned()),
+            active_project_path: Some("Acme".into()),
+            output_dir: Some("/Users/someone/Desktop".into()),
+            ..Settings::default()
+        };
+
+        assert_eq!(
+            output_dir_for_source(Path::new("/Users/someone/Desktop/loose.pdf"), &cfg),
+            Some(root.join("Acme").to_string_lossy().into_owned())
+        );
+    }
+
+    #[test]
+    fn without_a_workspace_the_chosen_folder_still_wins() {
+        let cfg = Settings {
+            output_dir: Some("/Users/someone/Desktop".into()),
+            ..Settings::default()
+        };
+
+        assert_eq!(output_dir_for(&cfg), Some("/Users/someone/Desktop".into()));
+    }
+
+    #[test]
+    fn a_project_that_climbs_out_of_the_workspace_is_refused() {
+        let root = tree("outdir-escape", &["Inbox/keep.md"]);
+        let cfg = Settings {
+            workspace_path: Some(root.to_string_lossy().into_owned()),
+            active_project_path: Some("../elsewhere".into()),
+            output_dir: Some("/Users/someone/Desktop".into()),
+            ..Settings::default()
+        };
+
+        // Falls back rather than writing outside the workspace.
+        assert_eq!(output_dir_for(&cfg), Some("/Users/someone/Desktop".into()));
+    }
+
+    #[test]
+    fn a_project_folder_that_is_gone_does_not_send_the_run_nowhere() {
+        let root = tree("outdir-missing", &["Inbox/keep.md"]);
+        let cfg = Settings {
+            workspace_path: Some(root.to_string_lossy().into_owned()),
+            active_project_path: Some("Deleted".into()),
+            output_dir: None,
+            ..Settings::default()
+        };
+
+        assert_eq!(output_dir_for(&cfg), None);
+    }
+
+    /// A pre-library `outputDir` writes the run where the tree cannot see it.
+    #[test]
+    fn a_project_folder_that_is_gone_refuses_rather_than_using_the_legacy_folder() {
+        let root = tree("outdir-missing-legacy", &["Inbox/keep.md"]);
+        let cfg = Settings {
+            workspace_path: Some(root.to_string_lossy().into_owned()),
+            active_project_path: Some("Deleted".into()),
+            output_dir: Some("/Users/someone/Desktop".into()),
+            ..Settings::default()
+        };
+
+        assert_eq!(output_dir_for(&cfg), None);
+        assert_eq!(
+            no_destination_message(&cfg),
+            "That project folder is not there any more. Pick another project."
+        );
+    }
+
     fn names(v: &[std::path::PathBuf]) -> Vec<String> {
         let mut n: Vec<String> = v
             .iter()
@@ -1664,9 +1862,7 @@ mod scan_tests {
         n
     }
 
-    /// The regression that shipped: a file whose folder is also the output
-    /// folder must still be eligible. Results land beside their sources by
-    /// default, so excluding the output folder excluded every input.
+    /// A file whose folder is also the output folder must stay eligible.
     #[test]
     fn file_in_the_output_folder_is_still_collected() {
         let root = tree("output-overlap", &["report.pdf"]);
@@ -1742,8 +1938,7 @@ mod scan_tests {
         for name in ["a.html", "a.htm", "A.HTML"] {
             assert!(is_permanent_direct(Path::new(name)), "{name}");
         }
-        // Images have a local engine now, so they must reach the capabilities
-        // lookup instead of being billed to a remote provider on sight.
+        // Images have a local engine, so they reach the capabilities lookup.
         for name in [
             "a.png", "a.jpg", "a.jpeg", "a.webp", "a.tiff", "a.tif", "a.gif", "a.bmp", "a.pdf",
             "a.docx", "a.epub", "a.xlsx", "a.pptx",
@@ -1771,8 +1966,7 @@ mod scan_tests {
         assert!(names(&candidates).contains(&"table.csv".into()));
         assert!(!names(&candidates).contains(&"already.md".into()));
 
-        // A service with the Vision engine advertises image/png, so the image
-        // belongs to the backend rather than to Datalab.
+        // A service with the Vision engine advertises image/png.
         let supported = HashSet::from([
             "text/csv".to_string(),
             "application/vnd.oasis.opendocument.text".to_string(),
@@ -1790,8 +1984,7 @@ mod scan_tests {
         assert!(!names(&plan.direct).contains(&"program.exe".into()));
 
         assert!(require_backend_capacity(plan, false).is_err());
-        // No advertised image support — a Linux deployment, or a Mac below
-        // macOS 26 — and the image still falls through to the direct route.
+        // No advertised image support, so the image falls through to direct.
         let direct_only = route_conversion_candidates(
             vec![root.join("legacy.docx"), root.join("image.png")],
             &HashSet::new(),
@@ -1890,10 +2083,8 @@ mod already_text_tests {
             fs::write(root.join(rel), b"x").unwrap();
         }
         let inputs = vec![root.to_string_lossy().to_string()];
-        // Already-text files never become jobs...
         assert_eq!(collect_input_files(&inputs, JobType::Convert).len(), 1);
         assert_eq!(collect_input_files(&inputs, JobType::Transcribe).len(), 0);
-        // ...but are counted so the UI can explain the skip.
         assert_eq!(count_matching(&inputs, ALREADY_TEXT), 3);
     }
 }
@@ -1926,9 +2117,8 @@ mod convert_one_gate_tests {
         assert!(!queue_is_free(&state, generation));
     }
 
-    /// The window `convert_one`'s preflight opens. A run started while the
-    /// preflight was in the air has bumped the generation and may not yet have
-    /// inserted a single row, so the queue alone still reads as idle.
+    /// A run started inside the preflight has bumped the generation with no
+    /// rows yet.
     #[test]
     fn a_run_started_during_the_preflight_closes_the_queue() {
         let state = JobManager::default();
@@ -1954,7 +2144,6 @@ mod document_io_tests {
     use super::*;
     use std::fs;
 
-    /// Seed a document and return its path.
     fn doc(name: &str, body: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!("toolkit-doc-{name}"));
         let _ = fs::remove_dir_all(&root);
@@ -1976,8 +2165,7 @@ mod document_io_tests {
         assert_eq!(reopened.mtime_ms, saved_mtime);
     }
 
-    /// The whole point of the mtime handshake: an edit made outside the app
-    /// must not be silently replaced by the pane's stale copy.
+    /// An edit made outside the app must not be replaced by a stale copy.
     #[test]
     fn write_refuses_when_the_file_changed_on_disk() {
         let path = doc("stale", "original\n");
@@ -1988,9 +2176,7 @@ mod document_io_tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "original\n");
     }
 
-    /// Overwriting a long document with a short one must leave the short one,
-    /// not the short one followed by the tail of the old bytes — the failure a
-    /// truncate-in-place write produces when it stops halfway.
+    /// A short overwrite must not leave the tail of the old bytes behind.
     #[test]
     fn overwriting_leaves_no_tail_of_the_previous_contents() {
         let long = "x".repeat(4096);

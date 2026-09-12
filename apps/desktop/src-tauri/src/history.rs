@@ -1,18 +1,11 @@
 //! Persistent run history, in a SQLite file beside `settings.json`.
 //!
-//! Three jobs, and the second is why this is a database rather than a log file:
+//! It answers "has this file already been done?" on every input scan, which is
+//! why it is a database and not a log file, and it remembers accepted backend
+//! work across a restart with no credentials and no document content.
 //!
-//! 1. Remember where every result went, so finished work can be found again.
-//! 2. Answer "has this file already been done?" on **every** input scan — every
-//!    drop, every job switch. That is an indexed lookup by source path.
-//! 3. Remember accepted backend work across an app restart, without storing
-//!    credentials or document content.
-//!
-//! **History is a convenience and must never break a job.** Every entry point
-//! that a job touches swallows storage errors: a conversion that succeeded is
-//! still a success even if we failed to write the row.
-//!
-//! All SQL lives here. Nothing else in the app opens the database.
+//! History must never break a job: every entry point a job touches swallows
+//! storage errors. All SQL lives here.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,16 +15,13 @@ use rusqlite::{Connection, OptionalExtension as _};
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
-/// Rows kept before the oldest are trimmed. Big enough to be a real archive,
-/// small enough that the file can't grow without bound.
+/// Rows kept before the oldest are trimmed, so the file cannot grow forever.
 const MAX_ENTRIES: i64 = 5_000;
 
-/// Bump when the schema changes, and add a matching `if version < N` block in
-/// `migrate` — so a new column is a migration rather than a crash on startup.
+/// Bump on a schema change, with a matching `if version < N` in `migrate`.
 const SCHEMA_VERSION: i64 = 5;
 
-/// The open database, or `None` if it could not be opened. `None` makes every
-/// operation a silent no-op, which is the whole failure policy in one word.
+/// The open database, or `None`, which makes every operation a silent no-op.
 pub struct History {
     db: Mutex<Option<Connection>>,
 }
@@ -56,18 +46,17 @@ pub struct Entry {
     pub file_name: String,
     pub source_path: String,
     pub output_path: Option<String>,
-    pub job_type: String,
-    pub output_format: String,
     pub status: String,
     pub error: Option<String>,
     /// Unix seconds.
     pub finished_at: i64,
+    /// Is the recorded result still on disk? One `stat` per listed row, so no
+    /// row offers to open a deleted file. Failed rows say false.
+    pub output_exists: bool,
 }
 
-/// One backend conversion to remember before its submit request is sent.
-///
-/// The source identity and mtime are derived here rather than accepted from a
-/// caller, so recovery never trusts stale metadata supplied over another API.
+/// One backend conversion to remember before its submit goes out. The source
+/// identity and mtime are derived here, never taken from a caller.
 pub struct NewInFlight<'a> {
     pub source_path: &'a str,
     pub file_name: &'a str,
@@ -96,17 +85,16 @@ pub struct InFlightEntry {
     pub idempotency_key: String,
     /// `None` until the backend accepts or replays the submission.
     pub backend_job_id: Option<String>,
-    /// `Some` once a remote fallback has been started for this file. Written
-    /// before the submit request, so an unknown outcome is still visible.
+    /// `Some` once a remote fallback started. Written before the submit, so an
+    /// unknown outcome is still visible.
     pub fallback_provider: Option<String>,
-    /// `Some` only once the provider accepted. Provider set with this `None`
-    /// means the submission may already have been billed.
+    /// `Some` only once the provider accepted. A provider with this `None` may
+    /// already have been billed.
     pub fallback_request_id: Option<String>,
     pub fallback_check_url: Option<String>,
     pub conversion_profile: String,
-    /// The OCR options this submission was made with. Part of the service's
-    /// replay fingerprint, so recovery must resubmit these and not whatever
-    /// Settings hold now.
+    /// The OCR options this submission was made with, and part of the replay
+    /// fingerprint, so recovery resubmits these and not today's.
     pub ocr_language_correction: bool,
     pub ocr_custom_words: String,
     /// Source modification time in Unix milliseconds at submit time.
@@ -117,8 +105,8 @@ pub struct InFlightEntry {
 
 // --- Setup -----------------------------------------------------------------
 
-/// Open (creating if needed) the history database in the app config dir.
-/// Never fails hard: a broken database degrades to "no history".
+/// Open the history database, creating it if needed. A broken one degrades to
+/// "no history" rather than failing the launch.
 pub fn init(app: &AppHandle) -> History {
     let db = app
         .path()
@@ -143,8 +131,8 @@ pub fn init(app: &AppHandle) -> History {
 
 fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
-    // WAL because up to four job tasks finish concurrently (the semaphore in
-    // jobs.rs) while a scan is reading. busy_timeout covers the rest.
+    // WAL: four job tasks can finish while a scan reads. busy_timeout does
+    // the rest.
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
@@ -193,17 +181,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
     if version < 3 {
-        // Version 2 was never released. Its rows have no trustworthy service
-        // origin, so the empty default makes them non-recoverable rather than
-        // silently binding them to whichever URL is configured on next start.
+        // Version 2 rows carry no trustworthy origin, so the empty default
+        // makes them non-recoverable.
         conn.execute_batch(
             "ALTER TABLE inflight_conversions
                  ADD COLUMN backend_url TEXT NOT NULL DEFAULT '';",
         )?;
     }
     if version < 4 {
-        // Remember the remote fallback before it is paid for. Without these,
-        // a restart mid-fallback resubmitted the file and billed it twice.
+        // Remember the remote fallback before it is paid for, or a restart
+        // mid-fallback resubmits and bills twice.
         conn.execute_batch(
             "ALTER TABLE inflight_conversions ADD COLUMN fallback_provider TEXT;
              ALTER TABLE inflight_conversions ADD COLUMN fallback_request_id TEXT;
@@ -211,10 +198,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
     if version < 5 {
-        // The OCR options are part of the service's replay fingerprint. Reading
-        // them back from Settings at recovery time resubmitted the stored key
-        // with a different fingerprint, which the service answers 409 forever.
-        // The defaults are the contract's, so a pre-5 row recovers unchanged.
+        // The OCR options are part of the replay fingerprint, so reading them
+        // from Settings at recovery 409s forever. The defaults are the
+        // contract's, so a pre-5 row recovers unchanged.
         conn.execute_batch(
             "ALTER TABLE inflight_conversions
                  ADD COLUMN ocr_language_correction INTEGER NOT NULL DEFAULT 1;
@@ -222,9 +208,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                  ADD COLUMN ocr_custom_words TEXT NOT NULL DEFAULT '';",
         )?;
     }
-    // Add `if version < 6 { … }` above when the schema changes again, then bump
-    // SCHEMA_VERSION. A file written by a *newer* build is left untouched:
-    // extra columns are harmless to read, and rewriting it would lose history.
+    // Add `if version < 6 { … }` above and bump SCHEMA_VERSION. A file from a
+    // newer build is left alone: rewriting it would lose history.
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -233,11 +218,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
 // --- Identity ---------------------------------------------------------------
 
-/// The key a source file is filed under. Canonicalised on both write and read
-/// so the same file reached two ways (a symlink, `/tmp` vs `/private/tmp`)
-/// still matches itself. Falls back to the literal path when the file is gone,
-/// which cannot cause a wrong "already done" — a missing source fails the
-/// mtime check anyway.
+/// The key a source file is filed under. Canonicalised on write and on read, so
+/// one file reached two ways still matches. A gone file falls back to the
+/// literal path, which the mtime check then rejects.
 fn key(path: &str) -> String {
     std::fs::canonicalize(path)
         .map(|p| p.to_string_lossy().into_owned())
@@ -259,9 +242,8 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Resolve the exact source identity and mtime that a restart must verify.
-/// If either lookup fails, the caller skips persistence rather than recording
-/// a recovery row that could not be validated safely later.
+/// Resolve the source identity and mtime a restart must verify. If either fails
+/// the caller skips persistence rather than writing a row it cannot validate.
 fn source_identity(path: &str) -> Option<(String, i64)> {
     let canonical = std::fs::canonicalize(path).ok()?;
     let source_path = canonical.to_string_lossy().into_owned();
@@ -271,11 +253,9 @@ fn source_identity(path: &str) -> Option<(String, i64)> {
 
 // --- In-flight backend conversions -----------------------------------------
 
-/// Best-effort insert before submit. Reusing a stable idempotency key preserves
-/// the original recovery identity, attached backend job, and creation time.
-/// Returns `false` when persistence is unavailable or the source cannot be
-/// identified safely; that must never stop the conversion itself.
-#[allow(dead_code, reason = "the M6 jobs integration lands in a later patch")]
+/// Best-effort insert before submit. A stable idempotency key preserves the
+/// original recovery identity, backend job and creation time. A `false` answer
+/// must never stop the conversion itself.
 pub fn upsert_in_flight(app: &AppHandle, pending: &NewInFlight<'_>) -> bool {
     if pending.idempotency_key.trim().is_empty()
         || pending.backend_url.trim().is_empty()
@@ -348,10 +328,8 @@ fn in_flight_matches(
     )
 }
 
-/// Attach the backend UUID returned by either an accepted or replayed submit.
-/// The same UUID may be attached repeatedly; a conflicting UUID is rejected so
-/// a replay cannot silently replace the job that the durable key identifies.
-#[allow(dead_code, reason = "the M6 jobs integration lands in a later patch")]
+/// Attach the backend UUID a submit returned. The same one may be attached
+/// again. A conflicting one is rejected, so a replay replaces nothing.
 pub fn attach_backend_job(app: &AppHandle, idempotency_key: &str, backend_job_id: &str) -> bool {
     if idempotency_key.trim().is_empty() || backend_job_id.trim().is_empty() {
         return false;
@@ -377,11 +355,8 @@ fn attach_backend_job_row(
     Ok(changed == 1)
 }
 
-/// List restart-recoverable records in stable creation order.
-///
-/// `None` means storage was unavailable or unreadable; `Some([])` honestly
-/// means the store was read and contains no active backend conversions.
-#[allow(dead_code, reason = "the M6 jobs integration lands in a later patch")]
+/// List restart-recoverable records in stable creation order. `None` means
+/// storage was unreadable, `Some([])` that there is nothing active.
 pub fn list_in_flight(app: &AppHandle) -> Option<Vec<InFlightEntry>> {
     with_db(app, select_in_flight)
 }
@@ -419,8 +394,8 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
 }
 
 /// Record that a remote fallback is about to start, before the request goes
-/// out. A row with a provider and no request id means the outcome is unknown
-/// and may already have been billed, so recovery must never resubmit it.
+/// out. A provider with no request id may already have been billed, so
+/// recovery must never resubmit it.
 pub fn begin_fallback(app: &AppHandle, idempotency_key: &str, provider: &str) -> bool {
     if idempotency_key.trim().is_empty() || provider.trim().is_empty() {
         return false;
@@ -458,10 +433,25 @@ pub fn attach_fallback_request(
     .unwrap_or(false)
 }
 
-/// Delete one terminal or explicitly stopped conversion by its stable key.
-/// Unknown keys and unavailable storage both return `false`; no other row is
-/// cleaned up as a side effect.
-#[allow(dead_code, reason = "the M6 jobs integration lands in a later patch")]
+/// Forget a fallback Datalab refused. Only for a submit that got an answer.
+pub fn clear_fallback(app: &AppHandle, idempotency_key: &str) -> bool {
+    if idempotency_key.trim().is_empty() {
+        return false;
+    }
+    with_db(app, |conn| {
+        Ok(conn.execute(
+            "UPDATE inflight_conversions
+                SET fallback_provider = NULL, fallback_request_id = NULL,
+                    fallback_check_url = NULL
+              WHERE idempotency_key = ?1",
+            rusqlite::params![idempotency_key],
+        )? == 1)
+    })
+    .unwrap_or(false)
+}
+
+/// Delete one terminal or stopped conversion by its stable key. Unknown keys
+/// and unavailable storage both return `false`.
 pub fn delete_in_flight(app: &AppHandle, idempotency_key: &str) -> bool {
     if idempotency_key.trim().is_empty() {
         return false;
@@ -469,17 +459,15 @@ pub fn delete_in_flight(app: &AppHandle, idempotency_key: &str) -> bool {
     with_db(app, |conn| delete_in_flight_row(conn, idempotency_key)).unwrap_or(false)
 }
 
-/// Recovery is safe only while the canonical source and its modification time
-/// still identify the exact file that was submitted originally.
+/// Recovery is safe only while the canonical source and its mtime still name
+/// the file that was submitted.
 pub fn in_flight_source_is_current(entry: &InFlightEntry) -> bool {
     source_identity(&entry.source_path)
         .is_some_and(|identity| identity == (entry.source_path.clone(), entry.source_mtime))
 }
 
-/// `None` means the store is unavailable or the key was not durably written;
-/// callers preserve history's best-effort policy in either case. `Some(false)`
-/// is authoritative and must stop a replay from submitting changed bytes under
-/// the original idempotency key.
+/// `None` means the store is unavailable or the key was never written.
+/// `Some(false)` must stop a replay sending changed bytes under the old key.
 pub fn in_flight_source_for_key_is_current(app: &AppHandle, idempotency_key: &str) -> Option<bool> {
     if idempotency_key.trim().is_empty() {
         return None;
@@ -511,7 +499,7 @@ fn delete_in_flight_row(conn: &Connection, idempotency_key: &str) -> rusqlite::R
 
 // --- Writing ----------------------------------------------------------------
 
-/// Log a finished job. Errors are swallowed on purpose — see the module note.
+/// Log a finished job. Errors are swallowed on purpose, per the module note.
 pub fn record(app: &AppHandle, f: &Finished) {
     with_db(app, |conn| {
         insert(conn, f)?;
@@ -540,19 +528,11 @@ fn insert(conn: &Connection, f: &Finished) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Carry a source's finished results across to a copy of it.
-///
-/// Reuse is keyed on the source path, so a file imported into a project is a
-/// file this app has never seen and the result it already has would be bought
-/// again. This files the same results under the new path, so the next run
-/// satisfies them from disk for free.
-///
-/// It relies on `jobs::import_source` preserving the modification time:
-/// `reuse_map` requires the stored mtime to equal the file's current one, and
-/// a copy stamped with the time of the copy reads as a document that changed.
-///
-/// Every job and format is carried, not just the one the current settings ask
-/// for, because an import does not know which job the user will run next.
+/// Carry a source's finished results across to a copy of it. Reuse is keyed on
+/// the source path, so an imported file is one this app has never seen and its
+/// result would be bought again. Relies on `jobs::import_source` keeping the
+/// mtime, which `reuse_map` checks. Every job and format is carried, because an
+/// import cannot know what runs next.
 pub fn carry_forward(app: &AppHandle, from: &str, to: &str) {
     with_db(app, |conn| {
         carry_forward_rows(conn, from, to)?;
@@ -566,23 +546,86 @@ fn carry_forward_rows(conn: &Connection, from: &str, to: &str) -> rusqlite::Resu
         .and_then(|n| n.to_str())
         .unwrap_or_default()
         .to_string();
-    // The newest row per job and format, not every row: a file converted five
-    // times has five rows and one current result.
+    // The newest row per job and format: five conversions are five rows and one
+    // current result. `finished_at` comes across, or an import sorts on top.
     conn.execute(
         "INSERT INTO history
            (file_name, source_path, output_path, job_type, output_format,
             status, error, finished_at, source_mtime)
          SELECT ?1, ?2, output_path, job_type, output_format,
-                status, NULL, ?3, ?4
+                status, NULL, finished_at, ?3
            FROM history
           WHERE id IN (
                 SELECT MAX(id) FROM history
-                 WHERE source_path = ?5
+                 WHERE source_path = ?4
                    AND status = 'done'
                    AND output_path IS NOT NULL
                  GROUP BY job_type, output_format)",
-        rusqlite::params![file_name, key(to), now_secs(), mtime_ms(to), key(from)],
+        rusqlite::params![file_name, key(to), mtime_ms(to), key(from)],
     )
+}
+
+/// A file moved inside the library, and the result beside it moved with it.
+/// Point the remembered rows at both new paths, or the next run pays again:
+/// `reuse_map` matches the source path and needs the output to still be a file.
+///
+/// The keys must be taken **before** the move, because `key` canonicalizes and
+/// a gone path canonicalizes to itself.
+///
+/// The two columns are not stored the same way, which is why `MovedFrom` exists
+/// rather than two `&str`. `insert` canonicalizes `source_path` and writes
+/// `output_path` exactly as the writer spelled it.
+pub fn relocate(app: &AppHandle, from: &MovedFrom, to_source: &str, to_output: Option<&str>) {
+    with_db(app, |conn| {
+        relocate_rows(conn, from, to_source, to_output)
+    });
+}
+
+fn relocate_rows(
+    conn: &Connection,
+    from: &MovedFrom,
+    to_source: &str,
+    to_output: Option<&str>,
+) -> rusqlite::Result<()> {
+    let file_name = Path::new(to_source)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    conn.execute(
+        "UPDATE history SET source_path = ?1, file_name = ?2 WHERE source_path = ?3",
+        rusqlite::params![key(to_source), file_name, from.source],
+    )?;
+    if let Some(new) = to_output {
+        // Both spellings, because a row written through a symlinked parent
+        // holds whichever one its writer had. The new value goes in raw.
+        conn.execute(
+            "UPDATE history SET output_path = ?1 WHERE output_path IN (?2, ?3)",
+            rusqlite::params![new, from.output, from.output_key],
+        )?;
+    }
+    Ok(())
+}
+
+/// The identities a move is leaving behind, canonicalized while both files
+/// were still on disk. Take this before moving either one.
+pub struct MovedFrom {
+    /// Canonical, the way `insert` files a source.
+    source: String,
+    /// As the caller spelled it, the way `insert` files an output.
+    output: Option<String>,
+    /// And canonicalized, for a row some other writer filed that way.
+    output_key: Option<String>,
+}
+
+impl MovedFrom {
+    pub fn snapshot(source: &str, output: Option<&str>) -> Self {
+        Self {
+            source: key(source),
+            output: output.map(str::to_string),
+            output_key: output.map(key),
+        }
+    }
 }
 
 fn trim(conn: &Connection) -> rusqlite::Result<()> {
@@ -600,27 +643,15 @@ fn trim(conn: &Connection) -> rusqlite::Result<()> {
 // --- The "already done" question ---------------------------------------------
 
 /// Which of `sources` already have a usable result, and **where that result
-/// is**, given the job and the output format that would be produced now.
-/// Keyed by the source path exactly as passed in; the value is the output file.
+/// is**, given the job and the output format that would be produced now. Keyed
+/// by the source path exactly as passed in. The value is the output file.
 ///
-/// A result is reusable when **all** of these hold:
+/// A result is reusable only when every one of these holds: the same source
+/// path, the same job, the same output format, a run that succeeded, an output
+/// file still on disk, and an unchanged source mtime. Which folder it sits in
+/// is the caller's business.
 ///
-/// - the same source path was processed before, **and**
-/// - by the same job, **and**
-/// - to the same output format, **and**
-/// - that run succeeded and its output file **still exists on disk**, **and**
-/// - the source's mtime is **unchanged** since it was processed.
-///
-/// Any one failing means it genuinely needs redoing: deleted the output → redo,
-/// edited the source → redo, switched markdown → html → redo.
-///
-/// Note this says nothing about *which folder* the result is in — that is the
-/// caller's business. A result in the folder the user picked means there is
-/// nothing to do; one somewhere else can be copied instead of paid for again.
-///
-/// Deliberately **path-keyed, not content-hashed**. Hashing would survive
-/// renames, but it means reading every byte of every file on every scan, which
-/// is brutal for the video files this app is pointed at.
+/// Path-keyed, not content-hashed: hashing reads every byte on every scan.
 pub fn reusable(
     app: &AppHandle,
     sources: &[std::path::PathBuf],
@@ -652,8 +683,7 @@ fn reuse_map(
     let mut found = HashMap::new();
     for source in sources {
         let raw = source.to_string_lossy().into_owned();
-        // Read the source's mtime once. If we can't (the file vanished between
-        // the scan and now), there is nothing to reuse.
+        // A source that vanished between the scan and now has nothing to reuse.
         let Some(current) = mtime_ms(&raw) else {
             continue;
         };
@@ -663,9 +693,7 @@ fn reuse_map(
         });
         let Ok(rows) = rows else { continue };
 
-        // Any past run whose output survives and whose source is untouched
-        // counts. Checking every candidate, not just the newest, means a
-        // deleted newer output falls back to an older one that is still there.
+        // Every surviving output counts, so a deleted newer one falls back.
         for row in rows.flatten() {
             let (Some(out), Some(then)) = row else {
                 continue;
@@ -679,9 +707,8 @@ fn reuse_map(
     found
 }
 
-/// Do these two paths name the same folder? Canonicalised, so a trailing
-/// slash or a symlinked parent doesn't read as a different destination and
-/// trigger a pointless copy.
+/// Do these two paths name the same folder? Canonicalised, so a trailing slash
+/// does not trigger a pointless copy.
 pub fn same_dir(a: &Path, b: &Path) -> bool {
     let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     real(a) == real(b)
@@ -696,8 +723,7 @@ pub fn is_in_dir(output_path: &str, dir: &str) -> bool {
 
 // --- Reading ----------------------------------------------------------------
 
-/// Newest first, optionally filtered by a substring of the file name or its
-/// folder. An unreadable database reads as an empty history.
+/// Newest first, filtered by a substring of the file name or its folder.
 pub fn list(app: &AppHandle, query: &str, limit: u32) -> Vec<Entry> {
     with_db(app, |conn| select(conn, query, limit)).unwrap_or_default()
 }
@@ -705,23 +731,23 @@ pub fn list(app: &AppHandle, query: &str, limit: u32) -> Vec<Entry> {
 fn select(conn: &Connection, query: &str, limit: u32) -> rusqlite::Result<Vec<Entry>> {
     let limit = limit.clamp(1, 2_000) as i64;
     let read = |r: &rusqlite::Row| -> rusqlite::Result<Entry> {
+        let output_path: Option<String> = r.get(3)?;
         Ok(Entry {
             id: r.get(0)?,
             file_name: r.get(1)?,
             source_path: r.get(2)?,
-            output_path: r.get(3)?,
-            job_type: r.get(4)?,
-            output_format: r.get(5)?,
-            status: r.get(6)?,
-            error: r.get(7)?,
-            finished_at: r.get(8)?,
+            // One `stat` per listed row: the panel offers Open on a path the
+            // log remembers, and a deleted result answered with a toast.
+            output_exists: output_path.as_deref().is_some_and(|p| Path::new(p).exists()),
+            output_path,
+            status: r.get(4)?,
+            error: r.get(5)?,
+            finished_at: r.get(6)?,
         })
     };
-    const COLS: &str = "id, file_name, source_path, output_path, job_type,
-                        output_format, status, error, finished_at";
+    const COLS: &str = "id, file_name, source_path, output_path, status, error, finished_at";
 
-    // One statement shape for both cases: an empty query becomes `%%`, which
-    // matches every row, so listing and searching can't drift apart.
+    // One statement shape: an empty query becomes `%%` and matches every row.
     let pattern = format!("%{}%", escape_like(query.trim()));
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLS} FROM history
@@ -734,8 +760,7 @@ fn select(conn: &Connection, query: &str, limit: u32) -> rusqlite::Result<Vec<En
     Ok(rows)
 }
 
-/// `%` and `_` are wildcards in LIKE, so a search for "report_v2" must not
-/// quietly match "reportXv2".
+/// `%` and `_` are LIKE wildcards, so "report_v2" must not match "reportXv2".
 fn escape_like(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('%', "\\%")
@@ -758,8 +783,8 @@ pub fn clear(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Run `f` against the database, or return `None` if there isn't one. Every
-/// error becomes `None`, which is the "history never breaks a job" rule.
+/// Run `f` against the database. Every error becomes `None`, which is the
+/// "history never breaks a job" rule.
 fn with_db<T>(app: &AppHandle, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Option<T> {
     let state = app.state::<History>();
     let guard = state.db.lock().ok()?;
@@ -804,6 +829,69 @@ mod tests {
         .unwrap();
     }
 
+    /// Moving a file must cost nothing. `reuse_map` checks both paths, so a
+    /// move that updated neither bills the next run.
+    #[test]
+    fn a_moved_file_and_its_result_are_still_reusable_where_they_landed() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db();
+        let acme = dir.path().join("Acme");
+        fs::create_dir_all(&acme).unwrap();
+        let from = dir.path().join("deck.pdf");
+        let from_out = dir.path().join("deck.md");
+        fs::write(&from, b"pdf").unwrap();
+        fs::write(&from_out, b"# deck").unwrap();
+        done(&conn, &from, from_out.to_str().unwrap(), "markdown");
+
+        // Snapshot while both are where the rows say, then move. Rename keeps
+        // the mtime, so the identity check still passes.
+        let before = MovedFrom::snapshot(
+            from.to_str().unwrap(),
+            Some(from_out.to_str().unwrap()),
+        );
+        let to = acme.join("deck.pdf");
+        let to_out = acme.join("deck.md");
+        fs::rename(&from, &to).unwrap();
+        fs::rename(&from_out, &to_out).unwrap();
+
+        relocate_rows(&conn, &before, to.to_str().unwrap(), to_out.to_str()).unwrap();
+
+        let found = reuse_map(&conn, std::slice::from_ref(&to), "convert", "markdown");
+        assert_eq!(
+            found.get(&to.to_string_lossy().to_string()).map(String::as_str),
+            Some(to_out.to_str().unwrap()),
+            "the moved file should still be answered from the result that moved with it"
+        );
+        // And the row reads as the file the user now sees.
+        let name: String = conn
+            .query_row("SELECT file_name FROM history LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "deck.pdf");
+    }
+
+    /// A move with nothing beside it still re-points the source.
+    #[test]
+    fn a_moved_file_with_no_result_still_re_points_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db();
+        let from = dir.path().join("notes.pdf");
+        let out = dir.path().join("notes.md");
+        fs::write(&from, b"pdf").unwrap();
+        fs::write(&out, b"# notes").unwrap();
+        done(&conn, &from, out.to_str().unwrap(), "markdown");
+
+        let before = MovedFrom::snapshot(from.to_str().unwrap(), None);
+        let to = dir.path().join("moved.pdf");
+        fs::rename(&from, &to).unwrap();
+        relocate_rows(&conn, &before, to.to_str().unwrap(), None).unwrap();
+
+        let found = reuse_map(&conn, std::slice::from_ref(&to), "convert", "markdown");
+        assert_eq!(
+            found.get(&to.to_string_lossy().to_string()).map(String::as_str),
+            Some(out.to_str().unwrap())
+        );
+    }
+
     #[test]
     fn a_carried_row_makes_the_copy_reusable_at_its_new_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -813,8 +901,7 @@ mod tests {
         let out = dir.path().join("deck.md");
         fs::write(&from, b"pdf").unwrap();
         fs::write(&out, b"# deck").unwrap();
-        // The importer preserves the source mtime, which is what lets the
-        // copy answer the mtime check the reuse lookup makes.
+        // The importer keeps the source mtime, so the copy passes the check.
         let when = fs::metadata(&from).unwrap().modified().unwrap();
         fs::write(&to, b"pdf").unwrap();
         fs::File::options()
@@ -832,7 +919,9 @@ mod tests {
 
         let found = reuse_map(&conn, std::slice::from_ref(&to), "convert", "markdown");
         assert_eq!(
-            found.get(&to.to_string_lossy().to_string()).map(String::as_str),
+            found
+                .get(&to.to_string_lossy().to_string())
+                .map(String::as_str),
             Some(out.to_str().unwrap()),
             "the copy should reuse the original's result instead of being bought again"
         );
@@ -851,8 +940,7 @@ mod tests {
         done(&conn, &from, "/out/new.md", "markdown");
         done(&conn, &from, "/out/deck.html", "html");
 
-        // Two formats, one row each. Five conversions of one file are five
-        // rows and one current result.
+        // Two formats, one row each, and one current result per format.
         assert_eq!(
             carry_forward_rows(&conn, from.to_str().unwrap(), to.to_str().unwrap()).unwrap(),
             2
@@ -865,6 +953,38 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         assert_eq!(carried, ["/out/deck.html", "/out/new.md"]);
+    }
+
+    /// An import is not a conversion, so it must not mint a "just now" row.
+    #[test]
+    fn a_carried_row_keeps_the_time_its_result_was_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db();
+        let from = dir.path().join("deck.pdf");
+        let to = dir.path().join("copy.pdf");
+        fs::write(&from, b"pdf").unwrap();
+        fs::write(&to, b"pdf").unwrap();
+
+        done(&conn, &from, "/out/deck.md", "markdown");
+        conn.execute(
+            "UPDATE history SET finished_at = 1000 WHERE source_path = ?1",
+            [key(from.to_str().unwrap())],
+        )
+        .unwrap();
+
+        assert_eq!(
+            carry_forward_rows(&conn, from.to_str().unwrap(), to.to_str().unwrap()).unwrap(),
+            1
+        );
+
+        let carried: i64 = conn
+            .query_row(
+                "SELECT finished_at FROM history WHERE source_path = ?1",
+                [key(to.to_str().unwrap())],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(carried, 1000);
     }
 
     #[test]
@@ -1025,8 +1145,8 @@ mod tests {
             rows[0].backend_job_id.as_deref(),
             Some("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
         );
-        // A row written before the OCR columns existed reads back as the
-        // contract's defaults, which is what it was submitted with.
+        // A pre-OCR row reads back as the contract's defaults, which is what
+        // it was submitted with.
         assert!(rows[0].ocr_language_correction);
         assert_eq!(rows[0].ocr_custom_words, "");
         let pending = NewInFlight {
@@ -1078,8 +1198,8 @@ mod tests {
         assert_eq!(before_attach[0].client_run_id, pending.client_run_id);
         assert_eq!(before_attach[0].idempotency_key, pending.idempotency_key);
         assert_eq!(before_attach[0].conversion_profile, "standard");
-        // The OCR options are part of the replay fingerprint, so they have to
-        // survive the restart that recovery reads them back across.
+        // The OCR options are part of the replay fingerprint, so they survive
+        // the restart recovery reads them across.
         assert!(!before_attach[0].ocr_language_correction);
         assert_eq!(before_attach[0].ocr_custom_words, "Uniwise\nDatalab");
         assert!(before_attach[0].created_at > 0);
@@ -1105,10 +1225,8 @@ mod tests {
         assert!(!delete_in_flight_row(&conn, pending.idempotency_key).unwrap());
     }
 
-    /// In Sidecar mode the ledger records the alias, not the port. A retry
-    /// rebuilds the row from the live context, so both writes have to land on
-    /// the same durable identity or `restore_in_flight` returns silently and
-    /// the retry runs with no recovery row behind it.
+    /// In Sidecar mode the ledger records the alias, not the port. Both writes
+    /// land on one durable identity, or a retry runs with no recovery row.
     #[test]
     fn a_sidecar_row_binds_to_the_alias_rather_than_to_a_port() {
         let conn = db();
@@ -1128,8 +1246,7 @@ mod tests {
         };
 
         assert!(upsert_in_flight_row(&conn, &pending).unwrap());
-        // The rebuilt row a retry writes, one sidecar restart and one new port
-        // later.
+        // The rebuilt row a retry writes, one restart and one port later.
         assert!(upsert_in_flight_row(&conn, &pending).unwrap());
 
         let rows = select_in_flight(&conn).unwrap();
@@ -1322,9 +1439,7 @@ mod tests {
         let conn = db();
         let (src, out) = pair("edited");
         log_done(&conn, &src, &out);
-        // Pretend the source was touched after it was processed. Doctoring the
-        // stored mtime is deterministic; rewriting the file could land in the
-        // same millisecond and flake.
+        // Doctor the stored mtime rather than the file: rewriting could flake.
         conn.execute("UPDATE history SET source_mtime = source_mtime - 1000", [])
             .unwrap();
         assert!(
@@ -1373,8 +1488,7 @@ mod tests {
         );
     }
 
-    /// The classic way to lose a user's history is a `migrate` that recreates
-    /// the table on every open. Reopening must find the rows still there.
+    /// A `migrate` that recreates the table on every open loses the history.
     #[test]
     fn a_database_on_disk_survives_a_reopen() {
         let dir = std::env::temp_dir().join("toolkit-hist-reopen");
@@ -1407,8 +1521,7 @@ mod tests {
     #[test]
     fn retention_trims_the_oldest_first() {
         let conn = db();
-        // Inserted raw, not through `insert`: 5,000 canonicalize+stat syscalls
-        // would make this a slow test for no extra coverage.
+        // Raw, not through `insert`: 5,000 stat syscalls for no coverage.
         conn.execute_batch("BEGIN").unwrap();
         for i in 0..MAX_ENTRIES + 10 {
             conn.execute(
@@ -1432,9 +1545,8 @@ mod tests {
         assert_eq!(oldest, 10, "the ten oldest should be the ones dropped");
     }
 
-    /// The reuse decision splits on *where* the result is: in the chosen
-    /// folder means nothing to do, anywhere else means copy it rather than pay
-    /// for it twice.
+    /// Where the result sits decides: the chosen folder means nothing to do,
+    /// anywhere else means copy rather than pay twice.
     #[test]
     fn a_result_counts_as_here_only_in_its_own_folder() {
         let (_src, out) = pair("folder-match");
@@ -1449,9 +1561,7 @@ mod tests {
         assert!(!is_in_dir(&out_s, &format!("{dir}/nested")));
     }
 
-    /// Written before the request goes out, so the outcome of an interrupted
-    /// submit is recoverable rather than invisible. Without this a restart
-    /// resubmitted the file and billed it twice.
+    /// Written before the request, so an interrupted submit is recoverable.
     #[test]
     fn a_fallback_is_recorded_before_its_request_is_accepted() {
         let conn = db();

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileTextIcon, PlayIcon, XIcon } from "@phosphor-icons/react";
-import { Button, Mono, Sheet, SplitPane, StatusDot } from "@ui";
-import { fmtElapsed } from "@/app/format";
+import { FileTextIcon, FolderOpenIcon, PlayIcon, XIcon } from "@phosphor-icons/react";
+import { Button, Mono, Segmented, Sheet, SplitPane, StatusDot } from "@ui";
+import { basename, fmtElapsed } from "@/app/format";
 import { barStatus, runCounter } from "./barStatus";
-import { autoOpenTarget, terminalIds } from "./runOutcome";
+import { autoOpenTarget, newlyDone, resultDirs, terminalIds } from "./runOutcome";
 import { conversionClient } from "@/app/api";
 import { commands } from "@/app/commands";
 import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
@@ -20,7 +20,6 @@ import type {
   WorkspaceInfo,
 } from "@/app/types";
 import { LibraryPane } from "@/domains/library/LibraryPane";
-import { WorkspaceViewNav } from "@/domains/library/WorkspaceViewNav";
 import { OnboardingGate } from "@/domains/onboarding/OnboardingGate";
 import { conversionPatch } from "@/domains/onboarding/conversionMode";
 import { RunView } from "@/domains/run/RunView";
@@ -28,7 +27,6 @@ import { JOBS } from "@/domains/run/jobs";
 import {
   autodetectJob,
   canStartRun,
-  effectiveSkipAlreadyDone,
   largeRunConfirmation,
   planRun,
   runButtonLabel,
@@ -42,8 +40,9 @@ import { HistoryPanel } from "@/domains/history/HistoryPanel";
 import { SettingsPanel } from "@/domains/settings/SettingsPanel";
 import { DocumentPane } from "@/domains/thread/DocumentPane";
 import { FileInspector } from "@/domains/thread/FileInspector";
-import { isDirty, type OpenDoc } from "@/domains/thread/model";
+import { isDirty } from "@/domains/thread/model";
 import {
+  centerWindow,
   confirm,
   copyToClipboard,
   onWindowResized,
@@ -54,6 +53,7 @@ import {
   setWindowMaxSize,
   setWindowMinSize,
   setWindowResizable,
+  showWindow,
   windowSize,
   workArea,
 } from "@/platform/host";
@@ -66,16 +66,19 @@ import { useCloseConfirm, useDragDrop, useWindowFocusClass } from "./useHostWind
 import { useZoom, zoomLabel } from "./useZoom";
 import "./App.css";
 
-/// How often to re-ask the conversion service what it can do while the backend
-/// route is selected.
+/// The three surfaces the nav switches between. Settings is a sheet, not one.
+const VIEW_ITEMS = [
+  { value: "library", label: "Library" },
+  { value: "run", label: "Run" },
+  { value: "history", label: "History" },
+] satisfies { value: View; label: string }[];
+
 const CAPABILITY_PROBE_INTERVAL_MS = 15_000;
 
-/// How long the window has to sit still before its size is written back. A
-/// live drag reports every frame, and each write is a settings save.
+/// A live drag reports every frame, and each write is a settings save.
 const RESIZE_SETTLE_MS = 400;
 
-/// The persisted factor is not trusted. A hand-edited settings.json can hold
-/// anything, and handing that to the webview scales the app to nothing.
+/// A hand-edited settings.json can scale the app to nothing.
 function clampZoom(factor: number): number {
   if (!Number.isFinite(factor) || factor <= 0) return ZOOM.default;
   return Math.min(ZOOM.max, Math.max(ZOOM.min, factor));
@@ -83,16 +86,14 @@ function clampZoom(factor: number): number {
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  /// The host has answered `get_settings`. Nothing renders before it does: a
-  /// single frame at `DEFAULT_SETTINGS` has no workspace path, which is how
-  /// first run is detected, so it would flash the onboarding gate at someone
-  /// who has used the app for a year.
+  /// Nothing renders before the host answers: a frame at `DEFAULT_SETTINGS`
+  /// reads as first run.
   const [loaded, setLoaded] = useState(false);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  /// The catch-all's folder. Null until `ensure_workspace` answers.
+  const [catchAllPath, setCatchAllPath] = useState<string | null>(null);
   const [secrets, setSecrets] = useState<SecretStatus>({ datalab: false, revai: false, backend: false });
-  /// Starts true because that is the safe answer while the host is being
-  /// asked. A backend token field shown by mistake is what breaks the session.
-  /// One that appears a beat late costs nothing.
+  /// Starts true: a backend token field shown by mistake breaks the session.
   const [appOwnsBackend, setAppOwnsBackend] = useState(true);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [scanResult, setScanResult] = useState<{ key: string; value: Scan }>({
@@ -102,26 +103,20 @@ export default function App() {
   const [capabilities, setCapabilities] = useState<ConversionCapabilities>({ state: "idle" });
   const [now, setNow] = useState(() => Date.now());
   const [view, setView] = useState<View>("library");
-  /// Settings is a sheet over the whole window rather than a view, so opening
-  /// it no longer evicts the Run column in the middle of a run.
   const [settingsOpen, setSettingsOpen] = useState(false);
-  /// Bumped once when a run finishes. Refreshes the already-done counts and an
-  /// open History panel — a 200-file run emits hundreds of job-updated events,
-  /// so reacting to those instead would re-scan the disk hundreds of times.
+  /// Bumped once when a run finishes. Reacting to `job-updated` instead would
+  /// re-scan the disk hundreds of times a run.
   const [runsFinished, setRunsFinished] = useState(0);
   const [starting, setStarting] = useState(false);
   const wasRunning = useRef(false);
-  /// The rows already finished when this run started. A run's own results are
-  /// the difference, because every count below is derived from the whole job
-  /// list and `convert_one` appends to it. See `runOutcome.ts`.
-  const terminalAtStart = useRef<ReadonlySet<number>>(new Set());
-  /// The job list, readable from the finish effect without it depending on
-  /// `jobs`. A 200-file run emits hundreds of `job-updated` events, and that
-  /// effect must fire on the transition, not on the traffic.
+  /// The rows already finished when this run started. Every door that starts
+  /// work sets it.
+  const [terminalAtStart, setTerminalAtStart] = useState<ReadonlySet<number>>(new Set());
+  /// Lets the finish effect read the list without depending on `jobs`.
   const jobsRef = useRef<Job[]>([]);
   const wasWorkspace = useRef(false);
   const autoClear = useRef(false);
-  /// The selection autodetect has already answered. See the effect below.
+  /// The selection autodetect has already answered.
   const answered = useRef<string | null>(null);
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS);
   const settingsSave = useRef<Promise<void>>(Promise.resolve());
@@ -139,6 +134,7 @@ export default function App() {
     select,
     closeDoc,
     edit,
+    renameDoc,
     setMode,
     setDocMeta,
   } = useDocuments({ showToast });
@@ -149,25 +145,20 @@ export default function App() {
     settings.datalabFormat,
     settings.datalabPipelineId,
     settings.outputDir,
-    // The route decides which extensions `scan_inputs` counts, so leaving
-    // these out lets the Run button promise a count from the other route.
+    // The route decides which extensions `scan_inputs` counts.
     settings.conversionRoute,
     runsFinished,
   ]);
   const scanCurrent = scanResult.key === scanKey;
-  const scan = scanCurrent ? scanResult.value : EMPTY_SCAN;
+  /// Counts zero while the scan is re-asked, or Run over-bills. Nodes stay.
+  const scan = scanCurrent ? scanResult.value : { ...EMPTY_SCAN, nodes: scanResult.value.nodes };
   const job = useMemo(() => JOBS.find((j) => j.id === settings.jobType) ?? JOBS[0], [settings.jobType]);
   const inputCount = settings.jobType === "transcribe" ? scan.transcribe : scan.convert;
 
-  /// First run, keyed on the one thing the app cannot work without. The gate
-  /// replaces the whole tree while this holds.
   const onboarding = loaded && settings.workspacePath === null;
   const workspacePath = settings.workspacePath;
-  /// A workspace is open, so the library is home and the run flow is off the
-  /// default nav.
   const libraryMode = loaded && workspacePath !== null;
 
-  /// Surface backend failures instead of dropping them on the floor.
   const call = useCallback(
     async (fn: () => Promise<unknown>) => {
       try {
@@ -207,6 +198,10 @@ export default function App() {
     [queueSettingsSave],
   );
 
+  const persist = useCallback((patch: Partial<Settings>) => {
+    applySettings({ ...settingsRef.current, ...patch });
+  }, [applySettings]);
+
   useEffect(() => {
     void (async () => {
       const [s, k, j, owns] = await Promise.all([
@@ -215,9 +210,8 @@ export default function App() {
         commands.listJobs(),
         commands.appOwnsBackend(),
       ]);
-      // Spread over the defaults rather than trusting the host's shape: a key
-      // the stored settings.json predates arrives absent, and `undefined` is
-      // not `null`, so an absent workspacePath would read as "already set up".
+      // A key the stored settings.json predates arrives `undefined`, not
+      // `null`, so an absent workspacePath would read as already set up.
       const merged = { ...DEFAULT_SETTINGS, ...s };
       settingsRef.current = merged;
       setSettings(merged);
@@ -233,59 +227,62 @@ export default function App() {
     return () => void un.then((f) => f());
   }, [upsert]);
 
-  // Declared above the run-finished effect so it lands first in the same
-  // commit: that effect reads the list and must not read last render's.
+  // Above the run-finished effect, so that effect never reads last render's.
   useEffect(() => {
     jobsRef.current = jobs;
   }, [jobs]);
 
-  // The sidebar's list. Re-read once per finished run rather than per
-  // job-updated event, for the same reason the history panel does.
+  // The sidebar's list, re-read once per finished run.
   useEffect(() => {
     if (!libraryMode) return;
     let live = true;
-    // Behind the pending settings save. Onboarding's last beat is what binds
-    // the workspace, and the host answers this from that same file, so asking
-    // ahead of the write returns "No workspace configured" and the sidebar
-    // opens empty.
+    // Behind the pending save: asking ahead of it returns "No workspace
+    // configured".
     const pendingSave = settingsSave.current;
+    // Captured before the chain: the state variable inside the `then` is the
+    // render's value, not the one that arrived.
+    let catchAll: string | null = null;
     void pendingSave
-      // Before the listing, so a welcome file this launch seeds is already on
-      // disk when the tree reads the folder. It answers with a path only on
-      // the launch that wrote it, so this opens the document once in the life
-      // of a workspace rather than greeting the user every time.
+      // Before the listing, so a welcome file it seeds is on disk when the
+      // tree reads the folder.
       .then(() => commands.ensureWorkspace())
       .then((info) => {
-        if (live && info?.welcomePath) void openPath(info.welcomePath);
+        if (!live || !info) return;
+        catchAll = info.catchAllPath;
+        setCatchAllPath(info.catchAllPath);
+        if (info.welcomePath) void openPath(info.welcomePath);
       })
       .catch(() => {
-        // A workspace that cannot be adopted still lists below, and that
-        // failure is the one worth reporting.
+        // It still lists below, and that failure is the one worth reporting.
       })
       .then(() => commands.listProjects())
       .then((p) => {
-        if (live) setProjects(p);
+        if (!live) return;
+        setProjects(p);
+        // Adopt the catch-all when the bound destination is gone, or the run
+        // falls back to whatever absolute `outputDir` it last held.
+        const current = settingsRef.current.activeProjectPath;
+        const stillThere = p.some((project) => project.path === current);
+        if (!stillThere && p.length > 0) {
+          const home = p.find((project) => project.path === catchAll) ?? p[0];
+          persist({ activeProjectPath: home.path });
+        }
       })
       .catch((e: unknown) => {
-        // A workspace folder moved or unmounted in Finder fails here. Saying
-        // so is the difference between "your workspace is gone" and a sidebar
-        // that silently lists nothing.
+        // A workspace moved in Finder fails here, and unsaid it reads as an
+        // empty sidebar.
         if (live) showToast(String(e));
       });
     return () => {
       live = false;
     };
-  }, [libraryMode, workspacePath, runsFinished, showToast, openPath]);
+  }, [libraryMode, workspacePath, runsFinished, showToast, openPath, persist]);
 
-  // Rescan whenever the selection changes: the counts drive the run label, the
-  // job autodetect, and the suggested output folder.
-  //
-  // Also on the output format, because "already done" is format-specific, and
-  // once per finished run, because that run is what just changed the answer.
+  // The counts drive the run label, the autodetect and the output folder, and
+  // "already done" is format-specific.
   useEffect(() => {
     if (settings.inputs.length === 0) {
-      // The scan is an async host call. Emptying the selection has to zero the
-      // counts here or the run label and autodetect keep citing the last drop.
+      // Emptying the selection has to zero the counts here.
       // eslint-disable-next-line react-hooks/set-state-in-effect -- reset derived scan; there is no store to subscribe to
       setScanResult({ key: scanKey, value: EMPTY_SCAN });
       return;
@@ -301,8 +298,7 @@ export default function App() {
     };
   }, [scanKey, settings.inputs]);
 
-  // Behind the pending settings save, so the route the user just switched on
-  // is on disk before the probe reports on it.
+  // Behind the pending save, so the route is on disk before the probe runs.
   useEffect(() => {
     if (settings.conversionRoute !== "backend") {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- reset external probe state when its route is disabled
@@ -326,17 +322,14 @@ export default function App() {
         });
         return true;
       } catch (e) {
-        // Carry the host's reason through. It names what actually went wrong,
-        // from "the service is starting" to a failed start, and the run hint
-        // has nothing else to tell the user.
+        // The run hint has nothing to say but the host's own reason.
         const message = e instanceof Error ? e.message : String(e);
         if (!probe.cancelled) setCapabilities({ state: "unavailable", message });
         return false;
       }
     };
-    // Keep asking. A one-shot probe latches Run off for the whole session when
-    // the app starts before the service. `acceptingJobs` also goes stale, so
-    // re-ask after a success.
+    // A one-shot probe latches Run off for the session when the app starts
+    // first, and `acceptingJobs` goes stale.
     void ask();
     const retry = window.setInterval(() => void ask(), CAPABILITY_PROBE_INTERVAL_MS);
     return () => {
@@ -345,12 +338,8 @@ export default function App() {
     };
   }, [settings.conversionRoute, runsFinished]);
 
-  const persist = useCallback((patch: Partial<Settings>) => {
-    applySettings({ ...settingsRef.current, ...patch });
-  }, [applySettings]);
 
-  /// Stable, because the tree's fetch effects depend on it. An inline arrow
-  /// would re-run them on every render.
+  /// Stable: the tree's fetch effects depend on it.
   const setExpandedPaths = useCallback(
     (expandedPaths: string[]) => {
       persist({ expandedPaths });
@@ -358,37 +347,41 @@ export default function App() {
     [persist],
   );
 
-  /// The library tree's session state. It lives up here rather than in the
-  /// pane, because `left` swaps the pane out on every trip to Run and the
-  /// children cache and the selection have to outlive that.
+  /// The library tree's session state. The run-finished effect reads it too.
   const tree = useProjectTree({
     projects,
     expandedPaths: settings.expandedPaths,
     onExpandedChange: setExpandedPaths,
-    /// A finished run, plus the two settings the host's pairing rule reads: the
-    /// output format decides which sibling counts as a result, and the route
-    /// decides whether the service's own Markdown counts too. Without them the
-    /// tree goes on calling a converted file unconverted until the folder
-    /// itself moves. Deliberately not part of `scanKey`, which walks the disk
-    /// and calls the service.
+    /// A finished run, plus the two settings the host's pairing rule reads, or
+    /// the tree calls a converted file unconverted until its folder moves.
     refreshKey: `${runsFinished}:${settings.datalabFormat}:${settings.conversionRoute}`,
     showToast,
   });
 
-  /// First run's answer, in one write: where the workspace is and how
-  /// conversion runs. One write rather than two, so a crash between them
-  /// cannot leave a workspace with no route.
+  /// The file the Move control acts on, derived from the tree's own selection,
+  /// which climbs to the parent when a folder collapses. Null on a folder.
+  const selectedRow = useMemo(() => {
+    const rel = tree.selected;
+    if (rel === null) return null;
+    const cut = rel.lastIndexOf("/");
+    if (cut < 0) return null;
+    const row = tree.listings[rel.slice(0, cut)]?.entries.find((entry) => entry.rel === rel);
+    return row === undefined || row.isDir ? null : row;
+  }, [tree.listings, tree.selected]);
+
+  /// First run's answer in one write: two would let a crash between them leave
+  /// a workspace with no route.
   const completeOnboarding = useCallback(
     (workspace: WorkspaceInfo, mode: OnboardingConversionMode) => {
       persist({
-        onboardingComplete: true,
         workspacePath: workspace.workspacePath,
-        workspaceId: workspace.workspaceId,
+        // A drop needs somewhere to land before anyone picks a project.
+        activeProjectPath: workspace.catchAllPath,
         ...conversionPatch(mode),
       });
-      // Grow here rather than leaving it to the effect below, so the library
-      // does not paint one frame at the gate's size. Latching the flag is what
-      // stops that effect repeating the grow a beat later.
+      setCatchAllPath(workspace.catchAllPath);
+      // Grow here, or the library paints a frame at the gate's size. The flag
+      // latches so the effect below does not repeat it.
       wasWorkspace.current = true;
       void (async () => {
         try {
@@ -397,33 +390,22 @@ export default function App() {
           const area = await workArea().catch(() => null);
           if (area) await setWindowMaxSize(area.width, area.height);
           await resizeWindow(WORKSPACE.width, WORKSPACE.height);
+          await centerWindow(WORKSPACE.width, WORKSPACE.height);
         } catch {
           // No window to size off a real host.
         }
       })();
       setView("library");
-      // Only a brand-new workspace carries one. A user who deletes the file
-      // never sees it again, because the host writes it once and says so here.
+      // Only a brand-new workspace carries one: the host writes it once.
       if (workspace.welcomePath !== null) void openPath(workspace.welcomePath);
     },
     [openPath, persist],
   );
 
-  // Match the job to what was dropped, and put results beside the input.
-  //
-  // Deliberately depends on the three values it actually reads, not on the
-  // `scan` object. Depending on settings.jobType would make a manual click
-  // un-clickable — the effect would switch it straight back — and depending on
-  // the whole object would re-fire on an already-done refresh, which is the
-  // same bug by a longer route.
-  //
-  // The three values are not enough on their own, which is what `answered` is
-  // for: the scan drops to EMPTY_SCAN and back on every unrelated refresh, and
-  // the counts returning read as a change. `autodetectJob` holds the rule that
-  // one selection gets one answer.
+  // Never depend on `settings.jobType`, which undoes a manual click, or on the
+  // whole `scan`, which re-fires on an already-done refresh. `answered` covers
+  // the scan dropping to EMPTY_SCAN and back.
   useEffect(() => {
-    // Autodetect must run in an effect: it persists, and it must not depend on
-    // jobType or a manual click is undone on the next render. See CLAUDE.md.
     const current = settingsRef.current;
     const detected = autodetectJob(current.inputs, answered.current, {
       convert: scan.convert,
@@ -431,12 +413,15 @@ export default function App() {
     });
     if (!detected) return;
     answered.current = detected.selection;
-    // Read outputDir from the ref rather than a dependency, so defaulting it
-    // can't retrigger this effect.
+    // Read outputDir from the ref, so defaulting it cannot retrigger this.
     applySettings({
       ...current,
       jobType: detected.jobType,
-      outputDir: current.outputDir ?? scan.suggestedOutput,
+      // Only without a workspace: with one, the active project decides.
+      outputDir:
+        current.workspacePath === null
+          ? (current.outputDir ?? scan.suggestedOutput)
+          : current.outputDir,
     });
   }, [applySettings, scan.convert, scan.transcribe, scan.suggestedOutput]);
 
@@ -447,36 +432,62 @@ export default function App() {
 
   const addPaths = useCallback(
     (paths: string[]) => {
-      if (paths.length) mutateInputs((cur) => Array.from(new Set([...cur, ...paths])));
+      if (!paths.length) return;
+      // Anything staged during a run is for the next one. Every staging door
+      // comes here, so the auto-clear stands down here.
+      autoClear.current = false;
+      mutateInputs((cur) => Array.from(new Set([...cur, ...paths])));
     },
     [mutateInputs]
   );
 
-  /// One file from the library, converted into the folder it already sits in.
-  ///
-  /// The host answers with a verdict and this renders it. Nothing here plans a
-  /// route: the route plan, the key checks and the reuse rule all live in Rust,
-  /// and a second planner in the webview would eventually disagree with the one
-  /// a run uses.
+  /// File a drop into the library and stage what came back, never the dropped
+  /// paths: the run dedupes by path, so both would convert it twice.
+  const importDrop = useCallback(
+    async (paths: string[]) => {
+      // A cancelled picker still costs a round trip and a full re-list.
+      if (paths.length === 0) return paths;
+      const project = settingsRef.current.activeProjectPath;
+      if (project === null) return paths;
+      try {
+        const landed = await commands.importIntoProject(paths, project);
+        // No watcher, and the focus reconcile does not fire while the window
+        // keeps focus, so without this the copies land invisibly.
+        setRunsFinished((n) => n + 1);
+        return landed;
+      } catch (e) {
+        showToast(String(e));
+        return [];
+      }
+    },
+    [showToast],
+  );
+
+  /// One file, converted into the folder it already sits in. The host answers
+  /// a verdict and this renders it: a second planner here would disagree with
+  /// the one a run uses.
   const convertOne = useCallback(
     async (row: FileRow) => {
       showPreview((cur) => (cur?.rel === row.rel ? null : cur));
       let out;
       try {
+        // `convert_one` appends to the queue rather than clearing it, so
+        // everything already in there belongs to an earlier run.
+        setTerminalAtStart(terminalIds(jobsRef.current));
         out = await commands.convertOne(row.rel);
       } catch (e) {
         showToast(String(e));
         return;
       }
       if (out.kind === "blocked") {
-        // The file is about to be staged for the user to run by hand, so the
-        // run in flight must not take the selection with it when it ends. Same
-        // call Stop makes, for the same reason: this refusal promises the file
-        // is waiting in Run, and the auto-clear would empty the list under it.
-        autoClear.current = false;
-        // Staging is not optional. The Run view's hint chain is gated on a
-        // non-empty selection, so bouncing without it lands the user on an
-        // empty Run view with no hint and a disabled button.
+        // No job takes this file: it is gone, or nothing converts its kind. Run
+        // resolves neither, so staging it persists a path the host just refused.
+        if (out.reason === "not_convertible") {
+          showToast(out.message ?? "Cannot convert this file");
+          return;
+        }
+        // Staging is not optional for the rest: the Run hint chain is gated on
+        // a non-empty selection, so bouncing without it lands on an empty view.
         addPaths([row.path]);
         showToast(out.message ?? "Cannot convert this file yet");
         setView("run");
@@ -484,27 +495,55 @@ export default function App() {
       }
       if (out.kind === "copied") {
         showToast(out.message ?? "Copied a result from an earlier run — no charge");
-        // A copy finishes inside the command, so no job ever runs and the
+        // A copy finishes inside the command, so no job runs and the
         // run-finished effect never fires. Refresh the tree so the row pairs.
         setRunsFinished((n) => n + 1);
       }
-      // Queued needs nothing: the row's status arrives on the job-updated
-      // stream, and `runsFinished` bumps when the run ends.
+      // Queued needs nothing: its status arrives on the job-updated stream.
     },
     [addPaths, showPreview, showToast],
   );
 
-  const addFiles = async () => {
-    addPaths(await pickFiles());
-  };
+  /// File one library row, and the result beside it, into another project. The
+  /// host moves both halves or neither, and this follows the file.
+  const moveToProject = useCallback(
+    async (row: FileRow, projectRel: string) => {
+      showPreview((cur) => (cur?.rel === row.rel ? null : cur));
+      let landed;
+      try {
+        landed = await commands.moveToProject(row.rel, projectRel);
+      } catch (e) {
+        showToast(String(e));
+        return;
+      }
+      // A tab is keyed on the path. Left behind, the next autosave writes to
+      // the folder the file left, fails, and strands the edit.
+      const workspace = settingsRef.current.workspacePath;
+      if (workspace !== null) {
+        renameDoc(row.path, `${workspace}/${landed}`);
+        if (row.resultPath !== null) {
+          renameDoc(row.resultPath, `${workspace}/${projectRel}/${basename(row.resultPath)}`);
+        }
+      }
+      setRunsFinished((n) => n + 1);
+      tree.toggle(projectRel, true, false);
+      tree.select(landed);
+      const project = projects.find((p) => p.path === projectRel);
+      showToast(`Moved ${row.name} to ${project?.title ?? projectRel}`);
+    },
+    [projects, renameDoc, showPreview, showToast, tree],
+  );
 
   const importFiles = useCallback(async () => {
-    addPaths(await pickFiles());
+    const picked = await pickFiles();
+    // The view switch waits for the picker: a cancel evicts nothing.
+    if (picked.length === 0) return;
     setView("run");
-  }, [addPaths]);
+    addPaths(await importDrop(picked));
+  }, [addPaths, importDrop]);
 
   const addFolders = async () => {
-    addPaths(await pickFolders());
+    addPaths(await importDrop(await pickFolders()));
   };
 
   const pickOutput = async () => {
@@ -512,35 +551,36 @@ export default function App() {
     if (dir) persist({ outputDir: dir });
   };
 
-  // Drops land window-wide, but the input list only exists in the run view —
-  // so dropping onto an open panel staged the files with no visible sign at
-  // all. Switch back so the drop has a visible result. Only on drop, never on
-  // enter/over: yanking the user out of Settings because a drag passed over
-  // the window would be worse than the bug.
-  //
-  // The sheet closes first, or the drop stages files and switches the view
-  // behind a scrim, which is that same bug through the new door.
+  /// One setting for both a drop and a run, so they cannot name two folders.
+  const pickProject = useCallback(
+    (rel: string) => {
+      persist({ activeProjectPath: rel });
+    },
+    [persist],
+  );
+
+  // Drops land window-wide and the input list renders only in Run. Only on
+  // drop: a passing drag must not yank the user out of Settings.
   const onDrop = useCallback(
     (paths: string[]) => {
       setSettingsOpen(false);
-      addPaths(paths);
       setView("run");
+      void importDrop(paths).then(addPaths);
     },
-    [addPaths],
+    [addPaths, importDrop],
   );
   const dragging = useDragDrop(onDrop);
 
-  const finished = jobs.filter((j) => j.status === "done" || j.status === "failed").length;
   const doneCount = jobs.filter((j) => j.status === "done").length;
-  const failedCount = jobs.filter((j) => j.status === "failed").length;
   const running = jobs.some((j) => ACTIVE.includes(j.status));
-  const total = jobs.length;
 
   const activeCount = jobs.filter((j) => ACTIVE.includes(j.status)).length;
 
-  /// The live run, or null. The nav owns the centre of the title bar, so the
-  /// run reports from the corner.
-  const status = barStatus(jobs);
+  /// This run's rows. Over the whole list, one file from the tree after a
+  /// batch reads "200 / 201".
+  const runJobs = jobs.filter((j) => !terminalAtStart.has(j.id));
+
+  const status = barStatus(runJobs);
 
   useEffect(() => {
     if (!running) return;
@@ -549,19 +589,14 @@ export default function App() {
   }, [running]);
 
   useWindowFocusClass();
-  // Documents whose edit is still only in memory: the autosave has not landed
-  // yet, or the host refused the write. Closing the window is one click from
-  // quitting, so it has to say so.
+  // Edits still only in memory. Closing the window is one click from quitting.
   const dirtyCount = docs.filter((d) => isDirty(d.save)).length;
   useCloseConfirm(running, activeCount, dirtyCount);
 
-  /// Zoom belongs to the app rather than to the document, and it outlives the
-  /// session.
   const zoom = clampZoom(settings.zoom);
   const onZoom = useCallback(
     (next: number) => {
-      // The ladder clamps at both ends, so Cmd+ at 200% asks for the factor
-      // already in force. No toast for a step that changes nothing.
+      // The ladder clamps, so Cmd+ at 200% asks for the factor already in force.
       if (next === zoom) return;
       persist({ zoom: next });
       showToast(`Zoom ${zoomLabel(next)}`);
@@ -570,66 +605,57 @@ export default function App() {
   );
   useZoom(zoom, onZoom);
 
-  /// Something is in the right pane. The split still collapses to one column
-  /// when there is not, which is the resting state on every launch, and the
-  /// card counts because it has nowhere else to live.
-  const expanded = docs.length > 0 || preview !== null;
-  const sizesRef = useRef(settings);
-
-  useEffect(() => {
-    sizesRef.current = settings;
-  }, [settings]);
-
-  // First run opens at its own size. Bounds before size, as everywhere else:
-  // the gate is taller and wider than the window's opening minimum, and macOS
-  // clamps `setSize` to whatever is in force at that instant.
+  // Bounds before size: macOS clamps `setSize` to what is in force then.
   useEffect(() => {
     if (!onboarding) return;
     void (async () => {
       try {
         await setWindowMinSize(ONBOARDING.minWidth, ONBOARDING.minHeight);
         await resizeWindow(ONBOARDING.width, ONBOARDING.height);
+        await centerWindow(ONBOARDING.width, ONBOARDING.height);
       } catch {
         // No window to size off a real host.
+      } finally {
+        // In a `finally` so a failed step still hands the user a window.
+        await showWindow().catch(() => null);
       }
     })();
   }, [onboarding]);
 
-  // The window grows to the workspace once, when the settings load says a
-  // workspace is bound, and opens where the user last left it. It never
-  // shrinks back: binding a workspace is permanent, which is why
-  // `wasWorkspace` latches instead of tracking.
-  //
-  // The statement order is load-bearing: macOS clamps `setSize` to the bounds
-  // in force at that instant, so widen the bounds before growing.
-  //
-  // Native resizing is the OS animating a real window: there is nothing here
-  // to match in CSS, and trying would fight it.
+  // The window grows once, to where the user last left it, and `wasWorkspace`
+  // latches because binding a workspace is permanent. Statement order is
+  // load-bearing: macOS clamps `setSize` to the bounds in force, so widen
+  // the bounds first.
   useEffect(() => {
     if (!libraryMode || wasWorkspace.current) return;
     wasWorkspace.current = true;
     void (async () => {
-      // The one read before the resize. The split restores its saved ratio a
-      // frame after this effect starts and clamps that percentage against the
-      // width in force right then, so every round trip here costs it.
-      const area = await workArea().catch(() => null);
-      await setWindowResizable(true);
-      await setWindowMinSize(WORKSPACE.minWidth, WORKSPACE.minHeight);
-      // A ceiling, so a size restored from a larger display cannot open a
-      // window bigger than the screen it is opening on.
-      if (area) await setWindowMaxSize(area.width, area.height);
-      const { expandedWidth, expandedHeight } = sizesRef.current;
-      await resizeWindow(expandedWidth ?? WORKSPACE.width, expandedHeight ?? WORKSPACE.height);
+      try {
+        // The one read before the resize: the split restores its ratio a frame
+        // from now, against whatever width is in force then.
+        const area = await workArea().catch(() => null);
+        await setWindowResizable(true);
+        await setWindowMinSize(WORKSPACE.minWidth, WORKSPACE.minHeight);
+        // A size restored from a larger display must not exceed this screen.
+        if (area) await setWindowMaxSize(area.width, area.height);
+        const { expandedWidth, expandedHeight } = settingsRef.current;
+        // Clamp to the same ceiling: the position uses the size that lands.
+        const want = { w: expandedWidth ?? WORKSPACE.width, h: expandedHeight ?? WORKSPACE.height };
+        const width = area ? Math.min(want.w, area.width) : want.w;
+        const height = area ? Math.min(want.h, area.height) : want.h;
+        await resizeWindow(width, height);
+        // macOS applies `setSize` asynchronously, so the host's `center()`
+        // measures the frame from before the grow.
+        await centerWindow(width, height);
+      } finally {
+        // In a `finally` so a failed step still reveals the hidden window.
+        await showWindow().catch(() => null);
+      }
     })();
   }, [libraryMode]);
 
-  // Remember the workspace size while the user is in it. The grow above only
-  // reads it back, so without this the window returned to the default on every
-  // launch.
-  //
-  // Our own `resizeWindow` reports through this same event. Writing that back
-  // records the size actually on screen, which is what "where you left it"
-  // means, ceiling clamp included.
+  // The grow above only reads this back. Our own `resizeWindow` reports here
+  // too, so what lands is the size on screen, ceiling clamp included.
   useEffect(() => {
     if (!libraryMode) return;
     let live = true;
@@ -651,18 +677,14 @@ export default function App() {
     };
   }, [libraryMode, persist]);
 
-  // Escape, in one ordered handler. Several surfaces answer this key and each
-  // one binding its own listener is a race with no error and no test, so the
-  // order lives here: the sheet outranks the document you are reading, and
-  // neither closes the window. Fields keep their own Escape semantics.
+  // Escape, in one ordered handler: a listener per surface is a silent race.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      // The sheet is a modal <dialog>. Its own `cancel` event owns the key,
-      // and answering here as well would close the document behind it.
+      // The sheet's own `cancel` event owns the key.
       if (settingsOpen) return;
-      // The card is the top surface while it is up, so it goes before the
-      // document it covers.
+      if (view !== "library") return;
+      // The card covers the document, so it closes first.
       if (preview !== null) {
         e.preventDefault();
         showPreview(null);
@@ -680,22 +702,26 @@ export default function App() {
     return () => {
       window.removeEventListener("keydown", onKey);
     };
-  }, [activeId, preview, requestClose, settingsOpen, showPreview]);
+  }, [activeId, preview, requestClose, settingsOpen, showPreview, view]);
 
-  // ⌘, from the app menu. A real menu item rather than a webview keydown,
-  // which would compete with the editor in the same window.
+  // A real menu item, because a webview keydown competes with the editor.
   useEffect(() => {
     const un = commands.onOpenSettings(() => {
+      // The gate renders no sheet, so the flag would latch and ambush the
+      // user when it closes.
+      if (settingsRef.current.workspacePath === null) return;
       setSettingsOpen(true);
     });
     return () => void un.then((f) => f());
   }, []);
 
-  // ⌘O in workspace mode: same path as a drop — stage files and open Run.
+  // ⌘O stages files and opens Run, the same path a drop takes.
   useEffect(() => {
     if (!libraryMode) return;
     const onKey = (e: KeyboardEvent) => {
       if (!e.metaKey || e.key.toLowerCase() !== "o" || e.shiftKey || e.altKey) return;
+      // A keydown inside the modal <dialog> still bubbles here.
+      if (settingsOpen) return;
       const el = document.activeElement;
       if (el instanceof HTMLElement && el.closest("input, textarea, select, [contenteditable]")) {
         return;
@@ -707,99 +733,101 @@ export default function App() {
     return () => {
       window.removeEventListener("keydown", onKey);
     };
-  }, [importFiles, libraryMode]);
+  }, [importFiles, libraryMode, settingsOpen]);
 
-  /// Put a result on screen.
-  ///
-  /// Opening a document is not enough on its own. The end pane holds Run or
-  /// History whenever the nav says so, and `open` deliberately never touches
-  /// the view, so a tab opened from either of those lands where nobody can see
-  /// it — which is why the History eye button has always looked like it did
-  /// nothing. Saving first is what switching tabs already does: `open`
-  /// activates another document without flushing the one leaving, and the
-  /// autosave skips a document whose last write the host refused.
+  /// Put a result on screen. `open` never touches the view, so a tab opened
+  /// from Run or History lands where nobody can see it. Save first, because
+  /// `open` does not flush the document it replaces. `fallback` goes to Finder
+  /// when the pane refuses the file.
   const reveal = useCallback(
-    async (open: () => Promise<boolean>) => {
+    async (open: () => Promise<boolean>, fallback: string | null) => {
       if (activeId) await saveDoc(activeId);
-      if (await open()) setView("library");
+      if (await open()) {
+        setView("library");
+        return;
+      }
+      if (fallback) void call(() => commands.revealPath(fallback));
     },
-    [activeId, saveDoc],
+    [activeId, call, saveDoc],
   );
 
-  const revealJob = useCallback((job: Job) => reveal(() => openJob(job)), [openJob, reveal]);
+  const revealJob = useCallback(
+    (job: Job) => reveal(() => openJob(job), job.outputPath),
+    [openJob, reveal],
+  );
 
   const revealHistory = useCallback(
-    (entry: HistoryEntry) => reveal(() => openHistory(entry)),
+    (entry: HistoryEntry) => reveal(() => openHistory(entry), entry.outputPath),
     [openHistory, reveal],
   );
 
-  /// Read through a ref for the same reason `useCloseConfirm` does: `openJob`
-  /// closes over the open documents, so its identity changes on every
-  /// keystroke, and the effect below must fire on a run's edges rather than on
-  /// that traffic.
+  /// Through a ref: `openJob` changes identity on every keystroke, and the
+  /// effect below must fire on a run's edges.
   const revealJobRef = useRef(revealJob);
   useEffect(() => {
     revealJobRef.current = revealJob;
   }, [revealJob]);
 
-  // When a run finishes, clear the input selection so the same files can't be
-  // re-run by accident — Run greys out until new inputs are added. Gated on a
-  // flag set by run(), so finishing a Retry doesn't wipe inputs the user has
-  // already staged for the next batch; and skipped when nothing succeeded, so
-  // a wholly failed run leaves the selection in place to try again.
+  /// Same ref treatment: `tree.toggle` changes identity as the tree loads.
+  const openDestinationRef = useRef(tree.toggle);
   useEffect(() => {
-    // A run starting: remember what was already terminal, so what finishes
-    // below is this run's work and not the whole queue's.
-    if (!wasRunning.current && running) {
-      terminalAtStart.current = terminalIds(jobsRef.current);
-    }
+    openDestinationRef.current = tree.toggle;
+  }, [tree.toggle]);
+
+  // Clear the selection so the same files cannot be re-run by accident. The
+  // flag is set by `run()` alone, so a Retry leaves the next batch staged.
+  useEffect(() => {
     if (wasRunning.current && !running) {
       if (autoClear.current && doneCount > 0) mutateInputs(() => []);
       autoClear.current = false;
-      // The run just changed what counts as already done, and added rows to
-      // the history. One bump, not one per event.
       setRunsFinished((n) => n + 1);
+      // The bump re-lists the folders, so this only opens the branches. Read
+      // off the results: a run writes beside each source, not to the project.
+      const workspace = settingsRef.current.workspacePath;
+      if (workspace !== null) {
+        for (const rel of resultDirs(workspace, newlyDone(terminalAtStart, jobsRef.current))) {
+          openDestinationRef.current(rel, true, false);
+        }
+      }
       // One file is a request to read it. A batch is not, so nothing opens.
-      const target = autoOpenTarget(terminalAtStart.current, jobsRef.current);
+      const target = autoOpenTarget(terminalAtStart, jobsRef.current);
       if (target !== null) {
-        // `mode` is one state for the pane rather than one per document, so a
-        // document nobody asked to edit would otherwise arrive in the editor.
+        // `mode` is one state for the pane, not one per document.
         setMode("read");
         void revealJobRef.current(target);
       }
     }
     wasRunning.current = running;
-  }, [running, doneCount, mutateInputs, setMode]);
+  }, [running, doneCount, mutateInputs, setMode, terminalAtStart]);
 
-  // Every hook is above this line, which is the only reason the two
-  // whole-window states below can return early at all.
+  /* The only channel for errors that never reach a job row. Hoisted because a
+     modal <dialog> draws in the top layer, so a region at the app root is
+     invisible while the sheet is up. */
+  const toastRegion = (
+    <div className="toast-region" role="status" aria-live="polite">
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+
+  // Every hook is above this line, which lets these two return early.
   if (!loaded) return <div className="app" />;
 
   if (onboarding) {
     return (
       <div className="app">
-        {/* The gate carries no chrome, but the window still has to be
-            draggable: under titleBarStyle Overlay the webview covers the title
-            bar and only `data-tauri-drag-region` moves it. */}
+        {/* No chrome, but the window still has to drag. */}
         <header className="bar" data-tauri-drag-region="deep">
           <div className="bar-lights" aria-hidden />
         </header>
         <OnboardingGate onDone={completeOnboarding} onToast={showToast} />
-        <div className="toast-region" role="status" aria-live="polite">
-          {toast && <div className="toast">{toast}</div>}
-        </div>
+        {toastRegion}
       </div>
     );
   }
 
-  // What the selection actually costs. Skip, copy, and billable work, plus the
-  // skip-off case: files already in this folder that will still be sent and
-  // land as numbered copies. The button only ever promises the billable number.
-  const skipAlreadyDone = effectiveSkipAlreadyDone(
-    settings.jobType,
-    settings.conversionRoute,
-    settings.skipAlreadyDone,
-  );
+  // Skip, copy, billable work, and files resent as numbered copies. The
+  // button promises the billable number alone.
+  const skipAlreadyDone = settings.skipAlreadyDone;
   const { skipping, copying, toRun, colliding } = planRun(
     settings.jobType,
     inputCount,
@@ -820,12 +848,24 @@ export default function App() {
       : toRun > 0 && !secrets.revai
         ? ["revai" as const]
         : [];
+  /// For naming and revealing the destination, never for deciding it. Keep it
+  /// in step with `output_dir_for`, which settles that.
+  const destination =
+    workspacePath !== null && settings.activeProjectPath !== null
+      ? {
+          rel: settings.activeProjectPath,
+          path: `${workspacePath}/${settings.activeProjectPath}`,
+        }
+      : settings.outputDir !== null
+        ? { rel: null, path: settings.outputDir }
+        : null;
+
   const routeBlocked = settings.jobType === "convert" && conversionPlan.blocked.length > 0;
   const preflightReady =
     scanCurrent && !routeBlocked && missingCredentials.length === 0;
   const canRun = canStartRun({
     hasInputs: settings.inputs.length > 0,
-    hasOutput: Boolean(settings.outputDir),
+    hasOutput: destination !== null,
     hasKey: preflightReady,
     toRun,
     copying,
@@ -834,12 +874,10 @@ export default function App() {
   });
 
   const run = async () => {
-    // `running` is derived from the job list, which stays empty until the first
-    // job-updated event lands — so without this guard a double-click fires two
-    // runs before the button ever disables.
+    // `running` stays false until the first event lands, so without this a
+    // double-click fires two runs.
     if (starting || !canRun) return;
-    // A large batch is irreversible spend the moment it starts — Stop only
-    // helps once you have noticed. Confirm the size and the cost driver first.
+    // A large batch spends the moment it starts, and Stop is too late.
     if (toRun >= BIG_RUN) {
       const backendFiles =
         settings.jobType === "convert" ? conversionPlan.backend.length : 0;
@@ -859,14 +897,16 @@ export default function App() {
       );
       if (!go) return;
     }
-    const outputDir = settings.outputDir;
-    if (!outputDir) return;
+    if (destination === null) return;
     setStarting(true);
-    // Queued before the invoke so the run's own job-updated events, which the
-    // listener applies with a functional update, land on top of a clean list.
+    // Cleared before the invoke, so this run's events land on a clean list.
     setJobs([]);
+    // `run_pipeline` clears the host's queue too.
+    setTerminalAtStart(new Set());
     try {
-      const res = await commands.runPipeline(settings.inputs, outputDir, settings.jobType);
+      // Behind the pending save: the host reads the destination off disk.
+      await settingsSave.current;
+      const res = await commands.runPipeline(settings.inputs, settings.jobType);
       if (res.copied > 0) {
         showToast(
           `Copied ${res.copied} result${res.copied > 1 ? "s" : ""} from an earlier run — no charge`
@@ -875,9 +915,8 @@ export default function App() {
         showToast(`Skipped ${res.skipped} file${res.skipped > 1 ? "s" : ""} already done`);
       }
       autoClear.current = true;
-      // Copies finish inside run_pipeline, so a run with nothing billable never
-      // makes `running` true and the run-finished effect never fires. Do its
-      // two jobs here: refresh the counts, and clear the spent selection.
+      // Copies finish inside `run_pipeline`, so a run with nothing billable
+      // never makes `running` true.
       if (res.count === 0) {
         setRunsFinished((n) => n + 1);
         if (res.copied > 0) mutateInputs(() => []);
@@ -885,8 +924,7 @@ export default function App() {
       }
     } catch (e) {
       showToast(String(e));
-      // The run never started, so the backend still holds the previous run's
-      // results. Re-sync rather than leaving the list wrongly empty.
+      // The run never started, so the host still holds the previous run's rows.
       setJobs(await commands.listJobs().catch(() => []));
     } finally {
       setStarting(false);
@@ -894,21 +932,45 @@ export default function App() {
   };
 
   const stop = async () => {
-    // Stopping is not finishing. Without this, the auto-clear below sees a run
-    // end with at least one success and wipes the selection, so the files the
-    // user stopped part-way through have to be dragged in again.
+    // Stopping is not finishing: the auto-clear would wipe the selection.
     autoClear.current = false;
     await call(() => commands.stopRun());
   };
 
-  // The open document is what is on screen, which stops being the file
-  // the moment an edit is saved. A row's Copy has to mean the same thing as the
-  // pane's, so prefer the open document and otherwise read the file.
-  //
-  // There is no third fallback any more. The job row used to carry the
-  // provider's bytes, which meant every result crossed IPC and stayed in the
-  // webview for the session. `readDocumentText` reads the same file the pane
-  // would, without the preview cap, so a result too large to open still copies.
+  /// The second door that spends. Stop turns a cancelled batch into failed
+  /// rows, so one click here can re-bill all of it.
+  const retryFailed = async () => {
+    const failed = jobs.filter((j) => j.status === "failed");
+    if (failed.length === 0) return;
+    if (failed.length >= BIG_RUN) {
+      const go = await confirm(
+        `This will run ${String(failed.length)} files again, including anything Stop cancelled.\n\nEach one is billed like a new conversion.`,
+        {
+          title: `Retry ${String(failed.length)} files?`,
+          kind: "warning",
+          okLabel: "Retry all",
+          cancelLabel: "Cancel",
+        },
+      );
+      if (!go) return;
+    }
+    // The retried rows are this run's work, so they leave the baseline.
+    const before = terminalIds(jobs);
+    for (const j of failed) before.delete(j.id);
+    setTerminalAtStart(before);
+    await call(() => commands.retryFailed());
+  };
+
+  const retryJob = async (id: number) => {
+    // A retry inside a run joins it, and must not disturb its baseline.
+    const before = running ? new Set(terminalAtStart) : terminalIds(jobs);
+    before.delete(id);
+    setTerminalAtStart(before);
+    await call(() => commands.retryJob(id));
+  };
+
+  // Prefer the open document, which is what the pane shows. The file is the
+  // fallback, and `readDocumentText` has no preview cap.
   const copyText = async (j: Job | null) => {
     if (!j?.outputPath) return;
     const open = docs.find((d) => d.id === j.outputPath);
@@ -924,18 +986,10 @@ export default function App() {
     showToast((await copyToClipboard(text)) ? "Copied to clipboard" : "Copy failed");
   };
 
-  // The pane copies what is on screen, which after an edit is not what the
-  // job returned. Same two outcomes and the same two messages as a job row.
-  const copyDoc = async (doc: OpenDoc) => {
-    showToast((await copyToClipboard(doc.text)) ? "Copied to clipboard" : "Copy failed");
-  };
-
-  // The button names what is about to happen, and never overstates the cost:
-  // when everything left is a copy it says so, because that run is free.
+  // The button never overstates the cost: a run of copies alone is free.
   const runLabel = runButtonLabel(job.verb, toRun, copying);
 
-  // A selection that matches no job at all is a dead end unless we say why,
-  // so name the formats rather than just reporting a count of zero.
+  // A selection matching no job needs the formats named, not a count of zero.
   const other = settings.jobType === "transcribe" ? scan.convert : scan.transcribe;
   let hint: string | null = null;
   let hintOpensSettings = false;
@@ -955,9 +1009,8 @@ export default function App() {
     if (reason === "capabilities_pending") {
       hint = "Checking conversion service capabilities…";
     } else if (reason === "backend_unavailable") {
-      // Settings holds no control that moves the service. Where it lives is a
-      // deployment file the app never writes, so this hint carries the host's
-      // own reason rather than pointing at a field that cannot help.
+      // Settings holds no control that moves the service, so carry the host's
+      // own reason.
       const detail = capabilities.state === "unavailable" ? capabilities.message : undefined;
       hint = detail ?? `Conversion service unavailable for ${count} file${count > 1 ? "s" : ""}`;
     } else if (reason === "backend_not_accepting") {
@@ -976,29 +1029,24 @@ export default function App() {
     hint = `Add your ${labels.join(" and ")} in Settings`;
     hintOpensSettings = true;
   } else if (toRun === 0 && copying === 0 && skipping > 0) {
-    hint = `All ${skipping} already in this folder — turn off “Skip files already done” in Settings to run them again`;
-  } else if (settings.inputs.length > 0 && !settings.outputDir) {
-    // Last in the chain on purpose: the branches above are more actionable, and
-    // this state is only reachable when the autodetect couldn't guess a folder
-    // (files from two different parents), so it is the rarer answer.
+    hint = `All ${skipping} already have a result beside them — turn off “Skip files already done” in Settings to run them again`;
+  } else if (settings.inputs.length > 0 && destination === null) {
+    // Last in the chain: the branches above are more actionable.
     hint = "Choose an output folder for the results";
   }
 
-  /// Cobalt and a warning glyph promise a press. Only the hints `onHint` acts
-  /// on get that treatment; the rest are status prose.
+  /// Cobalt promises a press, so only the hints `onHint` acts on get it.
   const hintActionable =
     hint !== null &&
     (hintOpensSettings || hint === "Choose an output folder for the results");
 
-  // What the run does besides the billable work. Copies are only mentioned
-  // when the button isn't already announcing them.
+  // What the run does besides the billable work.
   const noteParts: string[] = [];
-  if (skipping > 0) noteParts.push(`${skipping} already in this folder`);
-  // Skip-off re-runs still refuse to clobber: write_output numbers the file.
-  // Naming that here is the whole increment: the silent duplicate was the bug.
+  if (skipping > 0) noteParts.push(`${skipping} already done`);
+  // Skip-off re-runs still refuse to clobber: `write_output` numbers the file.
   if (colliding > 0) {
     noteParts.push(
-      `${colliding} already in this folder will be saved as numbered copies`,
+      `${colliding} already have a result and will be saved as numbered copies`,
     );
   }
   if (copying > 0 && toRun > 0) noteParts.push(`${copying} copied from an earlier run`);
@@ -1038,6 +1086,8 @@ export default function App() {
       settings={settings}
       scan={scan}
       jobs={jobs}
+      runJobs={runJobs}
+      projects={projects}
       dragging={dragging}
       now={now}
       running={running}
@@ -1046,25 +1096,23 @@ export default function App() {
       hint={hint}
       hintActionable={hintActionable}
       note={note}
-      finished={finished}
-      total={total}
-      doneCount={doneCount}
-      failedCount={failedCount}
       job={job}
       selectedId={activeId}
-      expanded={expanded}
       persist={persist}
-      onAddFiles={() => void addFiles()}
+      onAddFiles={() => void importFiles()}
       onAddFolders={() => void addFolders()}
       onPickOutput={() => void pickOutput()}
+      onPickProject={pickProject}
       onRemoveInput={(p) => mutateInputs((cur) => cur.filter((x) => x !== p))}
       onClearInputs={() => mutateInputs(() => [])}
       onRun={() => void run()}
       onStop={() => void stop()}
-      onRetryFailed={() => void call(() => commands.retryFailed())}
+      onRetryFailed={() => void retryFailed()}
       onRevealOutput={() => {
-        const dir = settings.outputDir;
-        if (dir) void call(() => commands.revealPath(dir));
+        // A run writes beside each source, not into the project folder.
+        const written = jobs.filter((j) => j.status === "done" && j.outputPath !== null);
+        const path = written[written.length - 1]?.outputPath ?? destination?.path;
+        if (path) void call(() => commands.revealPath(path));
       }}
       onPreview={(j) => void revealJob(j)}
       onCopy={(j) => void copyText(j)}
@@ -1072,41 +1120,37 @@ export default function App() {
         const path = j.outputPath;
         if (path) void call(() => commands.revealPath(path));
       }}
-      onRetryJob={(id) => void call(() => commands.retryJob(id))}
+      onRetryJob={(id) => void retryJob(id)}
       onHint={() => {
         if (hintOpensSettings) setSettingsOpen(true);
-        else if (!settings.outputDir) void pickOutput();
+        else if (destination === null) void pickOutput();
       }}
     />
   );
 
-  // The null arm never renders: the two early returns above prove `loaded` and
-  // `!onboarding`, which together bind the workspace path. TypeScript cannot
-  // see through a return, so the guard stays.
+  // The null arm never renders: TypeScript cannot see through the two early
+  // returns that bind the workspace path.
   const libraryPane =
     workspacePath === null ? null : (
       <LibraryPane
         workspacePath={workspacePath}
         projects={projects}
+        catchAllPath={catchAllPath}
+        activeProjectPath={settings.activeProjectPath}
+        selected={selectedRow}
         tree={tree}
         jobs={jobs}
-        /* The card is a Quick Look surface, so it follows the selection while
-           it is up. Without this an arrow press left the card naming one file
-           and the highlighted row naming another, and the card's own Convert
-           then billed the file the user had stopped looking at. It never
-           raises the card on its own: only Space and a click do that. */
+        /* The card follows the selection while it is up, or its Convert bills
+           the file the user stopped looking at. It never raises the card. */
         onSelect={(row) => {
           showPreview((cur) => (cur === null ? null : row));
         }}
-        /* One click rule: open the best openable thing on the row, and inspect
-           when there is none. A plain .md opens. A paired deck.pdf opens its
-           deck.md. An unpaired convertible and a binary raise the card.
-
-           The host decides `openable` from the extension and the size cap,
-           which is everything but the encoding: a Windows-1252 .csv is a text
-           row the reader refuses. So a failed open falls back to the card
-           rather than leaving the click with nothing but a toast. */
+        /* Open the best openable thing on the row, and inspect when there is
+           none. `openable` leaves out the encoding, so a failed open falls
+           back to the card rather than a bare toast. */
         onActivate={(row) => {
+          // The document and the card render only in the library pane.
+          setView("library");
           const path = row.openable
             ? row.path
             : row.resultOpenable
@@ -1121,20 +1165,24 @@ export default function App() {
           });
         }}
         onInspect={(row) => {
-          showPreview(preview?.rel === row.rel ? null : row);
+          // A card the Run column was covering must show, not toggle off.
+          const covered = view !== "library";
+          setView("library");
+          showPreview(!covered && preview?.rel === row.rel ? null : row);
         }}
         onConvert={(row) => void convertOne(row)}
+        onSetActiveProject={pickProject}
+        onMoveToProject={(row, projectRel) => void moveToProject(row, projectRel)}
         onOpenSettings={() => {
           setSettingsOpen(true);
         }}
         onCreateProject={async (title) => {
           const created = await commands.createProject(title);
           setProjects((cur) => [...cur, created]);
-          setView("library");
           try {
             setProjects(await commands.listProjects());
           } catch {
-            // The project exists; a stale list is better than an error toast.
+            // The project exists. A stale list beats an error toast.
           }
         }}
         onRevealPath={(path) => {
@@ -1144,14 +1192,9 @@ export default function App() {
       />
     );
 
-  // Two panes, always. The sidebar is the app's one fixed landmark: the nav
-  // swaps what the end pane holds and the library stays put underneath it, so
-  // the file you are working on never leaves the screen to reach Run.
-  //
-  // Always the same element in the same slot. Swapping between `<SplitPane>`
-  // and a bare pane moves the column to a different position in the tree, and
-  // React answers a move by remounting: that threw away a half-typed API key in
-  // Settings and whatever was in the History search box.
+  // Two panes, always: the library stays put under whatever the nav swaps in.
+  // Always the same element in the same slot, or React remounts the column and
+  // throws away a half-typed API key.
   const body = (
     <SplitPane
       className="workspace"
@@ -1167,13 +1210,13 @@ export default function App() {
           activeId={activeId}
           mode={mode}
           dragging={dragging}
+          onPick={() => void importFiles()}
           inspector={
             preview === null ? undefined : (
               <FileInspector
                 row={preview}
-                /* The card is the Convert control's primary home: the row's is
-                   under the pointer only, and Enter on a row is what raises
-                   this. */
+                /* The card is Convert's primary home: the row's answers to
+                   the pointer only. */
                 primary={
                   preview.resultOpenable && preview.resultPath !== null ? (
                     <Button
@@ -1196,6 +1239,20 @@ export default function App() {
                     >
                       {preview.job === "transcribe" ? "Transcribe" : "Convert"}
                     </Button>
+                  ) : preview.resultPath !== null ? (
+                    /* Converted to something the pane cannot read, and the
+                       card must never be actionless. */
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      icon={<FolderOpenIcon />}
+                      onClick={() => {
+                        const path = preview.resultPath;
+                        if (path) void call(() => commands.revealPath(path));
+                      }}
+                    >
+                      Show result in Finder
+                    </Button>
                   ) : undefined
                 }
                 onReveal={(path) => {
@@ -1216,7 +1273,12 @@ export default function App() {
           }}
           onModeChange={setMode}
           onEdit={edit}
-          onCopy={(doc) => void copyDoc(doc)}
+          // The pane copies what is on screen, not what the job returned.
+          onCopy={(doc) => {
+            void copyToClipboard(doc.text).then((ok) => {
+              showToast(ok ? "Copied to clipboard" : "Copy failed");
+            });
+          }}
           onReveal={(doc) => {
             const path = doc.revealPath;
             if (path) void call(() => commands.revealPath(path));
@@ -1224,8 +1286,7 @@ export default function App() {
         />
         )
       }
-      // Passed rather than left to the primitive's defaults. The split is a
-      // window measurement, so it lives with the rest of them in geometry.ts.
+      // The split is a window measurement, so it lives in geometry.ts.
       defaultStart={SPLIT.start}
       minStart={SPLIT.minStart}
       minEnd={SPLIT.minEnd}
@@ -1236,8 +1297,7 @@ export default function App() {
     />
   );
 
-  /// The live run, rendered in the one bar cell with room for it: the nav owns
-  /// the centre for the whole length of the run.
+  /// The live run, in the corner: the nav owns the centre of the bar.
   const runIndicator =
     status !== null ? (
       <>
@@ -1256,41 +1316,23 @@ export default function App() {
       </>
     ) : null;
 
-  /* The only channel for errors that never reach a job row (key saves, reveal
-     failures, clipboard). It must announce itself: role="status" so a screen
-     reader hears it without stealing focus.
-
-     Hoisted into a const because it renders in one of two places. A modal
-     <dialog> draws in the top layer, above every z-index, so this region at
-     the app root is invisible while the sheet is up — and saving an API key is
-     the most common thing Settings does. */
-  const toastRegion = (
-    <div className="toast-region" role="status" aria-live="polite">
-      {toast && <div className="toast">{toast}</div>}
-    </div>
-  );
-
   return (
     <div className="app">
-      {/* `data-tauri-drag-region="deep"` is what makes the window draggable —
-          the webview covers the title bar under titleBarStyle: Overlay, and
-          WebKit ignores -webkit-app-region. "deep" so the brand text drags
-          too; Tauri's handler already exempts buttons. */}
+      {/* The only thing that makes the window draggable: the webview covers
+          the title bar and WebKit ignores -webkit-app-region. "deep" so the
+          text drags too, and Tauri already exempts buttons. */}
       <header className="bar" data-tauri-drag-region="deep">
         <div className="bar-lights" aria-hidden />
-        {/* The nav, unconditionally: past the two early returns above, a
-            workspace is bound and the library is home. */}
         <div className="bar-status">
-          <WorkspaceViewNav
-            view={view}
-            onView={(next) => {
-              setView(next);
-            }}
+          <Segmented
+            className="bar-nav"
+            size="sm"
+            label="Workspace"
+            value={view}
+            onChange={setView}
+            options={VIEW_ITEMS}
           />
         </div>
-        {/* Every panel lives in the centre Segmented nav, so the run reports
-            in the corner instead: in the centre it displaced the nav and put
-            History out of reach for the length of the run. */}
         <div className="bar-actions">{runIndicator}</div>
       </header>
 
@@ -1302,10 +1344,8 @@ export default function App() {
           setSettingsOpen(false);
         }}
         title="Settings"
-        /* A modal dialog makes the rest of the window inert, and macOS drags a
-           window by hit-testing this attribute rather than by a CSS state. With
-           no strip inside the dialog the window cannot be moved while Settings
-           is open. */
+        /* A modal dialog makes the rest inert, and macOS drags by hit-testing
+           this attribute, so the sheet needs its own strip. */
         head={<div data-tauri-drag-region="deep" />}
         titleActions={
           <Button

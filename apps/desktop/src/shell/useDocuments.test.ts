@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activateOrInsert, removeDoc } from "./documents";
+import { activateOrInsert, removeDoc, renameDoc } from "./documents";
 import type { OpenDoc } from "@/domains/thread/model";
 
 function doc(id: string, save: OpenDoc["save"] = "clean"): OpenDoc {
@@ -44,5 +44,32 @@ describe("removeDoc", () => {
 
   it("changes nothing when the document is not open", () => {
     expect(removeDoc([a], a.id, b.id)).toEqual({ docs: [a], activeId: a.id });
+  });
+});
+
+describe("renameDoc", () => {
+  it("carries the open tab to the file's new path", () => {
+    const moved = renameDoc([a, b], a.id, a.id, "/taxes/a.md");
+    expect(moved.docs[0]).toMatchObject({
+      id: "/taxes/a.md",
+      title: "a.md",
+      subtitle: "/taxes/a.md",
+      revealPath: "/taxes/a.md",
+    });
+    expect(moved.activeId).toBe("/taxes/a.md");
+  });
+
+  it("keeps an unsaved edit, which is the whole point of following the file", () => {
+    const edited = doc(a.id, "edited");
+    expect(renameDoc([edited], a.id, a.id, "/taxes/a.md").docs[0].save).toBe("edited");
+  });
+
+  it("leaves the showing document alone when another one moves", () => {
+    const moved = renameDoc([a, b], b.id, a.id, "/taxes/a.md");
+    expect(moved.activeId).toBe(b.id);
+  });
+
+  it("changes nothing when the moved file was never open", () => {
+    expect(renameDoc([a], a.id, c.id, "/taxes/c.md")).toEqual({ docs: [a], activeId: a.id });
   });
 });

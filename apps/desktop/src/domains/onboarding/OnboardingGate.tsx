@@ -6,16 +6,13 @@ import type { OnboardingConversionMode, WorkspaceInfo } from "@/app/types";
 import { pickDirectory } from "@/platform/host";
 import { conversionConsequence } from "./conversionMode";
 
-/// Three beats, one question each. The user is not configuring an app here,
-/// they are being told what it is and agreeing to two defaults, so every beat
-/// is a sentence and a single control.
+/// Three beats, each a sentence and one control.
 type Step = "hello" | "workspace" | "conversion";
 
-/// A folder the CTA could act on, and what acting on it would mean.
+/// A folder the button could act on, and what that would mean.
 interface Candidate {
   path: string;
-  /// A workspace is already there, so setup adopts it. It is the difference
-  /// between the button saying Create and saying Open.
+  /// Setup will adopt it: the button says Open rather than Create.
   existing: boolean;
 }
 
@@ -27,8 +24,7 @@ export function OnboardingGate({
   onToast: (message: string) => void;
 }) {
   const [step, setStep] = useState<Step>("hello");
-  /// The folder the CTA is about to act on. Null only while the host is still
-  /// answering, which is why the button waits rather than guessing a path.
+  /// Null while the host is answering, so the button waits.
   const [candidate, setCandidate] = useState<Candidate | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
   const [mode, setMode] = useState<OnboardingConversionMode>("local");
@@ -85,8 +81,7 @@ export function OnboardingGate({
         void setup();
         return;
       case "conversion":
-        // The workspace exists by now: beat 3 is only reachable through a
-        // setup that resolved.
+        // Beat 3 is only reachable through a setup that resolved.
         if (workspace) onDone(workspace, mode);
         return;
       default: {
@@ -100,10 +95,8 @@ export function OnboardingGate({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Enter" || e.defaultPrevented) return;
-      // A focused button answers Return itself, so advancing here as well
-      // would skip a beat or open a picker and move on at the same time. The
-      // segmented is the exception: re-selecting the mode you are already on
-      // does nothing, so Return there should carry on rather than stall.
+      // A focused button answers Return itself, so advancing here skips a
+      // beat. The segmented is the exception: re-selecting does nothing.
       const el = document.activeElement;
       if (el instanceof HTMLElement && el.matches("button:not([role='radio'])")) return;
       e.preventDefault();

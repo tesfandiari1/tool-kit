@@ -4,9 +4,8 @@ import { cx } from "../cx";
 import { Label } from "./Text";
 import "./Field.css";
 
-/// Wraps any control with a label and a hint, and wires the label to it. Use
-/// this directly only for controls the library does not provide; `TextInput`,
-/// `Select`, and `Switch` build it in.
+/// A label and hint around any control. `TextInput`, `Select` and `Switch`
+/// build it in.
 export interface FieldProps {
   label?: ReactNode;
   hint?: ReactNode;
@@ -15,9 +14,7 @@ export interface FieldProps {
   /// Label sits beside the control rather than above it.
   inline?: boolean;
   htmlFor?: string;
-  /// Id stamped on the hint/error paragraph. Pass the control's
-  /// `aria-describedby` the same value so the message is actually announced.
-  /// `TextInput`, `Select`, and `Switch` wire this for you.
+  /// Give the control the same `aria-describedby`, or nothing is announced.
   messageId?: string;
   className?: string;
   children: ReactNode;
@@ -55,9 +52,7 @@ export interface InputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 
   invalid?: boolean;
 }
 
-/// The bare control, with no label or hint around it. Reach for this when the
-/// input shares a row with something else (a Save button, a unit suffix) and
-/// `TextInput`'s built-in `Field` would force it onto its own line.
+/// No label or hint: for an input that shares its row with another control.
 export function Input({ invalid = false, className, ...rest }: InputProps) {
   return (
     <input
@@ -72,7 +67,6 @@ export interface TextInputProps extends InputProps {
   label?: ReactNode;
   hint?: ReactNode;
   error?: ReactNode;
-  fieldClassName?: string;
 }
 
 /// `Field` + `Input`, which is the shape most settings want.
@@ -81,7 +75,6 @@ export function TextInput({
   hint,
   error,
   invalid = false,
-  fieldClassName,
   id,
   ...rest
 }: TextInputProps) {
@@ -96,7 +89,6 @@ export function TextInput({
       error={error}
       htmlFor={inputId}
       messageId={hasMessage ? msgId : undefined}
-      className={fieldClassName}
     >
       <Input
         id={inputId}
@@ -118,18 +110,15 @@ export interface SelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement
   hint?: ReactNode;
   error?: ReactNode;
   options: SelectOption[];
-  fieldClassName?: string;
 }
 
-/// A native `<select>`, restyled in its closed state only. The open menu stays
-/// the real macOS popup, which keeps type-ahead, keyboard navigation, and
-/// VoiceOver working without reimplementing any of it.
+/// Restyled closed only: the open menu stays the real macOS popup, with its
+/// type-ahead and VoiceOver intact.
 export function Select({
   label,
   hint,
   error,
   options,
-  fieldClassName,
   className,
   id,
   ...rest
@@ -145,7 +134,6 @@ export function Select({
       error={error}
       htmlFor={selectId}
       messageId={hasMessage ? msgId : undefined}
-      className={fieldClassName}
     >
       <select
         id={selectId}
@@ -166,12 +154,10 @@ export function Select({
 export interface SwitchProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "type" | "size"> {
   label?: ReactNode;
   hint?: ReactNode;
-  fieldClassName?: string;
 }
 
-/// A real checkbox behind a drawn track, so keyboard and assistive-technology
-/// behaviour is the platform's rather than ours.
-export function Switch({ label, hint, fieldClassName, className, id, ...rest }: SwitchProps) {
+/// A real checkbox behind a drawn track, so the behaviour is the platform's.
+export function Switch({ label, hint, className, id, ...rest }: SwitchProps) {
   const generated = useId();
   const inputId = id ?? generated;
   const msgId = `${inputId}-msg`;
@@ -198,7 +184,6 @@ export function Switch({ label, hint, fieldClassName, className, id, ...rest }: 
       htmlFor={inputId}
       messageId={hint ? msgId : undefined}
       inline
-      className={fieldClassName}
     >
       {control}
     </Field>
