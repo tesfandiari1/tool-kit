@@ -2,7 +2,7 @@ import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { cx } from "../cx";
 import "./Button.css";
 
-export type ButtonVariant = "primary" | "quiet" | "ghost" | "link";
+export type ButtonVariant = "primary" | "secondary" | "inverse" | "ghost";
 /// `lg` is reserved for a view's single actuator. See Button.css.
 export type ButtonSize = "sm" | "md" | "lg";
 
@@ -12,7 +12,7 @@ export interface ButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement
   /// Fill the container's width.
   block?: boolean;
   /// Work is in flight. Disables the button but keeps it at full opacity in the
-  /// live colour, because a greyed-out button reads as unavailable, not busy.
+  /// warning colour, because a greyed-out button reads as unavailable, not busy.
   busy?: boolean;
   /// Renders square with no text padding. Requires `aria-label`.
   iconOnly?: boolean;
@@ -21,7 +21,7 @@ export interface ButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement
 }
 
 export function Button({
-  variant = "quiet",
+  variant = "secondary",
   size = "md",
   block = false,
   busy = false,

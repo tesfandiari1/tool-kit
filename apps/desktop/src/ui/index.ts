@@ -7,7 +7,7 @@ import "./base.css";
 
 export { cx } from "./cx";
 
-export { Label, Display, Text, Mono } from "./primitives/Text";
+export { Label, Display, Text, Meta } from "./primitives/Text";
 export type {
   LabelProps,
   LabelTone,
@@ -16,16 +16,16 @@ export type {
   TextProps,
   TextSize,
   TextTone,
-  MonoProps,
-  MonoSize,
-  MonoTone,
+  MetaProps,
+  MetaSize,
+  MetaTone,
 } from "./primitives/Text";
 
 export { Button } from "./primitives/Button";
 export type { ButtonProps, ButtonVariant, ButtonSize } from "./primitives/Button";
 
 export { Panel, Well, Divider } from "./primitives/Surface";
-export type { PanelProps, PanelTone, WellProps, DividerProps } from "./primitives/Surface";
+export type { PanelProps, WellProps, DividerProps } from "./primitives/Surface";
 
 export { Badge, StatusDot } from "./primitives/Badge";
 export type { BadgeProps, Tone, StatusDotProps, DotTone } from "./primitives/Badge";
@@ -54,11 +54,10 @@ export type { SheetProps } from "./primitives/Sheet";
 export { Tree, TreeRow } from "./primitives/Tree";
 export type { TreeProps, TreeRowProps } from "./primitives/Tree";
 
-export { Field, Input, TextInput, Select, Switch } from "./primitives/Field";
+export { Field, Input, Select, Switch } from "./primitives/Field";
 export type {
   FieldProps,
   InputProps,
-  TextInputProps,
   SelectProps,
   SelectOption,
   SwitchProps,
@@ -69,3 +68,7 @@ export type { StackProps, RowProps, Gap, Align } from "./primitives/Layout";
 
 export { Meter } from "./primitives/Meter";
 export type { MeterProps } from "./primitives/Meter";
+
+/// A status message over the window, from the app root or a sheet overlay.
+export { Toast } from "./primitives/Toast";
+export type { ToastProps, ToastTone } from "./primitives/Toast";

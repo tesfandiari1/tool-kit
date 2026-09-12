@@ -1,185 +1,169 @@
-/* One height and one hairline, so a settings column reads as one stack. */
+@layer ui {
+  /* One height and one hairline, so a settings column reads as one stack. */
 
-.ui-field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s2);
-  min-width: 0;
-}
+  .ui-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    min-width: 0;
+  }
 
-/* Label beside the control, for a setting that reads as a sentence. A grid,
-   not a row: the hint has to drop to its own full-width line, and as a third
-   column it squeezes the label and precedes what it explains. */
-.ui-field--inline {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  column-gap: var(--s4);
-  row-gap: var(--s2);
-}
-.ui-field--inline .ui-field__hint {
-  grid-column: 1 / -1;
-}
+  /* Label beside the control, for a setting that reads as a sentence. A grid,
+     not a row: the hint has to drop to its own full-width line, and as a third
+     column it squeezes the label and precedes what it explains. */
+  .ui-field--inline {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    column-gap: var(--s4);
+    row-gap: var(--s2);
+  }
+  .ui-field--inline .ui-field__hint {
+    grid-column: 1 / -1;
+  }
 
-.ui-field__hint {
-  color: var(--ink-3);
-  font-size: var(--t-xs);
-  line-height: var(--lh-snug);
-  margin: 0;
-}
+  .ui-field__hint {
+    color: var(--text-mute);
+    font-size: var(--t-xs);
+    line-height: var(--lh-snug);
+    margin: 0;
+  }
 
-.ui-field__hint--fault {
-  color: var(--fault);
-}
+  .ui-field__hint--fault {
+    color: var(--status-danger);
+  }
 
-/* --- Text input ------------------------------------------------------- */
-.ui-input {
-  width: 100%;
-  height: 30px;
-  padding: 0 var(--s3);
+  /* --- Text input ------------------------------------------------------- */
+  .ui-input {
+    width: 100%;
+    height: 30px;
+    padding: 0 var(--s3);
 
-  font-family: var(--font-mono);
-  font-size: var(--t-sm);
-  letter-spacing: var(--track-mono);
+    font-family: var(--font-body);
+    font-size: var(--t-sm);
 
-  background: var(--surface-well);
-  color: var(--ink);
-  border: 1px solid var(--rule-lit);
-  border-radius: var(--r-control);
+    background: var(--surface-lift);
+    color: var(--text-body);
+    border: 1px solid var(--rule);
 
-  -webkit-user-select: text;
-  user-select: text;
-  cursor: auto;
+    -webkit-user-select: text;
+    user-select: text;
+    cursor: auto;
 
-  transition:
-    border-color var(--dur-fast) var(--ease),
-    background var(--dur-fast) var(--ease);
-}
+    transition:
+      border-color var(--dur-fast) var(--ease),
+      background var(--dur-fast) var(--ease);
+  }
 
-.ui-input::placeholder {
-  color: var(--ink-ghost);
-}
+  .ui-input::placeholder {
+    color: var(--text-ghost);
+  }
 
-.ui-input:hover:not(:disabled) {
-  border-color: var(--rule-strong);
-}
+  .ui-input:focus {
+    border-color: var(--focus-ring);
+  }
 
-.ui-input:focus {
-  border-color: var(--accent);
-}
+  .ui-input:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
 
-.ui-input:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
+  .ui-input--invalid {
+    border-color: var(--status-danger);
+  }
 
-.ui-input--invalid {
-  border-color: var(--fault);
-}
+  /* --- Select: closed state only. The open menu stays the system's ------ */
+  .ui-select {
+    width: 100%;
+    height: 30px;
+    padding: 0 var(--s6) 0 var(--s3);
 
-/* --- Select: closed state only. The open menu stays the system's ------ */
-.ui-select {
-  width: 100%;
-  height: 30px;
-  padding: 0 var(--s6) 0 var(--s3);
+    font-family: var(--font-body);
+    font-size: var(--t-sm);
 
-  font-family: var(--font-mono);
-  font-size: var(--t-sm);
-  letter-spacing: var(--track-mono);
+    background: var(--surface-lift);
+    color: var(--text-body);
+    border: 1px solid var(--rule);
 
-  background: var(--surface-well);
-  color: var(--ink);
-  border: 1px solid var(--rule-lit);
-  border-radius: var(--r-control);
+    appearance: none;
+    -webkit-appearance: none;
 
-  appearance: none;
-  -webkit-appearance: none;
+    /* Chevron, drawn in the token ink so it tracks the theme. */
+    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+      linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position:
+      calc(100% - 16px) 13px,
+      calc(100% - 11px) 13px;
+    background-size:
+      5px 5px,
+      5px 5px;
+    background-repeat: no-repeat;
 
-  /* Chevron, drawn in the token ink so it tracks the theme. */
-  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
-    linear-gradient(135deg, currentColor 50%, transparent 50%);
-  background-position:
-    calc(100% - 16px) 13px,
-    calc(100% - 11px) 13px;
-  background-size:
-    5px 5px,
-    5px 5px;
-  background-repeat: no-repeat;
+    transition: border-color var(--dur-fast) var(--ease);
+  }
 
-  transition: border-color var(--dur-fast) var(--ease);
-}
+  .ui-select:focus {
+    border-color: var(--focus-ring);
+  }
+  .ui-select:disabled {
+    opacity: 0.45;
+  }
 
-.ui-select:hover:not(:disabled) {
-  border-color: var(--rule-strong);
-}
-.ui-select:focus {
-  border-color: var(--accent);
-}
-.ui-select:disabled {
-  opacity: 0.45;
-}
+  /* --- Switch: a real checkbox hidden behind the drawn track ------------ */
+  .ui-switch {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    width: 34px;
+    height: 20px;
+  }
 
-/* --- Switch: a real checkbox hidden behind the drawn track ------------ */
-.ui-switch {
-  position: relative;
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  width: 34px;
-  height: 20px;
-}
+  .ui-switch__input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: default;
+  }
 
-.ui-switch__input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  opacity: 0;
-  cursor: default;
-}
+  .ui-switch__track {
+    position: absolute;
+    inset: 0;
+    background: var(--surface-sunk);
+    border: 1px solid var(--rule);
+    transition:
+      background var(--dur) var(--ease),
+      border-color var(--dur) var(--ease);
+    pointer-events: none;
+  }
 
-.ui-switch__track {
-  position: absolute;
-  inset: 0;
-  border-radius: var(--r-pill);
-  background: var(--surface-well);
-  border: 1px solid var(--rule-lit);
-  transition:
-    background var(--dur) var(--ease),
-    border-color var(--dur) var(--ease);
-  pointer-events: none;
-}
+  .ui-switch__thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 12px;
+    height: 12px;
+    background: var(--text-mute);
+    transition:
+      transform var(--dur) var(--ease),
+      background var(--dur) var(--ease);
+    pointer-events: none;
+  }
 
-.ui-switch__thumb {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 12px;
-  height: 12px;
-  border-radius: var(--r-pill);
-  background: var(--ink-3);
-  transition:
-    transform var(--dur) var(--ease),
-    background var(--dur) var(--ease);
-  pointer-events: none;
-}
+  .ui-switch__input:checked ~ .ui-switch__track {
+    background: var(--btn-secondary-hover-bg);
+    border-color: var(--btn-secondary-hover-bg);
+  }
+  .ui-switch__input:checked ~ .ui-switch__thumb {
+    transform: translateX(16px);
+    background: var(--btn-secondary-hover-fg);
+  }
 
-.ui-switch__input:checked ~ .ui-switch__track {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-.ui-switch__input:checked ~ .ui-switch__thumb {
-  transform: translateX(16px);
-  background: var(--accent-ink);
-}
-
-.ui-switch__input:focus-visible ~ .ui-switch__track {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
-
-.ui-switch__input:disabled ~ .ui-switch__track,
-.ui-switch__input:disabled ~ .ui-switch__thumb {
-  opacity: 0.45;
+  .ui-switch__input:disabled ~ .ui-switch__track,
+  .ui-switch__input:disabled ~ .ui-switch__thumb {
+    opacity: 0.45;
+  }
 }

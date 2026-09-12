@@ -205,11 +205,9 @@ export function TreeRow({
         {/* Reserved on leaves as well as branches, or sibling labels sit out
             of line. */}
         <span className={cx("ui-tree__twisty", open !== undefined && "is-branch")} aria-hidden />
-        {icon !== undefined && (
-          <span className="ui-tree__icon" aria-hidden>
-            {icon}
-          </span>
-        )}
+        {/* Not hidden: the slot carries a status dot mid-run, which names
+            itself. A file glyph in here has no accessible name to leak. */}
+        {icon !== undefined && <span className="ui-tree__icon">{icon}</span>}
         <span className="ui-tree__name">{children}</span>
         {end !== undefined && <span className="ui-tree__end">{end}</span>}
       </span>

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { FolderOpenIcon, GearSixIcon, PlusIcon } from "@phosphor-icons/react";
-import { Button, Input, Label, Mono, Path, Row, Select, Spacer, Stack } from "@ui";
+import { Button, Input, Label, Meta, Path, Row, Select, Spacer, Stack } from "@ui";
 import type { FileRow, Job, ProjectSummary } from "@/app/types";
 import { basename, tildePath } from "@/app/format";
 import type { ProjectTreeState } from "@/shell/useProjectTree";
@@ -77,9 +77,9 @@ export function LibraryPane({
     <aside className="lib-side">
       <div className="lib-side__head">
         <Label>Workspace</Label>
-        <Mono size="sm" tone="ink" truncate title={workspacePath}>
+        <Meta size="sm" tone="ink" truncate title={workspacePath}>
           {basename(workspacePath)}
-        </Mono>
+        </Meta>
         <Path path={tildePath(workspacePath)} className="lib-side__path" />
       </div>
 

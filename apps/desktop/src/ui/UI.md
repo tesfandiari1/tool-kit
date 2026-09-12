@@ -7,7 +7,7 @@ import { Button, Panel, Label, Stack } from "@ui";
 ```
 
 Run `pnpm dev` and open `http://localhost:1420/?gallery` to see every primitive
-in every state, in both themes.
+in every state, on either side of the theme.
 
 ## The rule that makes this a library
 
@@ -30,23 +30,27 @@ you find out months later.
 
 ## The design language
 
-Derived from AssemblyAI's published theme, retuned for a macOS instrument
-panel. Four rules decide every question:
+This is the Tristin Esfandiari system, retuned for a macOS instrument panel.
+Three colours, radius 0, no shadow, no gradient, no blur. Rules do the work
+that a shadow would: a 1px rule bounds a rectangle, and neighbours share one
+rule rather than each drawing their own. Four rules decide every question:
 
-**1. Colour is signal, never decoration.** Amber is live, green is passed, red
-is failed, cobalt is the control you press. Icons, brand marks, and folder
-glyphs are never coloured. If a colour is not carrying one of those five
-meanings, it is wrong.
+**1. Colour is signal, never decoration.** `--status-warning` is live,
+`--status-success` is passed, `--status-danger` is failed. The control you
+press is an ink fill, not a hue. Slate is a ground and a hover, never a
+highlight. Icons, brand marks, and folder glyphs are never coloured. If a
+colour is not carrying one of those meanings, it is wrong.
 
 **2. Values light up, they don't appear.** Counts and timers hold their slot as
 `tone="ghost"` glyphs and brighten when they carry meaning. `StatusDot` occupies
 the same box at every status. A window with twenty jobs finishing out of order
 must never reflow.
 
-**3. macOS first.** Real vibrancy under a scrim, SF metrics for prose, HIG focus
-rings, tabular numerals wherever a number ticks, and native `<select>` and
-`<input type=checkbox>` underneath the restyled shells so the platform's
-keyboard and VoiceOver behaviour survives.
+**3. macOS first.** Opaque surfaces that follow the macOS appearance, native
+`<select>` and `<input type=checkbox>` underneath the restyled shells so the
+platform's keyboard and VoiceOver behaviour survives, tabular figures wherever
+a number ticks, dimming when the window loses key, and one focus ring: a 1px
+`--focus-ring` outline at `3px` offset.
 
 **4. Whitespace is a grammar, not a feel.** The 4px scale is in `tokens.css`.
 Which step means what is here, and a wrong step reads as a bug rather than as a
@@ -60,7 +64,7 @@ taste difference. The gap is inversely proportional to the relationship:
 | `--s4` | 16 | panel body padding, panel to panel |
 | `--s5` | 24 | column to window edge |
 | `--s6` | 32 | empty-state optical padding only |
-| `--s7` `--s8` | 40 48 | not used in chrome at all |
+| `--s7` `--s8` | 48 64 | not used in chrome at all |
 
 **Indent is a rung, not a new value.** `Tree` steps `--s3` a level, which is
 both the "items in a list" rung and AppKit's measured `indentationPerLevel`, and
@@ -85,69 +89,86 @@ column air. Inside the border the same 30px is a bug report.
 
 ### Typography
 
-Three families, three jobs, no overlap. Getting this right matters more than
-any colour.
+Three faces, four jobs, no overlap. Getting this right matters more than any
+colour.
 
-| Family | Component | Job |
+| Face | Component | Job |
 |---|---|---|
-| JetBrains Mono, uppercase, `0.09em` | `<Label>` | Every section heading, tab, field label, and button |
-| Instrument Serif, `-0.02em` | `<Display>` | Panel titles and headline numbers, `--t-lg` and up |
-| SF Pro | `<Text>` | All prose |
-| JetBrains Mono | `<Mono>` | Paths, counts, timers, identifiers |
+| Red Hat Display 500, uppercase, `0.22em` | `<Label>` | Every section heading, tab, field label, and button |
+| TRJN DaVinci, `0.01em` | `<Display>` | Panel titles and headline numbers, `--t-lg` and up |
+| DM Sans | `<Text>` | All prose |
+| Red Hat Display, tabular figures | `<Meta>` | Paths, counts, timers, identifiers |
 
-The mono uppercase label is the signature. It carries more of the identity than
-the palette does. `<Display>` deliberately has no size below `lg`: Instrument
-Serif is drawn for display sizes and muddies at UI scale.
+The tracked caps label is the signature. It carries more of the identity than
+the palette does. `<Display>` deliberately has no size below `lg`: DaVinci is
+drawn for display sizes and muddies at UI scale.
+
+**DM Sans has no `tnum`**, and its digits are proportional, so a figure set in
+it shifts every time it ticks. Every number that changes on screen goes on
+`<Meta>` or another `--font-subhead` element with
+`font-variant-numeric: tabular-nums`. Prose keeps DM Sans.
 
 ### Themes
 
-`:root` is **graphite**, the warm charcoal desktop default.
-`[data-theme="paper"]` is **paper**, AssemblyAI's cream, for any future web
-surface. Only surfaces, ink, and accent contrast differ. Type, space, radius,
-and motion are shared, so a component styled once works in both.
+Two sides, one declaration. Every role token is a `light-dark()` pair in
+`tokens.css`, so `color-scheme` decides which side a value resolves to and no
+token is written twice. The app sets `color-scheme: light dark` and follows the
+macOS appearance: **bone** in light, **ink** in dark.
+
+`[data-theme="bone"]` and `[data-theme="ink"]` force a side by setting
+`color-scheme` alone. That is for review, in the gallery. The app never sets
+it.
 
 ## Files
 
 ```
 src/ui/
   base.css            reset, element defaults, focus ring, .ui-selectable
-  tokens.css          every colour, size, font, radius, and duration
-  fonts.css           @font-face for the two self-hosted OFL families
+  tokens.css          every colour, size, face, space, and duration
+  fonts.css           @font-face for the three self-hosted families
   cx.ts               class-name join
   index.ts            the entire public surface
   primitives/         grouped by concept, not one file per component
-    Text              Label · Display · Text · Mono
+    Text              Label · Display · Text · Meta
     Path              Path (a file path as crumbs)
     Button            Button
     Surface           Panel · Well · Divider
     Badge             Badge · StatusDot
-    Field             Field · Input · TextInput · Select · Switch
+    Field             Field · Input · Select · Switch
     Layout            Stack · Row · Spacer
     Meter             Meter
     Segmented         Segmented
     Sheet             Sheet (a modal card on a native <dialog>)
+    Toast             Toast (a status bar at the foot of the window)
     Tree              Tree · TreeRow, with treeKeys.ts beside them
   gallery/            the specimen page
+scripts/lint-tokens.sh  the token gate, run by `pnpm lint`
 ```
 
 Primitives are grouped by concept because they are read and changed together.
 Each `.tsx` imports its own `.css`.
 
-### One pair that is easy to confuse
+`Input` takes an optional `label` and `hint` and wraps itself in `Field` when
+either is given, so most settings need one element. Pass neither when the
+control shares a row with something else and its own `Field` would force it
+onto a line of its own.
 
-**`Input` vs `TextInput`.** `TextInput` is `Field` + `Input`, which is what most
-settings want. Reach for the bare `Input` when the control shares a row with
-something else (a Save button, a unit suffix) and `TextInput`'s built-in `Field`
-would force it onto its own line.
+**Stacked panels share a rule.** Two panels in a column each draw a 1px border,
+which reads as a 2px seam. The call site pulls the second up with
+`margin-block-start: -1px`.
 
 ## Loading order
 
-`src/shell/App.css` deliberately does **not** `@import "../ui/base.css"`. `index.ts`
-already loads it, and importing from both places makes Vite emit the whole 16KB
-token layer into two chunks with two competing `:root` blocks.
+Cascade layers decide, not import order. `@layer ui, app;` is declared at the
+top of both `base.css` and `App.css`, every file under `primitives/` wraps its
+rules in `@layer ui`, and `App.css` wraps its own in `@layer app`. An app rule
+therefore beats a library rule of any specificity, whichever file Vite emits
+first. `Gallery.css` is deliberately unlayered, so the specimen page wins over
+both.
 
-That means `App.tsx` must import `@ui` **before** `./App.css`, so the library's
-`:root` lands first and the app's overrides win. Keep that order.
+`src/shell/App.css` still does **not** `@import "../ui/base.css"`. `index.ts`
+already loads it, and importing from both places makes Vite emit the whole token
+layer into two chunks with two competing `:root` blocks.
 
 ## Extending it
 
@@ -156,8 +177,8 @@ That means `App.tsx` must import `@ui` **before** `./App.css`, so the library's
    what it means.
 2. **Add the specimen in the same commit.** A primitive with no entry in
    `gallery/Gallery.tsx` cannot be reviewed, so it does not exist.
-3. **Check both themes** before calling it done. The toggle is in the gallery's
-   top bar.
+3. **Check all three theme settings** before calling it done: system, bone and
+   ink. The switch is in the gallery's top bar.
 4. **Spacing comes from `--s1`..`--s8` only**, on the grammar above. The 4px
    grid has one exception, and it is not a spacing value: chrome measured
    against something macOS draws itself. The traffic lights sit at a fixed
@@ -166,6 +187,11 @@ That means `App.tsx` must import `@ui` **before** `./App.css`, so the library's
    `useZoom` publishes `--zoom` on `:root`. Nothing else may hold a literal.
 5. **Keep native elements underneath.** A restyled `<select>` keeps type-ahead
    and VoiceOver for free. A div pretending to be one does not.
+6. **`pnpm lint:tokens` is the guard**, and it runs inside `pnpm lint`. It fails
+   on a hex colour, an `rgba(`, a `box-shadow`, a `border-radius`, a
+   `backdrop-filter`, a literal font family, or a deleted token name anywhere
+   under `src/`. Only `tokens.css`, `fonts.css` and the gallery's one
+   `.gal__dark` line are exempt.
 
 ## What is deliberately absent
 

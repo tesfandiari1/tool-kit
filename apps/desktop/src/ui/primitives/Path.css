@@ -1,34 +1,37 @@
-/* Path: a file path as crumbs. */
+@layer ui {
+  /* Path: a file path as crumbs. */
 
-.ui-path {
-  display: flex;
-  align-items: baseline;
-  gap: var(--s1);
-  min-width: 0;
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
-  line-height: var(--lh-snug);
-  white-space: nowrap;
-  -webkit-user-select: text;
-  user-select: text;
-}
+  .ui-path {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s1);
+    min-width: 0;
+    font-family: var(--font-subhead);
+    font-size: var(--t-xs);
+    font-variant-numeric: tabular-nums;
+    line-height: var(--lh-snug);
+    white-space: nowrap;
+    -webkit-user-select: text;
+    user-select: text;
+  }
 
-/* The trail gives way first and the file last, so a narrow pane ends up
-   showing the one crumb worth reading. */
-.ui-path__crumb {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-  flex-shrink: 100;
-  color: var(--ink-3);
-}
+  /* The trail gives way first and the file last, so a narrow pane ends up
+     showing the one crumb worth reading. */
+  .ui-path__crumb {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    flex-shrink: 100;
+    color: var(--text-mute);
+  }
 
-.ui-path__crumb--leaf {
-  color: var(--ink-2);
-  flex-shrink: 1;
-}
+  .ui-path__crumb--leaf {
+    color: var(--text-body);
+    flex-shrink: 1;
+  }
 
-.ui-path__sep {
-  color: var(--ink-ghost);
-  flex-shrink: 0;
+  .ui-path__sep {
+    color: var(--text-ghost);
+    flex-shrink: 0;
+  }
 }

@@ -1,0 +1,31 @@
+@layer ui {
+  /* An ink bar at the foot of the window, whatever the theme. The tone is the
+     left rule and nothing else: a coloured panel would be decoration. */
+  .ui-toast {
+    position: fixed;
+    bottom: var(--s5);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 60;
+
+    display: flex;
+    align-items: center;
+    min-height: 40px;
+    padding: var(--s2) var(--s4);
+    /* Never wider than the 560px window it floats over. */
+    max-width: min(460px, calc(100% - 2 * var(--s5)));
+
+    background: var(--toast-bg);
+    color: var(--toast-fg);
+    border: 1px solid var(--rule);
+    border-left: 4px solid var(--status-info);
+
+    font-family: var(--font-body);
+    font-size: var(--t-sm);
+    line-height: var(--lh-snug);
+  }
+
+  .ui-toast--danger {
+    border-left-color: var(--status-danger);
+  }
+}

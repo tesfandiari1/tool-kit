@@ -4,8 +4,8 @@ import { cx } from "../cx";
 import { Label } from "./Text";
 import "./Field.css";
 
-/// A label and hint around any control. `TextInput`, `Select` and `Switch`
-/// build it in.
+/// A label and hint around any control. `Input`, `Select` and `Switch` build
+/// it in.
 export interface FieldProps {
   label?: ReactNode;
   hint?: ReactNode;
@@ -50,38 +50,38 @@ export function Field({
 
 export interface InputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "size"> {
   invalid?: boolean;
-}
-
-/// No label or hint: for an input that shares its row with another control.
-export function Input({ invalid = false, className, ...rest }: InputProps) {
-  return (
-    <input
-      aria-invalid={invalid || undefined}
-      className={cx("ui-input", invalid && "ui-input--invalid", className)}
-      {...rest}
-    />
-  );
-}
-
-export interface TextInputProps extends InputProps {
   label?: ReactNode;
   hint?: ReactNode;
   error?: ReactNode;
 }
 
-/// `Field` + `Input`, which is the shape most settings want.
-export function TextInput({
+/// Bare when it shares a row with another control, wrapped in `Field` the
+/// moment a label, hint or error is given.
+export function Input({
+  invalid = false,
   label,
   hint,
   error,
-  invalid = false,
+  className,
   id,
   ...rest
-}: TextInputProps) {
+}: InputProps) {
   const generated = useId();
   const inputId = id ?? generated;
   const msgId = `${inputId}-msg`;
   const hasMessage = Boolean(error ?? hint);
+  const control = (
+    <input
+      id={inputId}
+      aria-invalid={invalid || Boolean(error) || undefined}
+      aria-describedby={hasMessage ? msgId : undefined}
+      className={cx("ui-input", (invalid || Boolean(error)) && "ui-input--invalid", className)}
+      {...rest}
+    />
+  );
+
+  if (!label && !hasMessage) return control;
+
   return (
     <Field
       label={label}
@@ -90,12 +90,7 @@ export function TextInput({
       htmlFor={inputId}
       messageId={hasMessage ? msgId : undefined}
     >
-      <Input
-        id={inputId}
-        invalid={invalid || Boolean(error)}
-        aria-describedby={hasMessage ? msgId : undefined}
-        {...rest}
-      />
+      {control}
     </Field>
   );
 }

@@ -140,7 +140,7 @@ export function OnboardingGate({
             <Stack gap={2}>
               <Path path={tildePath(candidate.path)} />
               <Row gap={2}>
-                <Button variant="link" onClick={() => void choose()}>
+                <Button variant="ghost" onClick={() => void choose()}>
                   Choose different folder
                 </Button>
               </Row>

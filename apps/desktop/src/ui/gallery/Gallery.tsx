@@ -9,7 +9,7 @@ import {
   Input,
   Label,
   Meter,
-  Mono,
+  Meta,
   Panel,
   Path,
   Row,
@@ -24,7 +24,7 @@ import {
   Switch,
   Tabs,
   Text,
-  TextInput,
+  Toast,
   Tree,
   TreeRow,
   Well,
@@ -54,7 +54,7 @@ Cause is not defined. See \`Exhibit C\` for the notice procedure.
 `;
 
 const THEME_KEY = "toolkit.gallery.theme";
-type Theme = "graphite" | "paper";
+type Theme = "system" | "bone" | "ink";
 
 export function Gallery() {
   const [tab, setTab] = useState("agreement");
@@ -63,7 +63,12 @@ export function Gallery() {
   const [source, setSource] = useState(SAMPLE);
 
   const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem(THEME_KEY) as Theme | null) ?? "graphite",
+    () => {
+      // A value from an older gallery (graphite, paper) must not leave every
+      // option unselected.
+      const stored = localStorage.getItem(THEME_KEY);
+      return stored === "bone" || stored === "ink" ? stored : "system";
+    },
   );
   // Interactive specimens: a segmented control and a disclosure are reviewable
   // only if you can operate them.
@@ -71,8 +76,8 @@ export function Gallery() {
 
   useEffect(() => {
     const root = document.documentElement;
-    if (theme === "paper") root.setAttribute("data-theme", "paper");
-    else root.removeAttribute("data-theme");
+    if (theme === "system") root.removeAttribute("data-theme");
+    else root.setAttribute("data-theme", theme);
     localStorage.setItem(THEME_KEY, theme);
     return () => {
       root.removeAttribute("data-theme");
@@ -87,42 +92,44 @@ export function Gallery() {
           <Badge>v0.1</Badge>
           <Spacer />
           <Label>Theme</Label>
-          <Button
+          {/* The theme switch is also the Segmented specimen at `sm`. */}
+          <Segmented
+            label="Theme"
             size="sm"
-            variant={theme === "graphite" ? "primary" : "quiet"}
-            onClick={() => {
-              setTheme("graphite");
-            }}
-          >
-            Graphite
-          </Button>
-          <Button
-            size="sm"
-            variant={theme === "paper" ? "primary" : "quiet"}
-            onClick={() => {
-              setTheme("paper");
-            }}
-          >
-            Paper
-          </Button>
+            value={theme}
+            onChange={setTheme}
+            options={[
+              { value: "system" as const, label: "System" },
+              { value: "bone" as const, label: "Bone" },
+              { value: "ink" as const, label: "Ink" },
+            ]}
+          />
         </div>
 
-        <Section title="Colour" note="Signal only. Amber live, green passed, red failed.">
+        <Section
+          title="Colour"
+          note="The role layer, and nothing else. Warning is live, success passed, danger failed."
+        >
           <div className="gal__swatches">
             {(
               [
-                ["--surface", "surface"],
-                ["--surface-raised", "surface raised"],
-                ["--surface-well", "surface well"],
-                ["--rule-lit", "rule"],
-                ["--ink", "ink"],
-                ["--ink-2", "ink 2"],
-                ["--ink-3", "ink 3"],
-                ["--accent", "accent"],
-                ["--accent-quiet", "accent quiet"],
-                ["--live", "live"],
-                ["--pass", "pass"],
-                ["--fault", "fault"],
+                ["--surface-page", "surface page"],
+                ["--surface-lift", "surface lift"],
+                ["--surface-sunk", "surface sunk"],
+                ["--rule", "rule"],
+                ["--rule-soft", "rule soft"],
+                ["--text-body", "text body"],
+                ["--text-soft", "text soft"],
+                ["--text-mute", "text mute"],
+                ["--text-ghost", "text ghost"],
+                ["--link-hover", "link hover"],
+                ["--focus-ring", "focus ring"],
+                ["--selection", "selection"],
+                ["--toast-bg", "toast bg"],
+                ["--status-info", "status info"],
+                ["--status-success", "status success"],
+                ["--status-warning", "status warning"],
+                ["--status-danger", "status danger"],
               ] as const
             ).map(([token, name]) => (
               <figure key={token} className="gal__swatch">
@@ -135,16 +142,15 @@ export function Gallery() {
           </div>
         </Section>
 
-        <Section title="Typography" note="Three families, three jobs, no overlap.">
+        <Section title="Typography" note="Three faces, three jobs, no overlap.">
           <div className="gal__specimen">
             <Stack gap={4}>
               <Display size="3xl">Less time configuring</Display>
               <Display size="2xl">Convert 24 files</Display>
               <Display size="xl">Run history</Display>
               <Divider />
-              <Label>Label — the signature</Label>
+              <Label>Label, the signature</Label>
               <Label tone="strong">Label strong</Label>
-              <Label tone="accent">Label accent</Label>
               <Divider />
               <Text size="lg">Large body copy for a lead paragraph.</Text>
               <Text>
@@ -158,33 +164,35 @@ export function Gallery() {
                 Ghost copy, holding a slot until it carries meaning.
               </Text>
               <Divider />
-              <Mono>~/Deals/Acme/2024-Q3_board-deck.pdf</Mono>
-              <Mono tone="ink">00:04:18</Mono>
-              <Mono tone="ghost">--:--:--</Mono>
+              <Meta>~/Deals/Acme/2024-Q3_board-deck.pdf</Meta>
+              {/* Meta is the only face with tabular figures, so these two rows
+                  measure the same width and a running timer never jitters. */}
+              <Meta tone="ink">00:04:18</Meta>
+              {/* Minus signs, not hyphens: the face gives U+2212 a digit's width. */}
+              <Meta tone="ghost">−−:−−:−−</Meta>
             </Stack>
           </div>
         </Section>
 
-        <Section title="Button" note="Every control wears the mono label treatment.">
+        <Section title="Button" note="Every control wears the same tracked caps label.">
           <div className="gal__specimen">
             <Stack gap={4}>
               <Row gap={2} wrap>
                 <Button variant="primary">Convert 3 files</Button>
-                <Button variant="quiet">Stop</Button>
+                <Button variant="secondary">Stop</Button>
                 <Button variant="ghost">Clear</Button>
               </Row>
               <Row gap={2} wrap>
                 <Button variant="primary" size="sm">
                   Small
                 </Button>
-                <Button variant="quiet" size="sm">
-                  Small quiet
+                <Button variant="secondary" size="sm">
+                  Small secondary
                 </Button>
                 <Button variant="primary" disabled>
                   Disabled
                 </Button>
-                {/* link: a text action with no box, still label-treated. */}
-                <Button variant="link">Clear history</Button>
+                <Button variant="ghost">Clear history</Button>
               </Row>
               {/* What the run screen ships: the lg actuator, its busy state,
                   and icon-only chrome. */}
@@ -195,18 +203,29 @@ export function Gallery() {
                 <Button variant="primary" size="lg" busy icon="◌">
                   Working… 3 of 6
                 </Button>
-                <Button variant="quiet" size="lg" icon="■">
+                <Button variant="secondary" size="lg" icon="■">
                   Stop
                 </Button>
               </Row>
               <Row gap={2} wrap>
                 <Button variant="ghost" iconOnly icon="⚙" aria-label="Settings" />
                 <Button variant="ghost" size="sm" iconOnly icon="◉" aria-label="Preview" />
-                <Button variant="quiet" iconOnly icon="⧉" aria-label="Copy" />
+                <Button variant="secondary" iconOnly icon="⧉" aria-label="Copy" />
               </Row>
               <Button variant="primary" block>
                 Block
               </Button>
+              {/* Inverse only ever sits on a dark band, so the specimen brings
+                  its own. */}
+              <div className="gal__dark">
+                <Row gap={2} wrap>
+                  <Button variant="inverse">Choose folder</Button>
+                  <Button variant="inverse" size="sm">
+                    Small
+                  </Button>
+                  <Button variant="inverse" iconOnly icon="⧉" aria-label="Copy" />
+                </Row>
+              </div>
             </Stack>
           </div>
         </Section>
@@ -225,11 +244,14 @@ export function Gallery() {
               <Divider />
               <Row gap={2} wrap>
                 <Badge>Universal-3.5 Pro</Badge>
-                <Badge tone="pass">Done</Badge>
-                <Badge square>24</Badge>
-                {/* Rule 2: the empty square badge is the same width as the one
+                <Badge tone="info">Queued</Badge>
+                <Badge tone="success">Done</Badge>
+                <Badge tone="warning">Retrying</Badge>
+                <Badge tone="danger">Failed</Badge>
+                <Badge count>24</Badge>
+                {/* Rule 2: the empty count badge is the same width as the one
                     beside it, so a count landing never moves its neighbours. */}
-                <Badge square>{""}</Badge>
+                <Badge count>{""}</Badge>
               </Row>
               <Divider />
               <Stack gap={2}>
@@ -246,8 +268,14 @@ export function Gallery() {
           <div className="gal__grid2">
             <div className="gal__specimen">
               <Stack gap={4}>
-                <TextInput label="Pipeline ID" placeholder="pl_…" defaultValue="pl_7f2a91" />
-                <TextInput
+                {/* Label and hint wrap the input in a Field on their own. */}
+                <Input
+                  label="Pipeline ID"
+                  placeholder="pl_…"
+                  defaultValue="pl_7f2a91"
+                  hint="A pl_ id sends Convert through that pipeline instead."
+                />
+                <Input
                   label="API key"
                   placeholder="Required"
                   error="Datalab rejected this key."
@@ -274,7 +302,7 @@ export function Gallery() {
                 <Switch label="High accuracy" />
                 <Switch label="Disabled setting" disabled />
                 <Divider />
-                <TextInput label="Disabled" defaultValue="Locked" disabled />
+                <Input label="Disabled" defaultValue="Locked" disabled />
                 {/* Field + bare Input, for a control that shares its row. */}
                 <Field label="API key" htmlFor="gal-key">
                   <Row gap={2}>
@@ -316,7 +344,7 @@ export function Gallery() {
         <Section title="Surfaces" note="A panel is a titled region; a well is a recessed one.">
           <Stack gap={4}>
             <div className="gal__grid2">
-              <Panel title="Queue" actions={<Badge square>6</Badge>}>
+              <Panel title="Queue" actions={<Badge count>6</Badge>}>
                 <Stack gap={3}>
                   {(
                     [
@@ -327,17 +355,17 @@ export function Gallery() {
                   ).map(({ name, tone }) => (
                     <Row key={name} gap={3}>
                       <StatusDot tone={tone} label={tone} />
-                      <Mono truncate>{name}</Mono>
+                      <Meta truncate>{name}</Meta>
                       <Spacer />
-                      <Mono size="xs" tone="ghost">
+                      <Meta size="xs" tone="ghost">
                         00:12
-                      </Mono>
+                      </Meta>
                     </Row>
                   ))}
                 </Stack>
               </Panel>
 
-              <Panel tone="raised" title="Output">
+              <Panel title="Output">
                 <Well>
                   <Text size="sm" tone="muted">
                     # Board deck
@@ -405,8 +433,8 @@ export function Gallery() {
               <Text size="xs" tone="faint">
                 Line numbers stay aligned under soft wrap, which is the whole reason
                 this is CodeMirror and not a textarea. Highlighting spends no colour:
-                structure is drawn with the ink ramp and weight, so amber, green and
-                red keep meaning exactly one thing each.
+                structure is drawn with the text ramp and weight, so the status
+                colours keep meaning exactly one thing each.
               </Text>
             </Stack>
 
@@ -448,6 +476,22 @@ export function Gallery() {
         </Section>
 
         <Section
+          title="Toast"
+          note="The one channel for a message that reaches no row. The tone is the left rule and nothing else."
+        >
+          <div className="gal__grid2">
+            {/* Each host is its own containing block, or both bars would stack
+                at the foot of the window. */}
+            <div className="gal__toasthost">
+              <Toast>Output folder set to ~/Deals/Acme.</Toast>
+            </div>
+            <div className="gal__toasthost">
+              <Toast tone="danger">Datalab rejected this key.</Toast>
+            </div>
+          </div>
+        </Section>
+
+        <Section
           title="Sheet"
           note="A native dialog in the top layer. Escape closes it, Tab stays inside it, and the toast comes through the overlay slot."
         >
@@ -469,8 +513,9 @@ export function Gallery() {
   );
 }
 
-/// The sheet, its drag strip, and the toast that has to draw above it. The
-/// toast is a plain fixed box, which outside the dialog would be invisible.
+/// The sheet, its drag strip, and the toast that has to draw above it. A fixed
+/// toast rendered outside the dialog sits under the top layer and is invisible,
+/// so the Toast primitive goes through the overlay slot instead.
 function SheetSpecimen() {
   const [open, setOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -521,11 +566,11 @@ function SheetSpecimen() {
             Close
           </Button>
         }
-        overlay={toast !== null && <div className="gal__toast">{toast}</div>}
+        overlay={toast !== null && <Toast>{toast}</Toast>}
       >
         <div className="gal__sheetbody">
           <Stack gap={4}>
-            <TextInput label="Datalab key" placeholder="••••••••" />
+            <Input label="Datalab key" placeholder="••••••••" />
             <Select
               label="Output format"
               defaultValue="markdown"
@@ -683,13 +728,13 @@ function TreeSpecimen() {
           title={node.result === undefined ? node.name : `${node.name} → ${node.result}`}
           end={
             node.result !== undefined ? (
-              <Mono size="xs" tone="ghost">
+              <Meta size="xs" tone="ghost">
                 {node.result.split(".").pop()?.toUpperCase()}
-              </Mono>
+              </Meta>
             ) : node.convertible === true ? (
               /* The in-row control: out of the tab order, because Enter on the
                  row is the keyboard route to the same thing. */
-              <Button variant="link" size="sm" tabIndex={-1}>
+              <Button variant="ghost" size="sm" tabIndex={-1}>
                 Convert
               </Button>
             ) : undefined
@@ -742,14 +787,14 @@ function TreeSpecimen() {
           {rows(TREE_SPEC, 0)}
         </Tree>
       </div>
-      <Mono size="xs" tone="ghost">
+      <Meta size="xs" tone="ghost">
         {last}
-      </Mono>
+      </Meta>
       <Text size="xs" tone="faint">
         Click a row, then drive it from the keyboard. The arrows select and open nothing, Right
         descends into a folder that is already open, Left climbs from a file, Option+Right takes the
         whole subtree, Space inspects without scrolling the pane, and typing jumps. Selection is a
-        surface step, never the accent: cobalt is the control you press, and a selected row is a
+        surface step, never a colour: an ink fill is the control you press, and a selected row is a
         statement of place.
       </Text>
     </Stack>
@@ -820,9 +865,9 @@ function SplitPaneSpecimen() {
         <Button size="sm" onClick={() => { setCollapsed((c) => !c); }}>
           {collapsed ? "Open the seam" : "Collapse"}
         </Button>
-        <Mono size="sm" tone={layout ? "default" : "ghost"}>
+        <Meta size="sm" tone={layout ? "default" : "ghost"}>
           {layout ? `${layout.start.toFixed(0)} / ${layout.end.toFixed(0)}` : "-- / --"}
-        </Mono>
+        </Meta>
       </Row>
     </Stack>
   );

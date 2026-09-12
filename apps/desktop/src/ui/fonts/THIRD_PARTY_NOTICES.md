@@ -1,23 +1,22 @@
 # Bundled fonts
 
-Both families are licensed under the SIL Open Font License 1.1, which permits
-bundling and redistribution inside an application. Files here are the `latin`
-subset served by Google Fonts, downloaded and vendored so the app renders with
-no network access.
+The families listed here are licensed under the SIL Open Font License 1.1,
+which permits bundling and redistribution inside an application. They are
+vendored so the app renders with no network access.
 
-## Instrument Serif
+## Red Hat Display
 
-- File: `InstrumentSerif-Regular.woff2`
-- Copyright: Rodrigo Fuenzalida and Instrument
+- File: `RedHatDisplay-Variable.ttf` (variable, weight 300–900)
+- Copyright: Red Hat, Inc.
 - License: SIL Open Font License 1.1
-- Source: https://github.com/Instrument/instrument-serif
+- Source: https://github.com/RedHatOfficial/RedHatFont
 
-## JetBrains Mono
+## DM Sans
 
-- File: `JetBrainsMono-Variable.woff2` (variable, weight 100–800)
-- Copyright: JetBrains s.r.o.
+- File: `DMSans-Variable.ttf` (variable, weight 100–1000)
+- Copyright: Colophon Foundry, Jonny Pinhorn and Indian Type Foundry
 - License: SIL Open Font License 1.1
-- Source: https://github.com/JetBrains/JetBrainsMono
+- Source: https://github.com/googlefonts/dm-fonts
 
 The OFL requires that these fonts not be sold on their own and that any
 modified version be released under the same license with a different name.

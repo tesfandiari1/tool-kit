@@ -2,7 +2,7 @@
   height: 100%;
   overflow: auto;
   /* Opaque: a browser tab has no NSVisualEffectView behind it. */
-  background: var(--surface-solid);
+  background: var(--surface-page);
   padding: var(--s6) var(--s6) var(--s8);
   -webkit-user-select: text;
   user-select: text;
@@ -22,9 +22,8 @@
   gap: var(--s3);
   margin: calc(var(--s6) * -1) calc(var(--s6) * -1) var(--s6);
   padding: var(--s3) var(--s6);
-  background: var(--surface-raised);
+  background: var(--surface-lift);
   border-bottom: 1px solid var(--rule);
-  backdrop-filter: blur(12px);
 }
 
 .gal__section {
@@ -44,8 +43,7 @@
 .gal__specimen {
   padding: var(--s4);
   border: 1px solid var(--rule);
-  border-radius: var(--r-panel);
-  background: var(--surface);
+  background: var(--surface-page);
 }
 
 .gal__swatches {
@@ -56,7 +54,6 @@
 
 .gal__swatch {
   border: 1px solid var(--rule);
-  border-radius: var(--r-control);
   overflow: hidden;
 }
 
@@ -67,7 +64,7 @@
 .gal__swatch figcaption {
   padding: var(--s2);
   border-top: 1px solid var(--rule);
-  background: var(--surface-well);
+  background: var(--surface-sunk);
 }
 
 .gal__grid2 {
@@ -82,7 +79,7 @@
   min-height: 0;
   display: grid;
   place-items: center;
-  background: var(--surface-well);
+  background: var(--surface-sunk);
 }
 
 /* `--bar-h` is set here so the specimen shows the band the card clears. */
@@ -100,20 +97,20 @@
   padding: var(--s4);
 }
 
-/* Fixed, and drawn from inside the dialog: the top layer would hide it. */
-.gal__toast {
-  position: fixed;
-  bottom: var(--s5);
-  left: 50%;
-  transform: translateX(-50%);
-  padding: var(--s2) var(--s4);
-  border: 1px solid var(--rule-lit);
-  border-radius: var(--r-panel);
-  background: var(--surface-raised);
-  color: var(--ink);
-  font-size: var(--t-sm);
-  z-index: 60;
+/* Toast is fixed to the foot of the window. A transform makes this box the
+   containing block, so a specimen sits in the page instead of over it. */
+.gal__toasthost {
+  position: relative;
+  transform: translateZ(0);
+  height: 120px;
+  border: 1px solid var(--rule);
+  background: var(--surface-page);
 }
+
+/* The one palette token outside tokens.css: `inverse` only reads on a dark
+   band, so the specimen brings the band with it. One line, because that is
+   what lint-tokens.sh exempts. */
+.gal__dark { background: var(--ink); padding: var(--s4); }
 
 /* Reviewed at the pane's floor, which is where a name truncates. */
 .gal__tree {

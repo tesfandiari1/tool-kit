@@ -10,8 +10,8 @@ export interface PathProps {
 
 /// A file path as crumbs, with the last one the file.
 ///
-/// Mono, because paths are identifiers. The trail is faint and the file is not:
-/// you scan for the file and read the trail only when you need it.
+/// The subhead face, because paths are identifiers. The trail is faint and the
+/// file is not: you scan for the file and read the trail only when you need it.
 export function Path({ path, className }: PathProps) {
   const crumbs = pathCrumbs(path);
   const last = crumbs.length - 1;

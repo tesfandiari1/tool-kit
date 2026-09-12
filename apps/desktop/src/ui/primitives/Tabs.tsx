@@ -24,7 +24,8 @@ export interface TabsProps {
 
 /// A strip of open documents, and a real `tablist` unlike `Segmented`, because
 /// each tab controls a panel. The caller owns that panel and connects it with
-/// `id={`ui-tabpanel-${id}`}` and `aria-labelledby={`ui-tab-${id}`}`.
+/// `id={`ui-tabpanel-${encodeURIComponent(id)}`}` and
+/// `aria-labelledby={`ui-tab-${encodeURIComponent(id)}`}`.
 ///
 /// Keyboard follows the APG, and activation follows focus because switching a
 /// document is instant.
@@ -73,14 +74,17 @@ export function Tabs({ items, value, onChange, onClose, label, end, className }:
     >
       {items.map((t) => {
         const active = t.id === value;
+        /// The id is a path, and a path with a space is not a valid HTML id,
+        /// so `aria-controls` would point at nothing.
+        const slug = encodeURIComponent(t.id);
         return (
           <div key={t.id} className={cx("ui-tabs__tab", active && "is-active")}>
             <button
               type="button"
               role="tab"
-              id={`ui-tab-${t.id}`}
+              id={`ui-tab-${slug}`}
               aria-selected={active}
-              aria-controls={`ui-tabpanel-${t.id}`}
+              aria-controls={`ui-tabpanel-${slug}`}
               /// Roving tabindex: the strip is one stop, arrows move within it.
               tabIndex={active ? 0 : -1}
               className="ui-tabs__label"

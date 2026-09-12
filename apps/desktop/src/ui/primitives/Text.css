@@ -1,111 +1,117 @@
-/* Typography primitives. Each family has exactly one job here. */
+@layer ui {
+  /* Typography primitives. Each family has exactly one job here. */
 
-/* --- Label: mono, uppercase, tracked. The language's signature -------- */
-.ui-label {
-  font-family: var(--font-mono);
-  font-size: var(--t-label);
-  font-weight: var(--weight-medium);
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
-  line-height: var(--lh-tight);
-  color: var(--ink-3);
-  margin: 0;
-}
+  /* One caps rule for every tracked uppercase surface in the system. Zero
+     specificity, so each component still owns its colour, box and states. */
+  :where(.ui-label, .ui-btn, .ui-tabs__label, .ui-seg__item, .ui-badge) {
+    font-family: var(--font-subhead);
+    font-size: var(--t-label);
+    font-weight: var(--weight-subhead);
+    letter-spacing: var(--track-label);
+    text-transform: uppercase;
+    line-height: 1;
+  }
 
-.ui-label--strong {
-  color: var(--ink-2);
-}
-.ui-label--accent {
-  color: var(--accent-quiet);
-}
+  /* --- Label: the language's signature ---------------------------------- */
+  .ui-label {
+    color: var(--text-mute);
+    margin: 0;
+  }
 
-/* --- Display: never below --t-lg, where this face muddies ------------- */
-.ui-display {
-  font-family: var(--font-display);
-  font-weight: var(--weight-normal);
-  letter-spacing: var(--track-display);
-  line-height: var(--lh-tight);
-  color: var(--ink);
-  margin: 0;
-}
+  .ui-label--strong {
+    color: var(--text-soft);
+  }
 
-.ui-display--lg {
-  font-size: var(--t-xl);
-}
-.ui-display--xl {
-  font-size: var(--t-2xl);
-}
-.ui-display--2xl {
-  font-size: var(--t-3xl);
-}
-.ui-display--3xl {
-  font-size: var(--t-4xl);
-}
+  /* --- Display: never below --t-lg, where this face muddies ------------- */
+  .ui-display {
+    font-family: var(--font-display);
+    /* One weight. Without this an h2 fakes a bold the face does not have. */
+    font-weight: 400;
+    letter-spacing: var(--track-display);
+    line-height: var(--lh-tight);
+    color: var(--text-body);
+    margin: 0;
+  }
 
-/* --- Text: SF Pro, all prose ------------------------------------------ */
-.ui-text {
-  font-family: var(--font-body);
-  line-height: var(--lh-body);
-  color: var(--ink);
-  margin: 0;
-}
+  .ui-display--lg {
+    font-size: var(--t-xl);
+  }
+  .ui-display--xl {
+    font-size: var(--t-2xl);
+  }
+  .ui-display--2xl {
+    font-size: var(--t-3xl);
+  }
+  .ui-display--3xl {
+    font-size: var(--t-4xl);
+  }
 
-.ui-text--xs {
-  font-size: var(--t-xs);
-}
-.ui-text--sm {
-  font-size: var(--t-sm);
-}
-.ui-text--base {
-  font-size: var(--t-base);
-}
-.ui-text--lg {
-  font-size: var(--t-lg);
-  line-height: var(--lh-snug);
-}
+  /* --- Text: all prose -------------------------------------------------- */
+  .ui-text {
+    font-family: var(--font-body);
+    line-height: var(--lh-body);
+    color: var(--text-body);
+    margin: 0;
+  }
 
-.ui-text--muted {
-  color: var(--ink-2);
-}
-.ui-text--faint {
-  color: var(--ink-3);
-}
-/* Values hold their slot and brighten (UI.md rule 2). */
-.ui-text--ghost {
-  color: var(--ink-ghost);
-}
-.ui-text--fault {
-  color: var(--fault);
-}
+  .ui-text--xs {
+    font-size: var(--t-xs);
+  }
+  .ui-text--sm {
+    font-size: var(--t-sm);
+  }
+  .ui-text--base {
+    font-size: var(--t-base);
+  }
+  .ui-text--lg {
+    font-size: var(--t-lg);
+    line-height: var(--lh-snug);
+  }
 
-/* --- Mono: anything the eye scans in a column ------------------------- */
-.ui-mono {
-  font-family: var(--font-mono);
-  font-size: var(--t-sm);
-  letter-spacing: var(--track-mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--ink-2);
-  margin: 0;
-}
+  .ui-text--muted {
+    color: var(--text-soft);
+  }
+  .ui-text--faint {
+    color: var(--text-mute);
+  }
+  /* Values hold their slot and brighten (UI.md rule 2). */
+  .ui-text--ghost {
+    color: var(--text-ghost);
+  }
+  .ui-text--fault {
+    color: var(--status-danger);
+  }
 
-.ui-mono--xs {
-  font-size: var(--t-xs);
-}
-.ui-mono--sm {
-  font-size: var(--t-sm);
-}
+  /* --- Meta: anything the eye scans in a column ------------------------- */
+  /* The subhead face is the only one with `tnum`, so every figure that ticks
+     is set here and never on the body face. */
+  .ui-meta {
+    font-family: var(--font-subhead);
+    font-size: var(--t-sm);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-soft);
+    margin: 0;
+  }
 
-.ui-mono--ink {
-  color: var(--ink);
-}
-.ui-mono--ghost {
-  color: var(--ink-ghost);
-}
+  .ui-meta--xs {
+    font-size: var(--t-xs);
+  }
+  .ui-meta--sm {
+    font-size: var(--t-sm);
+  }
 
-/* Middle-truncate a path: keep the filename, drop the middle of the folders. */
-.ui-truncate {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
+  .ui-meta--ink {
+    color: var(--text-body);
+  }
+  .ui-meta--ghost {
+    color: var(--text-ghost);
+  }
+
+  /* Middle-truncate a path: keep the filename, drop the middle of the folders. */
+  .ui-truncate {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
 }

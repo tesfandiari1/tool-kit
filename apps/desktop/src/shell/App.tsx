@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileTextIcon, FolderOpenIcon, PlayIcon, XIcon } from "@phosphor-icons/react";
-import { Button, Mono, Segmented, Sheet, SplitPane, StatusDot } from "@ui";
+import { Button, Meta, Segmented, Sheet, SplitPane, StatusDot, Toast } from "@ui";
 import { basename, fmtElapsed } from "@/app/format";
 import { barStatus, runCounter } from "./barStatus";
 import { autoOpenTarget, newlyDone, resultDirs, terminalIds } from "./runOutcome";
@@ -164,7 +164,7 @@ export default function App() {
       try {
         return await fn();
       } catch (e) {
-        showToast(String(e));
+        showToast(String(e), "danger");
         return undefined;
       }
     },
@@ -271,7 +271,7 @@ export default function App() {
       .catch((e: unknown) => {
         // A workspace moved in Finder fails here, and unsaid it reads as an
         // empty sidebar.
-        if (live) showToast(String(e));
+        if (live) showToast(String(e), "danger");
       });
     return () => {
       live = false;
@@ -456,7 +456,7 @@ export default function App() {
         setRunsFinished((n) => n + 1);
         return landed;
       } catch (e) {
-        showToast(String(e));
+        showToast(String(e), "danger");
         return [];
       }
     },
@@ -476,20 +476,20 @@ export default function App() {
         setTerminalAtStart(terminalIds(jobsRef.current));
         out = await commands.convertOne(row.rel);
       } catch (e) {
-        showToast(String(e));
+        showToast(String(e), "danger");
         return;
       }
       if (out.kind === "blocked") {
         // No job takes this file: it is gone, or nothing converts its kind. Run
         // resolves neither, so staging it persists a path the host just refused.
         if (out.reason === "not_convertible") {
-          showToast(out.message ?? "Cannot convert this file");
+          showToast(out.message ?? "Cannot convert this file", "danger");
           return;
         }
         // Staging is not optional for the rest: the Run hint chain is gated on
         // a non-empty selection, so bouncing without it lands on an empty view.
         addPaths([row.path]);
-        showToast(out.message ?? "Cannot convert this file yet");
+        showToast(out.message ?? "Cannot convert this file yet", "danger");
         setView("run");
         return;
       }
@@ -513,7 +513,7 @@ export default function App() {
       try {
         landed = await commands.moveToProject(row.rel, projectRel);
       } catch (e) {
-        showToast(String(e));
+        showToast(String(e), "danger");
         return;
       }
       // A tab is keyed on the path. Left behind, the next autosave writes to
@@ -803,11 +803,7 @@ export default function App() {
   /* The only channel for errors that never reach a job row. Hoisted because a
      modal <dialog> draws in the top layer, so a region at the app root is
      invisible while the sheet is up. */
-  const toastRegion = (
-    <div className="toast-region" role="status" aria-live="polite">
-      {toast && <div className="toast">{toast}</div>}
-    </div>
-  );
+  const toastRegion = toast ? <Toast tone={toast.tone}>{toast.text}</Toast> : null;
 
   // Every hook is above this line, which lets these two return early.
   if (!loaded) return <div className="app" />;
@@ -923,7 +919,7 @@ export default function App() {
         autoClear.current = false;
       }
     } catch (e) {
-      showToast(String(e));
+      showToast(String(e), "danger");
       // The run never started, so the host still holds the previous run's rows.
       setJobs(await commands.listJobs().catch(() => []));
     } finally {
@@ -979,11 +975,12 @@ export default function App() {
       try {
         text = await commands.readDocumentText(j.outputPath);
       } catch {
-        showToast("Copy failed");
+        showToast("Copy failed", "danger");
         return;
       }
     }
-    showToast((await copyToClipboard(text)) ? "Copied to clipboard" : "Copy failed");
+    const copied = await copyToClipboard(text);
+    showToast(copied ? "Copied to clipboard" : "Copy failed", copied ? "info" : "danger");
   };
 
   // The button never overstates the cost: a run of copies alone is free.
@@ -1035,7 +1032,7 @@ export default function App() {
     hint = "Choose an output folder for the results";
   }
 
-  /// Cobalt promises a press, so only the hints `onHint` acts on get it.
+  /// The link colour promises a press, so only the hints `onHint` acts on get it.
   const hintActionable =
     hint !== null &&
     (hintOpensSettings || hint === "Choose an output folder for the results");
@@ -1276,7 +1273,7 @@ export default function App() {
           // The pane copies what is on screen, not what the job returned.
           onCopy={(doc) => {
             void copyToClipboard(doc.text).then((ok) => {
-              showToast(ok ? "Copied to clipboard" : "Copy failed");
+              showToast(ok ? "Copied to clipboard" : "Copy failed", ok ? "info" : "danger");
             });
           }}
           onReveal={(doc) => {
@@ -1302,15 +1299,15 @@ export default function App() {
     status !== null ? (
       <>
         <StatusDot tone="live" />
-        <Mono size="sm">{runCounter(status.done, status.total)}</Mono>
+        <Meta size="sm">{runCounter(status.done, status.total)}</Meta>
         {status.since !== null && (
           <>
-            <Mono size="sm" tone="ghost" aria-hidden>
+            <Meta size="sm" tone="ghost" aria-hidden>
               ·
-            </Mono>
-            <Mono size="sm" tone="ghost">
+            </Meta>
+            <Meta size="sm" tone="ghost">
               {fmtElapsed(now, status.since)}
-            </Mono>
+            </Meta>
           </>
         )}
       </>

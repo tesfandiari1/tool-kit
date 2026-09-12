@@ -5,11 +5,16 @@ import type { FileRow, HistoryEntry, Job } from "@/app/types";
 import { isDirty, type DocMode, type OpenDoc } from "@/domains/thread/model";
 import { confirm } from "@/platform/host";
 import { activateOrInsert, NO_DOCS, removeDoc, renameDoc } from "./documents";
+import type { ToastTone } from "./useToast";
 
 /// Every open result and which one the pane shows. Nothing here touches
 /// `view`. Every door reads the file from disk: a job row carries a path,
 /// never the converted text.
-export function useDocuments({ showToast }: { showToast: (msg: string) => void }) {
+export function useDocuments({
+  showToast,
+}: {
+  showToast: (msg: string, tone?: ToastTone) => void;
+}) {
   const [{ docs, activeId }, setList] = useState(NO_DOCS);
   const [mode, setMode] = useState<DocMode>("read");
   /// The inspector card's file. Here, so "opening a document dismisses the
@@ -21,7 +26,7 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
   const open = useCallback(
     async (title: string, outputPath: string | null): Promise<boolean> => {
       if (!outputPath) {
-        showToast("No result file to open");
+        showToast("No result file to open", "danger");
         return false;
       }
       setPreview(null);
@@ -44,7 +49,7 @@ export function useDocuments({ showToast }: { showToast: (msg: string) => void }
         setList((cur) => activateOrInsert(cur.docs, doc));
         return true;
       } catch (e) {
-        showToast(String(e));
+        showToast(String(e), "danger");
         return false;
       }
     },

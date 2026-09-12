@@ -1,53 +1,49 @@
-/* Surfaces: the panel, the well and the divider. Square-ish and hairlined,
-   never floating cards: no gaps, no shadows, a radius you have to look for. */
+@layer ui {
+  /* Surfaces: the panel, the well and the divider. A ruled rectangle, never a
+     floating card: no fill, no shadow, no radius. */
 
-.ui-panel {
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  border-radius: var(--r-panel);
-  min-width: 0;
-}
+  .ui-panel {
+    border: 1px solid var(--rule);
+    min-width: 0;
+  }
 
-.ui-panel--raised {
-  background: var(--surface-raised);
-}
-.ui-panel__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s3);
-  padding: var(--s3) var(--s4);
-  border-bottom: 1px solid var(--rule);
-  min-height: 40px;
-}
+  .ui-panel__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s3);
+    padding: var(--s3) var(--s4);
+    border-bottom: 1px solid var(--rule);
+    min-height: 40px;
+  }
 
-.ui-panel__body {
-  padding: var(--s4);
-  min-width: 0;
-}
+  .ui-panel__body {
+    padding: var(--s4);
+    min-width: 0;
+  }
 
-.ui-panel__body--flush {
-  padding: 0;
-}
+  .ui-panel__body--flush {
+    padding: 0;
+  }
 
-/* --- Well: a recessed area for output, logs, transcripts --------------- */
-.ui-well {
-  background: var(--surface-well);
-  border: 1px solid var(--rule);
-  border-radius: var(--r-control);
-  padding: var(--s3);
-  min-width: 0;
-}
+  /* --- Well: a recessed area for output, logs, transcripts --------------- */
+  .ui-well {
+    background: var(--surface-sunk);
+    border: 1px solid var(--rule);
+    padding: var(--s3);
+    min-width: 0;
+  }
 
-/* --- Divider ----------------------------------------------------------- */
-.ui-divider {
-  border: 0;
-  border-top: 1px solid var(--rule);
-  margin: 0;
-  align-self: stretch;
-}
+  /* --- Divider ----------------------------------------------------------- */
+  .ui-divider {
+    border: 0;
+    border-top: 1px solid var(--rule);
+    margin: 0;
+    align-self: stretch;
+  }
 
-.ui-divider--vertical {
-  border-top: 0;
-  border-left: 1px solid var(--rule);
+  .ui-divider--vertical {
+    border-top: 0;
+    border-left: 1px solid var(--rule);
+  }
 }

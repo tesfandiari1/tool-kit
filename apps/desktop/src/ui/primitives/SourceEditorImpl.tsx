@@ -16,45 +16,45 @@ import { tags } from "@lezer/highlight";
 /// Highlighting with no hue: colour is signal here, so structure is drawn with
 /// the ink ramp and weight (UI.md rule 1).
 const inkOnly = HighlightStyle.define([
-  { tag: tags.heading, color: "var(--ink)", fontWeight: "600" },
-  { tag: tags.heading1, color: "var(--ink)", fontWeight: "700" },
-  { tag: tags.strong, color: "var(--ink)", fontWeight: "600" },
-  { tag: tags.emphasis, color: "var(--ink-2)", fontStyle: "italic" },
-  { tag: tags.link, color: "var(--ink-2)", textDecoration: "underline" },
-  { tag: tags.url, color: "var(--ink-3)" },
-  { tag: tags.monospace, color: "var(--ink-2)" },
-  { tag: tags.quote, color: "var(--ink-2)", fontStyle: "italic" },
-  { tag: tags.list, color: "var(--ink-2)" },
+  { tag: tags.heading, color: "var(--text-body)", fontWeight: "600" },
+  { tag: tags.heading1, color: "var(--text-body)", fontWeight: "700" },
+  { tag: tags.strong, color: "var(--text-body)", fontWeight: "600" },
+  { tag: tags.emphasis, color: "var(--text-soft)", fontStyle: "italic" },
+  { tag: tags.link, color: "var(--text-soft)", textDecoration: "underline" },
+  { tag: tags.url, color: "var(--text-mute)" },
+  { tag: tags.monospace, color: "var(--text-soft)" },
+  { tag: tags.quote, color: "var(--text-soft)", fontStyle: "italic" },
+  { tag: tags.list, color: "var(--text-soft)" },
   /// Marks the author typed and does not want to look at.
-  { tag: tags.processingInstruction, color: "var(--ink-ghost)" },
-  { tag: tags.meta, color: "var(--ink-ghost)" },
-  { tag: tags.contentSeparator, color: "var(--ink-ghost)" },
+  { tag: tags.processingInstruction, color: "var(--text-ghost)" },
+  { tag: tags.meta, color: "var(--text-ghost)" },
+  { tag: tags.contentSeparator, color: "var(--text-ghost)" },
 ]);
 
 /// Chrome, on tokens, so a theme swap moves the editor with the app.
 const chrome = EditorView.theme({
   "&": {
     height: "100%",
-    color: "var(--ink-2)",
+    color: "var(--text-soft)",
     backgroundColor: "transparent",
     fontSize: "var(--t-sm)",
   },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": {
-    fontFamily: "var(--font-mono)",
+    fontFamily: "var(--font-code)",
     lineHeight: "1.62",
     overflow: "auto",
   },
   ".cm-content": {
     padding: "var(--s4) 0",
-    caretColor: "var(--accent-hover)",
+    caretColor: "var(--focus-ring)",
   },
   ".cm-line": { padding: "0 var(--s4)" },
   ".cm-gutters": {
     backgroundColor: "transparent",
     border: "none",
     borderRight: "1px solid var(--rule)",
-    color: "var(--ink-ghost)",
+    color: "var(--text-ghost)",
     /// Line numbers tick, so they set tabular (UI.md rule 2).
     fontVariantNumeric: "tabular-nums",
     paddingRight: "var(--s1)",
@@ -66,16 +66,16 @@ const chrome = EditorView.theme({
   },
   ".cm-activeLineGutter": {
     backgroundColor: "transparent",
-    color: "var(--ink-3)",
+    color: "var(--text-mute)",
   },
-  ".cm-activeLine": { backgroundColor: "var(--surface-well)" },
+  ".cm-activeLine": { backgroundColor: "var(--surface-lift)" },
   /* Match the base theme's `.cm-selectionLayer .cm-selectionBackground`
      specificity, or a select-all comes out in WebKit's lavender. */
   ".cm-selectionLayer .cm-selectionBackground, &.cm-focused .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection, ::selection":
     {
-      backgroundColor: "var(--select)",
+      backgroundColor: "var(--selection)",
     },
-  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent-hover)" },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--focus-ring)" },
 });
 /// No `{ dark: true }`: it is baked in at module load, and the app has two
 /// themes. Every colour resolves from the token layer instead.

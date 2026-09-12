@@ -16,7 +16,7 @@ import {
   Badge,
   Button,
   Meter,
-  Mono,
+  Meta,
   Panel,
   Row,
   Segmented,
@@ -39,7 +39,7 @@ import { runServiceDescription } from "./plan";
 function toneFor(status: Job["status"]) {
   if (status === "done") return "pass" as const;
   if (status === "failed") return "fault" as const;
-  // Queued waits for a permit: amber would claim a provider is spending.
+  // Queued waits for a permit: the live colour would claim a provider is spending.
   if (status === "queued") return "queued" as const;
   return "live" as const;
 }
@@ -172,7 +172,7 @@ export function RunView({
             </Button>
             {running && (
               <Button
-                variant="quiet"
+                variant="secondary"
                 size="lg"
                 onClick={onStop}
                 title="Stop this run"
@@ -220,16 +220,16 @@ export function RunView({
         actions={
           <Row gap={2}>
             {!running && failedCount > 0 && (
-              <Button variant="link" onClick={onRetryFailed}>
+              <Button variant="ghost" onClick={onRetryFailed}>
                 Retry {failedCount} failed
               </Button>
             )}
             {!running && doneCount > 0 && (
-              <Button variant="link" onClick={onRevealOutput}>
+              <Button variant="ghost" onClick={onRevealOutput}>
                 Show in Finder
               </Button>
             )}
-            <Badge square>{total}</Badge>
+            <Badge count>{total}</Badge>
           </Row>
         }
       >
@@ -332,7 +332,7 @@ function FolderField({
       <button type="button" className="folder-hit" onClick={onPick} title={path ?? placeholder}>
         <Row gap={2}>
           {path ? <FolderOpenIcon weight="fill" /> : <FolderIcon />}
-          <Mono truncate>{path ? basename(path) : placeholder}</Mono>
+          <Meta truncate>{path ? basename(path) : placeholder}</Meta>
         </Row>
       </button>
     </Panel>
@@ -378,12 +378,12 @@ function InputPicker({
         <Row gap={2}>
           {inputs.length > 0 && (
             <>
-              <Button variant="link" onClick={onClear}>
+              <Button variant="ghost" onClick={onClear}>
                 Clear
               </Button>
               {/* Holds its slot once the panel has anything in it, so a scan
                   landing does not resize the header (UI.md rule 2). */}
-              <Badge square>{count > 0 ? count : ""}</Badge>
+              <Badge count>{count > 0 ? count : ""}</Badge>
             </>
           )}
         </Row>
@@ -463,15 +463,15 @@ function InputRow({
     <li className="drop-node">
       <div className="drop-item" title={path}>
         {isDir ? <FolderOpenIcon weight="fill" /> : <FileTextIcon />}
-        <Mono size="xs" truncate tone={inactive ? "ghost" : "ink"}>
+        <Meta size="xs" truncate tone={inactive ? "ghost" : "ink"}>
           {node?.name ?? basename(path)}
-        </Mono>
+        </Meta>
         <Spacer />
         {/* Holds its slot whether or not it reads, so the well does not
             reflow when a scan lands (UI.md rule 2). */}
-        <Mono size="xs" tone={taken > 0 ? "default" : "ghost"} className="drop-count">
+        <Meta size="xs" tone={taken > 0 ? "default" : "ghost"} className="drop-count">
           {isDir && node !== undefined ? String(taken) : ""}
-        </Mono>
+        </Meta>
         <Button
           variant="ghost"
           size="sm"
@@ -488,9 +488,9 @@ function InputRow({
         <ul className="drop-matches">
           {matches.map((match) => (
             <li key={match.path} className="drop-match" title={match.path}>
-              <Mono size="xs" truncate tone={match.job === jobType ? "default" : "ghost"}>
+              <Meta size="xs" truncate tone={match.job === jobType ? "default" : "ghost"}>
                 {match.name}
-              </Mono>
+              </Meta>
             </li>
           ))}
           {node !== undefined && node.truncated > 0 && (
@@ -656,9 +656,9 @@ function JobRow({
           title={job.sourcePath}
           onClick={done ? onOpen : undefined}
         >
-          <Mono size="xs" className="job-name">
+          <Meta size="xs" className="job-name">
             {job.fileName}
-          </Mono>
+          </Meta>
         </button>
         {job.status === "failed" && job.error ? (
           <Text as="span" size="xs" tone="fault" className="job-sub">
@@ -681,9 +681,9 @@ function JobRow({
           </Text>
         )}
       </div>
-      <Mono size="xs" tone={active ? "ink" : "ghost"} className="job-time">
+      <Meta size="xs" tone={active ? "ink" : "ghost"} className="job-time">
         {time}
-      </Mono>
+      </Meta>
       {/* Out of the tab order: every action here has a keyboard route in the
           document header or the results head. */}
       <div className="job-actions">

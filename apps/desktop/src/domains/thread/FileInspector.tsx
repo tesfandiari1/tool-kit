@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { FolderOpenIcon, XIcon } from "@phosphor-icons/react";
-import { Badge, Button, Divider, Label, Mono, Path, Row, Spacer, Stack, Text, Well } from "@ui";
+import { Badge, Button, Divider, Label, Meta, Path, Row, Spacer, Stack, Text, Well } from "@ui";
 import { commands } from "@/app/commands";
 import { fmtWhen, tildePath } from "@/app/format";
 import type { FileRow } from "@/app/types";
@@ -115,16 +115,16 @@ export function FileInspector({
             <Badge>{row.isDir ? "Folder" : fmtBytes(row.size)}</Badge>
             {/* `truncate` is the library's only nowrap, and the date needs
                 it beside the media type. */}
-            <Mono size="xs" tone="ghost" truncate>
+            <Meta size="xs" tone="ghost" truncate>
               {fmtWhen(Math.floor(row.modifiedMs / 1000), nowMs)}
-            </Mono>
+            </Meta>
           </Row>
 
           {/* Its own line: the longest string in the card. */}
           {!row.isDir && row.mediaType !== "" && (
-            <Mono size="xs" tone="ghost" truncate>
+            <Meta size="xs" tone="ghost" truncate>
               {row.mediaType}
-            </Mono>
+            </Meta>
           )}
 
           <Path path={tildePath(row.path)} />

@@ -1,134 +1,113 @@
-/* Buttons wear the label treatment: mono, uppercase, tracked. */
+@layer ui {
+  /* Buttons wear the shared caps rule from Text.css. Only colour, box and
+     state live here. */
 
-.ui-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--s2);
+  .ui-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s2);
+    white-space: nowrap;
 
-  font-family: var(--font-mono);
-  font-size: var(--t-label);
-  font-weight: var(--weight-medium);
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
-  line-height: 1;
-  white-space: nowrap;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-body);
 
-  border: 1px solid transparent;
-  border-radius: var(--r-control);
-  background: transparent;
-  color: var(--ink);
+    transition:
+      background var(--dur) var(--ease),
+      border-color var(--dur) var(--ease),
+      color var(--dur) var(--ease),
+      opacity var(--dur) var(--ease);
+  }
 
-  transition:
-    background var(--dur-fast) var(--ease),
-    border-color var(--dur-fast) var(--ease),
-    color var(--dur-fast) var(--ease),
-    opacity var(--dur-fast) var(--ease);
-}
+  .ui-btn:disabled {
+    opacity: 0.38;
+  }
 
-.ui-btn:disabled {
-  opacity: 0.38;
-}
+  /* One press rule for every variant. */
+  .ui-btn:active:not(:disabled) {
+    opacity: 0.85;
+  }
 
-/* `lg` is the one actuator a screen is built around, never a bigger button. */
-.ui-btn--lg {
-  height: 38px;
-  padding: 0 var(--s4);
-}
-.ui-btn--md {
-  height: 30px;
-  padding: 0 var(--s4);
-}
-.ui-btn--sm {
-  height: 24px;
-  padding: 0 var(--s3);
-}
-.ui-btn--block {
-  width: 100%;
-}
+  /* `lg` is the one actuator a screen is built around, never a bigger button. */
+  .ui-btn--lg {
+    height: 38px;
+    padding: 0 var(--s4);
+  }
+  .ui-btn--md {
+    height: 30px;
+    padding: 0 var(--s4);
+  }
+  .ui-btn--sm {
+    height: 24px;
+    padding: 0 var(--s3);
+  }
+  .ui-btn--block {
+    width: 100%;
+  }
 
-/* --- primary: the one thing you press --------------------------------- */
-.ui-btn--primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-ink);
-}
-.ui-btn--primary:hover:not(:disabled) {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
-}
-.ui-btn--primary:active:not(:disabled) {
-  background: var(--accent-active);
-  border-color: var(--accent-active);
-}
+  /* --- primary: the one thing you press --------------------------------- */
+  .ui-btn--primary {
+    background: var(--btn-primary-bg);
+    border-color: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
+  }
+  .ui-btn--primary:hover:not(:disabled) {
+    background: var(--btn-primary-hover-bg);
+    border-color: var(--btn-primary-hover-bg);
+  }
 
-/* --- ghost: chrome-level actions that must not compete ---------------- */
-.ui-btn--ghost {
-  color: var(--ink-2);
-  border-color: transparent;
-}
-.ui-btn--ghost:hover:not(:disabled) {
-  background: var(--rule);
-  color: var(--ink);
-}
-.ui-btn--ghost:active:not(:disabled) {
-  background: var(--rule-lit);
-}
+  /* --- secondary: outlined, fills on hover ------------------------------ */
+  .ui-btn--secondary {
+    border-color: var(--btn-secondary-border);
+    color: var(--btn-secondary-fg);
+  }
+  .ui-btn--secondary:hover:not(:disabled) {
+    background: var(--btn-secondary-hover-bg);
+    color: var(--btn-secondary-hover-fg);
+  }
 
-/* --- quiet: outlined but neutral, for Stop / Clear / secondary chrome -- */
-.ui-btn--quiet {
-  border-color: var(--rule-lit);
-  color: var(--ink-2);
-}
-.ui-btn--quiet:hover:not(:disabled) {
-  background: var(--rule);
-  border-color: var(--rule-strong);
-  color: var(--ink);
-}
-.ui-btn--quiet:active:not(:disabled) {
-  background: var(--rule-lit);
-  border-color: var(--rule-strong);
-}
+  /* --- inverse: the same outline over a dark band ----------------------- */
+  .ui-btn--inverse {
+    border-color: var(--btn-inverse-border);
+    color: var(--btn-inverse-fg);
+  }
+  .ui-btn--inverse:hover:not(:disabled) {
+    background: var(--btn-inverse-hover-bg);
+    color: var(--btn-inverse-hover-fg);
+  }
 
-/* --- link: a text action with no box, still label-treated ------------- */
-.ui-btn--link {
-  height: auto;
-  padding: 0;
-  border-color: transparent;
-  color: var(--ink-2);
-}
-.ui-btn--link:hover:not(:disabled) {
-  color: var(--accent-quiet);
-}
-.ui-btn--link:active:not(:disabled) {
-  color: var(--accent);
-}
+  /* --- ghost: a text action with no box, still caps-treated ------------- */
+  .ui-btn--ghost {
+    height: auto;
+    padding: 0;
+    border-color: transparent;
+    color: var(--text-soft);
+  }
+  .ui-btn--ghost:hover:not(:disabled) {
+    color: var(--link-hover);
+  }
 
-/* Disabled mid-flight, but never dimmed: that would read as unavailable.
-   Outlined rather than filled, because this can persist for minutes. */
-.ui-btn--busy:disabled {
-  opacity: 1;
-  background: var(--surface);
-  border-color: color-mix(in srgb, var(--live) 40%, transparent);
-  color: var(--live);
-}
+  /* Disabled mid-flight, but never dimmed: that would read as unavailable.
+     Outlined rather than filled, because this can persist for minutes. */
+  .ui-btn--busy:disabled {
+    opacity: 1;
+    background: transparent;
+    border-color: var(--status-warning);
+    color: var(--status-warning);
+  }
 
-.ui-btn__icon {
-  display: inline-flex;
-  flex: none;
-}
+  .ui-btn__icon {
+    display: inline-flex;
+    flex: none;
+  }
 
-/* Icon-only: square, no text padding. */
-.ui-btn--icon {
-  padding: 0;
-  width: 30px;
-}
-.ui-btn--icon.ui-btn--sm {
-  width: 24px;
-}
-
-/* Exempt from inactive dimming: a grey Run button reads as disabled. */
-body.inactive .ui-btn--primary:not(:disabled),
-body.inactive .ui-btn--busy:disabled {
-  filter: saturate(0.85);
+  /* Icon-only: square, no text padding. */
+  .ui-btn--icon {
+    padding: 0;
+    width: 30px;
+  }
+  .ui-btn--icon.ui-btn--sm {
+    width: 24px;
+  }
 }

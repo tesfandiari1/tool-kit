@@ -1,105 +1,87 @@
-/* A modal card over the window. The scrim is a child, not `::backdrop`, where
-   custom properties do not resolve dependably. */
+@layer ui {
+  /* A modal card over the window. The scrim is a child, not `::backdrop`, where
+     custom properties do not resolve dependably. */
 
-.ui-sheet {
-  position: fixed;
-  inset: 0;
-  inline-size: 100%;
-  max-inline-size: none;
-  block-size: 100%;
-  max-block-size: none;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  overflow: hidden;
-}
-
-.ui-sheet::backdrop {
-  background: transparent;
-}
-
-.ui-sheet__scrim {
-  position: absolute;
-  inset: 0;
-  background: var(--surface-scrim);
-}
-
-/* Paper's `--surface-scrim` is its page ground, so reusing it here makes the
-   card disappear. The light theme gets a real dimmer. */
-[data-theme="paper"] .ui-sheet__scrim {
-  background: color-mix(in srgb, var(--warm-950) 45%, transparent);
-}
-
-/* Floats clear on all four sides: hung off the title bar, a square top with
-   no border reads as clipped. It clears `--bar-h` so the traffic lights stay
-   over live chrome. */
-.ui-sheet__card {
-  position: absolute;
-  inset-block-start: calc(var(--bar-h, 0px) + var(--s4));
-  inset-inline: 0;
-  margin-inline: auto;
-  /* A fixed reading measure, with a narrow-window floor so the card keeps its
-     margin rather than grow into the window edge. */
-  inline-size: min(620px, calc(100% - var(--s5) * 2));
-  max-block-size: calc(100% - var(--bar-h, 0px) - var(--s4) - var(--s5));
-  display: flex;
-  flex-direction: column;
-  min-block-size: 0;
-  background: var(--surface-solid);
-  border: 1px solid var(--rule-lit);
-  border-radius: var(--r-panel);
-  box-shadow: 0 18px 48px color-mix(in srgb, var(--warm-950) 60%, transparent);
-  overflow: hidden;
-  animation: ui-sheet-in var(--dur-slow) var(--ease-out);
-}
-
-@keyframes ui-sheet-in {
-  from {
-    opacity: 0;
-    transform: translateY(calc(var(--s3) * -1));
+  .ui-sheet {
+    position: fixed;
+    inset: 0;
+    inline-size: 100%;
+    max-inline-size: none;
+    block-size: 100%;
+    max-block-size: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    overflow: hidden;
   }
-  to {
-    opacity: 1;
-    transform: translateY(0);
+
+  .ui-sheet::backdrop {
+    background: transparent;
   }
-}
 
-/* One bar: a panel drawing its own close leaves this row holding a title. */
-.ui-sheet__title {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  padding: var(--s3) var(--s4);
-  border-block-end: 1px solid var(--rule);
-}
-.ui-sheet__heading {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  margin: 0;
-  min-inline-size: 0;
-}
-.ui-sheet__actions {
-  margin-inline-start: auto;
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-}
+  .ui-sheet__scrim {
+    position: absolute;
+    inset: 0;
+    background: var(--scrim);
+  }
 
-/* No padding: the panel inside already carries its own measure and insets. */
-.ui-sheet__body {
-  min-block-size: 0;
-  overflow: auto;
-}
+  /* Floats clear on all four sides: hung off the title bar, a square top with
+     no border reads as clipped. It clears `--bar-h` so the traffic lights stay
+     over live chrome. */
+  .ui-sheet__card {
+    position: absolute;
+    inset-block-start: calc(var(--bar-h, 0px) + var(--s4));
+    inset-inline: 0;
+    margin-inline: auto;
+    /* A fixed reading measure, with a narrow-window floor so the card keeps its
+       margin rather than grow into the window edge. */
+    inline-size: min(620px, calc(100% - var(--s5) * 2));
+    max-block-size: calc(100% - var(--bar-h, 0px) - var(--s4) - var(--s5));
+    display: flex;
+    flex-direction: column;
+    min-block-size: 0;
+    background: var(--surface-lift);
+    border: 1px solid var(--rule);
+    overflow: hidden;
+  }
 
-/* The inert title bar above the card. Grid, so the app's sizeless drag region
-   fills it: an empty box is a window that cannot be moved. */
-.ui-sheet__head {
-  position: absolute;
-  inset-block-start: 0;
-  inset-inline: 0;
-  block-size: var(--bar-h, 0px);
-  display: grid;
+  /* One bar: a panel drawing its own close leaves this row holding a title. */
+  .ui-sheet__title {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    padding: var(--s3) var(--s4);
+    border-block-end: 1px solid var(--rule);
+  }
+  .ui-sheet__heading {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    margin: 0;
+    min-inline-size: 0;
+  }
+  .ui-sheet__actions {
+    margin-inline-start: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+  }
+
+  /* No padding: the panel inside already carries its own measure and insets. */
+  .ui-sheet__body {
+    min-block-size: 0;
+    overflow: auto;
+  }
+
+  /* The inert title bar above the card. Grid, so the app's sizeless drag region
+     fills it: an empty box is a window that cannot be moved. */
+  .ui-sheet__head {
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline: 0;
+    block-size: var(--bar-h, 0px);
+    display: grid;
+  }
 }

@@ -1,70 +1,79 @@
-/* Element-level defaults. Everything beyond this belongs to a component. */
+/* Element-level defaults. Everything beyond this belongs to a component.
+
+   The layer order is declared here and nowhere else: every primitive wraps in
+   `ui`, App.css wraps in `app`, so app overrides win whatever the import
+   order turns out to be. Tokens stay unlayered. */
+@layer ui, app;
 
 @import "./fonts.css";
 @import "./tokens.css";
 
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
+@layer ui {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
 
-html,
-body,
-#root {
-  height: 100%;
-  margin: 0;
-}
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
 
-body {
-  /* A scrim over the NSVisualEffectView: fully transparent turns the app into
-     a window onto the wallpaper, which fights every label. */
-  background: var(--surface-scrim);
-  color: var(--ink);
-  font-family: var(--font-body);
-  font-size: var(--t-base);
-  line-height: var(--lh-body);
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
+  body {
+    background: var(--surface-page);
+    color: var(--text-body);
+    font-family: var(--font-body);
+    font-size: var(--t-base);
+    line-height: var(--lh-body);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
 
-  /* Selection is opt-in, granted back by `.ui-selectable`. */
-  -webkit-user-select: none;
-  user-select: none;
-  cursor: default;
-}
+    /* Selection is opt-in, granted back by `.ui-selectable`. */
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+  }
 
-/* WebKit's default lavender swamps the ink on a dark ground. Background only,
-   so the ink ramp survives the wash. */
-::selection {
-  background: var(--select);
-}
+  /* WebKit's default lavender swamps the ink. The pair is set together: the
+     wash alone leaves near-black text on blue-deep in the ink theme. */
+  ::selection {
+    background: var(--selection);
+    color: var(--selection-text);
+  }
 
-.ui-selectable {
-  -webkit-user-select: text;
-  user-select: text;
-  cursor: auto;
-}
+  .ui-selectable {
+    -webkit-user-select: text;
+    user-select: text;
+    cursor: auto;
+  }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
-  color: inherit;
-  margin: 0;
-}
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+    margin: 0;
+  }
 
-button {
-  cursor: default;
-}
+  button {
+    cursor: default;
+  }
 
-/* One focus treatment, matching the HIG ring. */
-:where(a, button, input, select, textarea, [tabindex]):focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-  border-radius: var(--r-control);
-}
+  /* The one focus treatment in the system. A control whose ring would be
+     clipped declares `outline-offset: -2px` and nothing else. */
+  :where(a, button, input, select, textarea, [tabindex]):focus-visible,
+  .ui-tree__item:focus-visible > .ui-tree__row,
+  .ui-switch__input:focus-visible ~ .ui-switch__track,
+  [data-separator]:focus-visible {
+    outline: 1px solid var(--focus-ring);
+    outline-offset: 3px;
+  }
 
-:where(a, button, input, select, textarea, [tabindex]):focus:not(:focus-visible) {
-  outline: none;
+  :where(a, button, input, select, textarea, [tabindex]):focus:not(:focus-visible) {
+    outline: none;
+  }
 }

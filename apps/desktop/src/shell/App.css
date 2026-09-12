@@ -1,871 +1,839 @@
-/* App composites only. No `@import "./ui/base.css"`: importing it twice emits
-   the token layer into two chunks with competing `:root` blocks. App.tsx
-   imports `@ui` before this file, and that order is load-bearing. */
+/* Restated from base.css: whichever of the two loads first fixes the
+   order, so the import order in App.tsx stops being load-bearing. */
+@layer ui, app;
 
-/* macOS dims an inactive window's accents. `--live` and `--accent` are absent
-   on purpose, so a background run stays readable. */
-body.inactive {
-  --ink: var(--warm-300);
-  --ink-2: var(--warm-500);
-  --ink-3: var(--warm-600);
-  /* Unmapped, ghost stays brighter than the dimmed --ink-3 above it. */
-  --ink-ghost: #4a494599;
-  --rule: #ecebe514;
-}
-/* The dimming exceptions live in Button.css, Meter.css and Badge.css. */
+@layer app {
+  /* App composites only. No `@import "./ui/base.css"`: importing it twice emits
+     the token layer into two chunks with competing `:root` blocks. The `app`
+     layer wins over `ui` whatever the import order turns out to be. */
 
-/* Icons are glyphs, never coloured badges (UI.md rule 1). */
-svg {
-  font-size: 16px;
-  flex-shrink: 0;
-}
-
-/* Every number can tick and none may shift the layout (UI.md rule 2). */
-
-.app {
-  /* The bar height in one expression, because the Settings sheet hangs off
-     this edge. The top term divides by --zoom: the traffic lights are drawn in
-     logical pixels and do not scale with the page. */
-  --bar-h: calc(var(--s3) / var(--zoom, 1) + var(--s6) + var(--s2));
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-}
-
-/* --- Title bar ---------------------------------------------------------- */
-/* Inset past the traffic lights. Dragging is `data-tauri-drag-region`, never
-   CSS: WebKit has no -webkit-app-region. Full-width, unlike `.flow`, or the
-   bar drifts out of alignment with the lights. */
-.bar {
-  /* `1fr auto 1fr` centres the middle column on the window rather than on the
-     space left over. */
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  align-items: center;
-  gap: var(--s3);
-  /* Symmetric, or the title slides off centre. The top inset divides by
-     `--zoom`: it is measured against `trafficLightPosition`. */
-  padding: calc(var(--s3) / var(--zoom, 1)) var(--s5) var(--s2);
-  width: 100%;
-  flex-shrink: 0;
-}
-/* A reservation for the traffic lights. 64 logical pixels, not CSS ones, which
-   is why this is the one width that is not a token. The fallback keeps the
-   gallery, which has no zoom hook, at 1. */
-.bar-lights {
-  min-width: calc(64px / var(--zoom, 1));
-}
-/* Mono uppercase is the one type that belongs in chrome: Instrument Serif
-   muddies at 15px. */
-.bar-status {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  justify-self: center;
-  gap: var(--s2);
-  min-width: 0;
-  /* Holds its height across every state, and --s6 is the first rung that
-     clears the sm Segmented at 30px. */
-  min-height: var(--s6);
-}
-.bar-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  justify-self: end;
-}
-/* `runCounter` pads with a space, so the timer needs `pre` to hold still. */
-.bar-actions .ui-mono {
-  font-variant-numeric: tabular-nums;
-  white-space: pre;
-}
-
-/* The primitive is built to stretch, and this centre column has no width to
-   fill, so each item hugs its label. */
-.bar-nav .ui-seg__item {
-  flex: none;
-  padding-inline: var(--s3);
-}
-
-/* --- Vertical flow ------------------------------------------------------ */
-/* The frame is wider than anything inside it: --s5 against a --s4 panel gap
-   (UI.md rule 4). The top pairs with the title bar's --s2 to make the same
-   --s4. The head and foot hold their height and `.flow-scroll` takes slack. */
-.flow {
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  padding: var(--s2) var(--s5) 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  overflow: hidden;
-}
-/* One band: --s3 inside, --s4 down to the hairline (UI.md rule 4). */
-.flow-head {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s3);
-  padding-bottom: var(--s4);
-  border-bottom: 1px solid var(--rule);
-}
-.flow-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s4);
-  /* Top air matches the foot's. */
-  padding: var(--s4) 0;
-}
-/* macOS hides scrollbars until you scroll, so this is the only hint that more
-   sits below. Translucent, so a panel that fits does not claim otherwise. */
-.flow-scroll::after {
-  content: "";
-  position: sticky;
-  bottom: 0;
-  display: block;
-  height: var(--s5);
-  margin-top: calc(-1 * var(--s5));
-  pointer-events: none;
-  opacity: 0.6;
-  background: linear-gradient(to bottom, transparent, var(--surface-scrim));
-}
-/* --s3 keeps the message slot attached to the Job panel above it. */
-.flow-foot {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s3);
-  padding: var(--s4) 0 var(--s5);
-  border-top: 1px solid var(--rule);
-}
-
-/* --- Workspace split ---------------------------------------------------- */
-/* `min-height: 0` is what lets the panes scroll inside the split rather than
-   push the column past the window. */
-.workspace {
-  flex: 1;
-  min-height: 0;
-  min-width: 0;
-}
-
-/* --- First run --------------------------------------------------------- */
-/* A window rather than a panel: no border, no rail, one centred column. */
-.onboarding-gate {
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  max-width: 520px;
-  margin: 0 auto;
-  padding: var(--s5) var(--s5) var(--s6);
-  display: flex;
-  flex-direction: column;
-}
-/* The beat absorbs the column's slack, so every beat sits on one line. */
-.onboarding-beat {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: var(--s3);
-  /* A cross-fade only: the beats are one window saying a different thing.
-     `--dur` rather than a literal, so reduced motion zeroes it. */
-  animation: beat-in var(--dur) var(--ease-out);
-}
-@keyframes beat-in {
-  from {
-    opacity: 0;
+  /* macOS dims an inactive window. Three role tokens, never the raw palette:
+     redefining that would repaint the whole document. Status colours are
+     absent on purpose, so a background run stays readable. */
+  body.inactive {
+    --text-body: var(--text-mute);
+    --text-soft: color-mix(in oklch, var(--text-mute) 62%, var(--surface-page));
+    --rule: var(--rule-soft);
   }
-  to {
-    opacity: 1;
+
+  /* Icons are glyphs, never coloured badges (UI.md rule 1). */
+  svg {
+    font-size: 16px;
+    flex-shrink: 0;
   }
-}
-/* A fixed slot outside the fading beat, so the button never moves. */
-.onboarding-foot {
-  flex: none;
-  padding-top: var(--s5);
-}
 
-/* --- Library ------------------------------------------------------------ */
-/* The app's one fixed landmark. Insets match `.flow`'s, so the two panes read
-   as one window, and the split's hairline is the divider. */
-.lib-side {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s4);
-  /* Pairs with the title bar's --s2 to make the run column's --s4. */
-  padding: var(--s2) var(--s5) var(--s5);
-  min-height: 0;
-  min-width: 0;
-}
-.lib-side__head {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s1);
-  min-width: 0;
-}
-/* No gap: `.ui-tree` already keeps its rows --s1 apart. */
-.lib-side__list {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  /* The rows truncate, so a sideways scrollbar here is only ever a bug. */
-  overflow-x: hidden;
-}
-.lib-side__foot {
-  flex: none;
-  display: flex;
-}
-.lib-side__path {
-  opacity: 0.85;
-}
-.lib-side__actions {
-  flex: none;
-}
+  /* Every number can tick and none may shift the layout (UI.md rule 2). */
 
-/* --- Project tree ------------------------------------------------------- */
-/* Layout only: this file loads after @ui and would beat the row's own tone. */
-
-/* Two characters whether or not it reads (UI.md rule 2). */
-.lib-tree__count {
-  min-width: 2ch;
-  flex: none;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-/* Holds its width: a truncated extension says less than nothing. */
-.lib-tree__result {
-  flex: none;
-}
-/* Holds its width at rest, so the row is one size hovered, focused and
-   converting. `pointer-events` moves with the opacity, or an invisible control
-   answers a click on empty space. */
-.lib-tree__convert {
-  display: flex;
-  flex: none;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur-fast) var(--ease);
-}
-/* Keyed on the row: an item holds its own subtree, so hovering a file would
-   light every project above it. */
-.ui-tree__row:hover .lib-tree__convert,
-.ui-tree__item:focus-visible > .ui-tree__row .lib-tree__convert {
-  opacity: 1;
-  pointer-events: auto;
-}
-/* A fact about the row, not a control, so it never hides and holds its
-   width. */
-.lib-tree__saves {
-  white-space: nowrap;
-  flex: none;
-}
-
-/* A rail rather than a row action: the row already carries Convert, and a
-   second hover control is one nobody finds. */
-.lib-side__move {
-  flex: none;
-}
-
-/* The open row keeps its name at full strength. */
-.job.is-selected .job-name {
-  color: var(--ink);
-}
-
-/* Opacity and a 1% settle, transform only, while the OS animates the window.
-   Nothing matches the close, or CSS fights the native shrink. */
-.workspace .doc {
-  animation: pane-in var(--dur-slow) var(--ease-out);
-  transform-origin: left center;
-}
-@keyframes pane-in {
-  from {
-    opacity: 0;
-    transform: scale(0.99);
+  .app {
+    /* The bar height in one expression, because the Settings sheet hangs off
+       this edge. The top term divides by --zoom: the traffic lights are drawn in
+       logical pixels and do not scale with the page. */
+    --bar-h: calc(var(--s3) / var(--zoom, 1) + var(--s6) + var(--s2));
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
   }
-  to {
-    opacity: 1;
-    transform: none;
+
+  /* --- Title bar ---------------------------------------------------------- */
+  /* Inset past the traffic lights. Dragging is `data-tauri-drag-region`, never
+     CSS: WebKit has no -webkit-app-region. Full-width, unlike `.flow`, or the
+     bar drifts out of alignment with the lights. */
+  .bar {
+    /* `1fr auto 1fr` centres the middle column on the window rather than on the
+       space left over. */
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: var(--s3);
+    /* Symmetric, or the title slides off centre. The top inset divides by
+       `--zoom`: it is measured against `trafficLightPosition`. */
+    padding: calc(var(--s3) / var(--zoom, 1)) var(--s5) var(--s2);
+    width: 100%;
+    flex-shrink: 0;
   }
-}
-
-/* --- Folder picker ------------------------------------------------------ */
-/* A hit target inside a Panel, not a second control chrome. */
-.folder-hit {
-  display: flex;
-  align-items: center;
-  /* Hover answers with surface, never colour. The padding undoes the negative
-     margin exactly, so the content does not move. */
-  min-height: 40px;
-  margin: 0 calc(-1 * var(--s2));
-  padding: 0 var(--s2);
-  border: 0;
-  border-radius: var(--r-control);
-  background: none;
-  color: inherit;
-  text-align: left;
-  transition: background var(--dur-fast) var(--ease);
-}
-.folder-hit:hover {
-  background: var(--surface-raised);
-}
-.folder-hit svg {
-  color: var(--ink-3);
-  flex-shrink: 0;
-}
-
-/* --- Settings ----------------------------------------------------------- */
-/* Padding lives on the scrollport, so the gutter sits beside the fields.
-   --s4 between groups, --s3 between fields, --s2 inside a control. */
-/* Never `.flow` here: its `flex: 1` scroll child inside the sheet's block body
-   never resolves a height, and the head band scrolls off the card. */
-.settings {
-  display: flex;
-  flex-direction: column;
-}
-/* Sticky, so the sheet body stays the only scroll container. */
-.settings__nav {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  padding: var(--s3) var(--s4);
-  background: var(--surface-solid);
-  border-bottom: 1px solid var(--rule);
-}
-/* The card is the frame here, so the inset steps down to --s4. */
-.settings__body {
-  padding: var(--s4);
-  scrollbar-gutter: stable;
-}
-/* Revealed fields belong to the choice above them: one step closer. */
-.settings-nest {
-  padding-top: var(--s1);
-}
-/* A native input's intrinsic min-width pushes Save and Remove off the row. */
-.settings-key {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--s2);
-  align-items: center;
-}
-.settings-key .ui-input {
-  min-width: 0;
-}
-.settings-key__actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--s2);
-}
-
-/* --- Blocking hint ------------------------------------------------------ */
-/* Never a <Button>: `white-space: nowrap` is right for "SAVE" and clips a
-   sentence. Prose you can click, so it takes body type and wraps. */
-.hint {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--s2);
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--accent-quiet);
-  font-family: var(--font-body);
-  font-size: var(--t-xs);
-  line-height: var(--lh-snug);
-  text-align: left;
-  white-space: normal;
-}
-.hint:hover {
-  color: var(--accent-hover);
-}
-.hint svg,
-.job-msg svg {
-  font-size: 13px;
-  margin-top: 1px;
-}
-
-/* Two lines held open, so an arriving hint cannot jump the scroll region.
-   Below the panel, not inside: empty space in a border reads as broken. */
-.job-msg {
-  min-height: calc(2 * var(--lh-snug) * var(--t-xs));
-}
-
-/* --- Input well --------------------------------------------------------- */
-/* Drag-over is an affordance, not a running job, so it takes cobalt. */
-.ui-well.is-dropping {
-  border-color: var(--accent);
-  background: color-mix(in oklch, var(--accent) 14%, var(--surface-well));
-}
-/* The whole well is the picker. Rows inside carry their own cursor. */
-.drop-well {
-  cursor: pointer;
-}
-.drop-well .drop-node {
-  cursor: default;
-}
-
-/* A real button: clicking the empty state is the first thing anyone tries. */
-.drop-empty {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  padding: var(--s6) var(--s4);
-  text-align: center;
-  gap: var(--s1);
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-.drop-empty > svg {
-  font-size: 28px;
-  color: var(--ink-3);
-  margin-bottom: var(--s1);
-  transition: color var(--dur) var(--ease);
-}
-.drop-well:hover .drop-empty > svg {
-  color: var(--accent);
-}
-
-/* Dropped paths. `--s3` between them: items in a list (UI.md rule 4). */
-.drop-list,
-.drop-matches {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
-.drop-list {
-  gap: var(--s3);
-}
-
-.drop-item {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  min-width: 0;
-}
-.drop-item > svg {
-  color: var(--ink-3);
-  font-size: 14px;
-  flex: none;
-}
-/* Two digits held open whether or not they read (UI.md rule 2). */
-.drop-count {
-  min-width: 2ch;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  flex: none;
-}
-
-/* One level in on the tree's own rung, and --s1 between them: atoms of one
-   object (UI.md rule 4). */
-.drop-matches {
-  gap: var(--s1);
-  margin-top: var(--s2);
-  padding-left: calc(var(--s2) + var(--s3));
-}
-.drop-match {
-  min-width: 0;
-  display: flex;
-}
-
-/* --- Results log -------------------------------------------------------- */
-.job-list {
-  display: flex;
-  flex-direction: column;
-}
-
-.job {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  min-height: 40px;
-  padding: var(--s2) var(--s4);
-  border-bottom: 1px solid var(--rule);
-}
-.job:last-child {
-  border-bottom: 0;
-}
-.job:hover:not(.is-selected) {
-  background: color-mix(in oklch, var(--ink) 4%, transparent);
-}
-/* Never cobalt: that is the control you press. Surface is the whole signal. */
-.job.is-selected {
-  background: var(--surface-raised);
-}
-.job-body {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-}
-/* Bare on purpose: the row is already the affordance. */
-.job-open {
-  display: block;
-  min-width: 0;
-  flex-shrink: 1;
-  padding: 0;
-  border: 0;
-  background: none;
-  text-align: left;
-  overflow: hidden;
-}
-.job-open:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: -2px;
-  border-radius: var(--r-control);
-}
-/* Blockified inside `.job-open`: an inline span cannot draw an ellipsis. */
-.job-name {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex-shrink: 1;
-}
-/* Layout only. This file loads after @ui, so a colour here beats the call
-   site's `tone` and greys every failed job's error. */
-.job-sub {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex-shrink: 100;
-  min-width: 0;
-}
-.job-time {
-  flex-shrink: 0;
-}
-/* Actions occupy their slot always, so revealing them never shifts the row. */
-.job-actions {
-  display: flex;
-  gap: var(--s2);
-  opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease);
-}
-.job:hover .job-actions,
-.job:focus-within .job-actions {
-  opacity: 1;
-}
-
-.hist-list {
-  display: flex;
-  flex-direction: column;
-}
-/* Layout only. See `.job-sub`. */
-.hist-empty {
-  display: grid;
-  place-items: center;
-  gap: var(--s1);
-  padding: var(--s6);
-  text-align: center;
-}
-/* The one reading surface in the app, so prose type and a real measure. */
-.preview-body {
-  margin: 0;
-  padding: var(--s5);
-  overflow: auto;
-  font-family: var(--font-body);
-  font-size: var(--t-base);
-  line-height: 1.62;
-  word-break: break-word;
-  color: var(--ink);
-  -webkit-user-select: text;
-  user-select: text;
-}
-.md h1,
-.md h2,
-.md h3,
-.md h4,
-.md h5,
-.md h6 {
-  color: var(--ink);
-  font-weight: var(--weight-medium);
-  line-height: 1.3;
-  margin: 1.15em 0 0.4em;
-}
-.md h1 { font-size: 1.28em; }
-.md h2 { font-size: 1.12em; }
-.md h3 { font-size: 1em; }
-.md h4,
-.md h5,
-.md h6 {
-  font-size: 1em;
-}
-.md p,
-.md ul,
-.md ol,
-.md blockquote {
-  margin: 0 0 0.8em;
-}
-.md ul,
-.md ol {
-  padding-left: 1.2em;
-}
-.md blockquote {
-  padding-left: var(--s3);
-  border-left: 2px solid var(--rule-lit);
-  color: var(--ink-2);
-}
-.md img {
-  max-width: 100%;
-  height: auto;
-}
-.md a {
-  color: var(--ink);
-  text-decoration: underline;
-}
-.md code {
-  font-family: var(--font-mono);
-  font-size: 0.88em;
-}
-.md pre {
-  font-family: var(--font-mono);
-  font-size: var(--t-sm);
-  line-height: 1.45;
-  overflow: auto;
-  padding: var(--s3);
-  margin: 0 0 0.8em;
-  background: var(--surface-raised);
-  border: 1px solid var(--rule);
-  border-radius: var(--r-control);
-}
-.md pre code {
-  font-size: inherit;
-}
-.md table {
-  border-collapse: collapse;
-  width: 100%;
-  font-size: var(--t-base);
-  margin: 0 0 0.8em;
-}
-.md th,
-.md td {
-  border-bottom: 1px solid var(--rule);
-  padding: var(--s1) var(--s2);
-  text-align: left;
-}
-.md th {
-  color: var(--ink);
-  font-weight: var(--weight-medium);
-  border-bottom-color: var(--rule-lit);
-}
-
-/* --- Toast ---------------------------------------------------------------- */
-.toast {
-  position: fixed;
-  bottom: var(--s5);
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--surface-raised);
-  border: 1px solid var(--rule-lit);
-  color: var(--ink);
-  padding: var(--s2) var(--s4);
-  border-radius: var(--r-panel);
-  font-size: var(--t-sm);
-  /* Never wider than the column it floats over. */
-  max-width: min(460px, calc(100% - 2 * var(--s5)));
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--warm-950) 55%, transparent);
-  z-index: 60;
-  animation: toast-in var(--dur-fast) var(--ease-out);
-}
-@keyframes toast-in {
-  from {
-    opacity: 0;
-    transform: translateX(-50%) translateY(var(--s1));
+  /* A reservation for the traffic lights. 64 logical pixels, not CSS ones, which
+     is why this is the one width that is not a token. The fallback keeps the
+     gallery, which has no zoom hook, at 1. */
+  .bar-lights {
+    min-width: calc(64px / var(--zoom, 1));
   }
-  to {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0);
+  /* Tracked caps are the one type that belongs in chrome: the display face
+     muddies at 15px. */
+  .bar-status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    justify-self: center;
+    gap: var(--s2);
+    min-width: 0;
+    /* Holds its height across every state, and --s6 is the first rung that
+       clears the sm Segmented at 30px. */
+    min-height: var(--s6);
   }
-}
-
-.spin {
-  animation: spin 0.9s linear infinite;
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
+  .bar-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    justify-self: end;
   }
-}
+  /* `runCounter` pads with a space, so the timer needs `pre` to hold still. */
+  .bar-actions .ui-meta {
+    font-variant-numeric: tabular-nums;
+    white-space: pre;
+  }
 
-/* Overlay scrollbars, the way macOS draws them. */
-::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
-}
-::-webkit-scrollbar-thumb {
-  background: var(--rule-strong);
-  border-radius: var(--r-pill);
-  border: 3px solid transparent;
-  background-clip: content-box;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--ink-3);
-  background-clip: content-box;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
+  /* The primitive is built to stretch, and this centre column has no width to
+     fill, so each item hugs its label. */
+  .bar-nav .ui-seg__item {
+    flex: none;
+    padding-inline: var(--s3);
+  }
 
-/* The app's own motion only: a blanket `animation: none !important` kills the
-   library's reduced-motion substitutes too. */
-@media (prefers-reduced-motion: reduce) {
-  .spin,
-  .toast,
+  /* --- Vertical flow ------------------------------------------------------ */
+  /* The frame is wider than anything inside it: --s5 against a --s4 panel gap
+     (UI.md rule 4). The top pairs with the title bar's --s2 to make the same
+     --s4. The head and foot hold their height and `.flow-scroll` takes slack. */
+  .flow {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    padding: var(--s2) var(--s5) 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow: hidden;
+  }
+  /* One band: --s3 inside, --s4 down to the hairline (UI.md rule 4). */
+  .flow-head {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s3);
+    padding-bottom: var(--s4);
+    border-bottom: 1px solid var(--rule);
+  }
+  .flow-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+    /* Top air matches the foot's. */
+    padding: var(--s4) 0;
+  }
+  /* --s3 keeps the message slot attached to the Job panel above it. */
+  .flow-foot {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s3);
+    padding: var(--s4) 0 var(--s5);
+    border-top: 1px solid var(--rule);
+  }
+
+  /* --- Workspace split ---------------------------------------------------- */
+  /* `min-height: 0` is what lets the panes scroll inside the split rather than
+     push the column past the window. */
+  .workspace {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+  }
+
+  /* --- First run --------------------------------------------------------- */
+  /* A window rather than a panel: no border, no rail, one centred column. */
+  .onboarding-gate {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    max-width: 520px;
+    margin: 0 auto;
+    padding: var(--s5) var(--s5) var(--s6);
+    display: flex;
+    flex-direction: column;
+  }
+  /* The beat absorbs the column's slack, so every beat sits on one line. */
   .onboarding-beat {
-    animation: none;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: var(--s3);
+    /* A cross-fade only: the beats are one window saying a different thing.
+       `--dur` rather than a literal, so reduced motion zeroes it. */
+    animation: beat-in var(--dur) var(--ease);
   }
-  .folder-hit,
-  .ui-well.is-dropping,
-  .job-actions {
-    transition: none;
+  @keyframes beat-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
-}
+  /* A fixed slot outside the fading beat, so the button never moves. */
+  .onboarding-foot {
+    flex: none;
+    padding-top: var(--s5);
+  }
 
-/* --- Document pane ------------------------------------------------------ */
-.doc {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  height: 100%;
-  background: var(--surface-well);
-  /* `inline-size`, never `size`: containing the block axis collapses `.flow`
-     to 8px and blanks the app. */
-  container-type: inline-size;
-  container-name: doc;
-}
+  /* --- Library ------------------------------------------------------------ */
+  /* The app's one fixed landmark. Insets match `.flow`'s, so the two panes read
+     as one window, and the split's hairline is the divider. */
+  .lib-side {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+    /* Pairs with the title bar's --s2 to make the run column's --s4. */
+    padding: var(--s2) var(--s5) var(--s5);
+    min-height: 0;
+    min-width: 0;
+  }
+  .lib-side__head {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    min-width: 0;
+  }
+  /* No gap: `.ui-tree` already keeps its rows --s1 apart. */
+  .lib-side__list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    /* The rows truncate, so a sideways scrollbar here is only ever a bug. */
+    overflow-x: hidden;
+  }
+  .lib-side__foot {
+    flex: none;
+    display: flex;
+  }
+  .lib-side__path {
+    opacity: 0.85;
+  }
+  .lib-side__actions {
+    flex: none;
+  }
 
-/* Tighter to the strip above than to the body (UI.md rule 4). */
-/* The tab carries the name, so this says where the file lives. */
-.doc-head {
-  display: flex;
-  padding: var(--s3) var(--s5);
-  border-bottom: 1px solid var(--rule);
-  flex: none;
-}
-.doc-head > * {
-  flex: 1;
-  min-width: 0;
-}
-/* Gives way before the controls do. */
-.doc-id {
-  min-width: 0;
-  flex-shrink: 1;
-  overflow: hidden;
-}
+  /* --- Project tree ------------------------------------------------------- */
+  /* Layout only: this file loads after @ui and would beat the row's own tone. */
 
-.doc-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.doc-body > * {
-  min-height: 0;
-}
-
-/* The card is absolute in here, so the document keeps its scroll position
-   underneath and the strip above stays uncovered. */
-.doc-stack {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.doc-empty {
-  align-items: center;
-  justify-content: center;
-  gap: var(--s4);
-  text-align: center;
-  padding: var(--s6);
-}
-/* Takes a measure rather than shrink to its own copy, which `align-items:
-   center` above would otherwise do. */
-.doc-empty .ui-well {
-  width: 100%;
-  max-width: 34rem;
-}
-
-/* --- File inspector ----------------------------------------------------- */
-/* Covers `.doc-stack` and not `.doc`: the live tab strip is the way back. */
-.doc-inspect {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: start center;
-  padding: var(--s5);
-  overflow-y: auto;
-  background: color-mix(in srgb, var(--surface-well) 88%, transparent);
-  animation: doc-inspect-in var(--dur-fast) var(--ease-out);
-}
-@keyframes doc-inspect-in {
-  from {
+  /* Two characters whether or not it reads (UI.md rule 2). */
+  .lib-tree__count {
+    min-width: 2ch;
+    flex: none;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Holds its width: a truncated extension says less than nothing. */
+  .lib-tree__result {
+    flex: none;
+  }
+  /* Holds its width at rest, so the row is one size hovered, focused and
+     converting. `pointer-events` moves with the opacity, or an invisible control
+     answers a click on empty space. */
+  .lib-tree__convert {
+    display: flex;
+    flex: none;
     opacity: 0;
-    transform: translateY(var(--s2));
+    pointer-events: none;
+    transition: opacity var(--dur-fast) var(--ease);
   }
-  to {
+  /* Keyed on the row: an item holds its own subtree, so hovering a file would
+     light every project above it. */
+  .ui-tree__row:hover .lib-tree__convert,
+  .ui-tree__item:focus-visible > .ui-tree__row .lib-tree__convert {
     opacity: 1;
-    transform: none;
+    pointer-events: auto;
   }
-}
-/* A card, not a panel: a measure that grows makes four lines read as a page. */
-.doc-inspect__card {
-  width: 100%;
-  max-width: 56ch;
-  display: flex;
-  flex-direction: column;
-  background: var(--surface-solid);
-  border: 1px solid var(--rule-lit);
-  border-radius: var(--r-panel);
-  box-shadow: 0 12px 32px color-mix(in srgb, var(--warm-950) 50%, transparent);
-}
-.doc-inspect__head {
-  padding: var(--s2) var(--s3) var(--s2) var(--s4);
-  border-bottom: 1px solid var(--rule);
-}
-.doc-inspect__body {
-  padding: var(--s5);
-}
-.doc-inspect__foot {
-  padding: var(--s3) var(--s4);
-  border-top: 1px solid var(--rule);
-}
-/* Wrapped rather than scrolled: the card shows a dozen lines and stops. */
-.doc-inspect__peek {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-/* Names the label, not the tab: `is-active` sits on the wrapper,
-   `aria-selected` on the inner button, and the label paints its own ink. */
-.doc.is-covered .ui-tabs__tab.is-active .ui-tabs__label {
-  color: var(--ink-3);
-}
+  /* A fact about the row, not a control, so it never hides and holds its
+     width. */
+  .lib-tree__saves {
+    white-space: nowrap;
+    flex: none;
+  }
 
-/* Unbounded the prose runs 130 characters, and fixed at 68ch every pixel past
-   480px is margin. So it fills the pane and stops at 90ch. */
-.doc .preview-body {
-  width: 100%;
-  max-width: clamp(52ch, 100%, 90ch);
-  margin: 0 auto;
-  flex: 1;
-  /* `ch` grows the column with the type, and `cqi` answers the seam as well
-     as the window. */
-  font-size: clamp(var(--t-base), 1.6cqi, var(--t-lg));
-}
-/* No editor centres its text: the gutter belongs against the left edge. */
-.doc .ui-source {
-  width: 100%;
-  margin: 0;
+  /* A rail rather than a row action: the row already carries Convert, and a
+     second hover control is one nobody finds. */
+  .lib-side__move {
+    flex: none;
+  }
+
+  /* The open row keeps its name at full strength. */
+  .job.is-selected .job-name {
+    color: var(--text-body);
+  }
+
+  /* Opacity and a 1% settle, transform only, while the OS animates the window.
+     Nothing matches the close, or CSS fights the native shrink. */
+  .workspace .doc {
+    animation: pane-in var(--dur-slow) var(--ease);
+    transform-origin: left center;
+  }
+  @keyframes pane-in {
+    from {
+      opacity: 0;
+      transform: scale(0.99);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* --- Folder picker ------------------------------------------------------ */
+  /* A hit target inside a Panel, not a second control chrome. */
+  .folder-hit {
+    display: flex;
+    align-items: center;
+    /* Hover answers with surface, never colour. The padding undoes the negative
+       margin exactly, so the content does not move. */
+    min-height: 40px;
+    margin: 0 calc(-1 * var(--s2));
+    padding: 0 var(--s2);
+    border: 0;
+    background: none;
+    color: inherit;
+    text-align: left;
+    transition: background var(--dur-fast) var(--ease);
+  }
+  .folder-hit:hover {
+    background: var(--surface-lift);
+  }
+  .folder-hit svg {
+    color: var(--text-mute);
+    flex-shrink: 0;
+  }
+
+  /* --- Settings ----------------------------------------------------------- */
+  /* Padding lives on the scrollport, so the gutter sits beside the fields.
+     --s4 between groups, --s3 between fields, --s2 inside a control. */
+  /* Never `.flow` here: its `flex: 1` scroll child inside the sheet's block body
+     never resolves a height, and the head band scrolls off the card. */
+  .settings {
+    display: flex;
+    flex-direction: column;
+  }
+  /* Sticky, so the sheet body stays the only scroll container. */
+  .settings__nav {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: var(--s3) var(--s4);
+    background: var(--surface-lift);
+    border-bottom: 1px solid var(--rule);
+  }
+  /* The card is the frame here, so the inset steps down to --s4. */
+  .settings__body {
+    padding: var(--s4);
+    scrollbar-gutter: stable;
+  }
+  /* Revealed fields belong to the choice above them: one step closer. */
+  .settings-nest {
+    padding-top: var(--s1);
+  }
+  /* A native input's intrinsic min-width pushes Save and Remove off the row. */
+  .settings-key {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--s2);
+    align-items: center;
+  }
+  .settings-key .ui-input {
+    min-width: 0;
+  }
+  .settings-key__actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--s2);
+  }
+
+  /* --- Blocking hint ------------------------------------------------------ */
+  /* Never a <Button>: `white-space: nowrap` is right for "SAVE" and clips a
+     sentence. Prose you can click, so it takes body type and wraps. */
+  .hint {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s2);
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--link);
+    font-family: var(--font-body);
+    font-size: var(--t-xs);
+    line-height: var(--lh-snug);
+    text-align: left;
+    white-space: normal;
+  }
+  .hint:hover {
+    color: var(--link-hover);
+  }
+  .hint svg,
+  .job-msg svg {
+    font-size: 13px;
+    margin-top: 1px;
+  }
+
+  /* Two lines held open, so an arriving hint cannot jump the scroll region.
+     Below the panel, not inside: empty space in a border reads as broken. */
+  .job-msg {
+    min-height: calc(2 * var(--lh-snug) * var(--t-xs));
+  }
+
+  /* --- Input well --------------------------------------------------------- */
+  /* Drag-over is an affordance, not a running job, so it takes the focus ring. */
+  .ui-well.is-dropping {
+    border-color: var(--focus-ring);
+    background: color-mix(in oklch, var(--focus-ring) 12%, var(--surface-sunk));
+  }
+  /* The whole well is the picker. Rows inside carry their own cursor. */
+  .drop-well {
+    cursor: pointer;
+  }
+  .drop-well .drop-node {
+    cursor: default;
+  }
+
+  /* A real button: clicking the empty state is the first thing anyone tries. */
+  .drop-empty {
+    display: grid;
+    place-items: center;
+    width: 100%;
+    padding: var(--s6) var(--s4);
+    text-align: center;
+    gap: var(--s1);
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  .drop-empty > svg {
+    font-size: 28px;
+    color: var(--text-mute);
+    margin-bottom: var(--s1);
+    transition: color var(--dur) var(--ease);
+  }
+  .drop-well:hover .drop-empty > svg {
+    color: var(--text-body);
+  }
+
+  /* Dropped paths. `--s3` between them: items in a list (UI.md rule 4). */
+  .drop-list,
+  .drop-matches {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .drop-list {
+    gap: var(--s3);
+  }
+
+  .drop-item {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    min-width: 0;
+  }
+  .drop-item > svg {
+    color: var(--text-mute);
+    font-size: 14px;
+    flex: none;
+  }
+  /* Two digits held open whether or not they read (UI.md rule 2). */
+  .drop-count {
+    min-width: 2ch;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    flex: none;
+  }
+
+  /* One level in on the tree's own rung, and --s1 between them: atoms of one
+     object (UI.md rule 4). */
+  .drop-matches {
+    gap: var(--s1);
+    margin-top: var(--s2);
+    padding-left: calc(var(--s2) + var(--s3));
+  }
+  .drop-match {
+    min-width: 0;
+    display: flex;
+  }
+
+  /* --- Results log -------------------------------------------------------- */
+  .job-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .job {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    min-height: 40px;
+    padding: var(--s2) var(--s4);
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .job:last-child {
+    border-bottom: 0;
+  }
+  /* A queued row opens nothing, so the wash would promise a click that the
+     row's own handler drops. */
+  .job:hover:not(.is-selected):not(:has(.job-open[aria-disabled="true"])) {
+    background: color-mix(in oklch, var(--text-body) 6%, transparent);
+  }
+  /* Never the ring colour: that is the control you press. Surface is the whole
+     signal. */
+  .job.is-selected {
+    background: var(--surface-lift);
+  }
+  .job-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+  }
+  /* Bare on purpose: the row is already the affordance. */
+  .job-open {
+    display: block;
+    min-width: 0;
+    flex-shrink: 1;
+    padding: 0;
+    border: 0;
+    background: none;
+    text-align: left;
+    overflow: hidden;
+  }
+  /* base.css draws the ring; inside a row it has to sit within the bounds. */
+  .job-open:focus-visible {
+    outline-offset: -2px;
+  }
+  /* The row says it is not openable yet, and the name has to say it too: the
+     dim is on `.job-name`, because `.ui-meta` paints its own colour. */
+  .job-open[aria-disabled="true"] .job-name {
+    color: var(--text-mute);
+  }
+  /* Blockified inside `.job-open`: an inline span cannot draw an ellipsis. */
+  .job-name {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 1;
+  }
+  /* Layout only. This file loads after @ui, so a colour here beats the call
+     site's `tone` and greys every failed job's error. */
+  .job-sub {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 100;
+    min-width: 0;
+  }
+  .job-time {
+    flex-shrink: 0;
+  }
+  /* Actions occupy their slot always, so revealing them never shifts the row. */
+  .job-actions {
+    display: flex;
+    gap: var(--s2);
+    opacity: 0;
+    transition: opacity var(--dur-fast) var(--ease);
+  }
+  .job:hover .job-actions,
+  .job:focus-within .job-actions {
+    opacity: 1;
+  }
+
+  .hist-list {
+    display: flex;
+    flex-direction: column;
+  }
+  /* Layout only. See `.job-sub`. */
+  .hist-empty {
+    display: grid;
+    place-items: center;
+    gap: var(--s1);
+    padding: var(--s6);
+    text-align: center;
+  }
+  /* The one reading surface in the app, so prose type and a real measure. */
+  .preview-body {
+    margin: 0;
+    padding: var(--s5);
+    overflow: auto;
+    font-family: var(--font-body);
+    font-size: var(--t-base);
+    line-height: var(--lh-body);
+    word-break: break-word;
+    color: var(--text-body);
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .md h1,
+  .md h2,
+  .md h3,
+  .md h4,
+  .md h5,
+  .md h6 {
+    color: var(--text-body);
+    font-weight: var(--weight-subhead);
+    line-height: 1.3;
+    margin: 1.15em 0 0.4em;
+  }
+  .md h1 { font-size: 1.28em; }
+  .md h2 { font-size: 1.12em; }
+  .md h3 { font-size: 1em; }
+  .md h4,
+  .md h5,
+  .md h6 {
+    font-size: 1em;
+  }
+  .md p,
+  .md ul,
+  .md ol,
+  .md blockquote {
+    margin: 0 0 0.8em;
+  }
+  .md ul,
+  .md ol {
+    padding-left: 1.2em;
+  }
+  .md blockquote {
+    padding-left: var(--s3);
+    border-left: 1px solid var(--rule);
+    color: var(--text-soft);
+  }
+  .md img {
+    max-width: 100%;
+    height: auto;
+  }
+  .md a {
+    color: var(--link);
+    text-decoration: underline;
+  }
+  .md a:hover {
+    color: var(--link-hover);
+  }
+  .md code {
+    font-family: var(--font-code);
+    font-size: 0.88em;
+  }
+  .md pre {
+    font-family: var(--font-code);
+    font-size: var(--t-sm);
+    line-height: 1.45;
+    overflow: auto;
+    padding: var(--s3);
+    margin: 0 0 0.8em;
+    background: var(--surface-sunk);
+    border: 1px solid var(--rule);
+  }
+  .md pre code {
+    font-size: inherit;
+  }
+  .md table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: var(--t-base);
+    margin: 0 0 0.8em;
+  }
+  .md th,
+  .md td {
+    border-bottom: 1px solid var(--rule-soft);
+    padding: var(--s1) var(--s2);
+    text-align: left;
+  }
+  .md th {
+    color: var(--text-body);
+    font-weight: var(--weight-subhead);
+    border-bottom-color: var(--rule);
+  }
+
+  .spin {
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Overlay scrollbars, the way macOS draws them. */
+  ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+  /* A rule at rest and ink under the pointer: a thumb in text ink reads as a
+     bar of content beside the tree. */
+  ::-webkit-scrollbar-thumb {
+    background: var(--rule-soft);
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--text-mute);
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* The app's own motion only: a blanket `animation: none !important` kills the
+     library's reduced-motion substitutes too. */
+  @media (prefers-reduced-motion: reduce) {
+    .spin,
+    .onboarding-beat {
+      animation: none;
+    }
+    .folder-hit,
+    .ui-well.is-dropping,
+    .job-actions {
+      transition: none;
+    }
+  }
+
+  /* --- Document pane ------------------------------------------------------ */
+  .doc {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    background: var(--surface-sunk);
+    /* `inline-size`, never `size`: containing the block axis collapses `.flow`
+       to 8px and blanks the app. */
+    container-type: inline-size;
+    container-name: doc;
+  }
+
+  /* Tighter to the strip above than to the body (UI.md rule 4). */
+  /* The tab carries the name, so this says where the file lives. */
+  .doc-head {
+    display: flex;
+    padding: var(--s3) var(--s5);
+    border-bottom: 1px solid var(--rule);
+    flex: none;
+  }
+  .doc-head > * {
+    flex: 1;
+    min-width: 0;
+  }
+  /* Gives way before the controls do. */
+  .doc-id {
+    min-width: 0;
+    flex-shrink: 1;
+    overflow: hidden;
+  }
+
+  .doc-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .doc-body > * {
+    min-height: 0;
+  }
+
+  /* The card is absolute in here, so the document keeps its scroll position
+     underneath and the strip above stays uncovered. */
+  .doc-stack {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .doc-empty {
+    align-items: center;
+    justify-content: center;
+    gap: var(--s4);
+    text-align: center;
+    padding: var(--s6);
+  }
+  /* Takes a measure rather than shrink to its own copy, which `align-items:
+     center` above would otherwise do. */
+  .doc-empty .ui-well {
+    width: 100%;
+    max-width: 34rem;
+  }
+
+  /* --- File inspector ----------------------------------------------------- */
+  /* Covers `.doc-stack` and not `.doc`: the live tab strip is the way back. */
+  .doc-inspect {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: start center;
+    padding: var(--s5);
+    overflow-y: auto;
+    /* Opaque: a see-through cover leaves two documents competing for the eye. */
+    background: var(--surface-sunk);
+    animation: doc-inspect-in var(--dur-fast) var(--ease);
+  }
+  @keyframes doc-inspect-in {
+    from {
+      opacity: 0;
+      transform: translateY(var(--s2));
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  /* A card, not a panel: a measure that grows makes four lines read as a page. */
+  .doc-inspect__card {
+    width: 100%;
+    max-width: 56ch;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface-lift);
+    border: 1px solid var(--rule);
+  }
+  .doc-inspect__head {
+    padding: var(--s2) var(--s3) var(--s2) var(--s4);
+    border-bottom: 1px solid var(--rule);
+  }
+  .doc-inspect__body {
+    padding: var(--s5);
+  }
+  .doc-inspect__foot {
+    padding: var(--s3) var(--s4);
+    border-top: 1px solid var(--rule);
+  }
+  /* Wrapped rather than scrolled: the card shows a dozen lines and stops. */
+  .doc-inspect__peek {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  /* Names the label, not the tab: `is-active` sits on the wrapper,
+     `aria-selected` on the inner button, and the label paints its own ink. */
+  .doc.is-covered .ui-tabs__tab.is-active .ui-tabs__label {
+    color: var(--text-mute);
+  }
+
+  /* Unbounded the prose runs 130 characters, so it fills the pane and stops at
+     the measure prose is read at. */
+  .doc .preview-body {
+    width: 100%;
+    max-width: clamp(52ch, 100%, 68ch);
+    margin: 0 auto;
+    flex: 1;
+    /* `ch` grows the column with the type, and `cqi` answers the seam as well
+       as the window. */
+    font-size: clamp(var(--t-base), 1.6cqi, var(--t-lg));
+  }
+  /* No editor centres its text: the gutter belongs against the left edge. */
+  .doc .ui-source {
+    width: 100%;
+    margin: 0;
+  }
 }

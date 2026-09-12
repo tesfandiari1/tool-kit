@@ -1,80 +1,92 @@
-/* Pills and status glyphs: hairline outline, full radius, no fill. */
+@layer ui {
+  /* Badges and status glyphs: tracked caps and a square mark, no box. The
+     caps rule comes from Text.css. */
 
-.ui-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s2);
-
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
-  letter-spacing: var(--track-mono);
-  line-height: 1;
-  white-space: nowrap;
-
-  padding: var(--s1) var(--s3);
-  border: 1px solid var(--rule-lit);
-  border-radius: var(--r-pill);
-  color: var(--ink-2);
-  background: transparent;
-}
-
-.ui-badge--square {
-  border-radius: var(--r-control);
-  /* Two digits plus this border-box's own padding (UI.md rule 2). */
-  min-inline-size: calc(2ch + var(--s3) * 2 + 2px);
-  justify-content: center;
-}
-
-.ui-badge--pass {
-  border-color: var(--pass);
-  color: var(--pass);
-}
-
-/* --- Status dot: holds its slot at every status ----------------------- */
-.ui-dot {
-  display: inline-block;
-  flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: var(--r-pill);
-  background: var(--ink-ghost);
-}
-
-.ui-dot--queued {
-  background: transparent;
-  box-shadow: inset 0 0 0 1px var(--ink-ghost);
-}
-.ui-dot--live {
-  background: var(--live);
-  animation: ui-dot-pulse 1.6s var(--ease) infinite;
-}
-.ui-dot--pass {
-  background: var(--pass);
-}
-.ui-dot--fault {
-  background: var(--fault);
-}
-
-@keyframes ui-dot-pulse {
-  0%,
-  100% {
-    opacity: 1;
+  .ui-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s2);
+    white-space: nowrap;
+    color: var(--text-soft);
   }
-  50% {
-    opacity: 0.35;
-  }
-}
 
-/* The pulse becomes a static ring, amber and never the accent, which would
-   say "press me". */
-@media (prefers-reduced-motion: reduce) {
+  /* A 6px mark, and only when the tone carries a status: a neutral swatch
+     would be decoration (UI.md rule 1). */
+  .ui-badge--info::before,
+  .ui-badge--success::before,
+  .ui-badge--warning::before,
+  .ui-badge--danger::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    flex: none;
+    background: currentColor;
+  }
+
+  .ui-badge--info {
+    color: var(--status-info);
+  }
+  .ui-badge--success {
+    color: var(--status-success);
+  }
+  .ui-badge--warning {
+    color: var(--status-warning);
+  }
+  .ui-badge--danger {
+    color: var(--status-danger);
+  }
+
+  /* A count is the one boxed badge: a ruled rectangle holding two digits, so
+     a queue never reflows (UI.md rule 2). */
+  .ui-badge--count {
+    justify-content: center;
+    padding: var(--s1) var(--s3);
+    border: 1px solid var(--rule);
+    font-variant-numeric: tabular-nums;
+    min-inline-size: calc(2ch + var(--s3) * 2 + 2px);
+  }
+
+  /* --- Status dot: holds its slot at every status ----------------------- */
+  .ui-dot {
+    display: inline-block;
+    flex: none;
+    width: 6px;
+    height: 6px;
+    background: var(--text-ghost);
+  }
+
+  .ui-dot--queued {
+    background: transparent;
+    border: 1px solid var(--text-mute);
+  }
   .ui-dot--live {
-    animation: none;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--live) 35%, transparent);
+    background: var(--status-warning);
+    animation: ui-dot-pulse 1.6s var(--ease) infinite;
   }
-}
+  .ui-dot--pass {
+    background: var(--status-success);
+  }
+  .ui-dot--fault {
+    background: var(--status-danger);
+  }
 
-/* Live indicators stay lit in an inactive window. */
-body.inactive .ui-dot--live {
-  background: var(--live);
+  @keyframes ui-dot-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  /* The pulse becomes a static ring, in the live colour and never the focus
+     ring, which would say "press me". */
+  @media (prefers-reduced-motion: reduce) {
+    .ui-dot--live {
+      animation: none;
+      outline: 1px solid var(--status-warning);
+      outline-offset: 1px;
+    }
+  }
 }

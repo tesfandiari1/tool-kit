@@ -1,58 +1,58 @@
-/* A determinate bar promises how much is left, so it is used only when that
-   is known. */
+@layer ui {
+  /* A determinate bar promises how much is left, so it is used only when that
+     is known. */
 
-.ui-meter {
-  position: relative;
-  width: 100%;
-  height: 3px;
-  border-radius: var(--r-pill);
-  background: var(--rule);
-  overflow: hidden;
-}
-
-/* Scaled down rather than sized by width: animating width relays out twenty
-   rows on every poll. No `transform` default here, or it blanks the
-   reduced-motion variant, which animates opacity alone. */
-.ui-meter__fill {
-  width: 100%;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--live);
-  transform-origin: left center;
-  transition: transform var(--dur-slow) var(--ease-out);
-  will-change: transform;
-}
-
-.ui-meter--indeterminate .ui-meter__fill {
-  width: 34%;
-  animation: ui-meter-sweep 1.4s var(--ease) infinite;
-}
-
-@keyframes ui-meter-sweep {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(390%);
-  }
-}
-
-/* A pulse rather than a frozen bar, which reads as a stalled job. */
-@media (prefers-reduced-motion: reduce) {
-  .ui-meter--indeterminate .ui-meter__fill {
+  .ui-meter {
+    position: relative;
     width: 100%;
-    animation: ui-meter-breathe 2s var(--ease) infinite;
+    height: 3px;
+    background: var(--rule-soft);
+    overflow: hidden;
   }
-  @keyframes ui-meter-breathe {
-    0%,
-    100% {
-      opacity: 0.9;
-    }
-    50% {
-      opacity: 0.3;
-    }
-  }
-}
 
-/* `--live` is never dimmed, and an unscoped rule here repaints passed and
-   failed meters amber. */
+  /* Scaled down rather than sized by width: animating width relays out twenty
+     rows on every poll. No `transform` default here, or it blanks the
+     reduced-motion variant, which animates opacity alone. */
+  .ui-meter__fill {
+    width: 100%;
+    height: 100%;
+    background: var(--status-warning);
+    transform-origin: left center;
+    transition: transform var(--dur-slow) var(--ease);
+    will-change: transform;
+  }
+
+  .ui-meter--indeterminate .ui-meter__fill {
+    width: 34%;
+    animation: ui-meter-sweep 1.4s var(--ease) infinite;
+  }
+
+  @keyframes ui-meter-sweep {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(390%);
+    }
+  }
+
+  /* A pulse rather than a frozen bar, which reads as a stalled job. */
+  @media (prefers-reduced-motion: reduce) {
+    .ui-meter--indeterminate .ui-meter__fill {
+      width: 100%;
+      animation: ui-meter-breathe 2s var(--ease) infinite;
+    }
+    @keyframes ui-meter-breathe {
+      0%,
+      100% {
+        opacity: 0.9;
+      }
+      50% {
+        opacity: 0.3;
+      }
+    }
+  }
+
+  /* The fill is never dimmed, and an unscoped rule here would repaint passed
+     and failed meters in the live colour. */
+}

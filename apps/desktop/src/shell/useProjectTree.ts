@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { commands } from "@/app/commands";
 import type { DirListing, ListError, ProjectSummary } from "@/app/types";
 import { onWindowFocused } from "@/platform/host";
+import type { ToastTone } from "./useToast";
 
 /// One click that fires a thousand `read_dir` calls is a frozen tree.
 const DEEP_EXPAND_DEPTH = 6;
@@ -110,7 +111,7 @@ export function useProjectTree({
   onExpandedChange: (paths: string[]) => void;
   /// The finished-run counter plus every setting the host's pairing rule reads.
   refreshKey: string;
-  showToast: (message: string) => void;
+  showToast: (message: string, tone?: ToastTone) => void;
 }): ProjectTreeState {
   const [listings, setListings] = useState<Record<string, DirListing>>({});
   const [busy, setBusy] = useState<string[]>([]);
@@ -197,7 +198,7 @@ export function useProjectTree({
         return listing;
       } catch (e) {
         const failure = listFailure(e);
-        if (mode === "click") showToast(failure.message);
+        if (mode === "click") showToast(failure.message, "danger");
         // Dropping these on every failure lets one sleeping volume empty
         // `expandedPaths` for good.
         if (!failure.gone) {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { EyeIcon, FolderOpenIcon } from "@phosphor-icons/react";
-import { Badge, Button, Input, Mono, Row, Spacer, StatusDot, Text } from "@ui";
+import { Badge, Button, Input, Meta, Row, Spacer, StatusDot, Text } from "@ui";
 import { commands } from "@/app/commands";
 import { basename, fmtWhen } from "@/app/format";
 import { HISTORY_LIMIT, type HistoryEntry } from "@/app/types";
@@ -83,12 +83,11 @@ export function HistoryPanel({
 
   return (
     <FlowLayout
-      className="history-panel"
       head={
         <>
           <Row gap={2}>
             <Spacer />
-            <Badge square>
+            <Badge count>
               {rows === null
                 ? ""
                 : rows.length >= HISTORY_LIMIT
@@ -96,7 +95,7 @@ export function HistoryPanel({
                   : String(rows.length)}
             </Badge>
             <Button
-              variant="link"
+              variant="ghost"
               /* `clear_history` deletes the whole table, so a search matching
                  nothing must not disable it. */
               disabled={!rows || (rows.length === 0 && query === "")}
@@ -180,9 +179,9 @@ export function HistoryPanel({
                         : undefined
                     }
                   >
-                    <Mono size="xs" tone="ink" className="job-name">
+                    <Meta size="xs" tone="ink" className="job-name">
                       {e.fileName}
-                    </Mono>
+                    </Meta>
                   </button>
                   {e.status === "failed" && e.error ? (
                     <Text as="span" size="xs" tone="fault" className="job-sub">
@@ -204,9 +203,9 @@ export function HistoryPanel({
                     )
                   )}
                 </div>
-                <Mono size="xs" className="job-time">
+                <Meta size="xs" className="job-time">
                   {fmtWhen(e.finishedAt, nowMs)}
-                </Mono>
+                </Meta>
                 <div className="job-actions">
                   {openable && (
                     <Button

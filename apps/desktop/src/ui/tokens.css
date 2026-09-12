@@ -1,114 +1,98 @@
-/* Design tokens. Components reference these and never a literal colour, size
-   or font. Two themes ship, `:root` graphite and `[data-theme="paper"]`, and
-   only surface, ink and accent differ between them. */
+/* Design tokens. Components reference the role layer and never a literal
+   colour, size or font, and never the raw palette either. One role block:
+   `light-dark()` picks the side, so there is no second theme block to keep in
+   sync. The gallery forces a side with `[data-theme="bone"|"ink"]`. */
 
 :root {
-  /* Warm neutral ramp. Every step carries a yellow cast, and a cool grey
-     beside these reads as broken. */
-  --warm-950: #14120f;
-  --warm-900: #1d1b16;
-  --warm-800: #26241e;
-  --warm-600: #4a4945;
-  --warm-500: #777673;
-  --warm-400: #a5a4a2;
-  --warm-300: #c7c3b2;
-  --warm-100: #ecebe5;
-  --warm-050: #f5f3eb;
-  --warm-000: #fdfcf8;
+  color-scheme: light dark;
+}
 
-  /* Cobalt: the control you press, never decoration (UI.md rule 1). */
-  --cobalt-600: #2d1a9e;
-  --cobalt-500: #3923c7;
-  --cobalt-400: #614fd2;
-  --cobalt-300: #887bdd;
-  --cobalt-200: #b0a7e9;
-
-  /* Live, passed, failed. Nothing else is coloured with these. */
-  --amber: #e0a33c;
-  --green-400: #2d915c;
-  --green-300: #6dab89;
-  --red-500: #f04438;
-
-  /* Semantic layer: the only names components may use. */
-
-  /* Semi-opaque: they sit on the window's NSVisualEffectView. */
-  --surface-scrim: #14120fcc;
-  --surface: #1d1b16b8;
-  --surface-raised: #26241ecc;
-  --surface-well: #14120f8c;
-  --surface-solid: var(--warm-900);
-
-  --rule: #ecebe51f;
-  --rule-lit: #ecebe533;
-  --rule-strong: #ecebe552;
-
-  --ink: var(--warm-100);
-  --ink-2: var(--warm-400);
-  --ink-3: var(--warm-500);
-  --ink-ghost: #77767399;
-
-  --accent: var(--cobalt-400);
-  --accent-hover: var(--cobalt-300);
-  --accent-active: var(--cobalt-500);
-  --accent-ink: #ffffff;
-  --accent-quiet: var(--cobalt-200);
-
-  --live: var(--amber);
-  --pass: var(--green-300);
-  --fault: var(--red-500);
-
-  --focus: #7d8cff;
-
-  /* The one accent wash outside a control, because macOS tints selection.
-     Alpha, so the ink under it stays readable. */
-  --select: color-mix(in srgb, var(--accent) 34%, transparent);
-
+:root[data-theme="bone"] {
+  color-scheme: light;
+}
+:root[data-theme="ink"] {
   color-scheme: dark;
 }
 
-/* Paper theme: overrides surfaces, ink and the accent's contrast pair. */
-[data-theme="paper"] {
-  --surface-scrim: var(--warm-000);
-  --surface: var(--warm-000);
-  --surface-raised: var(--warm-050);
-  --surface-well: var(--warm-100);
-  --surface-solid: var(--warm-000);
+/* Raw palette: three colours with steps. Nothing outside this file reads it. */
+:root {
+  --blue: #69809c;
+  --blue-deep: #4c617a;
+  --blue-pale: #a8b8cc;
 
-  --rule: #c7c3b2;
-  --rule-lit: #a5a4a2;
-  --rule-strong: #777673;
+  --ink: #2b2b2b;
+  --ink-soft: #4e4e4e;
+  --ink-mute: #6e6a66;
+  /* Invented: the system has no dark side, and ink needs a lift and a sink. */
+  --ink-lift: #353535;
+  --ink-sunk: #1f1f1f;
 
-  --ink: var(--warm-900);
-  --ink-2: var(--warm-600);
-  --ink-3: var(--warm-500);
-  --ink-ghost: #a5a4a2;
-
-  --accent: var(--cobalt-500);
-  --accent-hover: var(--cobalt-400);
-  --accent-active: var(--cobalt-600);
-  --accent-ink: #ffffff;
-  --accent-quiet: var(--cobalt-500);
-
-  --live: #a8710f;
-  --pass: var(--green-400);
-  --fault: var(--red-500);
-
-  /* The graphite ring is tuned for a dark ground and washes out on cream. */
-  --focus: #3923c7;
-
-  /* Cream needs less accent: the strength that reads on charcoal buries it. */
-  --select: color-mix(in srgb, var(--accent) 20%, transparent);
-
-  color-scheme: light;
+  --bone: #efe3d6;
+  --bone-lift: #f8f2ea;
+  --bone-deep: #e4d5c4;
+  --bone-dim: #d8c8b6;
 }
 
-/* Three families, three jobs, never overlapping: display for panel titles,
-   body for prose, mono for every label. The tracked mono uppercase label is
-   the signature of the language. */
+/* Role layer: the only names a component may use. */
 :root {
-  --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
-  --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --surface-page: light-dark(var(--bone), var(--ink));
+  --surface-lift: light-dark(var(--bone-lift), var(--ink-lift));
+  --surface-sunk: light-dark(var(--bone-deep), var(--ink-sunk));
+  /* Invented: a modal needs a ground that reads as "behind", both sides. */
+  --scrim: rgba(20, 20, 22, 0.72);
+
+  --text-body: light-dark(var(--ink), var(--bone));
+  --text-soft: light-dark(var(--ink-soft), var(--bone-dim));
+  --text-mute: light-dark(var(--ink-mute), color-mix(in srgb, var(--bone-dim) 70%, var(--ink)));
+  /* Invented: UI.md rule 2 needs a held slot that is visible but not read. */
+  --text-ghost: color-mix(in srgb, var(--text-mute) 45%, transparent);
+
+  --rule: light-dark(var(--ink), rgba(239, 227, 214, 0.28));
+  --rule-soft: light-dark(rgba(43, 43, 43, 0.28), rgba(239, 227, 214, 0.14));
+
+  --link: var(--text-body);
+  --link-hover: light-dark(var(--blue-deep), var(--blue-pale));
+  --focus-ring: light-dark(var(--blue-deep), var(--blue-pale));
+
+  --selection: light-dark(var(--blue-pale), var(--blue-deep));
+  /* Invented: the system sets only the wash, and ink on blue-deep is unreadable. */
+  --selection-text: light-dark(var(--ink), var(--bone));
+
+  --btn-primary-bg: light-dark(var(--ink), var(--bone));
+  --btn-primary-fg: light-dark(var(--bone), var(--ink));
+  --btn-primary-hover-bg: light-dark(var(--blue-deep), var(--blue-pale));
+
+  --btn-secondary-border: light-dark(var(--ink), var(--bone));
+  --btn-secondary-fg: light-dark(var(--ink), var(--bone));
+  --btn-secondary-hover-bg: light-dark(var(--ink), var(--bone));
+  --btn-secondary-hover-fg: light-dark(var(--bone), var(--ink));
+
+  --btn-inverse-border: light-dark(var(--bone), var(--ink));
+  --btn-inverse-fg: light-dark(var(--bone), var(--ink));
+  --btn-inverse-hover-bg: light-dark(var(--bone), var(--ink));
+  --btn-inverse-hover-fg: light-dark(var(--ink), var(--bone));
+
+  /* Invented: the toast is a dark bar in both themes, and on ink it needs a
+     lifted step or it vanishes into the page. */
+  --toast-bg: light-dark(var(--ink), var(--ink-lift));
+  --toast-fg: var(--bone);
+
+  /* Muted status, never traffic lights. The ink side is a lifted step,
+     because #8c4a48 on ink is 2.15:1. */
+  --status-info: light-dark(#4c617a, #a8b8cc);
+  --status-success: light-dark(#5e7a63, #8fa894);
+  --status-warning: light-dark(#9c7a4a, #c6a472);
+  --status-danger: light-dark(#8c4a48, #c2766f);
+}
+
+/* Four families, four jobs: display for titles, subhead for every label and
+   button, body for prose, code for the editor. Every figure that ticks sits
+   on the subhead face, which is the only one with `tnum`. */
+:root {
+  --font-display: "TRJN DaVinci", Georgia, serif;
+  --font-subhead: "Red Hat Display", system-ui, sans-serif;
+  --font-body: "DM Sans", system-ui, sans-serif;
+  --font-code: ui-monospace, "SF Mono", Menlo, monospace;
 
   /* Desktop scale: a tool window shows twenty rows, not one headline. */
   --t-label: 10px;
@@ -121,17 +105,14 @@
   --t-3xl: 32px;
   --t-4xl: 44px;
 
-  --lh-tight: 1.15;
+  --lh-tight: 1.1;
   --lh-snug: 1.35;
-  --lh-body: 1.55;
+  --lh-body: 1.6;
 
-  /* Serif sets tight, mono labels wide. */
-  --track-display: -0.02em;
-  --track-label: 0.09em;
-  --track-mono: 0.02em;
+  --track-label: 0.22em;
+  --track-display: 0.01em;
 
-  --weight-normal: 400;
-  --weight-medium: 500;
+  --weight-subhead: 500;
 }
 
 /* 4px grid. No other spacing value exists in the system. */
@@ -142,36 +123,16 @@
   --s4: 16px;
   --s5: 24px;
   --s6: 32px;
-  --s7: 40px;
-  --s8: 48px;
+  --s7: 48px;
+  --s8: 64px;
 }
 
-/* Controls get a small radius. Grid cells get none. */
-:root {
-  --r-control: 4px;
-  --r-panel: 6px;
-  --r-pill: 999px;
-}
-
-/* Fast and flat. No bounce, no spring. */
+/* Hover transitions only. Nothing moves on scroll. */
 :root {
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-out: cubic-bezier(0, 0, 0.2, 1);
   --dur-fast: 90ms;
-  --dur: 150ms;
-  --dur-slow: 260ms;
-}
-
-/* Surfaces go opaque when the user turns vibrancy off. Scoped away from
-   paper, whose surfaces are opaque already: unscoped it paints them near-black
-   under dark ink. */
-@media (prefers-reduced-transparency: reduce) {
-  :root:not([data-theme="paper"]) {
-    --surface-scrim: var(--warm-950);
-    --surface: var(--warm-900);
-    --surface-raised: var(--warm-800);
-    --surface-well: var(--warm-950);
-  }
+  --dur: 180ms;
+  --dur-slow: 320ms;
 }
 
 @media (prefers-reduced-motion: reduce) {

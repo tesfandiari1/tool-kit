@@ -2,21 +2,21 @@ import type { HTMLAttributes } from "react";
 import { cx } from "../cx";
 import "./Badge.css";
 
-export type Tone = "neutral" | "pass";
+export type Tone = "neutral" | "info" | "success" | "warning" | "danger";
 
 export interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
   tone?: Tone;
-  /// Square corners instead of a pill, for counts and format tags.
-  square?: boolean;
+  /// Centred and wide enough for two digits, for queue counts.
+  count?: boolean;
 }
 
-export function Badge({ tone = "neutral", square = false, className, ...rest }: BadgeProps) {
+export function Badge({ tone = "neutral", count = false, className, ...rest }: BadgeProps) {
   return (
     <span
       className={cx(
         "ui-badge",
         tone !== "neutral" && `ui-badge--${tone}`,
-        square && "ui-badge--square",
+        count && "ui-badge--count",
         className,
       )}
       {...rest}

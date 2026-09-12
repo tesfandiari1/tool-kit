@@ -1,125 +1,125 @@
-/* A disclosure tree. The indent is --s3 a level and caps at four, or a deep
-   name walks off the pane. Nothing here spends colour. See UI.md. */
+@layer ui {
+  /* A disclosure tree. The indent is --s3 a level and caps at four, or a deep
+     name walks off the pane. Nothing here spends colour. See UI.md. */
 
-.ui-tree {
-  /* The app's project rows, not AppKit's 24px source list. */
-  --tree-row-h: 32px;
-}
+  .ui-tree {
+    /* The app's project rows, not AppKit's 24px source list. */
+    --tree-row-h: 32px;
+  }
 
-.ui-tree,
-.ui-tree__group {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s1);
-}
+  .ui-tree,
+  .ui-tree__group {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+  }
 
-/* A group belongs to the row above it, at the same --s1. */
-.ui-tree__group {
-  margin-block-start: var(--s1);
-}
+  /* A group belongs to the row above it, at the same --s1. */
+  .ui-tree__group {
+    margin-block-start: var(--s1);
+  }
 
-.ui-tree__item {
-  min-inline-size: 0;
-}
+  .ui-tree__item {
+    min-inline-size: 0;
+  }
 
-.ui-tree__row {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  min-block-size: var(--tree-row-h);
-  padding-inline: calc(var(--s2) + var(--s3) * min(var(--tree-depth, 0), 4)) var(--s2);
-  border-radius: var(--r-control);
-  transition: background var(--dur-fast) var(--ease);
-}
+  .ui-tree__row {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    min-block-size: var(--tree-row-h);
+    padding-inline: calc(var(--s2) + var(--s3) * min(var(--tree-depth, 0), 4)) var(--s2);
+    transition: background var(--dur-fast) var(--ease);
+  }
 
-/* A surface step, never cobalt: that is the control you press. */
-.ui-tree__item.is-selected > .ui-tree__row {
-  background: var(--surface-raised);
-}
+  /* A surface step, never a colour: the selection reports, it does not act. */
+  .ui-tree__item.is-selected > .ui-tree__row {
+    background: var(--surface-lift);
+  }
 
-/* On the row, not the item: the item contains its whole open subtree. */
-.ui-tree__item:focus-visible {
-  outline: none;
-}
-.ui-tree__item:focus-visible > .ui-tree__row {
-  outline: 2px solid var(--focus);
-  outline-offset: -2px;
-}
+  /* On the row, not the item: the item contains its whole open subtree. */
+  .ui-tree__item:focus-visible {
+    outline: none;
+  }
+  .ui-tree__item:focus-visible > .ui-tree__row {
+    outline-offset: -2px;
+  }
 
-/* A border rather than an icon, so it inherits the row's ink. */
-.ui-tree__twisty {
-  position: relative;
-  flex: none;
-  inline-size: var(--s3);
-  block-size: var(--s3);
-  display: grid;
-  place-items: center;
-  color: var(--ink-3);
-}
-/* A 12px target is one a pointer misses, so this takes the row's height and
-   the dead gap beside it. */
-.ui-tree__twisty.is-branch::after {
-  content: "";
-  position: absolute;
-  inset-block: calc((var(--s3) - var(--tree-row-h)) / 2);
-  inset-inline: calc(var(--s1) * -1);
-}
-.ui-tree__twisty.is-branch::before {
-  content: "";
-  inline-size: 0;
-  block-size: 0;
-  border: 3.5px solid transparent;
-  border-left-color: currentColor;
-  transform: translateX(1px);
-  transition: transform var(--dur) var(--ease);
-}
-.ui-tree__item[aria-expanded="true"] > .ui-tree__row > .ui-tree__twisty::before {
-  transform: rotate(90deg) translateY(1px);
-}
+  /* A border rather than an icon, so it inherits the row's ink. */
+  .ui-tree__twisty {
+    position: relative;
+    flex: none;
+    inline-size: var(--s3);
+    block-size: var(--s3);
+    display: grid;
+    place-items: center;
+    color: var(--text-mute);
+  }
+  /* A 12px target is one a pointer misses, so this takes the row's height and
+     the dead gap beside it. */
+  .ui-tree__twisty.is-branch::after {
+    content: "";
+    position: absolute;
+    inset-block: calc((var(--s3) - var(--tree-row-h)) / 2);
+    inset-inline: calc(var(--s1) * -1);
+  }
+  .ui-tree__twisty.is-branch::before {
+    content: "";
+    inline-size: 0;
+    block-size: 0;
+    border: 3.5px solid transparent;
+    border-left-color: currentColor;
+    transform: translateX(1px);
+    transition: transform var(--dur) var(--ease);
+  }
+  .ui-tree__item[aria-expanded="true"] > .ui-tree__row > .ui-tree__twisty::before {
+    transform: rotate(90deg) translateY(1px);
+  }
 
-/* Fixed, because the caller swaps the glyph for a status dot mid-run and a
-   content-sized slot would shift the row nine pixels (UI.md rule 2). */
-.ui-tree__icon {
-  flex: none;
-  inline-size: var(--s4);
-  display: grid;
-  place-items: center;
-  color: var(--ink-3);
-}
-.ui-tree__icon svg {
-  display: block;
-}
+  /* Fixed, because the caller swaps the glyph for a status dot mid-run and a
+     content-sized slot would shift the row nine pixels (UI.md rule 2). */
+  .ui-tree__icon {
+    flex: none;
+    inline-size: var(--s4);
+    display: grid;
+    place-items: center;
+    color: var(--text-mute);
+  }
+  .ui-tree__icon svg {
+    display: block;
+  }
 
-.ui-tree__name {
-  flex: 1 1 auto;
-  min-inline-size: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--t-sm);
-  color: var(--ink-2);
-  transition: color var(--dur-fast) var(--ease);
-}
-.ui-tree__item.is-selected > .ui-tree__row > .ui-tree__name {
-  color: var(--ink);
-}
+  .ui-tree__name {
+    flex: 1 1 auto;
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--t-sm);
+    color: var(--text-soft);
+    transition: color var(--dur-fast) var(--ease);
+  }
+  .ui-tree__item.is-selected > .ui-tree__row > .ui-tree__name {
+    color: var(--text-body);
+  }
 
-/* Content-sized, capped at half the row. The cap is against `.ui-tree__row`,
-   which has a definite width, or the percentage measures this box. */
-.ui-tree__end {
-  flex: 0 1 auto;
-  min-inline-size: 0;
-  max-inline-size: 50%;
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-}
+  /* Content-sized, capped at half the row. The cap is against `.ui-tree__row`,
+     which has a definite width, or the percentage measures this box. */
+  .ui-tree__end {
+    flex: 0 1 auto;
+    min-inline-size: 0;
+    max-inline-size: 50%;
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+  }
 
-/* "Empty", "Loading…", "N more files". They report, they do not answer. */
-.ui-tree__item.is-quiet > .ui-tree__row > .ui-tree__name {
-  color: var(--ink-ghost);
-  font-style: italic;
+  /* "Empty", "Loading…", "N more files". They report, they do not answer. */
+  .ui-tree__item.is-quiet > .ui-tree__row > .ui-tree__name {
+    color: var(--text-ghost);
+    font-style: italic;
+  }
 }

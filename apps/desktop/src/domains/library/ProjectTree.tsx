@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { FolderIcon, TrayIcon } from "@phosphor-icons/react";
-import { Button, Mono, StatusDot, Tree, TreeRow } from "@ui";
+import { Button, Meta, StatusDot, Tree, TreeRow } from "@ui";
 import { ACTIVE, latestJobFor, type FileRow, type Job, type ProjectSummary } from "@/app/types";
 import type { ProjectTreeState } from "@/shell/useProjectTree";
 import { fileGlyph } from "./fileGlyph";
@@ -111,14 +111,14 @@ export function ProjectTree({
         end={
           row.resultName !== null ? (
             kind === "" ? undefined : (
-              <Mono size="xs" tone="ghost" className="lib-tree__result">
+              <Meta size="xs" tone="ghost" className="lib-tree__result">
                 {kind}
-              </Mono>
+              </Meta>
             )
           ) : row.job !== null ? (
             <span className="lib-tree__convert">
               <Button
-                variant="link"
+                variant="ghost"
                 size="sm"
                 tabIndex={-1}
                 disabled={job !== null && ACTIVE.includes(job.status)}
@@ -171,7 +171,7 @@ export function ProjectTree({
         end={
           /* `.ui-tree__end` is already a flex row at --s2. */
           <>
-            <Mono
+            <Meta
               size="xs"
               tone="ghost"
               className="lib-tree__count"
@@ -182,15 +182,15 @@ export function ProjectTree({
               }
             >
               {pending > 0 ? String(pending) : ""}
-            </Mono>
+            </Meta>
             {active ? (
-              <Mono size="xs" tone="ghost" className="lib-tree__saves">
+              <Meta size="xs" tone="ghost" className="lib-tree__saves">
                 saves here
-              </Mono>
+              </Meta>
             ) : (
               <span className="lib-tree__convert">
                 <Button
-                  variant="link"
+                  variant="ghost"
                   size="sm"
                   tabIndex={-1}
                   onClick={() => {
@@ -231,7 +231,6 @@ export function ProjectTree({
   return (
     <Tree
       label="Library"
-      className="lib-tree"
       onSelect={(rel) => {
         tree.select(rel);
         onSelect(rows.get(rel) ?? null);

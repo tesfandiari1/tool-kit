@@ -186,8 +186,8 @@ export function DocumentPane({
           className="doc-body"
           inert={covered}
           role="tabpanel"
-          id={`ui-tabpanel-${doc.id}`}
-          aria-labelledby={`ui-tab-${doc.id}`}
+          id={`ui-tabpanel-${encodeURIComponent(doc.id)}`}
+          aria-labelledby={`ui-tab-${encodeURIComponent(doc.id)}`}
         >
           {mode === "read" ? (
             <MarkdownViewer text={doc.text} />

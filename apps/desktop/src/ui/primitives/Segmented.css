@@ -1,62 +1,55 @@
-/* A segmented control: two or three mutually exclusive modes, shown side by
-   side because the choice itself is information the user wants on screen. A
-   Select would hide the alternatives, and hiding them is the wrong trade when
-   there are only two. */
+@layer ui {
+  /* A segmented control: two or three mutually exclusive modes, shown side by
+     side because the choice itself is information the user wants on screen. A
+     Select would hide the alternatives, and hiding them is the wrong trade when
+     there are only two. */
 
-.ui-seg {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  background: var(--surface-well);
-  border: 1px solid var(--rule);
-  border-radius: var(--r-panel);
-}
+  .ui-seg {
+    display: flex;
+    border: 1px solid var(--rule);
+  }
 
-.ui-seg__item {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--s2);
-  height: 30px;
-  border: 0;
-  border-radius: var(--r-control);
-  background: transparent;
-  color: var(--ink-3);
+  /* Neighbours share a rule, so the box is drawn once. */
+  .ui-seg__item {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s2);
+    height: 30px;
+    border: 0;
+    border-left: 1px solid var(--rule);
+    background: transparent;
+    color: var(--text-mute);
 
-  font-family: var(--font-mono);
-  font-size: var(--t-label);
-  font-weight: var(--weight-medium);
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
+    transition:
+      background var(--dur-fast) var(--ease),
+      color var(--dur-fast) var(--ease);
+  }
 
-  transition:
-    background var(--dur-fast) var(--ease),
-    color var(--dur-fast) var(--ease);
-}
+  .ui-seg__item:first-child {
+    border-left: 0;
+  }
 
-.ui-seg__item:hover:not([aria-checked="true"]) {
-  color: var(--ink-2);
-}
+  .ui-seg__item:hover:not([aria-checked="true"]) {
+    color: var(--text-soft);
+  }
 
-.ui-seg__item[aria-checked="true"] {
-  background: var(--surface-raised);
-  color: var(--ink);
-}
+  .ui-seg__item[aria-checked="true"] {
+    background: var(--btn-secondary-hover-bg);
+    color: var(--btn-secondary-hover-fg);
+  }
 
-/* The trailing count holds its slot whether or not it reads, so selecting a
-   mode never shifts the label beside it. */
-.ui-seg__count {
-  min-width: 2ch;
-  text-align: left;
-  font-variant-numeric: tabular-nums;
-  color: var(--ink-ghost);
-}
+  /* The trailing count holds its slot whether or not it reads, so selecting a
+     mode never shifts the label beside it. */
+  .ui-seg__count {
+    min-width: 2ch;
+    text-align: left;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.6;
+  }
 
-.ui-seg__item[aria-checked="true"] .ui-seg__count {
-  color: var(--ink-2);
-}
-
-.ui-seg--sm .ui-seg__item {
-  height: 24px;
+  .ui-seg--sm .ui-seg__item {
+    height: 24px;
+  }
 }

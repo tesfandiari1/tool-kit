@@ -3,11 +3,8 @@ import { cx } from "../cx";
 import { Label } from "./Text";
 import "./Surface.css";
 
-export type PanelTone = "default" | "raised";
-
 /// `title` here is a rendered header, not the DOM tooltip.
 export interface PanelProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
-  tone?: PanelTone;
   title?: ReactNode;
   actions?: ReactNode;
   /// Drop the body's padding, for lists that draw their own row insets.
@@ -15,24 +12,9 @@ export interface PanelProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"
   children?: ReactNode;
 }
 
-export function Panel({
-  tone = "default",
-  title,
-  actions,
-  bare = false,
-  className,
-  children,
-  ...rest
-}: PanelProps) {
+export function Panel({ title, actions, bare = false, className, children, ...rest }: PanelProps) {
   return (
-    <div
-      className={cx(
-        "ui-panel",
-        tone !== "default" && `ui-panel--${tone}`,
-        className,
-      )}
-      {...rest}
-    >
+    <div className={cx("ui-panel", className)} {...rest}>
       {(title ?? actions) && (
         <div className="ui-panel__header">
           {typeof title === "string" ? <Label tone="strong">{title}</Label> : title}

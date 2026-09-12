@@ -4,12 +4,11 @@ import {
   Button,
   Field,
   Input,
-  Mono,
+  Meta,
   Segmented,
   Select,
   Stack,
   Switch,
-  TextInput,
 } from "@ui";
 import { commands } from "@/app/commands";
 import { type SecretId, type SecretStatus, type Settings } from "@/app/types";
@@ -221,7 +220,7 @@ function PipelineField({
     onCommit(draft.trim() || null);
   };
   return (
-    <TextInput
+    <Input
       label="Datalab pipeline ID (optional)"
       type="text"
       value={draft}
@@ -283,17 +282,17 @@ function CustomWordsField({
   // up to the truncation it should warn of.
   const left = CUSTOM_WORDS_MAX_BYTES - customWordsBytes(parseCustomWords(draft));
   return (
-    <TextInput
+    <Input
       label="Custom words (optional)"
       hint={
         <>
           Words local OCR should prefer when it is unsure. Worth setting for names and jargon it keeps
           getting wrong.{" "}
-          <Mono as="span" size="xs" tone="ghost">
+          <Meta as="span" size="xs" tone="ghost">
             {left < 0
               ? `${String(-left)} bytes over`
               : `${String(left)} of ${String(CUSTOM_WORDS_MAX_BYTES)} bytes left`}
-          </Mono>
+          </Meta>
         </>
       }
       type="text"
@@ -341,7 +340,7 @@ function KeyField({
       htmlFor={inputId}
       label={
         <>
-          {label} {saved && <Badge tone="pass">saved</Badge>}
+          {label} {saved && <Badge tone="success">saved</Badge>}
         </>
       }
     >
