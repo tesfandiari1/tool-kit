@@ -106,10 +106,12 @@
     color: var(--text-body);
   }
 
-  /* Content-sized, capped at half the row. The cap is against `.ui-tree__row`,
-     which has a definite width, or the percentage measures this box. */
+  /* Content-sized, capped at half the row, and never shrunk: the name gives
+     way first, or a tracked caps action runs past the pane. The cap is against
+     `.ui-tree__row`, which has a definite width, or the percentage measures
+     this box. */
   .ui-tree__end {
-    flex: 0 1 auto;
+    flex: 0 0 auto;
     min-inline-size: 0;
     max-inline-size: 50%;
     display: flex;

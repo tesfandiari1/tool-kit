@@ -18,7 +18,7 @@ report() {
   local hits
   hits=$("$@" || true)
   if [ -n "$hits" ]; then
-    echo "lint:tokens — $what"
+    echo "lint:tokens: $what"
     echo "$hits"
     echo
     fail=1
