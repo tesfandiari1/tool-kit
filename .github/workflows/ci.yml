@@ -47,7 +47,7 @@ jobs:
       - run: cargo test --locked --manifest-path apps/converter/Cargo.toml
       # No floating `v10` tag exists upstream: their major-tag series stops at
       # v7, so `@v10` fails to resolve. Pin the release.
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
       # Property-based testing against the running service. It boots its own
       # copy on a throwaway port and data root, so it shares nothing with the
       # steps above.
