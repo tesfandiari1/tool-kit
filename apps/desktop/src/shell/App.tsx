@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { FileTextIcon, FolderOpenIcon, PlayIcon, XIcon } from "@phosphor-icons/react";
 import { Button, Meta, Segmented, Sheet, SplitPane, StatusDot, Toast } from "@ui";
 import { basename, fmtElapsed } from "@/app/format";
@@ -787,18 +787,11 @@ export default function App() {
     [openHistory, reveal],
   );
 
-  /// Through a ref: `openJob` changes identity on every keystroke, and the
-  /// effect below must fire on a run's edges.
-  const revealJobRef = useRef(revealJob);
-  useEffect(() => {
-    revealJobRef.current = revealJob;
-  }, [revealJob]);
-
-  /// Same ref treatment: `tree.toggle` changes identity as the tree loads.
-  const openDestinationRef = useRef(tree.toggle);
-  useEffect(() => {
-    openDestinationRef.current = tree.toggle;
-  }, [tree.toggle]);
+  /// Effect Events: `openJob` changes identity on every keystroke and
+  /// `tree.toggle` as the tree loads, and the effect below must fire on a
+  /// run's edges alone.
+  const revealJobEvent = useEffectEvent(revealJob);
+  const openDestination = useEffectEvent(tree.toggle);
 
   // Clear the selection so the same files cannot be re-run by accident. The
   // flag is set by `run()` alone, so a Retry leaves the next batch staged.
@@ -812,13 +805,13 @@ export default function App() {
       const workspace = settingsRef.current.workspacePath;
       if (workspace !== null) {
         for (const rel of resultDirs(workspace, newlyDone(terminalAtStart, jobsRef.current))) {
-          openDestinationRef.current(rel, true, false);
+          openDestination(rel, true, false);
         }
       }
       // One file is a request to read it. A batch is not, so nothing opens.
       const target = autoOpenTarget(terminalAtStart, jobsRef.current);
       if (target !== null) {
-        void revealJobRef.current(target);
+        void revealJobEvent(target);
       }
     }
     wasRunning.current = running;

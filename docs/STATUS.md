@@ -45,8 +45,8 @@ Five, all low, from the verify pass over the 2026-09-12 fix.
   a quiet row (`src/shell/useProjectTree.ts`,
   `src/domains/library/ProjectTree.tsx`).
 - `open` in `useDocuments` depends on `docs`, so every door changes identity per
-  keystroke and App carries `revealJobRef` for it. Fix: check the open list
-  through `docsRef` (`src/shell/useDocuments.ts`).
+  keystroke and App wraps `revealJob` in `useEffectEvent` for it. Fix: check
+  the open list through `docsRef` (`src/shell/useDocuments.ts`).
 - `rustfmt --check` is dirty at seven pre-existing sites in `history.rs`,
   `tree.rs` and `workspace.rs`. Fix: `cargo fmt` in its own commit.
 - `fileGlyph` maps `heic` and `m4v`, which no job accepts. Fix: drop both
