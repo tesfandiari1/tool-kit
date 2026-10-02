@@ -8,7 +8,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::{multipart, Client, Method, Response, Url};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::AppHandle;
@@ -26,7 +26,8 @@ const STREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// offending field is named rather than 422ing every job in the run.
 const MAX_METADATA_BYTES: usize = 256;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ConversionCapabilities {
     pub(crate) accepting_jobs: bool,
     pub(crate) input_formats: Vec<String>,
@@ -70,14 +71,7 @@ struct CapabilitiesEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct CapabilitiesData {
-    conversion: ConversionCapabilitiesWire,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ConversionCapabilitiesWire {
-    accepting_jobs: bool,
-    input_formats: Vec<String>,
+    conversion: ConversionCapabilities,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -188,10 +182,7 @@ pub(crate) async fn fetch_capabilities(base_url: &str) -> Result<ConversionCapab
     let response =
         send_service_request(base_url, None, get_request("/api/v1/capabilities")).await?;
     let envelope: CapabilitiesEnvelope = parse_success(response, "capabilities")?;
-    Ok(ConversionCapabilities {
-        accepting_jobs: envelope.data.conversion.accepting_jobs,
-        input_formats: envelope.data.conversion.input_formats,
-    })
+    Ok(envelope.data.conversion)
 }
 
 /// Submit a source path through the host-only multipart door, so the webview
@@ -354,7 +345,7 @@ async fn download_markdown_with_limit(
     body_limit: usize,
 ) -> Result<String, String> {
     validate_uuid(conversion_id, "conversion id")?;
-    let output_dir = validate_output(output_dir, file_name).await?;
+    validate_output(output_dir, file_name).await?;
     let path = format!("/api/v1/conversions/{conversion_id}/artifacts/markdown");
     let endpoint = endpoint_url(base_url, &path)?;
     let client = http_client()?;
@@ -392,10 +383,7 @@ async fn download_markdown_with_limit(
         ));
     }
 
-    let output_dir = output_dir
-        .to_str()
-        .ok_or_else(|| "Output folder path is not valid UTF-8".to_string())?;
-    let (file, path) = crate::jobs::claim_path(output_dir, file_name, "md", "")?;
+    let (file, path) = crate::jobs::claim_path(output_dir, file_name, "md")?;
     let mut file = tokio::fs::File::from_std(file);
     let write_result: Result<(), String> = async {
         let mut written = 0usize;
@@ -698,9 +686,8 @@ async fn read_bounded_body(response: &mut Response, limit: usize) -> Result<Vec<
     Ok(bytes)
 }
 
-async fn validate_output(output_dir: &str, file_name: &str) -> Result<PathBuf, String> {
-    let directory = PathBuf::from(output_dir);
-    let metadata = tokio::fs::metadata(&directory)
+async fn validate_output(output_dir: &str, file_name: &str) -> Result<(), String> {
+    let metadata = tokio::fs::metadata(output_dir)
         .await
         .map_err(|e| format!("Could not open output folder: {e}"))?;
     if !metadata.is_dir() {
@@ -715,7 +702,7 @@ async fn validate_output(output_dir: &str, file_name: &str) -> Result<PathBuf, S
     {
         return Err("Output filename must be one plain filename".into());
     }
-    Ok(directory)
+    Ok(())
 }
 
 fn transport_error(error: reqwest::Error) -> String {
@@ -726,33 +713,11 @@ fn transport_error(error: reqwest::Error) -> String {
 mod tests {
     use super::*;
     use reqwest::header::{AUTHORIZATION, HOST};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
 
     const UUID: &str = "11111111-1111-4111-8111-111111111111";
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
-
-    struct TestDir(PathBuf);
-
-    impl TestDir {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "tool-kit-conversion-service-{}-{}",
-                std::process::id(),
-                NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir(&path).expect("test directory should be created");
-            Self(path)
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     struct MockResponse {
         status: &'static str,
@@ -853,14 +818,6 @@ mod tests {
 
     fn header_end(bytes: &[u8]) -> Option<usize> {
         bytes.windows(4).position(|window| window == b"\r\n\r\n")
-    }
-
-    fn default_ocr() -> OcrOptions {
-        OcrOptions {
-            language_correction: true,
-            custom_words: Vec::new(),
-            speaker_count: None,
-        }
     }
 
     /// A hand-edited settings.json can exceed the contract's text-part budget,
@@ -1000,8 +957,8 @@ mod tests {
 
     #[tokio::test]
     async fn conversion_upload_streams_a_real_file_as_contract_cased_multipart() {
-        let dir = TestDir::new();
-        let source = dir.0.join("source.pdf");
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.pdf");
         tokio::fs::write(&source, b"%PDF-real-file-bytes")
             .await
             .unwrap();
@@ -1107,8 +1064,8 @@ mod tests {
 
     #[tokio::test]
     async fn submit_rejects_an_invalid_response_conversion_id_without_leaking_token() {
-        let dir = TestDir::new();
-        let source = dir.0.join("source.pdf");
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.pdf");
         tokio::fs::write(&source, b"%PDF-invalid-response-id")
             .await
             .unwrap();
@@ -1129,7 +1086,7 @@ mod tests {
             &source.to_string_lossy(),
             UUID,
             "standard",
-            &default_ocr(),
+            &OcrOptions::default(),
             "stable-invalid-id-key",
         )
         .await
@@ -1174,8 +1131,8 @@ mod tests {
 
     #[tokio::test]
     async fn submit_helper_keeps_the_stable_key_and_parses_job_metadata() {
-        let dir = TestDir::new();
-        let source = dir.0.join("source.pdf");
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.pdf");
         tokio::fs::write(&source, b"%PDF-helper").await.unwrap();
         let server = mock_server(MockResponse {
             status: "202 Accepted",
@@ -1220,8 +1177,8 @@ mod tests {
 
     #[tokio::test]
     async fn submit_loss_can_replay_the_same_idempotency_key() {
-        let dir = TestDir::new();
-        let source = dir.0.join("replay.pdf");
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("replay.pdf");
         tokio::fs::write(&source, b"%PDF-replay").await.unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1246,7 +1203,7 @@ mod tests {
         });
         let base_url = format!("http://{address}");
         let source_path = source.to_string_lossy().into_owned();
-        let ocr = default_ocr();
+        let ocr = OcrOptions::default();
         let submit = || {
             submit_conversion(
                 &base_url,
@@ -1304,8 +1261,8 @@ mod tests {
 
     #[tokio::test]
     async fn markdown_download_streams_to_the_next_collision_safe_name() {
-        let dir = TestDir::new();
-        tokio::fs::write(dir.0.join("report.md"), b"existing")
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("report.md"), b"existing")
             .await
             .unwrap();
         let server = mock_server(MockResponse {
@@ -1321,7 +1278,7 @@ mod tests {
             &server.base_url,
             "download-token",
             UUID,
-            dir.0.to_str().unwrap(),
+            dir.path().to_str().unwrap(),
             "report.pdf",
         )
         .await
@@ -1344,7 +1301,7 @@ mod tests {
 
     #[tokio::test]
     async fn markdown_download_leaves_no_file_on_non_success_or_truncated_body() {
-        let non_success_dir = TestDir::new();
+        let non_success_dir = tempfile::tempdir().unwrap();
         let server = mock_server(MockResponse {
             status: "409 Conflict",
             content_type: "application/json",
@@ -1358,17 +1315,20 @@ mod tests {
             &server.base_url,
             "token",
             UUID,
-            non_success_dir.0.to_str().unwrap(),
+            non_success_dir.path().to_str().unwrap(),
             "report.pdf",
         )
         .await
         .unwrap_err();
         assert!(error.contains("conversion_not_ready"));
-        assert_eq!(std::fs::read_dir(&non_success_dir.0).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(non_success_dir.path()).unwrap().count(),
+            0
+        );
         let _ = server.request.await.unwrap();
         server.task.await.unwrap();
 
-        let partial_dir = TestDir::new();
+        let partial_dir = tempfile::tempdir().unwrap();
         let server = mock_server(MockResponse {
             status: "200 OK",
             content_type: "text/markdown",
@@ -1382,17 +1342,17 @@ mod tests {
             &server.base_url,
             "token",
             UUID,
-            partial_dir.0.to_str().unwrap(),
+            partial_dir.path().to_str().unwrap(),
             "report.pdf",
         )
         .await
         .unwrap_err();
         assert!(error.contains("HTTP failed"));
-        assert_eq!(std::fs::read_dir(&partial_dir.0).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(partial_dir.path()).unwrap().count(), 0);
         let _ = server.request.await.unwrap();
         server.task.await.unwrap();
 
-        let overrun_dir = TestDir::new();
+        let overrun_dir = tempfile::tempdir().unwrap();
         let server = mock_server(MockResponse {
             status: "200 OK",
             content_type: "text/markdown",
@@ -1406,26 +1366,26 @@ mod tests {
             &server.base_url,
             "token",
             UUID,
-            overrun_dir.0.to_str().unwrap(),
+            overrun_dir.path().to_str().unwrap(),
             "report.pdf",
             4,
         )
         .await
         .unwrap_err();
         assert!(error.contains("host limit"));
-        assert_eq!(std::fs::read_dir(&overrun_dir.0).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(overrun_dir.path()).unwrap().count(), 0);
         let _ = server.request.await.unwrap();
         server.task.await.unwrap();
     }
 
     #[tokio::test]
     async fn markdown_download_validates_id_directory_and_plain_filename() {
-        let dir = TestDir::new();
+        let dir = tempfile::tempdir().unwrap();
         assert!(download_markdown(
             "http://127.0.0.1:9",
             "token",
             "bad-id",
-            dir.0.to_str().unwrap(),
+            dir.path().to_str().unwrap(),
             "report.pdf"
         )
         .await
@@ -1434,12 +1394,12 @@ mod tests {
             "http://127.0.0.1:9",
             "token",
             UUID,
-            dir.0.to_str().unwrap(),
+            dir.path().to_str().unwrap(),
             "../report.pdf"
         )
         .await
         .is_err());
-        let file = dir.0.join("not-a-directory");
+        let file = dir.path().join("not-a-directory");
         tokio::fs::write(&file, b"file").await.unwrap();
         assert!(download_markdown(
             "http://127.0.0.1:9",

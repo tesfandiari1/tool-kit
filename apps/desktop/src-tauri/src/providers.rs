@@ -162,12 +162,17 @@ pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const POLL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Terminal where the status says retrying cannot help. 5xx and 429 stay
-/// transient.
-fn terminal_poll_error(status: reqwest::StatusCode, body: &Value, who: &str) -> Option<PollResult> {
+/// transient. The body is optional: a gateway's HTML 401 is still a 401.
+fn terminal_poll_error(
+    status: reqwest::StatusCode,
+    body: Option<&Value>,
+    who: &str,
+) -> Option<PollResult> {
     if status.is_success() || status.is_server_error() || status.as_u16() == 429 {
         return None;
     }
-    let detail = pick_string(body, &["error", "detail", "message", "title"])
+    let detail = body
+        .and_then(|body| pick_string(body, &["error", "detail", "message", "title"]))
         .unwrap_or_else(|| status.to_string());
     Some(PollResult::Failed(format!(
         "{who} returned {status}: {detail}"
@@ -288,13 +293,11 @@ pub async fn datalab_poll(
         .await
         .map_err(|e| e.to_string())?;
     let http = resp.status();
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Bad poll response from Datalab: {e}"))?;
-    if let Some(failed) = terminal_poll_error(http, &body, "Datalab") {
+    let body = resp.json::<Value>().await;
+    if let Some(failed) = terminal_poll_error(http, body.as_ref().ok(), "Datalab") {
         return Ok(failed);
     }
+    let body = body.map_err(|e| format!("Bad poll response from Datalab: {e}"))?;
     let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("");
     if status == "complete" {
         if !body
@@ -383,24 +386,20 @@ pub async fn datalab_pipeline_poll(
         .await
         .map_err(|e| e.to_string())?;
     let http = resp.status();
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Bad poll response from Datalab pipeline: {e}"))?;
-    if let Some(failed) = terminal_poll_error(http, &body, "Datalab pipeline") {
+    let body = resp.json::<Value>().await;
+    if let Some(failed) = terminal_poll_error(http, body.as_ref().ok(), "Datalab pipeline") {
         return Ok(failed);
     }
+    let body = body.map_err(|e| format!("Bad poll response from Datalab pipeline: {e}"))?;
     match body.get("status").and_then(|v| v.as_str()).unwrap_or("") {
         "completed" | "completed_with_errors" => {
-            let steps = body
-                .get("steps")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
             // The last *completed* step. Step 0 fetches a failed step's error
             // payload and writes it to disk as the document.
-            let step_index = steps
-                .iter()
+            let step_index = body
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
                 .filter(|s| s.get("status").and_then(|v| v.as_str()) == Some("completed"))
                 .filter_map(|s| s.get("step_index").and_then(|v| v.as_i64()))
                 .max();
@@ -425,15 +424,16 @@ pub async fn datalab_pipeline_poll(
             if rhttp.is_server_error() || rhttp.as_u16() == 429 {
                 return Err(format!("Datalab step result returned {rhttp}"));
             }
-            let rbody: Value = rresp
-                .json()
-                .await
-                .map_err(|e| format!("Bad step result from Datalab: {e}"))?;
+            // Status before parse, so a 404 with an HTML body is terminal.
             if !rhttp.is_success() {
                 return Ok(PollResult::Failed(format!(
                     "Datalab step result returned {rhttp}"
                 )));
             }
+            let rbody: Value = rresp
+                .json()
+                .await
+                .map_err(|e| format!("Bad step result from Datalab: {e}"))?;
             match pick_string(
                 &rbody,
                 &["markdown", "html", "json", "output", "content", "text"],
@@ -531,13 +531,11 @@ pub async fn revai_poll(
         .await
         .map_err(|e| e.to_string())?;
     let http = resp.status();
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Bad poll response from Rev.ai: {e}"))?;
-    if let Some(failed) = terminal_poll_error(http, &body, "Rev.ai") {
+    let body = resp.json::<Value>().await;
+    if let Some(failed) = terminal_poll_error(http, body.as_ref().ok(), "Rev.ai") {
         return Ok(failed);
     }
+    let body = body.map_err(|e| format!("Bad poll response from Rev.ai: {e}"))?;
     match body.get("status").and_then(|v| v.as_str()).unwrap_or("") {
         "transcribed" => {
             let tresp = client
@@ -573,5 +571,46 @@ pub async fn revai_poll(
                 .unwrap_or_else(|| "Transcription failed".into()),
         )),
         _ => Ok(PollResult::Pending),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Answer one request with `response`, verbatim, and hand back its URL.
+    async fn serve_once(response: String) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/check", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = socket.read(&mut buffer).await;
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        url
+    }
+
+    /// A gateway's HTML 401 is still a 401. Polling it for a minute fixes
+    /// nothing, while an HTML 503 stays transient.
+    #[tokio::test]
+    async fn the_status_decides_a_poll_before_the_body_is_parsed() {
+        let client = reqwest::Client::new();
+        let html = |status| {
+            format!("HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: 13\r\nConnection: close\r\n\r\n<html></html>")
+        };
+
+        let url = serve_once(html("401 Unauthorized")).await;
+        match datalab_poll(&client, "key", &url, "markdown").await {
+            Ok(PollResult::Failed(message)) => assert!(message.contains("401"), "{message}"),
+            Ok(_) => panic!("a 401 read as pending or done"),
+            Err(error) => panic!("a 401 read as transient: {error}"),
+        }
+
+        let url = serve_once(html("503 Service Unavailable")).await;
+        assert!(datalab_poll(&client, "key", &url, "markdown")
+            .await
+            .is_err());
     }
 }

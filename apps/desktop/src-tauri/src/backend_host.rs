@@ -72,7 +72,6 @@ pub(crate) enum BackendState {
     Starting,
     Running {
         port: u16,
-        pid: u32,
     },
     Failed {
         message: String,
@@ -196,10 +195,7 @@ impl BackendHost {
 
     /// Move the state machine. `backend_origin` is its only reader.
     fn publish(&self, state: BackendState) {
-        let mut inner = self.lock();
-        if inner.state != state {
-            inner.state = state;
-        }
+        self.lock().state = state;
     }
 
     /// Mint the token once per launch and put it where both sides read it. The
@@ -383,7 +379,7 @@ fn sidecar_origin(app: &AppHandle) -> Result<String, String> {
     };
     let state = host.lock().state.clone();
     match state {
-        BackendState::Running { port, .. } => Ok(origin_for(port)),
+        BackendState::Running { port } => Ok(origin_for(port)),
         BackendState::Failed { message } => Err(message),
         BackendState::Stopped | BackendState::Starting => Err(STARTING.to_string()),
     }
@@ -451,7 +447,7 @@ async fn supervise(app: AppHandle, host: BackendHost) {
                     break;
                 }
                 write_runtime(&layout.runtime_file, pid);
-                host.publish(BackendState::Running { port, pid });
+                host.publish(BackendState::Running { port });
                 if host.claim_recovery() {
                     // Recovery needs a service that answers: at `setup` there
                     // is no port, and one refused connection fails a job.

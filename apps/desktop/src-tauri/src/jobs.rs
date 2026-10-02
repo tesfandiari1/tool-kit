@@ -551,7 +551,8 @@ fn fail(app: &AppHandle, id: u64, generation: u64, err: &str) {
 }
 
 /// The converted text is already on disk, so the job row carries only its path.
-/// Copy reads the file rather than shipping every result across IPC.
+/// Copy reads the file rather than shipping every result across IPC. If Stop
+/// retired the task while the file was written, remove exactly that new path.
 fn finish(app: &AppHandle, id: u64, generation: u64, output_path: String) {
     let cleanup_path = output_path.clone();
     if let Some(updated) = app
@@ -575,22 +576,6 @@ fn finish(app: &AppHandle, id: u64, generation: u64, output_path: String) {
     }
 }
 
-/// A download or fallback write creates its file before control returns here.
-/// If Stop retired the task meanwhile, remove exactly that new path.
-fn completed_output_if_current(
-    current_generation: u64,
-    expected_generation: u64,
-    output: Result<String, String>,
-) -> Option<Result<String, String>> {
-    if current_generation == expected_generation {
-        return Some(output);
-    }
-    if let Ok(path) = output {
-        let _ = std::fs::remove_file(path);
-    }
-    None
-}
-
 /// Claim a free name in `output_dir` and hand back the file holding it.
 /// `create_new` makes the claim and the existence check one syscall, so two
 /// jobs finishing together cannot agree on a name and nothing is overwritten.
@@ -599,7 +584,6 @@ pub(crate) fn claim_path(
     output_dir: &str,
     file_name: &str,
     ext: &str,
-    suffix: &str,
 ) -> Result<(std::fs::File, std::path::PathBuf), String> {
     let stem = Path::new(file_name)
         .file_stem()
@@ -615,9 +599,9 @@ pub(crate) fn claim_path(
 
     for n in 0..1000 {
         let candidate = if n == 0 {
-            base.join(format!("{stem}{suffix}{dotted}"))
+            base.join(format!("{stem}{dotted}"))
         } else {
-            base.join(format!("{stem}{suffix} ({n}){dotted}"))
+            base.join(format!("{stem} ({n}){dotted}"))
         };
         match std::fs::OpenOptions::new()
             .write(true)
@@ -630,7 +614,7 @@ pub(crate) fn claim_path(
         }
     }
     Err(format!(
-        "Could not find a free filename for {stem}{suffix}{dotted} in the output folder."
+        "Could not find a free filename for {stem}{dotted} in the output folder."
     ))
 }
 
@@ -638,12 +622,11 @@ fn write_output(
     output_dir: &str,
     file_name: &str,
     ext: &str,
-    suffix: &str,
     text: &str,
 ) -> Result<String, String> {
     use std::io::Write;
 
-    let (mut f, candidate) = claim_path(output_dir, file_name, ext, suffix)?;
+    let (mut f, candidate) = claim_path(output_dir, file_name, ext)?;
     f.write_all(text.as_bytes())
         .and_then(|_| f.sync_all())
         .map(|_| candidate.to_string_lossy().to_string())
@@ -670,7 +653,7 @@ pub fn import_source(dir: &str, source: &Path) -> Result<String, String> {
         .map_err(|e| format!("Could not read {}: {e}", source.display()))?;
     let modified = reader.metadata().and_then(|m| m.modified()).ok();
 
-    let (mut f, candidate) = claim_path(dir, file_name, ext, "")?;
+    let (mut f, candidate) = claim_path(dir, file_name, ext)?;
     std::io::copy(&mut reader, &mut f)
         .and_then(|_| f.sync_all())
         .map_err(|e| format!("Could not write {}: {e}", candidate.display()))?;
@@ -707,7 +690,7 @@ pub fn reuse_result(app: &AppHandle, id: u64, generation: u64, existing: &str) -
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("txt");
-    match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
+    match write_output(&job.output_dir, &job.file_name, ext, &text) {
         Ok(path) => {
             finish(app, id, generation, path);
             true
@@ -775,7 +758,7 @@ fn request_origin(live: Result<String, String>, held: &str) -> String {
 
 async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
     let stale = |app: &AppHandle| app.state::<JobManager>().generation() != generation;
-    let Some(mut backend) = job.backend.clone() else {
+    let Some(backend) = job.backend.clone() else {
         return;
     };
 
@@ -881,7 +864,6 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         }
         match result {
             Ok(view) => {
-                backend.backend_job_id = Some(view.id.clone());
                 if app
                     .state::<JobManager>()
                     .update_if_generation(id, generation, |current| {
@@ -927,13 +909,6 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                     &job.file_name,
                 )
                 .await;
-                let Some(output) = completed_output_if_current(
-                    app.state::<JobManager>().generation(),
-                    generation,
-                    output,
-                ) else {
-                    return;
-                };
                 match output {
                     Ok(path) => finish(&app, id, generation, path),
                     Err(error) => fail_backend_retryable(&app, id, generation, &error),
@@ -996,17 +971,10 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         if stale(&app) {
             return;
         }
-        let Some(backend_job_id) = backend.backend_job_id.as_deref() else {
-            fail_backend_retryable(
-                &app,
-                id,
-                generation,
-                "Conversion service returned no job id",
-            );
-            return;
-        };
+        // `poll_conversion` refuses an answer about any other id, so the view
+        // always names this job.
         let origin = request_origin(backend_host::backend_origin(&app), &backend.backend_url);
-        let result = conversion_service::poll_conversion(&origin, &token, backend_job_id).await;
+        let result = conversion_service::poll_conversion(&origin, &token, &view.id).await;
         if stale(&app) {
             return;
         }
@@ -1281,19 +1249,7 @@ async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, origina
     if stale(app) {
         return;
     }
-    let output = write_output(
-        &original.output_dir,
-        &original.file_name,
-        extension,
-        "",
-        &text,
-    );
-    let Some(output) =
-        completed_output_if_current(app.state::<JobManager>().generation(), generation, output)
-    else {
-        return;
-    };
-    match output {
+    match write_output(&original.output_dir, &original.file_name, extension, &text) {
         Ok(path) => finish(app, id, generation, path),
         Err(error) => fail_backend_retryable(app, id, generation, &error),
     }
@@ -1579,7 +1535,7 @@ pub fn run_job(app: AppHandle, id: u64, generation: u64) {
         if stale(&app) {
             return;
         }
-        match write_output(&job.output_dir, &job.file_name, ext, "", &text) {
+        match write_output(&job.output_dir, &job.file_name, ext, &text) {
             Ok(path) => finish(&app, id, generation, path),
             Err(e) => fail(&app, id, generation, &e),
         }
@@ -1929,36 +1885,6 @@ mod backend_tests {
         assert_eq!(
             pipeline_resume.fallback.unwrap().provider,
             DATALAB_PIPELINE_PROVIDER
-        );
-    }
-
-    #[test]
-    fn stale_completed_output_removes_only_the_new_collision_safe_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let existing = root.join("report.md");
-        let created = root.join("report (1).md");
-        std::fs::write(&existing, b"existing").unwrap();
-        std::fs::write(&created, b"new").unwrap();
-
-        assert_eq!(
-            completed_output_if_current(2, 1, Ok(created.to_string_lossy().into_owned())),
-            None
-        );
-        assert!(!created.exists());
-        assert_eq!(std::fs::read(&existing).unwrap(), b"existing");
-
-        let current = root.join("report (2).md");
-        std::fs::write(&current, b"current").unwrap();
-        let current_path = current.to_string_lossy().into_owned();
-        assert_eq!(
-            completed_output_if_current(2, 2, Ok(current_path.clone())),
-            Some(Ok(current_path))
-        );
-        assert!(current.exists());
-        assert_eq!(
-            completed_output_if_current(2, 1, Err("stale network error".into())),
-            None
         );
     }
 
