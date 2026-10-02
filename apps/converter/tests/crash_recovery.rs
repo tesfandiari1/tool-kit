@@ -393,3 +393,31 @@ async fn a_row_that_cannot_be_decoded_is_quarantined_instead_of_stopping_the_boo
     assert!(!third.job_runner_failed());
     assert_artifacts_download(&third, healthy.job_id).await;
 }
+
+/// Orphan storage is the same class. One job directory that could not move to
+/// quarantine used to abort startup the way an unreadable row did.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_orphan_that_cannot_be_quarantined_does_not_stop_the_boot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let harness = TestHarness::new();
+    let first = harness.app().await;
+    first.shutdown(Duration::from_secs(1)).await;
+    drop(first);
+
+    // Moving a directory to a new parent rewrites its `..` entry, so a
+    // read-only directory cannot be renamed into quarantine.
+    let orphan = harness
+        .data_dir()
+        .join("jobs")
+        .join(Uuid::new_v4().to_string());
+    fs::create_dir(&orphan).unwrap();
+    fs::set_permissions(&orphan, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let restarted = harness.app().await;
+    assert!(orphan.is_dir(), "the orphan stays where it was");
+    assert!(!restarted.job_runner_failed());
+
+    fs::set_permissions(&orphan, fs::Permissions::from_mode(0o700)).unwrap();
+}

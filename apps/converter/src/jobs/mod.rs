@@ -173,7 +173,7 @@ impl JobRuntime {
         let grace = deadline.saturating_duration_since(Instant::now());
         let force_wait = grace.min(MAX_FORCE_CANCEL_WAIT);
         let graceful_deadline = deadline.checked_sub(force_wait).unwrap_or(deadline);
-        match timeout_at(graceful_deadline, handle.as_mut()).await {
+        match timeout_at(graceful_deadline, &mut handle.0).await {
             Ok(Ok(())) => return,
             Ok(Err(error)) => {
                 tracing::error!(%error, "conversion job runner task failed during shutdown");
@@ -184,7 +184,7 @@ impl JobRuntime {
         }
 
         self.force_cancel();
-        match timeout_at(deadline, handle.as_mut()).await {
+        match timeout_at(deadline, &mut handle.0).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 tracing::error!(%error, "conversion job runner task failed during shutdown");
@@ -192,7 +192,6 @@ impl JobRuntime {
             }
             Err(_) => {
                 tracing::error!("conversion job runner did not stop after forced cancellation");
-                handle.abort();
                 self.inner.status.send_replace(RunnerStatus::Failed);
             }
         }
@@ -211,16 +210,6 @@ impl JobRuntime {
 }
 
 struct AbortOnDropJoinHandle(JoinHandle<()>);
-
-impl AbortOnDropJoinHandle {
-    fn as_mut(&mut self) -> &mut JoinHandle<()> {
-        &mut self.0
-    }
-
-    fn abort(&self) {
-        self.0.abort();
-    }
-}
 
 impl Drop for AbortOnDropJoinHandle {
     fn drop(&mut self) {

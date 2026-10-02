@@ -533,11 +533,9 @@ impl ArtifactStore {
     async fn resolve_existing_relative(&self, relative: &Path) -> Result<PathBuf, ArtifactError> {
         let resolved = self.resolve_relative(relative)?;
         let mut current = self.root.as_path().to_owned();
-        let components = relative.components().collect::<Vec<_>>();
-        for (index, component) in components.iter().enumerate() {
-            let Component::Normal(component) = component else {
-                return Err(ArtifactError::InvalidRelativePath(relative.to_owned()));
-            };
+        // `resolve_relative` admitted only normal components.
+        let count = relative.components().count();
+        for (index, component) in relative.iter().enumerate() {
             current.push(component);
             let metadata = fs::symlink_metadata(&current).await.map_err(|source| {
                 ArtifactError::InspectPath {
@@ -548,7 +546,7 @@ impl ArtifactStore {
             if metadata.file_type().is_symlink() {
                 return Err(ArtifactError::SymlinkPath(current));
             }
-            if index + 1 < components.len() && !metadata.is_dir() {
+            if index + 1 < count && !metadata.is_dir() {
                 return Err(ArtifactError::NotDirectory(current));
             }
         }
@@ -579,14 +577,10 @@ impl ArtifactStore {
         relative: &Path,
         parent_to_sync: PathBuf,
     ) -> Result<(), ArtifactError> {
-        let path = self.resolve_relative(relative)?;
-        let Some(metadata) = optional_metadata(&path).await? else {
+        if !self.optional_owned_directory_relative(relative).await? {
             return Ok(());
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(ArtifactError::UnsafeOwnedPath(path));
         }
-        self.resolve_existing_relative(relative).await?;
+        let path = self.resolve_relative(relative)?;
         fs::remove_dir_all(&path)
             .await
             .map_err(|source| ArtifactError::Discard {
@@ -1127,13 +1121,7 @@ async fn hash_open_file(
         if count == 0 {
             break;
         }
-        total = total.checked_add(count as u64).ok_or_else(|| {
-            ArtifactError::ByteLengthLimitExceeded {
-                path: path.to_owned(),
-                maximum: maximum_byte_length.unwrap_or(u64::MAX),
-                actual: u64::MAX,
-            }
-        })?;
+        total += count as u64;
         if let Some(maximum) = maximum_byte_length {
             if total > maximum {
                 return Err(ArtifactError::ByteLengthLimitExceeded {

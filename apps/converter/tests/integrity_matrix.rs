@@ -5,11 +5,8 @@ mod support;
 use std::{fs, path::Path, time::Duration};
 
 use axum::http::StatusCode;
-use uuid::Uuid;
 
-use support::{
-    clean_pdf, count_named_files, json_body, multipart_body, SeededJob, TestApp, TestHarness, TOKEN,
-};
+use support::{clean_pdf, count_named_files, json_body, TestHarness};
 
 /// The five ways stored bytes stop matching what the database recorded. Each one
 /// trips a different guard, and an equal-length rewrite is the only one a byte
@@ -58,26 +55,6 @@ async fn initialize_empty_harness(harness: &TestHarness) {
     drop(app);
 }
 
-async fn submit_succeeded_job(app: &TestApp, idempotency_key: &str) -> SeededJob {
-    let response = app
-        .submit(
-            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "fixture.pdf"),
-            idempotency_key,
-            TOKEN,
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let submitted = json_body(response).await;
-    let seeded = SeededJob {
-        job_id: Uuid::parse_str(submitted["data"]["id"].as_str().unwrap()).unwrap(),
-        attempt_id: Uuid::parse_str(submitted["data"]["activeAttemptId"].as_str().unwrap())
-            .unwrap(),
-    };
-    let completed = app.wait_for_terminal(&seeded.job_id.to_string()).await;
-    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
-    seeded
-}
-
 /// Corrupts the immutable source of a queued job, then lets a fresh app claim it.
 /// The claim path owns this guard because startup recovery hands a queued job
 /// straight to the runner without reading its bytes.
@@ -121,7 +98,7 @@ async fn corrupt_published_markdown_fails_the_restart(
 ) {
     let harness = TestHarness::new();
     let first = harness.app().await;
-    let seeded = submit_succeeded_job(&first, idempotency_key).await;
+    let seeded = first.submit_succeeded_job(idempotency_key).await;
     first.shutdown(Duration::from_secs(1)).await;
     drop(first);
 

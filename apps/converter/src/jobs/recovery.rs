@@ -114,15 +114,24 @@ impl StartupRecovery {
             if database_ids.contains(&job_id) {
                 continue;
             }
-            let quarantine = service
+            // An orphan owns no row, so nothing reads it. One that will not
+            // move is left in place rather than stopping the boot.
+            match service
                 .recovery_artifacts()
                 .quarantine_preacceptance(job_id)
-                .await?;
-            tracing::warn!(
-                %job_id,
-                quarantine = ?quarantine,
-                "quarantined backend storage with no durable conversion owner"
-            );
+                .await
+            {
+                Ok(quarantine) => tracing::warn!(
+                    %job_id,
+                    quarantine = ?quarantine,
+                    "quarantined backend storage with no durable conversion owner"
+                ),
+                Err(error) => tracing::error!(
+                    %job_id,
+                    %error,
+                    "could not quarantine backend storage with no durable conversion owner, so it stays in place"
+                ),
+            }
         }
         Ok(())
     }
@@ -330,7 +339,7 @@ fn validate_candidate_invariants(job: &StoredConversion) -> Result<(), StartupRe
         && attempt
             .classification
             .as_deref()
-            .is_some_and(is_known_classification);
+            .is_some_and(|value| DocumentClassification::from_stored(value).is_some());
     let metadata_valid = match job.state {
         ConversionState::Queued => {
             job.route.is_none()
@@ -386,10 +395,6 @@ fn validate_candidate_invariants(job: &StoredConversion) -> Result<(), StartupRe
         return invalid_metadata(job, "active state metadata is incomplete or inconsistent");
     }
     Ok(())
-}
-
-fn is_known_classification(value: &str) -> bool {
-    DocumentClassification::from_stored(value).is_some()
 }
 
 fn invalid_metadata<T>(

@@ -23,6 +23,10 @@ use super::model::{
 pub const DATABASE_FILENAME: &str = "converter.sqlite";
 const AUTH_SCOPE: &str = "bootstrap";
 const MAX_POOL_CONNECTIONS: u32 = 4;
+/// Admission and `accepting_jobs` must count the same rows.
+const ACTIVE_COUNT_SQL: &str = "SELECT COUNT(*) AS active_count
+     FROM conversions
+     WHERE status IN ('queued', 'converting_local', 'finalizing')";
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -104,14 +108,10 @@ impl SqliteRepository {
             return Ok(CreateOutcome::Replay(existing));
         }
 
-        let active_count: i64 = sqlx::query(
-            "SELECT COUNT(*) AS active_count
-             FROM conversions
-             WHERE status IN ('queued', 'converting_local', 'finalizing')",
-        )
-        .fetch_one(&mut *transaction)
-        .await?
-        .try_get("active_count")?;
+        let active_count: i64 = sqlx::query(ACTIVE_COUNT_SQL)
+            .fetch_one(&mut *transaction)
+            .await?
+            .try_get("active_count")?;
         if active_count >= i64::from(self.max_active_jobs) {
             transaction.commit().await?;
             return Ok(CreateOutcome::Capacity);
@@ -860,14 +860,10 @@ impl SqliteRepository {
     }
 
     pub async fn accepting_jobs(&self) -> Result<bool, RepositoryError> {
-        let active_count: i64 = sqlx::query(
-            "SELECT COUNT(*) AS active_count
-             FROM conversions
-             WHERE status IN ('queued', 'converting_local', 'finalizing')",
-        )
-        .fetch_one(&self.pool)
-        .await?
-        .try_get("active_count")?;
+        let active_count: i64 = sqlx::query(ACTIVE_COUNT_SQL)
+            .fetch_one(&self.pool)
+            .await?
+            .try_get("active_count")?;
         Ok(active_count < i64::from(self.max_active_jobs))
     }
 }
@@ -1281,11 +1277,9 @@ fn encode_string_array(
 ) -> Result<String, RepositoryError> {
     if values.len() < minimum_items
         || values.len() > 256
-        || values.iter().any(|value| {
-            value.is_empty()
-                || value.len() > maximum_item_length
-                || value.chars().any(char::is_control)
-        })
+        || values
+            .iter()
+            .any(|value| validate_bounded_text(value, maximum_item_length, message).is_err())
     {
         return Err(RepositoryError::InvalidInput(message));
     }
@@ -1332,13 +1326,12 @@ fn validate_artifact(
         ));
     }
     validate_sha256(&artifact.sha256, "artifact hash is invalid")?;
-    if artifact.byte_length == 0 || artifact.byte_length > i64::MAX as u64 {
-        return Err(RepositoryError::InvalidInput(
+    match i64::try_from(artifact.byte_length) {
+        Ok(length) if length > 0 => Ok(length),
+        _ => Err(RepositoryError::InvalidInput(
             "artifact byte length is invalid",
-        ));
+        )),
     }
-    i64::try_from(artifact.byte_length)
-        .map_err(|_| RepositoryError::InvalidInput("artifact byte length is invalid"))
 }
 
 fn validate_bounded_text(
@@ -1466,28 +1459,21 @@ fn validate_new_conversion(input: &NewConversion) -> Result<(), RepositoryError>
     // The media-type policy lives in the conversion domain's source-format
     // table; the ledger keeps storage invariants only. Claim-time engine
     // resolution fails closed on any media type with no engine.
-    if input.source.media_type.is_empty()
-        || input.source.media_type.len() > 127
-        || input.source.media_type.chars().any(char::is_control)
-    {
-        return Err(RepositoryError::InvalidInput(
-            "source media type is invalid",
-        ));
-    }
+    validate_bounded_text(
+        &input.source.media_type,
+        127,
+        "source media type is invalid",
+    )?;
     if input.source.byte_length == 0 || input.source.byte_length > i64::MAX as u64 {
         return Err(RepositoryError::InvalidInput(
             "source byte length is invalid",
         ));
     }
-    if input.origin_request_id.is_empty()
-        || input.origin_request_id.len() > 128
-        || input.origin_request_id.chars().any(char::is_control)
-    {
-        return Err(RepositoryError::InvalidInput(
-            "origin request id is invalid",
-        ));
-    }
-    Ok(())
+    validate_bounded_text(
+        &input.origin_request_id,
+        128,
+        "origin request id is invalid",
+    )
 }
 
 fn validate_sha256(value: &str, message: &'static str) -> Result<(), RepositoryError> {
