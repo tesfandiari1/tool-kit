@@ -60,16 +60,11 @@ pub struct AnyDocEngine {
 }
 
 impl AnyDocEngine {
-    pub fn new(
-        max_output_bytes: u64,
-        parser_concurrency: usize,
-        timeout: Duration,
-        describer: Option<PathBuf>,
-    ) -> Self {
+    pub fn new(max_output_bytes: u64, timeout: Duration, describer: Option<PathBuf>) -> Self {
         Self {
             max_output_bytes,
             timeout,
-            permits: Arc::new(Semaphore::new(parser_concurrency.max(1))),
+            permits: Arc::new(Semaphore::new(1)),
             describer,
         }
     }
@@ -146,7 +141,9 @@ impl AnyDocEngine {
         }
 
         // Pictures with no alt text get a description where the model is
-        // available. Any failure here leaves today's output untouched.
+        // available. A failed run leaves today's output untouched. Once one
+        // picture is described, a picture the model skipped also loses
+        // Office's own "Description automatically generated" guess.
         // ponytail: a timeout in the marking parse still fails the job, since
         // the detached task keeps the permit. Merge both parses into one
         // bounded closure if a document ever parses in time but marks too slowly.
@@ -669,7 +666,7 @@ mod tests {
             sha256: hex::encode(Sha256::digest(pdf)),
         };
 
-        let engine = AnyDocEngine::new(1024 * 1024, 1, Duration::from_secs(30), None);
+        let engine = AnyDocEngine::new(1024 * 1024, Duration::from_secs(30), None);
         let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
@@ -705,7 +702,7 @@ mod tests {
             sha256: hex::encode(Sha256::digest(rtf)),
         };
 
-        let engine = AnyDocEngine::new(1024 * 1024, 1, Duration::from_secs(30), None);
+        let engine = AnyDocEngine::new(1024 * 1024, Duration::from_secs(30), None);
         let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
@@ -731,7 +728,7 @@ mod tests {
     /// its own permit wait rather than blocking forever.
     #[tokio::test]
     async fn a_timed_out_parse_keeps_its_permit_until_it_finishes() {
-        let engine = AnyDocEngine::new(1024, 1, Duration::from_millis(50), None);
+        let engine = AnyDocEngine::new(1024, Duration::from_millis(50), None);
         let permit = engine.acquire().await.unwrap();
         let hung = engine
             .run_bounded(move || {
@@ -757,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicking_conversion_is_a_crash_not_a_wedge() {
-        let engine = AnyDocEngine::new(1024, 1, Duration::from_secs(5), None);
+        let engine = AnyDocEngine::new(1024, Duration::from_secs(5), None);
         let result: Result<(), EngineFailure> =
             engine.run_bounded(|| panic!("deliberate test panic")).await;
         assert_eq!(result.unwrap_err(), EngineFailure::Crashed);

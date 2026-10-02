@@ -53,13 +53,18 @@ export function HistoryPanel({
         // One row past the page, which is how the badge knows a "+" is earned.
         .listHistory(query, HISTORY_LIMIT + 1)
         .then((r) => live && setRows(r))
-        .catch(() => live && setRows([]));
+        // A failed read must not pass for an empty history.
+        .catch((e: unknown) => {
+          if (!live) return;
+          setRows([]);
+          onToast(String(e));
+        });
     }, 120);
     return () => {
       live = false;
       window.clearTimeout(t);
     };
-  }, [query, refreshKey]);
+  }, [query, refreshKey, onToast]);
 
   const clear = async () => {
     const ok = await confirm(

@@ -138,11 +138,15 @@ fn bytes_part(bytes: bytes::Bytes, name: &str, mime: &str) -> reqwest::multipart
     // `stream_with_length`, not `Part::bytes`, which copies the buffer back
     // out. The length is required, or the body is chunked and both refuse.
     let len = bytes.len() as u64;
-    let part = reqwest::multipart::Part::stream_with_length(reqwest::Body::from(bytes), len)
-        .file_name(name.to_string());
-    // A panic aborts the job task and strands the row on "Uploading…".
-    part.mime_str(mime)
-        .unwrap_or_else(|_| reqwest::multipart::Part::bytes(Vec::new()).file_name(name.to_string()))
+    let part = |bytes: bytes::Bytes| {
+        reqwest::multipart::Part::stream_with_length(reqwest::Body::from(bytes), len)
+            .file_name(name.to_string())
+    };
+    // A panic aborts the job task and strands the row on "Uploading…". A bad
+    // type sends the same bytes untyped, never an empty file.
+    part(bytes.clone())
+        .mime_str(mime)
+        .unwrap_or_else(|_| part(bytes))
 }
 
 /// Seconds per `retry-after`, capped so a large one cannot pin a permit for
@@ -266,16 +270,25 @@ pub async fn datalab_submit(
                 .unwrap_or_else(|| "Datalab rejected the request".into()),
         ));
     }
+    let remote_id = body
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let check_url = body
+        .get("request_check_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    // Accepted and maybe billed, but nothing to poll.
+    if remote_id.is_empty() && check_url.is_none() {
+        return Err(SubmitError::Uncertain(
+            "Datalab did not return a request id".into(),
+        ));
+    }
     Ok(Submitted {
-        remote_id: body
-            .get("request_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        check_url: body
-            .get("request_check_url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+        remote_id,
+        check_url,
     })
 }
 

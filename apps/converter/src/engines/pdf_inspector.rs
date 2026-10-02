@@ -19,7 +19,7 @@ use crate::{
     persistence::DocumentClassification,
     worker_protocol::{
         FallbackReason, Inspection, PdfTypeLabel, RejectionCode, WorkerOutcome, WorkerReport,
-        MARKDOWN_FILE, PDF_INSPECTOR_VERSION, WORKER_EXPECTED_SOURCE_BYTES_ENV,
+        MARKDOWN_FILE, PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION, WORKER_EXPECTED_SOURCE_BYTES_ENV,
         WORKER_EXPECTED_SOURCE_SHA256_ENV, WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION,
         WORKER_REPORT_FILE,
     },
@@ -218,7 +218,7 @@ fn validate_cmaps(path: &Path) -> Result<(), EngineStartupError> {
 
 fn validate_identity(report: &WorkerReport) -> Result<(), EngineFailure> {
     if report.protocol_version != WORKER_PROTOCOL_VERSION
-        || report.engine.name != "pdf-inspector"
+        || report.engine.name != PDF_ENGINE_NAME
         || report.engine.version != PDF_INSPECTOR_VERSION
         || !report.engine.features.is_empty()
     {
@@ -235,6 +235,8 @@ fn validate_inspection(inspection: &Inspection) -> Result<(), EngineFailure> {
             .pages_needing_ocr
             .iter()
             .any(|page| *page == 0 || *page > inspection.page_count)
+        // A repeated page would count toward "every page needs OCR".
+        || inspection.pages_needing_ocr.windows(2).any(|w| w[0] >= w[1])
         || inspection
             .pages_with_tables
             .iter()
@@ -371,8 +373,8 @@ mod tests {
     use tokio::sync::watch;
 
     use super::{
-        is_complete_native_inspection, validate_cmaps, verify_worker_identity, EngineFailure,
-        EngineStartupError, PdfInspectorEngine, WorkerStartupError,
+        is_complete_native_inspection, validate_cmaps, validate_inspection, verify_worker_identity,
+        EngineFailure, EngineStartupError, PdfInspectorEngine, WorkerStartupError,
     };
     use crate::artifacts::{AttemptPaths, ValidatedOpenFile};
     use crate::worker_protocol::{Inspection, PageReasons, PdfTypeLabel};
@@ -604,5 +606,28 @@ mod tests {
 
         inspection.pages_needing_ocr.push(1);
         assert!(!is_complete_native_inspection(&inspection));
+    }
+
+    #[test]
+    fn a_repeated_ocr_page_is_a_protocol_failure() {
+        let mut inspection = Inspection {
+            pdf_type: PdfTypeLabel::Mixed,
+            confidence: 1.0,
+            page_count: 2,
+            pages_needing_ocr: vec![1, 2],
+            ocr_reasons_by_page: Vec::new(),
+            has_encoding_issues: false,
+            is_complex: false,
+            pages_with_tables: Vec::new(),
+            pages_with_columns: Vec::new(),
+            processing_time_ms: 1,
+        };
+        assert!(validate_inspection(&inspection).is_ok());
+
+        inspection.pages_needing_ocr = vec![1, 1];
+        assert_eq!(
+            validate_inspection(&inspection),
+            Err(EngineFailure::Protocol)
+        );
     }
 }

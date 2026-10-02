@@ -51,7 +51,7 @@ case "${1:-}" in
     echo "removed the override. Tool-Kit will use its own sidecar again."
     echo "Restart Tool-Kit to stop pointing at the old service."
     exit 0 ;;
-  -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}"; exit 0 ;;
+  -h|--help) sed -n '2,/^$/p' "${BASH_SOURCE[0]}"; exit 0 ;;
 esac
 
 URL="${1:-$DEFAULT_URL}"

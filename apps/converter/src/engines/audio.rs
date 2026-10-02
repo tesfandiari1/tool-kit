@@ -153,6 +153,8 @@ impl AudioEngine {
             )
             .stdin(Stdio::from(source))
             .stdout(Stdio::null())
+            // The diarizer prints `[Profiling]` lines on every run, and the
+            // report is the only channel back.
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()

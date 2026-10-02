@@ -287,9 +287,7 @@ async fn queued_job_survives_restart_on_its_original_attempt() {
 
     // Seeded with no service running, so the row is waiting for startup recovery
     // rather than for a notification.
-    let job_id = harness
-        .insert_queued_without_notification(&clean_pdf())
-        .await;
+    let job_id = harness.insert_queued_job(&clean_pdf()).await.job_id;
     let (status, seeded_attempt) = harness.stored_status(job_id).await;
     assert_eq!(status, "queued");
 

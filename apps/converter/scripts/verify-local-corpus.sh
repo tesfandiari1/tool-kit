@@ -20,7 +20,7 @@ CONVERTER_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -h|--help) sed -n '2,14p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,/^$/p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

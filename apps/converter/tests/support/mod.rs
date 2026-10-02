@@ -206,10 +206,6 @@ impl TestHarness {
         &self.data_dir
     }
 
-    pub(crate) async fn insert_queued_without_notification(&self, source: &[u8]) -> Uuid {
-        self.insert_queued_job(source).await.job_id
-    }
-
     pub(crate) async fn insert_queued_job(&self, source: &[u8]) -> SeededJob {
         let job_id = Uuid::new_v4();
         let attempt_id = Uuid::new_v4();
@@ -451,6 +447,12 @@ impl TestHarness {
         .await
         .unwrap();
         assert_eq!(updated.rows_affected(), 1);
+    }
+
+    /// Runs one app against the empty data root so the durable layout and the
+    /// schema exist before a test writes rows behind the service's back.
+    pub(crate) async fn initialize_empty(&self) {
+        self.app().await.shutdown(Duration::from_secs(1)).await;
     }
 
     pub(crate) async fn app(&self) -> TestApp {

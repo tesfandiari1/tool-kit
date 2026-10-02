@@ -89,8 +89,9 @@ private func writeManifest(in directory: URL) {
         guard let bytes = try? Data(contentsOf: url, options: .mappedIfSafe) else {
             fail("cannot read \(url.path)")
         }
-        let relative = url.path.replacingOccurrences(
-            of: directory.standardizedFileURL.path + "/", with: "")
+        let prefix = directory.standardizedFileURL.path + "/"
+        let relative =
+            url.path.hasPrefix(prefix) ? String(url.path.dropFirst(prefix.count)) : url.path
         files.append(
             ManifestFile(
                 path: relative, byteLength: bytes.count, sha256: hexDigest(SHA256.hash(data: bytes)))

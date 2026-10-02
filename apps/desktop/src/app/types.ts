@@ -13,8 +13,7 @@ export type View = "library" | "run" | "history";
 
 export interface WorkspaceInfo {
   workspacePath: string;
-  catchAllProjectId: string;
-  /// That project's folder, workspace-relative.
+  /// The catch-all project's folder, workspace-relative.
   catchAllPath: string;
   /// Set on the launch that wrote the file, so it opens once per workspace.
   welcomePath: string | null;
@@ -25,8 +24,6 @@ export interface ProjectSummary {
   title: string;
   /// Relative to the workspace root, so moving the workspace keeps it valid.
   path: string;
-  /// RFC 3339 UTC.
-  createdAt: string;
 }
 
 /// One entry in a project folder. The host decides everything a row renders,

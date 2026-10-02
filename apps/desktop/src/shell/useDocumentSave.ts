@@ -34,7 +34,11 @@ export function useDocumentSave({
   /// Reports whether the document is on disk, so a caller can stop.
   const saveDoc = useCallback(
     (id: string): Promise<boolean> => {
+      // Read before `set` below, so this is the write already in flight. A
+      // second write that overlaps it offers a stale mtime and is refused.
+      const prior = writes.current.get(id);
       const write = (async () => {
+        if (prior) await prior;
         const doc = docsRef.current.find((d) => d.id === id);
         // `saving` reads as clean, which stops ⌘S racing the autosave.
         if (!doc || !isDirty(doc.save)) return true;

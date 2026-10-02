@@ -6,7 +6,7 @@ use crate::{
     conversion::servable_media_types,
     engines::{ANYDOC_ENGINE_NAME, ANYDOC_VERSION},
     vision_protocol::VISION_ENGINE_NAME,
-    worker_protocol::PDF_INSPECTOR_VERSION,
+    worker_protocol::{PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION},
     AppState,
 };
 
@@ -78,7 +78,7 @@ pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
     // not here would be an invitation to a job that cannot run.
     let mut engines = vec![
         EngineCapability {
-            name: "pdf-inspector",
+            name: PDF_ENGINE_NAME,
             version: PDF_INSPECTOR_VERSION.to_owned(),
         },
         EngineCapability {

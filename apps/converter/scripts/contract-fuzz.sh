@@ -43,7 +43,7 @@ while [ $# -gt 0 ]; do
     --examples) EXAMPLES="${2:?--examples needs a value}"; shift 2 ;;
     --seed) SEED="${2:?--seed needs a value}"; shift 2 ;;
     --no-build) BUILD="no"; shift ;;
-    -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,/^$/p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

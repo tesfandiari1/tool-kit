@@ -72,7 +72,6 @@ impl AppState {
         // worker also describes DOCX and PPTX pictures.
         let anydoc_engine = AnyDocEngine::new(
             settings.limits.max_output_bytes,
-            1,
             settings.limits.pdf_timeout,
             vision_engine
                 .as_ref()

@@ -33,7 +33,7 @@ use crate::{
         StoredFailure, SuccessfulArtifacts,
     },
     vision_protocol::VISION_ENGINE_NAME,
-    worker_protocol::{Inspection, PdfTypeLabel, PDF_INSPECTOR_VERSION},
+    worker_protocol::{Inspection, PdfTypeLabel, PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION},
 };
 
 use super::{
@@ -1252,7 +1252,7 @@ fn local_start(
     let format = source_format_by_media_type(media_type)?;
     let engine = match format.engine {
         LocalEngineKind::Pdf => EngineRecord {
-            name: "pdf-inspector".to_owned(),
+            name: PDF_ENGINE_NAME.to_owned(),
             version: PDF_INSPECTOR_VERSION.to_owned(),
         },
         LocalEngineKind::AnyDoc => EngineRecord {
@@ -1379,7 +1379,7 @@ fn validate_manifest(
     // The document detail is engine-specific JSON, checked against the shape
     // of the engine that produced it.
     let manifest_classification: &str = match engine.name.as_str() {
-        "pdf-inspector" => {
+        PDF_ENGINE_NAME => {
             let document_inspection: Inspection = serde_json::from_value(manifest.document.clone())
                 .map_err(|_| ArtifactReadFailure::Integrity)?;
             if !is_complete_native_inspection(&document_inspection) {

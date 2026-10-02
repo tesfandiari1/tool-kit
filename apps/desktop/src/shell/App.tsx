@@ -191,8 +191,11 @@ export default function App() {
       .catch(() => undefined)
       .then(() => commands.saveSettings(next));
     settingsSave.current = pending;
-    void pending.catch(() => undefined);
-  }, []);
+    // The UI already shows the new value, which a relaunch would lose.
+    void pending.catch((e: unknown) => {
+      showToast(String(e), "danger");
+    });
+  }, [showToast]);
 
   const persist = useCallback((patch: Partial<Settings>) => {
     applySettings({ ...settingsRef.current, ...patch });
@@ -665,6 +668,8 @@ export default function App() {
         // macOS applies `setSize` asynchronously, so the host's `center()`
         // measures the frame from before the grow.
         await centerWindow(width, height);
+      } catch {
+        // No window to size off a real host.
       } finally {
         // In a `finally` so a failed step still reveals the hidden window.
         await showWindow().catch(() => null);

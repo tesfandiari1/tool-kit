@@ -329,9 +329,10 @@ function SpeakerCountField({
   onCommit: (value: number | null) => void;
 }) {
   const [draft, setDraft] = useState(value === null ? "" : String(value));
-  const commit = () => {
+  /// WebKit reports unparsable text as "", which would clear the saved count.
+  const commit = (badInput: boolean) => {
     const typed = draft.trim();
-    if (!typed) {
+    if (!typed && !badInput) {
       setDraft("");
       onCommit(null);
       return;
@@ -357,9 +358,11 @@ function SpeakerCountField({
       onChange={(e) => {
         setDraft(e.target.value);
       }}
-      onBlur={commit}
+      onBlur={(e) => {
+        commit(e.currentTarget.validity.badInput);
+      }}
       onKeyDown={(e) => {
-        if (e.key === "Enter") commit();
+        if (e.key === "Enter") commit(e.currentTarget.validity.badInput);
       }}
     />
   );

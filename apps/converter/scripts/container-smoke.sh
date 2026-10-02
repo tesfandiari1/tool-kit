@@ -59,7 +59,7 @@ while [ $# -gt 0 ]; do
     --phase) PHASE="${2:?--phase needs a value}"; shift 2 ;;
     --keep) KEEP="yes"; shift ;;
     --no-build) BUILD="no"; shift ;;
-    -h|--help) sed -n '2,27p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,/^$/p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

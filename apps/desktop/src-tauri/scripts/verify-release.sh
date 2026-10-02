@@ -38,7 +38,7 @@ NOTARIZED="no"
 while [ $# -gt 0 ]; do
   case "$1" in
     --notarized) NOTARIZED="yes"; shift ;;
-    -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,/^$/p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

@@ -12,8 +12,8 @@ use pdf_inspector::{DetectionConfig, PdfError, PdfOptions, PdfType, ScanStrategy
 use sha2::{Digest, Sha256};
 use tool_kit_converter::worker_protocol::{
     EngineIdentity, FallbackReason, Inspection, PageReasons, PdfTypeLabel, RejectionCode,
-    WorkerArtifact, WorkerOutcome, WorkerReport, MARKDOWN_FILE, PDF_INSPECTOR_VERSION,
-    WORKER_EXPECTED_SOURCE_BYTES_ENV, WORKER_EXPECTED_SOURCE_SHA256_ENV,
+    WorkerArtifact, WorkerOutcome, WorkerReport, MARKDOWN_FILE, PDF_ENGINE_NAME,
+    PDF_INSPECTOR_VERSION, WORKER_EXPECTED_SOURCE_BYTES_ENV, WORKER_EXPECTED_SOURCE_SHA256_ENV,
     WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION, WORKER_REPORT_FILE,
 };
 
@@ -279,7 +279,7 @@ fn write_report(output_directory: &Path, outcome: WorkerOutcome) -> Result<(), (
     let report = WorkerReport {
         protocol_version: WORKER_PROTOCOL_VERSION,
         engine: EngineIdentity {
-            name: "pdf-inspector".to_owned(),
+            name: PDF_ENGINE_NAME.to_owned(),
             version: PDF_INSPECTOR_VERSION.to_owned(),
             features: Vec::new(),
         },

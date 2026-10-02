@@ -29,12 +29,6 @@ use support::{
     test_app_with_worker_script, TestHarness, TOKEN,
 };
 
-async fn initialize_empty_harness(harness: &TestHarness) {
-    let app = harness.app().await;
-    app.shutdown(Duration::from_secs(1)).await;
-    drop(app);
-}
-
 #[tokio::test]
 async fn public_health_and_capabilities_are_truthful() {
     let app = test_app().await;
@@ -1182,7 +1176,7 @@ async fn corrupted_published_artifact_fails_closed_and_preserves_audit_files() {
 #[tokio::test]
 async fn converting_job_requeues_with_a_fresh_attempt_and_completes_after_restart() {
     let harness = TestHarness::new();
-    initialize_empty_harness(&harness).await;
+    harness.initialize_empty().await;
     let seeded = harness.insert_converting_job(&clean_pdf(), 0).await;
     let interrupted_attempt = harness
         .data_dir()
@@ -1208,7 +1202,7 @@ async fn converting_job_requeues_with_a_fresh_attempt_and_completes_after_restar
 #[tokio::test]
 async fn recovery_limit_produces_a_stable_failure_without_another_attempt() {
     let harness = TestHarness::with_recovery_limit(1);
-    initialize_empty_harness(&harness).await;
+    harness.initialize_empty().await;
     let seeded = harness.insert_converting_job(&clean_pdf(), 1).await;
 
     let restarted = harness.app().await;
@@ -1229,7 +1223,7 @@ async fn recovery_limit_produces_a_stable_failure_without_another_attempt() {
 #[tokio::test]
 async fn corrupt_active_source_fails_recovery_without_creating_a_retry() {
     let harness = TestHarness::new();
-    initialize_empty_harness(&harness).await;
+    harness.initialize_empty().await;
     let seeded = harness.insert_converting_job(&clean_pdf(), 0).await;
     let source = harness
         .data_dir()
@@ -2139,8 +2133,9 @@ async fn polling_claims_a_job_when_its_notification_was_missed() {
     let app = harness.app().await;
     app.wait_for_job_runner_idle().await;
     let job_id = harness
-        .insert_queued_without_notification(&clean_pdf())
+        .insert_queued_job(&clean_pdf())
         .await
+        .job_id
         .to_string();
 
     let completed = tokio::time::timeout(Duration::from_secs(3), app.wait_for_terminal(&job_id))

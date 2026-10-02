@@ -19,6 +19,7 @@ describe("paneLayout", () => {
     const repaired = paneLayout({ start: 40, end: 40 }, 33);
     expect(repaired.start + repaired.end).toBe(100);
     expect(repaired.start).toBe(40);
+    expect(paneLayout({ start: 150, end: -50 }, 33)).toEqual({ start: 100, end: 0 });
   });
 
   it("gives the document two thirds by default", () => {

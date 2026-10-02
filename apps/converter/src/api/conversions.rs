@@ -403,9 +403,17 @@ async fn stage_multipart(
     }
 
     Ok(StagedSubmission {
-        client_run_id: client_run_id.ok_or_else(|| missing_field("clientRunId", request_id))?,
-        profile: profile.ok_or_else(|| missing_field("profile", request_id))?,
-        source: source.ok_or_else(|| missing_field("source", request_id))?,
+        client_run_id: client_run_id.ok_or_else(|| {
+            missing(
+                "missing_client_run_id",
+                "clientRunId is required.",
+                request_id,
+            )
+        })?,
+        profile: profile
+            .ok_or_else(|| missing("missing_profile", "profile is required.", request_id))?,
+        source: source
+            .ok_or_else(|| missing("missing_source", "source is required.", request_id))?,
         // Both are optional; absent is the documented default.
         language_correction: language_correction.unwrap_or(true),
         custom_words: custom_words.unwrap_or_default(),
@@ -689,12 +697,7 @@ fn accepted(job: JobView, replayed: bool) -> Response {
     response
 }
 
-fn missing_field(field: &'static str, request_id: &RequestId) -> ApiError {
-    let (code, message) = match field {
-        "clientRunId" => ("missing_client_run_id", "clientRunId is required."),
-        "profile" => ("missing_profile", "profile is required."),
-        _ => ("missing_source", "source is required."),
-    };
+fn missing(code: &'static str, message: &'static str, request_id: &RequestId) -> ApiError {
     error(StatusCode::UNPROCESSABLE_ENTITY, code, message, request_id)
 }
 

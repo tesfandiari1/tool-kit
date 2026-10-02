@@ -2,8 +2,8 @@
 export type SplitLayout = Record<string, number>;
 
 /// The layout to hand the group. Its own module, or fast refresh breaks.
-/// Deriving `end` repairs a pair that no longer sums to 100.
+/// Clamping `start` and deriving `end` repair a pair the group cannot take.
 export function paneLayout(layout: SplitLayout | undefined, defaultStart: number): SplitLayout {
-  const start = layout?.start ?? defaultStart;
+  const start = Math.min(100, Math.max(0, layout?.start ?? defaultStart));
   return { start, end: 100 - start };
 }

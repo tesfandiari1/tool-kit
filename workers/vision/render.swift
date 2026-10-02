@@ -104,8 +104,11 @@ func markdown(_ page: DocumentObservation.Container) -> String {
 
     if let title = page.title {
         let text = title.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        claimed += normalize(text) + " "
-        blocks.append((topEdge(title.boundingRegion), "# " + text))
+        // An empty title would publish a bare "# " heading.
+        if !text.isEmpty {
+            claimed += normalize(text) + " "
+            blocks.append((topEdge(title.boundingRegion), "# " + text))
+        }
     }
     for table in page.tables {
         for row in table.rows {

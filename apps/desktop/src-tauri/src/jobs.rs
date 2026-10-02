@@ -238,6 +238,11 @@ impl Job {
         }
     }
 
+    /// Neither `done` nor `failed`: a run that holds one is joined, a quit confirms.
+    pub fn is_active(&self) -> bool {
+        matches!(self.status.as_str(), "queued" | "working" | "processing")
+    }
+
     pub(crate) fn new_backend(
         id: u64,
         source_path: String,

@@ -964,11 +964,7 @@ impl ConvertOneOutcome {
 /// Whether `convert_one` may still append, given the generation it read before
 /// its preflight. A run owns `run_config` for its whole life.
 fn queue_is_free(state: &JobManager, since: u64) -> bool {
-    state.generation() == since
-        && !state
-            .list()
-            .iter()
-            .any(|job| matches!(job.status.as_str(), "queued" | "working" | "processing"))
+    state.generation() == since && !state.list().iter().any(Job::is_active)
 }
 
 /// What an import left behind: the staged paths, and a line per file that
@@ -1053,18 +1049,23 @@ fn import_into_project(
 
         // A dropped folder keeps its shape, so the tree pairs results where
         // they sit. It merges by name. `claim_path` numbers collisions.
+        let mut any = false;
         for source in &matches {
-            if let Err(e) = take(&import_destination(&dir, root, source), source) {
-                failed.push(format!("{}: {e}", name_of(source)));
+            match take(&import_destination(&dir, root, source), source) {
+                Ok(_) => any = true,
+                Err(e) => failed.push(format!("{}: {e}", name_of(source))),
             }
         }
         // One staged path per dropped folder, even when some of its files
-        // failed: what landed is inside it. The run walks it again.
-        landed.push(
-            import_destination(&dir, root, root)
-                .to_string_lossy()
-                .into_owned(),
-        );
+        // failed: what landed is inside it. The run walks it again. When none
+        // landed, the folder may not exist and the failures say why.
+        if any {
+            landed.push(
+                import_destination(&dir, root, root)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
     }
     Ok(ImportOutcome { landed, failed })
 }
@@ -1376,7 +1377,7 @@ fn stop_run(app: AppHandle, state: State<JobManager>) -> Result<usize, String> {
     let jobs = state.list();
     delete_backend_inflight(&app, &jobs);
     for job in jobs {
-        if matches!(job.status.as_str(), "queued" | "working" | "processing") {
+        if job.is_active() {
             if let Some(updated) = state.update(job.id, |j| {
                 j.status = "failed".into();
                 j.progress_note = String::new();
@@ -1572,7 +1573,7 @@ fn quit_with_confirm(app: &AppHandle) {
         .state::<JobManager>()
         .list()
         .iter()
-        .filter(|j| matches!(j.status.as_str(), "queued" | "working" | "processing"))
+        .filter(|j| j.is_active())
         .count();
     if active == 0 {
         app.exit(0);

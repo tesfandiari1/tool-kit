@@ -47,20 +47,12 @@ impl Corruption {
     }
 }
 
-/// Runs one app against the empty data root so the durable layout and the schema
-/// exist before a test writes rows behind the service's back.
-async fn initialize_empty_harness(harness: &TestHarness) {
-    let app = harness.app().await;
-    app.shutdown(Duration::from_secs(1)).await;
-    drop(app);
-}
-
 /// Corrupts the immutable source of a queued job, then lets a fresh app claim it.
 /// The claim path owns this guard because startup recovery hands a queued job
 /// straight to the runner without reading its bytes.
 async fn corrupt_source_fails_the_claim(corruption: Corruption) {
     let harness = TestHarness::with_poll_interval(Duration::from_millis(50));
-    initialize_empty_harness(&harness).await;
+    harness.initialize_empty().await;
     let seeded = harness.insert_queued_job(&clean_pdf()).await;
     let source = harness
         .data_dir()
