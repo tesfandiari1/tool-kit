@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { commands } from "@/app/commands";
 import { basename } from "@/app/format";
-import type { FileRow, HistoryEntry, Job } from "@/app/types";
+import type { FileRow } from "@/app/types";
 import { isDirty, type DocMode, type OpenDoc } from "@/domains/thread/model";
 import { confirm } from "@/platform/host";
 import { activateOrInsert, NO_DOCS, removeDoc, renameDoc } from "./documents";
@@ -28,8 +28,11 @@ export function useDocuments({
   }, [docs]);
 
   /// Reports whether the pane showed the file: `openable` cannot answer for
-  /// the encoding, so a caller needs somewhere else to put it.
-  const open = useCallback(
+  /// the encoding, so a caller needs somewhere else to put it. The doc id is
+  /// the path, so every door opens one tab. Reads `docsRef`, never `docs`: a
+  /// callback that changes identity on every keystroke re-runs App's project
+  /// listing and the tree re-read behind it.
+  const openPath = useCallback(
     async (outputPath: string | null): Promise<boolean> => {
       if (!outputPath) {
         showToast("No result file to open", "danger");
@@ -37,7 +40,7 @@ export function useDocuments({
       }
       setPreview(null);
       // Re-reading an open document throws its edit away to learn nothing.
-      if (docs.some((d) => d.id === outputPath)) {
+      if (docsRef.current.some((d) => d.id === outputPath)) {
         setList((cur) => ({ ...cur, activeId: outputPath }));
         return true;
       }
@@ -63,15 +66,8 @@ export function useDocuments({
         return false;
       }
     },
-    [docs, showToast],
+    [showToast],
   );
-
-  const openJob = useCallback((job: Job) => open(job.outputPath), [open]);
-
-  const openHistory = useCallback((entry: HistoryEntry) => open(entry.outputPath), [open]);
-
-  /// The doc id is the path, so three doors open one tab.
-  const openPath = useCallback((path: string) => open(path), [open]);
 
   const select = useCallback((id: string) => {
     setPreview(null);
@@ -131,8 +127,6 @@ export function useDocuments({
     mode,
     preview,
     showPreview: setPreview,
-    openJob,
-    openHistory,
     openPath,
     select,
     closeDoc,

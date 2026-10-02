@@ -9,7 +9,6 @@ import { commands } from "@/app/commands";
 import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
 import type {
   FileRow,
-  HistoryEntry,
   Job,
   OnboardingConversionMode,
   ProjectSummary,
@@ -128,8 +127,6 @@ export default function App() {
     mode,
     preview,
     showPreview,
-    openJob,
-    openHistory,
     openPath,
     select,
     closeDoc,
@@ -187,22 +184,15 @@ export default function App() {
     });
   }, []);
 
-  const queueSettingsSave = useCallback((next: Settings) => {
+  const applySettings = useCallback((next: Settings) => {
+    settingsRef.current = next;
+    setSettings(next);
     const pending = settingsSave.current
       .catch(() => undefined)
       .then(() => commands.saveSettings(next));
     settingsSave.current = pending;
     void pending.catch(() => undefined);
   }, []);
-
-  const applySettings = useCallback(
-    (next: Settings) => {
-      settingsRef.current = next;
-      setSettings(next);
-      queueSettingsSave(next);
-    },
-    [queueSettingsSave],
-  );
 
   const persist = useCallback((patch: Partial<Settings>) => {
     applySettings({ ...settingsRef.current, ...patch });
@@ -489,8 +479,13 @@ export default function App() {
       let out;
       try {
         // `convert_one` appends to the queue rather than clearing it, so
-        // everything already in there belongs to an earlier run.
-        setTerminalAtStart(terminalIds(jobsRef.current));
+        // everything already in there belongs to an earlier run. Only on a
+        // free queue: the host refuses anything else with `run_in_progress`,
+        // and a baseline taken mid-run drops that run's finished rows from the
+        // counter and turns its finish into a one-file auto-open.
+        if (!jobsRef.current.some((j) => ACTIVE.includes(j.status))) {
+          setTerminalAtStart(terminalIds(jobsRef.current));
+        }
         out = await commands.convertOne(row.rel);
       } catch (e) {
         showToast(String(e), "danger");
@@ -596,9 +591,8 @@ export default function App() {
   const dragging = useDragDrop(onDrop);
 
   const doneCount = jobs.filter((j) => j.status === "done").length;
-  const running = jobs.some((j) => ACTIVE.includes(j.status));
-
   const activeCount = jobs.filter((j) => ACTIVE.includes(j.status)).length;
+  const running = activeCount > 0;
 
   /// This run's rows. Over the whole list, one file from the tree after a
   /// batch reads "200 / 201".
@@ -761,36 +755,26 @@ export default function App() {
     };
   }, [importFiles, libraryMode, settingsOpen]);
 
-  /// Put a result on screen. `open` never touches the view, so a tab opened
-  /// from Run or History lands where nobody can see it. Save first, because
-  /// `open` does not flush the document it replaces. `fallback` goes to Finder
-  /// when the pane refuses the file.
+  /// Put a result on screen. `openPath` never touches the view, so a tab
+  /// opened from Run or History lands where nobody can see it. Save first,
+  /// because `openPath` does not flush the document it replaces. Finder is the
+  /// fallback when the pane refuses the file.
   const reveal = useCallback(
-    async (open: () => Promise<boolean>, fallback: string | null) => {
+    async (path: string | null) => {
       if (activeId) await saveDoc(activeId);
-      if (await open()) {
+      if (await openPath(path)) {
         setView("library");
         return;
       }
-      if (fallback) void call(() => commands.revealPath(fallback));
+      if (path) void call(() => commands.revealPath(path));
     },
-    [activeId, call, saveDoc],
+    [activeId, call, openPath, saveDoc],
   );
 
-  const revealJob = useCallback(
-    (job: Job) => reveal(() => openJob(job), job.outputPath),
-    [openJob, reveal],
-  );
-
-  const revealHistory = useCallback(
-    (entry: HistoryEntry) => reveal(() => openHistory(entry), entry.outputPath),
-    [openHistory, reveal],
-  );
-
-  /// Effect Events: `openJob` changes identity on every keystroke and
+  /// Effect Events: `reveal` changes identity with the active tab and
   /// `tree.toggle` as the tree loads, and the effect below must fire on a
   /// run's edges alone.
-  const revealJobEvent = useEffectEvent(revealJob);
+  const revealEvent = useEffectEvent(reveal);
   const openDestination = useEffectEvent(tree.toggle);
 
   // Clear the selection so the same files cannot be re-run by accident. The
@@ -811,7 +795,7 @@ export default function App() {
       // One file is a request to read it. A batch is not, so nothing opens.
       const target = autoOpenTarget(terminalAtStart, jobsRef.current);
       if (target !== null) {
-        void revealJobEvent(target);
+        void revealEvent(target.outputPath);
       }
     }
     wasRunning.current = running;
@@ -1086,7 +1070,7 @@ export default function App() {
       refreshKey={runsFinished}
       dragging={dragging}
       onChanged={() => setRunsFinished((n) => n + 1)}
-      onOpen={(e) => void revealHistory(e)}
+      onOpen={(e) => void reveal(e.outputPath)}
       onToast={showToast}
     />
   );
@@ -1124,7 +1108,7 @@ export default function App() {
         const path = written[written.length - 1]?.outputPath ?? destination?.path;
         if (path) void call(() => commands.revealPath(path));
       }}
-      onPreview={(j) => void revealJob(j)}
+      onPreview={(j) => void reveal(j.outputPath)}
       onCopy={(j) => void copyText(j)}
       onRevealJob={(j) => {
         const path = j.outputPath;

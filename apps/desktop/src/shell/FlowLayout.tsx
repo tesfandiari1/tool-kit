@@ -6,17 +6,13 @@ export function FlowLayout({
   head,
   foot,
   children,
-  className,
 }: {
   head?: ReactNode;
   foot?: ReactNode;
   children: ReactNode;
-  className?: string;
 }) {
-  const mainClass = ["flow", className].filter(Boolean).join(" ");
-
   return (
-    <main className={mainClass}>
+    <main className="flow">
       {head && <div className="flow-head">{head}</div>}
       <div className="flow-scroll">{children}</div>
       {foot && <div className="flow-foot">{foot}</div>}
