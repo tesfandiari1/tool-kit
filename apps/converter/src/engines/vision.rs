@@ -27,11 +27,12 @@ use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
     persistence::DocumentClassification,
     vision_protocol::{
-        VisionOutcome, VisionRejectionCode, VisionReport, VISION_ENGINE_NAME, VISION_MARKDOWN_FILE,
-        VISION_WORKER_CUSTOM_WORDS_ENV, VISION_WORKER_EXPECTED_SOURCE_BYTES_ENV,
-        VISION_WORKER_EXPECTED_SOURCE_SHA256_ENV, VISION_WORKER_IDENTITY_PREFIX,
-        VISION_WORKER_LANGUAGE_CORRECTION_ENV, VISION_WORKER_MAX_OUTPUT_BYTES_ENV,
-        VISION_WORKER_PROTOCOL_VERSION, VISION_WORKER_REPORT_FILE,
+        VisionOutcome, VisionPages, VisionRejectionCode, VisionReport, VISION_ENGINE_NAME,
+        VISION_MARKDOWN_FILE, VISION_WORKER_CUSTOM_WORDS_ENV,
+        VISION_WORKER_EXPECTED_SOURCE_BYTES_ENV, VISION_WORKER_EXPECTED_SOURCE_SHA256_ENV,
+        VISION_WORKER_IDENTITY_PREFIX, VISION_WORKER_LANGUAGE_CORRECTION_ENV,
+        VISION_WORKER_MAX_OUTPUT_BYTES_ENV, VISION_WORKER_PROTOCOL_VERSION,
+        VISION_WORKER_REPORT_FILE,
     },
     worker_protocol::FallbackReason,
 };
@@ -40,8 +41,8 @@ const WORKER_LABEL: &str = "Vision";
 const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Engine-specific detail persisted as attempt diagnostics and embedded in the
-/// manifest. Content-free, and wall time is all of it: see the quality note in
-/// [`analysis`] for why Vision reports no measurement.
+/// manifest. Content-free, and wall time is all of it. The page counts go to
+/// the policy through [`analysis`], not here.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct VisionDiagnostics {
@@ -160,7 +161,7 @@ impl VisionEngine {
         self.validate_identity(&report)?;
 
         let outcome = match report.outcome {
-            VisionOutcome::Converted { artifact } => {
+            VisionOutcome::Converted { artifact, pages } => {
                 let digest = child::validate_staged_markdown(
                     paths,
                     VISION_MARKDOWN_FILE,
@@ -171,7 +172,7 @@ impl VisionEngine {
                 )
                 .await?;
                 EngineOutcome::Converted {
-                    analysis: analysis(elapsed)?,
+                    analysis: analysis(elapsed, pages)?,
                     byte_length: artifact.byte_length,
                     sha256: digest,
                 }
@@ -180,7 +181,7 @@ impl VisionEngine {
                 child::reject_if_markdown_staged(paths).await?;
                 match fallback_reason(code) {
                     Some(reason_code) => EngineOutcome::NeedsRemote {
-                        analysis: analysis(elapsed)?,
+                        analysis: analysis(elapsed, None)?,
                         reason_code,
                     },
                     None => EngineOutcome::Rejected {
@@ -229,15 +230,31 @@ fn verify_worker_identity(path: &Path) -> Result<String, WorkerStartupError> {
     Ok(version.to_owned())
 }
 
-fn analysis(elapsed: Duration) -> Result<EngineAnalysis, EngineFailure> {
+fn analysis(
+    elapsed: Duration,
+    pages: Option<VisionPages>,
+) -> Result<EngineAnalysis, EngineFailure> {
+    // The one thing Vision measures is which pages of a scan gave no text, so
+    // a partly unreadable scan publishes with `pages_without_extractable_text`
+    // rather than as a clean success. A single image has no pages. Table
+    // detection is never claimed: the spike caught it wrong in both
+    // directions, tables reported over plain paragraphs and real grids missed.
+    let native_text_ratio = match pages {
+        None => None,
+        // Every page empty is `no_text_found`, so a converted report saying so
+        // is not one this worker writes.
+        Some(VisionPages {
+            total,
+            without_text,
+        }) if without_text < total => Some((total - without_text) as f32 / total as f32),
+        Some(_) => return Err(EngineFailure::Protocol),
+    };
     Ok(EngineAnalysis {
         classification: DocumentClassification::ImageBased,
-        // Vision measures nothing the policy can read. A single image has no
-        // page-level text ratio, and the spike caught its table detection wrong
-        // in both directions: tables reported over plain paragraphs, real grids
-        // missed. A signal that wrong must never gate publication, so the
-        // engine claims none rather than a convenient one.
-        quality: QualitySignals::unmeasured(),
+        quality: QualitySignals {
+            native_text_ratio,
+            ..QualitySignals::unmeasured()
+        },
         diagnostics: serde_json::to_value(VisionDiagnostics {
             processing_time_ms: u64::try_from(elapsed.as_millis())
                 .map_err(|_| EngineFailure::Protocol)?,
@@ -410,6 +427,45 @@ mod tests {
             .publication_staging
             .join("worker-report.json")
             .exists());
+    }
+
+    /// A scan Vision read only part of must reach the policy as a scan with
+    /// textless pages, or it publishes as a clean success.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_scan_with_textless_pages_reports_them_to_the_policy() {
+        for (total, without_text, warns) in [(3, 1, Some(true)), (2, 0, Some(false)), (2, 2, None)]
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let worker = directory.path().join("worker");
+            write_worker(
+                &worker,
+                &worker_script(&format!(
+                    "set -e\nstaging=\"$1\"\nprintf 'Page one\\n' > \"$staging/result.md\"\n\
+                     sha=$(/usr/bin/shasum -a 256 \"$staging/result.md\" | cut -d' ' -f1)\n\
+                     bytes=$(/usr/bin/wc -c < \"$staging/result.md\" | tr -d ' ')\n\
+                     printf '{{\"protocolVersion\":1,\"engine\":{{\"name\":\"apple-vision\",\"version\":\"26.6.1\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":%s,\"sha256\":\"%s\"}},\"pages\":{{\"total\":{total},\"withoutText\":{without_text}}}}}}}' \"$bytes\" \"$sha\" > \"$staging/worker-report.json\"\n",
+                )),
+            );
+            let paths = paths(directory.path());
+            let source = source(&paths.source, b"%PDF-1.7 scan").await;
+
+            let engine = VisionEngine::initialize(worker, Duration::from_secs(5), 1024).unwrap();
+            let permit = engine.acquire().await.unwrap();
+            let (_cancel, cancellation) = watch::channel(false);
+            let result = engine
+                .convert(&paths, source, permit, cancellation, true, "")
+                .await;
+
+            match (result, warns) {
+                (Ok(EngineOutcome::Converted { analysis, .. }), Some(warns)) => {
+                    assert_eq!(analysis.quality.has_pages_without_text(), warns);
+                }
+                // Every page empty is `no_text_found`, never a conversion.
+                (Err(failure), None) => assert_eq!(failure, super::EngineFailure::Protocol),
+                _ => panic!("{without_text} of {total} textless pages routed the wrong way"),
+            }
+        }
     }
 
     #[cfg(unix)]

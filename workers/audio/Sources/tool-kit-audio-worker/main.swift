@@ -165,8 +165,11 @@ private func diarize(_ source: URL, directory: URL, speakers: Int?) async throws
     let manager = OfflineDiarizerManager(config: config)
     manager.initialize(models: models)
 
-    let samples = try AudioConverter().resampleAudioFile(path: source.path)
-    return try await manager.process(audio: samples).segments
+    // The URL overload resamples into a memory-mapped temp file, so a
+    // four-hour recording never sits in memory as one array.
+    // ponytail: a killed worker leaves that file in the per-user temp folder,
+    // which macOS sweeps. Pass a scratch path if FluidAudio ever takes one.
+    return try await manager.process(source).segments
 }
 
 private func run(_ stagingPath: String) async -> Never {
@@ -261,21 +264,20 @@ private func run(_ stagingPath: String) async -> Never {
             // code would misfile a broken install as the user's audio.
             fail("diarization failed: \(error)")
         }
-        let names = speakerNames(segments)
-        if names.isEmpty {
-            turns = merge(lines) { _ in "Speaker 1" }
-            speakersFound = 1
-        } else {
-            speakersFound = names.count
+        let order = speakerOrder(segments)
+        if let busiest = order.first {
             // A line no segment covers keeps the speaker of the line before
             // it, so the transcript never names a voice the count omits.
-            var lastName = "Speaker 1"
-            turns = merge(lines) { line in
-                if let id = speaker(for: line, in: segments), let name = names[id] {
-                    lastName = name
-                }
-                return lastName
-            }
+            var lastId = busiest
+            turns = numbered(
+                merge(lines) { line in
+                    if let id = speaker(for: line, in: segments) { lastId = id }
+                    return lastId
+                }, order: order)
+            speakersFound = Set(turns.map(\.speaker)).count
+        } else {
+            turns = merge(lines) { _ in "Speaker 1" }
+            speakersFound = 1
         }
     }
 

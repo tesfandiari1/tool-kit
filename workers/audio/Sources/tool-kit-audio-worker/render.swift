@@ -39,18 +39,29 @@ func speaker(for line: Line, in segments: [TimedSpeakerSegment], snap: Double = 
     return distance(nearest) <= snap ? nearest.speakerId : nil
 }
 
-/// Talk-time order, so the busiest voice is Speaker 1. A tie goes to the lower id.
-func speakerNames(_ segments: [TimedSpeakerSegment]) -> [String: String] {
+/// Speaker ids in talk-time order, busiest first. A tie goes to the lower id.
+func speakerOrder(_ segments: [TimedSpeakerSegment]) -> [String] {
     var talkTime: [String: Double] = [:]
     for segment in segments {
         talkTime[segment.speakerId, default: 0] += Double(segment.durationSeconds)
     }
+    return talkTime.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
+}
+
+/// Renames the diarizer ids in `turns` to Speaker 1, 2, … in `order`. Only an
+/// id that owns a turn gets a number, so a voice the diarizer heard under no
+/// recognised words leaves no gap and does not inflate the count.
+func numbered(_ turns: [Turn], order: [String]) -> [Turn] {
+    let present = Set(turns.map(\.speaker))
     var names: [String: String] = [:]
-    let order = talkTime.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
-    for (index, id) in order.enumerated() {
-        names[id] = "Speaker \(index + 1)"
+    for id in order where present.contains(id) {
+        names[id] = "Speaker \(names.count + 1)"
     }
-    return names
+    return turns.map { turn in
+        var turn = turn
+        turn.speaker = names[turn.speaker] ?? turn.speaker
+        return turn
+    }
 }
 
 /// Join neighbouring lines from one person into readable turns. A silence

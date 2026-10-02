@@ -9,13 +9,25 @@ import CoreGraphics
 import Foundation
 import Vision
 
+/// The longest side a rendered page may have, in pixels. A page past it renders
+/// at a lower dpi: 8192 square is 256 MB of bitmap, where a 200-inch page at
+/// 200 dpi would be gigabytes.
+private let maxPageSide: CGFloat = 8192
+
 /// One PDF page as an opaque bitmap at `dpi`, white behind the page. Callers
 /// render a page, read it and drop it before the next, so a long scan never
 /// holds every bitmap at once.
+///
+/// The crop box is the visible page, and CoreGraphics already clips it to the
+/// media box. The media box can carry bleed or a whole sheet around it.
 func renderPage(_ page: CGPDFPage, dpi: CGFloat) -> CGImage? {
-    let scale = dpi / 72.0
-    let box = page.getBoxRect(.mediaBox)
-    let w = Int((box.width * scale).rounded()), h = Int((box.height * scale).rounded())
+    let box = page.getBoxRect(.cropBox)
+    guard box.width.isFinite, box.height.isFinite, box.width > 0, box.height > 0 else {
+        return nil
+    }
+    let scale = min(dpi / 72.0, maxPageSide / max(box.width, box.height))
+    let w = max(1, Int((box.width * scale).rounded()))
+    let h = max(1, Int((box.height * scale).rounded()))
     guard let ctx = CGContext(
         data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
         space: CGColorSpaceCreateDeviceRGB(),

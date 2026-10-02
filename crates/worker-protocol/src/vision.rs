@@ -52,8 +52,15 @@ pub struct VisionEngineIdentity {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VisionOutcome {
-    Converted { artifact: VisionArtifact },
-    Rejected { code: VisionRejectionCode },
+    Converted {
+        artifact: VisionArtifact,
+        /// Set for a scanned PDF, absent for a single image.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pages: Option<VisionPages>,
+    },
+    Rejected {
+        code: VisionRejectionCode,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -62,6 +69,16 @@ pub struct VisionArtifact {
     pub relative_path: String,
     pub byte_length: u64,
     pub sha256: String,
+}
+
+/// How many pages of a scanned PDF Vision read, and how many of those gave no
+/// text. A converted report always has `without_text < total`: a scan with no
+/// text on any page is `NoTextFound`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisionPages {
+    pub total: u32,
+    pub without_text: u32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

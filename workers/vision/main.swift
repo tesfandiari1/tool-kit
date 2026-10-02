@@ -46,6 +46,13 @@ private struct Artifact: Encodable {
     let sha256: String
 }
 
+/// A scanned PDF's page count and how many of those pages Vision read no text
+/// on. Without it a partly unreadable scan publishes as a clean success.
+private struct Pages: Encodable {
+    let total: Int
+    let withoutText: Int
+}
+
 private struct EngineIdentity: Encodable {
     let name: String
     let version: String
@@ -55,19 +62,20 @@ private struct EngineIdentity: Encodable {
 /// Serde tags the outcome with `kind`, so the encoding is written by hand
 /// rather than synthesized.
 private enum Outcome: Encodable {
-    case converted(Artifact)
+    case converted(Artifact, Pages?)
     case rejected(Rejection)
 
     enum CodingKeys: String, CodingKey {
-        case kind, artifact, code
+        case kind, artifact, pages, code
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .converted(let artifact):
+        case .converted(let artifact, let pages):
             try container.encode("converted", forKey: .kind)
             try container.encode(artifact, forKey: .artifact)
+            try container.encodeIfPresent(pages, forKey: .pages)
         case .rejected(let code):
             try container.encode("rejected", forKey: .kind)
             try container.encode(code.rawValue, forKey: .code)
@@ -205,6 +213,16 @@ private func flattenedOntoWhite(_ image: CGImage) -> CGImage {
     return context.makeImage() ?? image
 }
 
+/// The converter's admission rule, `has_pdf_signature`: an optional UTF-8 BOM
+/// and leading whitespace, then `%PDF-`. Anything wider would let an image
+/// with `%PDF-` in its metadata take the PDF path and fail as invalid.
+private func isPdf(_ source: Data) -> Bool {
+    var bytes = source.prefix(1024)
+    if bytes.starts(with: [0xEF, 0xBB, 0xBF]) { bytes = bytes.dropFirst(3) }
+    let whitespace: Set<UInt8> = [0x09, 0x0A, 0x0C, 0x0D, 0x20]
+    return bytes.drop(while: whitespace.contains).starts(with: Data("%PDF-".utf8))
+}
+
 // MARK: - Run
 
 /// Writes the report and ends the process. `withoutOverwriting` is the
@@ -280,9 +298,11 @@ private func run(_ stagingPath: String) async -> Never {
     request.textRecognitionOptions.customWords = customWords
 
     let rendered: String
-    if source.starts(with: Data("%PDF-".utf8)) {
+    var pageCounts: Pages?
+    if isPdf(source) {
         // A scanned PDF the inspector found no text in. One page is rendered,
-        // read and released at a time, and a page with no text adds nothing.
+        // read and released at a time. A page with no text adds nothing to the
+        // Markdown, but it is counted, so the loss reaches the report.
         guard let provider = CGDataProvider(data: source as CFData),
               let pdf = CGPDFDocument(provider), pdf.numberOfPages > 0
         else { finish(.rejected(.invalidImage), in: staging) }
@@ -295,6 +315,7 @@ private func run(_ stagingPath: String) async -> Never {
             if !text.isEmpty { pages.append(text) }
         }
         rendered = pages.joined(separator: "\n\n")
+        pageCounts = Pages(total: pdf.numberOfPages, withoutText: pdf.numberOfPages - pages.count)
     } else {
         switch decodeOnlyFrame(source) {
         case .image(let image, let orientation):
@@ -319,7 +340,8 @@ private func run(_ stagingPath: String) async -> Never {
     finish(
         .converted(
             Artifact(
-                relativePath: markdownFile, byteLength: bytes.count, sha256: hexDigest(bytes))),
+                relativePath: markdownFile, byteLength: bytes.count, sha256: hexDigest(bytes)),
+            pageCounts),
         in: staging)
 }
 

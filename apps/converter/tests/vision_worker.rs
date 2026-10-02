@@ -26,8 +26,8 @@ use uuid::Uuid;
 
 use support::{corpus, pdf_with_content};
 use tool_kit_converter::vision_protocol::{
-    VisionOutcome, VisionRejectionCode, VisionReport, VISION_ENGINE_NAME, VISION_MARKDOWN_FILE,
-    VISION_WORKER_CUSTOM_WORDS_ENV, VISION_WORKER_EXPECTED_SOURCE_BYTES_ENV,
+    VisionOutcome, VisionPages, VisionRejectionCode, VisionReport, VISION_ENGINE_NAME,
+    VISION_MARKDOWN_FILE, VISION_WORKER_CUSTOM_WORDS_ENV, VISION_WORKER_EXPECTED_SOURCE_BYTES_ENV,
     VISION_WORKER_EXPECTED_SOURCE_SHA256_ENV, VISION_WORKER_IDENTITY_PREFIX,
     VISION_WORKER_LANGUAGE_CORRECTION_ENV, VISION_WORKER_MAX_OUTPUT_BYTES_ENV,
     VISION_WORKER_PROTOCOL_VERSION, VISION_WORKER_REPORT_FILE,
@@ -296,7 +296,7 @@ fn a_page_of_text_converts_and_the_artifact_matches_what_landed_on_disk() {
     assert_eq!(report.engine.version, macos_product_version());
     assert!(report.engine.features.is_empty());
 
-    let VisionOutcome::Converted { artifact } = report.outcome else {
+    let VisionOutcome::Converted { artifact, pages } = report.outcome else {
         panic!("a page of rendered text should convert");
     };
     assert_eq!(artifact.relative_path, VISION_MARKDOWN_FILE);
@@ -304,6 +304,7 @@ fn a_page_of_text_converts_and_the_artifact_matches_what_landed_on_disk() {
     assert!(!markdown.is_empty());
     assert_eq!(artifact.byte_length, markdown.len() as u64);
     assert_eq!(artifact.sha256, digest(&markdown));
+    assert_eq!(pages, None, "a single image has no pages");
 }
 
 /// Vision reads a page of evenly spaced identical lines as a wide table with
@@ -513,20 +514,42 @@ fn markdown_over_the_ceiling_is_rejected_and_nothing_is_published() {
     assert!(!run.staging.join(VISION_MARKDOWN_FILE).exists());
 }
 
-/// A scan converts on this machine instead of waiting for Datalab: the
-/// inspector gives up on a PDF with no text on any page, and Vision reads it.
-#[tokio::test]
-async fn a_pdf_with_no_text_on_any_page_converts_locally_through_vision() {
-    let Some(harness) = support::TestHarness::with_vision_worker() else {
+/// Admission accepts a PDF behind a UTF-8 BOM or whitespace, so the worker
+/// has to take it as a PDF too, not hand it to the image decoder. The report
+/// counts the page Vision read nothing on.
+#[test]
+fn a_scan_behind_a_bom_is_read_as_a_pdf_and_its_blank_page_is_counted() {
+    let Some(worker) = tool("tool-kit-vision-worker") else {
         return;
     };
     let directory = tempfile::tempdir().unwrap();
-    let pdf = scanned_pdf(directory.path(), ["Scanned Page One", "Scanned Page Two"]);
-    let app = harness.app().await;
+    let mut pdf = b"\xEF\xBB\xBF\n".to_vec();
+    pdf.extend(scanned_pdf(directory.path(), ["Scanned Page One", ""]));
+    let source = directory.path().join("scan.pdf");
+    fs::write(&source, &pdf).unwrap();
 
+    let run = run_worker(&worker, directory.path(), &source, &digest(&pdf), &[]);
+
+    assert!(run.status.success(), "worker exited {:?}", run.status);
+    let VisionOutcome::Converted { pages, .. } = read_report(&run.staging).outcome else {
+        panic!("a scan with one readable page should convert");
+    };
+    assert_eq!(
+        pages,
+        Some(VisionPages {
+            total: 2,
+            without_text: 1
+        })
+    );
+}
+
+/// Submits a scanned PDF and waits for the job to settle. Returns the job and
+/// the published Markdown.
+async fn convert_scan(harness: &support::TestHarness, pdf: &[u8]) -> (Value, String) {
+    let app = harness.app().await;
     let response = app
         .submit(
-            support::multipart_body(Uuid::new_v4(), "standard", &pdf, "scan.pdf"),
+            support::multipart_body(Uuid::new_v4(), "standard", pdf, "scan.pdf"),
             "scan",
             support::TOKEN,
         )
@@ -559,9 +582,44 @@ async fn a_pdf_with_no_text_on_any_page_converts_locally_through_vision() {
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let markdown = String::from_utf8(body.to_vec()).unwrap();
+    (data, String::from_utf8(body.to_vec()).unwrap())
+}
+
+/// A scan converts on this machine instead of waiting for Datalab: the
+/// inspector gives up on a PDF with no text on any page, and Vision reads it.
+#[tokio::test]
+async fn a_pdf_with_no_text_on_any_page_converts_locally_through_vision() {
+    let Some(harness) = support::TestHarness::with_vision_worker() else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let pdf = scanned_pdf(directory.path(), ["Scanned Page One", "Scanned Page Two"]);
+
+    let (data, markdown) = convert_scan(&harness, &pdf).await;
+
+    assert_eq!(data["warnings"], serde_json::json!([]), "{data}");
     assert!(markdown.contains("Scanned Page One"), "{markdown}");
     assert!(markdown.contains("Scanned Page Two"), "{markdown}");
+}
+
+/// A scan page Vision reads nothing on still publishes the rest, but never as
+/// a clean success: the page may be blank, or its content may be gone.
+#[tokio::test]
+async fn a_scan_with_an_unreadable_page_publishes_with_a_warning() {
+    let Some(harness) = support::TestHarness::with_vision_worker() else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let pdf = scanned_pdf(directory.path(), ["Scanned Page One", ""]);
+
+    let (data, markdown) = convert_scan(&harness, &pdf).await;
+
+    assert_eq!(
+        data["warnings"],
+        serde_json::json!(["pages_without_extractable_text"]),
+        "{data}"
+    );
+    assert!(markdown.contains("Scanned Page One"), "{markdown}");
 }
 
 /// A DOCX picture with no alt text may gain a description from Foundation
