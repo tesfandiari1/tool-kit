@@ -34,6 +34,7 @@
     "verify:local-corpus": "apps/converter/scripts/verify-local-corpus.sh",
     "verify:api-drift": "apps/converter/scripts/verify-api-drift.sh",
     "verify:release": "apps/desktop/src-tauri/scripts/verify-release.sh",
+    "trace:failures": "apps/desktop/src-tauri/scripts/trace-failures.sh",
     "generate:api": "openapi-typescript contract/http/openapi.yaml -o apps/desktop/src/app/api/schema.ts"
   },
   "devDependencies": {

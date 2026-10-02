@@ -138,7 +138,7 @@ impl VisionEngine {
             .env(VISION_WORKER_CUSTOM_WORDS_ENV, custom_words)
             .stdin(Stdio::from(source))
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
             .map_err(|_| EngineFailure::Unavailable)?;

@@ -95,6 +95,17 @@ pnpm verify:contract  # Schemathesis against a live converter, needs uv
 - **Both `deny.toml` files pin their platforms**, `src-tauri` to macOS, and
   every exception names its crate and reason.
 
+### Where failure evidence lives
+
+All under `~/Library/Application Support/dev.esfandiari.toolkit/`.
+
+- `converter.log`: sidecar stdout and stderr, PDF and Vision worker panics included. It is
+  capped at 2 MB, then truncated, not rotated.
+- `history.db`: one row per run, with the error the user saw.
+- `converter/converter.sqlite`: `attempts.inspection_json` holds page counts
+  and the pages that need OCR.
+- `pnpm trace:failures [N]` joins the two databases for each failed run.
+
 ### Live API smoke tests
 
 `apps/desktop/src-tauri/src/live_smoke.rs` hits the real endpoints. They are

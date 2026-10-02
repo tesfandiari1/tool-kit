@@ -224,7 +224,7 @@ pub(crate) fn worker_identity_line(
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .map_err(handshake)?;
     let deadline = std::time::Instant::now() + timeout;

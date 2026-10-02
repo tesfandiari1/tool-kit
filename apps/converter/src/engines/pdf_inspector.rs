@@ -117,7 +117,7 @@ impl PdfInspectorEngine {
             .env(WORKER_EXPECTED_SOURCE_SHA256_ENV, sha256)
             .stdin(Stdio::from(source))
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .kill_on_drop(true);
         if let Some(path) = self.bcmaps_dir.as_deref() {
             command.env("PDF_INSPECTOR_BCMAPS_DIR", path.as_path());
