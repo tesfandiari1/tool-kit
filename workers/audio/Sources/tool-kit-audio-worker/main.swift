@@ -129,11 +129,9 @@ private func fetchDiarizer(into directory: URL) async -> Never {
 
 /// Apple's on-device speech stack. The results arrive on a stream while
 /// `analyzeSequence` feeds the file in, so a task collects them in parallel.
-private func transcribe(_ file: AVAudioFile, locale: Locale) async throws -> [Line] {
-    let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
-    if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-        try await request.downloadAndInstall()
-    }
+private func transcribe(_ file: AVAudioFile, with transcriber: SpeechTranscriber) async throws
+    -> [Line]
+{
     let analyzer = SpeechAnalyzer(modules: [transcriber])
     let collector = Task { () -> [Line] in
         var lines: [Line] = []
@@ -233,13 +231,22 @@ private func run(_ stagingPath: String) async -> Never {
         finish(.rejected(.localeUnsupported), in: staging)
     }
 
+    let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
+    do {
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            try await request.downloadAndInstall()
+        }
+    } catch {
+        // The OS would not install the locale's model.
+        finish(.rejected(.speechAssetsUnavailable), in: staging)
+    }
     let lines: [Line]
     do {
-        lines = try await transcribe(file, locale: locale)
+        lines = try await transcribe(file, with: transcriber)
     } catch {
-        // Everything the speech stack can throw here comes back to the same
-        // missing asset: the OS would not install the locale's model.
-        finish(.rejected(.speechAssetsUnavailable), in: staging)
+        // An analyzer or decoder error is an engine failure, not a missing
+        // model, so it reads as a crash the way the diarizer's does.
+        fail("transcription failed: \(error)")
     }
     guard
         lines.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })

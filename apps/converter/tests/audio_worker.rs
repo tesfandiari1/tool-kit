@@ -400,6 +400,43 @@ fn bytes_no_decoder_can_read_are_rejected_as_invalid_audio() {
     assert!(!run.staging.join(AUDIO_MARKDOWN_FILE).exists());
 }
 
+/// A 1 Hz WAV opens as audio but the speech analyzer cannot convert it. That
+/// is an engine failure, so it exits 70 rather than filing the install-only
+/// `speech_assets_unavailable`.
+#[test]
+fn an_analyzer_error_fails_the_run_instead_of_blaming_the_speech_assets() {
+    let Some(tools) = tools() else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    // 16-bit mono PCM at 1 Hz, 64 silent frames.
+    let mut bytes = b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0".to_vec();
+    for field in [1u32, 2] {
+        bytes.extend_from_slice(&field.to_le_bytes()); // sample rate, byte rate
+    }
+    bytes.extend_from_slice(b"\x02\0\x10\0data\x80\0\0\0");
+    bytes.extend_from_slice(&[0; 128]);
+    let riff = u32::try_from(bytes.len() - 8).unwrap();
+    bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+    let source = directory.path().join("one-hertz.wav");
+    fs::write(&source, &bytes).unwrap();
+
+    let run = run_worker(
+        &tools.worker,
+        directory.path(),
+        &source,
+        &digest(&bytes),
+        &[
+            (AUDIO_WORKER_MEDIA_TYPE_ENV, "audio/wav"),
+            (AUDIO_WORKER_DIARIZER_DIR_ENV, &tools.diarizer),
+        ],
+    );
+
+    assert_eq!(run.status.code(), Some(70));
+    assert!(!run.staging.join(AUDIO_WORKER_REPORT_FILE).exists());
+    assert!(!run.staging.join(AUDIO_MARKDOWN_FILE).exists());
+}
+
 /// A source that does not match its binding is a broken spawn, not a bad
 /// recording, so it fails the run instead of filing a rejection.
 #[test]

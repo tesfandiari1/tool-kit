@@ -53,11 +53,6 @@ From 2026-10-01:
 
 Open decisions from the 2026-10-02 code review, one per owner call:
 
-- The audio worker reports every `transcribe()` error as
-  `speech_assets_unavailable`, so an undecodable stream reads as a failed model
-  install and is terminal. Recommended: keep that code for the install step
-  only and send analyzer errors through `fail()` (exit 70, retryable). No wire
-  change.
 - The converter keeps the source of a failed or `needs_remote` job, up to 1 GiB
   for a recording. No path reads it again, so deleting it is safe. A retention
   call.
