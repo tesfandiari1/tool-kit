@@ -1,16 +1,11 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 import type { ReactNode } from "react";
-import { Group, Panel, Separator, useGroupRef } from "react-resizable-panels";
+import { Group, Panel, Separator } from "react-resizable-panels";
 import { paneLayout, type SplitLayout } from "./splitLayout";
 import { cx } from "../cx";
 import "./SplitPane.css";
 
 export type { SplitLayout };
-
-/// Roughly 1.5s: the restore waits out a native window resize.
-const RESTORE_FRAMES = 90;
-/// Percentage points within which a restored layout counts as applied.
-const RESTORE_EPSILON = 0.5;
 
 export interface SplitPaneProps {
   start: ReactNode;
@@ -47,67 +42,11 @@ export function SplitPane({
   collapsed = false,
   className,
 }: SplitPaneProps) {
-  const groupRef = useGroupRef();
-  const wasCollapsed = useRef(collapsed);
-  /// Owed at mount too: `defaultLayout` is validated against the panels then
-  /// registered, and the second arrives a render later.
-  const owedRestore = useRef(true);
-  const groupEl = useRef<HTMLDivElement | null>(null);
-  // Never spread from `layout`: `setLayout` is positional, so key order picks
-  // which pane gets which width. See `paneLayout`.
   const intended = useMemo(() => paneLayout(layout, defaultStart), [layout, defaultStart]);
-
-  /* Restore the seam when the split opens: `defaultLayout` is honored only
-     when its ids match the panels present at mount. It retries because the
-     second panel registers a render later and the window is still growing,
-     where the start percentage is clamped under `minStart` for good. Only on
-     the collapsed to expanded edge, or it pulls the seam out from a drag.
-     A clamp can only move when the group resizes, so one call per width is
-     enough, plus one on the next frame: the library stores the new group size
-     after this callback, so the first call still measures the old one. */
-  useEffect(() => {
-    if (wasCollapsed.current && !collapsed) owedRestore.current = true;
-    wasCollapsed.current = collapsed;
-    if (collapsed || !owedRestore.current) return;
-
-    let left = RESTORE_FRAMES;
-    let frame = 0;
-    let lastWidth = -1;
-    let again = false;
-    const settled = (applied: SplitLayout) =>
-      Object.keys(intended).every(
-        (id) => Math.abs((applied[id] ?? 0) - (intended[id] ?? 0)) < RESTORE_EPSILON,
-      );
-
-    const restore = () => {
-      const group = groupRef.current;
-      const applied = group?.getLayout() ?? {};
-      if (group && Object.keys(applied).length === Object.keys(intended).length) {
-        if (settled(applied)) {
-          owedRestore.current = false;
-          return;
-        }
-        const width = groupEl.current?.offsetWidth ?? 0;
-        if (width !== lastWidth || again) {
-          again = width !== lastWidth;
-          lastWidth = width;
-          group.setLayout(intended);
-        }
-      }
-      if (--left > 0) frame = requestAnimationFrame(restore);
-      else owedRestore.current = false;
-    };
-    frame = requestAnimationFrame(restore);
-    return () => {
-      cancelAnimationFrame(frame);
-    };
-  }, [collapsed, intended, groupRef]);
 
   return (
     <Group
       orientation="horizontal"
-      groupRef={groupRef}
-      elementRef={groupEl}
       className={cx("ui-split", collapsed && "ui-split--collapsed", className)}
       defaultLayout={intended}
       /* The library also fires on mount, on a recompute and after any

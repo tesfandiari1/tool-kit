@@ -1,17 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { paneLayout } from "./splitLayout";
 
-/// `setLayout` reads `Object.values(layout)` and re-keys the result by panel
-/// order, so key order in the object it is handed decides which pane gets
-/// which width. Every case here is about that, not about arithmetic.
 describe("paneLayout", () => {
-  it("emits start before end, whatever order the saved layout arrived in", () => {
-    // What a Rust BTreeMap serialises: alphabetical, so end comes first. Passed
-    // straight through, this put two thirds on the launcher.
-    const saved = { end: 68.854, start: 31.146 };
-    expect(Object.keys(paneLayout(saved, 33))).toEqual(["start", "end"]);
-  });
-
   it("keeps the saved start on the start pane", () => {
     expect(paneLayout({ end: 68.854, start: 31.146 }, 33)).toEqual({
       start: 31.146,

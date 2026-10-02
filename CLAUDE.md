@@ -463,12 +463,9 @@ self-hosted: two OFL families plus DaVinci, licensed.
 - **⌘+/- is page zoom and does not move the traffic lights**, which macOS draws
   in logical pixels. Chrome measured against one divides by the factor:
   `calc(64px / var(--zoom, 1))`, published on `:root` by `useZoom`.
-- **`react-resizable-panels` reads `defaultLayout` by panel id but re-keys
-  `setLayout` by panel order**, so a Rust `BTreeMap` arriving as `{end, start}`
-  opens the split inverted, and only `paneLayout` may construct one.
-  `defaultLayout` is also validated against the panels present at mount, and the
-  group registers its second panel a render later, so `SplitPane` re-applies
-  the saved layout after mount and retries.
+- **The saved split restores through `defaultLayout` alone**, read by panel
+  id. Only `paneLayout` may construct one: the library throws on a pair that
+  does not sum to 100, and `paneLayout` repairs it.
 - **`icons/mark.png` is missing and has never been in git**, so
   `icons/make-icons.py` cannot regenerate the `.icns` ladder. Redraw it, never
   upscale a shipped icon. `tray.png` and `tray@2x.png` take their alpha from the
