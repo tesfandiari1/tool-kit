@@ -357,7 +357,7 @@ fn require_workspace(workspace: &Path) -> Result<PathBuf, String> {
     let toolkit = workspace.join(".toolkit");
     if !toolkit.join("workspace.json").is_file() {
         return Err(format!(
-            "Workspace not found at {}. Move it back or pick it again.",
+            "Workspace not found at {}. Move the folder back, then reopen Tool-Kit.",
             workspace.display()
         ));
     }
