@@ -110,7 +110,7 @@ async fn public_health_and_capabilities_are_truthful() {
     assert_eq!(engines[0]["name"], "pdf-inspector");
     assert_eq!(engines[0]["version"], "1.25.2");
     assert_eq!(engines[1]["name"], "anydoc");
-    assert_eq!(engines[1]["version"], "0.1.9");
+    assert_eq!(engines[1]["version"], "0.2.4");
     assert!(
         conversion["engine"].is_null(),
         "the singular engine field is gone"
@@ -576,7 +576,7 @@ async fn docx_completes_through_anydoc_and_replays() {
     let manifest_bytes = manifest.into_body().collect().await.unwrap().to_bytes();
     let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
     assert_eq!(manifest["engine"]["name"], "anydoc");
-    assert_eq!(manifest["engine"]["version"], "0.1.9");
+    assert_eq!(manifest["engine"]["version"], "0.2.4");
     assert_eq!(manifest["document"]["format"], "docx");
     assert_eq!(
         manifest["source"]["mediaType"],

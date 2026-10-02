@@ -37,7 +37,7 @@ use crate::{
 };
 
 pub(crate) const ANYDOC_ENGINE_NAME: &str = "anydoc";
-pub(crate) const ANYDOC_VERSION: &str = "0.1.9";
+pub(crate) const ANYDOC_VERSION: &str = "0.2.4";
 
 /// The admission label of the one format detection cannot see.
 const CSV_FORMAT_LABEL: &str = "csv";
@@ -474,7 +474,7 @@ fn collect_tokens(blocks: &[Block], tokens: &mut Vec<Token>) {
                 }
             }
             Block::BlockQuote(blocks) => collect_tokens(blocks, tokens),
-            Block::CodeBlock { .. } | Block::Rule => {}
+            Block::CodeBlock { .. } | Block::Math(_) | Block::Rule => {}
         }
     }
 }
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn the_pinned_version_matches_the_crate() {
-        assert_eq!(ANYDOC_VERSION, "0.1.9");
+        assert_eq!(ANYDOC_VERSION, "0.2.4");
     }
 
     #[test]

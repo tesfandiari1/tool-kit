@@ -458,7 +458,7 @@ if [ "$PHASE" = "all" ] || [ "$PHASE" = "graceful" ]; then
   DM="${RUN_DIR}/d-manifest.json"
   assert_json "anydoc route" '.route.kind' "$DM" "local_anydoc"
   assert_json "anydoc engine" '.engine.name' "$DM" "anydoc"
-  assert_json "anydoc engine version" '.engine.version' "$DM" "0.1.9"
+  assert_json "anydoc engine version" '.engine.version' "$DM" "0.2.4"
   assert_json "anydoc document format" '.document.format' "$DM" "docx"
   assert_json "anydoc source sha256" '.source.sha256' "$DM" "$DOCX_SHA"
   assert_json "anydoc source byteLength" '.source.byteLength' "$DM" "$DOCX_BYTES"
