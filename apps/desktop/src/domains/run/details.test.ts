@@ -4,7 +4,7 @@ import { jobDetailItems, jobDetailText } from "./details";
 describe("jobDetailItems", () => {
   it("returns no details for a direct job without backend metadata", () => {
     expect(
-      jobDetailItems({ route: null, reasonCodes: [], warnings: [], failure: null }),
+      jobDetailItems({ route: null, reasonCodes: [], warnings: [], failure: null, error: null }),
     ).toEqual([]);
   });
 
@@ -15,6 +15,7 @@ describe("jobDetailItems", () => {
         reasonCodes: ["future_reason", "another_future_reason"],
         warnings: ["future_warning"],
         failure: null,
+        error: null,
       }),
     ).toEqual([
       { kind: "route", label: "Route", value: "future_hybrid_route" },
@@ -31,6 +32,7 @@ describe("jobDetailItems", () => {
         reasonCodes: [],
         warnings: [],
         failure: { code: "future_failure", message: "The service explained what happened." },
+        error: null,
       }),
     ).toEqual([
       {
@@ -41,12 +43,27 @@ describe("jobDetailItems", () => {
     ]);
   });
 
+  // `fail()` writes the backend failure into `error` as `code: message`, and
+  // the row prints `error` on its own line.
+  it("drops a failure the row's error already says", () => {
+    expect(
+      jobDetailItems({
+        route: "local",
+        reasonCodes: [],
+        warnings: [],
+        failure: { code: "bad_document", message: "Document cannot be converted" },
+        error: "bad_document: Document cannot be converted",
+      }),
+    ).toEqual([{ kind: "route", label: "Route", value: "local" }]);
+  });
+
   it("formats every returned detail into the visible queue text", () => {
     const items = jobDetailItems({
       route: "future_route",
       reasonCodes: ["future_reason"],
       warnings: ["future_warning"],
       failure: { code: "future_failure", message: "Future-safe message" },
+      error: null,
     });
 
     expect(jobDetailText(items)).toBe(

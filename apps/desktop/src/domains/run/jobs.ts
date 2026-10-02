@@ -1,17 +1,16 @@
 import { FileTextIcon, WaveformIcon, type Icon } from "@phosphor-icons/react";
-import type { JobId, SecretId } from "@/app/types";
+import type { JobId } from "@/app/types";
 
 export interface JobDef {
   id: JobId;
-  label: string;
+  /// The job's name on the segmented control, and the Run button's verb.
   verb: string;
   desc: string;
-  secret: SecretId;
   service: string;
   icon: Icon;
 }
 
 export const JOBS: JobDef[] = [
-  { id: "convert", label: "Convert", verb: "Convert", desc: "Documents to Markdown", secret: "datalab", service: "Datalab", icon: FileTextIcon },
-  { id: "transcribe", label: "Transcribe", verb: "Transcribe", desc: "Audio and video to text", secret: "revai", service: "Rev.ai", icon: WaveformIcon },
+  { id: "convert", verb: "Convert", desc: "Documents to Markdown", service: "Datalab", icon: FileTextIcon },
+  { id: "transcribe", verb: "Transcribe", desc: "Audio and video to text", service: "Rev.ai", icon: WaveformIcon },
 ];

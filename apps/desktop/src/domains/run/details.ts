@@ -8,7 +8,7 @@ export interface JobDetailItem {
   value: string;
 }
 
-type JobMetadata = Pick<Job, "route" | "reasonCodes" | "warnings" | "failure">;
+type JobMetadata = Pick<Job, "route" | "reasonCodes" | "warnings" | "failure" | "error">;
 
 /// Keep service-owned values intact so new route, reason, warning, and failure
 /// codes become visible without a frontend release.
@@ -24,12 +24,11 @@ export function jobDetailItems(job: JobMetadata): JobDetailItem[] {
   for (const warning of job.warnings) {
     items.push({ kind: "warning", label: "Warning", value: warning });
   }
-  if (job.failure !== null) {
-    items.push({
-      kind: "failure",
-      label: "Failure",
-      value: `${job.failure.code}: ${job.failure.message}`,
-    });
+  // A backend failure is also the row's error, in the same words, and the row
+  // shows that line already.
+  const failure = job.failure && `${job.failure.code}: ${job.failure.message}`;
+  if (failure && failure !== job.error) {
+    items.push({ kind: "failure", label: "Failure", value: failure });
   }
 
   return items;

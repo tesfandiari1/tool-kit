@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { EditorState, Compartment } from "@codemirror/state";
+import { EditorState } from "@codemirror/state";
 import {
   EditorView,
   keymap,
@@ -83,17 +83,14 @@ const chrome = EditorView.theme({
 export interface SourceEditorProps {
   value: string;
   onChange?: (value: string) => void;
-  readOnly?: boolean;
   label?: string;
-  className?: string;
 }
 
 /// CodeMirror rather than a textarea for one reason: a gutter has to stay
 /// aligned with soft-wrapped lines.
-export function SourceEditorImpl({ value, onChange, readOnly = false, label, className }: SourceEditorProps) {
+export function SourceEditorImpl({ value, onChange, label }: SourceEditorProps) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
-  const editable = useRef(new Compartment());
   /// In a ref, or the mount effect rebuilds the editor on every parent render
   /// and loses the cursor and the undo history.
   const emit = useRef(onChange);
@@ -119,7 +116,6 @@ export function SourceEditorImpl({ value, onChange, readOnly = false, label, cla
           syntaxHighlighting(inkOnly),
           EditorView.lineWrapping,
           chrome,
-          editable.current.of(EditorView.editable.of(!readOnly)),
           EditorView.updateListener.of((u) => {
             if (u.docChanged) emit.current?.(u.state.doc.toString());
           }),
@@ -136,18 +132,14 @@ export function SourceEditorImpl({ value, onChange, readOnly = false, label, cla
   }, []);
 
   /// A change from outside. Guarded on inequality: echoing the user's own
-  /// keystroke back resets the cursor on every character.
+  /// keystroke back resets the cursor on every character. The document holds
+  /// `\n` only, so a CRLF file compares as normalized. Raw, the guard misses on
+  /// mount and the replace reports an edit, which autosaves the file as LF.
   useEffect(() => {
     const v = view.current;
-    if (!v || v.state.doc.toString() === value) return;
+    if (!v || v.state.doc.toString() === value.replace(/\r\n?/g, "\n")) return;
     v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: value } });
   }, [value]);
 
-  useEffect(() => {
-    view.current?.dispatch({
-      effects: editable.current.reconfigure(EditorView.editable.of(!readOnly)),
-    });
-  }, [readOnly]);
-
-  return <div ref={host} className={className ? `ui-source ${className}` : "ui-source"} role="group" aria-label={label} />;
+  return <div ref={host} className="ui-source" role="group" aria-label={label} />;
 }

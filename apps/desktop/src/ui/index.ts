@@ -31,11 +31,11 @@ export { Badge, StatusDot } from "./primitives/Badge";
 export type { BadgeProps, Tone, StatusDotProps, DotTone } from "./primitives/Badge";
 
 export { Tabs } from "./primitives/Tabs";
+export type { TabsProps, TabItem } from "./primitives/Tabs";
 
 /// A file path as crumbs.
 export { Path } from "./primitives/Path";
 export type { PathProps } from "./primitives/Path";
-export type { TabsProps, TabItem } from "./primitives/Tabs";
 
 export { SourceEditor } from "./primitives/SourceEditor";
 export type { SourceEditorProps } from "./primitives/SourceEditor";

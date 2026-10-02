@@ -36,7 +36,7 @@ export function Button({
   return (
     <button
       type={type}
-      disabled={disabled ?? busy}
+      disabled={disabled === true || busy}
       aria-busy={busy || undefined}
       className={cx(
         "ui-btn",

@@ -140,7 +140,7 @@ export function RunView({
                 const JIcon = j.icon;
                 return {
                   value: j.id,
-                  label: j.label,
+                  label: j.verb,
                   icon: (selected: boolean) => <JIcon weight={selected ? "fill" : "regular"} />,
                   count: j.id === "transcribe" ? scan.transcribe : scan.convert,
                 };

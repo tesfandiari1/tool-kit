@@ -59,7 +59,6 @@ type Theme = "system" | "bone" | "ink";
 export function Gallery() {
   const [tab, setTab] = useState("agreement");
   const [closed, setClosed] = useState<string[]>([]);
-  const [mode, setMode] = useState<"read" | "edit">("edit");
   const [source, setSource] = useState(SAMPLE);
 
   const [theme, setTheme] = useState<Theme>(
@@ -407,25 +406,12 @@ export function Gallery() {
             </Stack>
 
             <Stack gap={2}>
-              <Row gap={3}>
-                <Label>Source editor</Label>
-                <Spacer />
-                <Segmented
-                  label="Document mode"
-                  value={mode}
-                  onChange={setMode}
-                  options={[
-                    { value: "read" as const, label: "Read" },
-                    { value: "edit" as const, label: "Edit" },
-                  ]}
-                />
-              </Row>
+              <Label>Source editor</Label>
               <Panel>
                 <div style={{ height: 260 }}>
                   <SourceEditor
                     value={source}
                     onChange={setSource}
-                    readOnly={mode === "read"}
                     label="Sample document source"
                   />
                 </div>
@@ -463,13 +449,11 @@ export function Gallery() {
               <SplitPaneSpecimen />
               <Text size="xs" tone="faint">
                 Drag the seam, or focus it and use the arrow keys. The hairline stays
-                a hairline at rest and only brightens under the pointer. Collapsed
-                drops the seam and the end pane; the start pane keeps its instance
-                across the toggle, so the counter below it does not reset. The
-                document takes two thirds by default and never less than half. In a
-                specimen this narrow the start pane's 300px floor wins over that
-                share, which is the floor doing its job, and the ratio beside the
-                button is what the last drag reported.
+                a hairline at rest and only brightens under the pointer. The
+                document never takes less than half. In a specimen this narrow the
+                start pane's 240px floor wins over the default share, which is the
+                floor doing its job, and the ratio below is what the last drag
+                reported.
               </Text>
             </Stack>
           </Stack>
@@ -835,22 +819,19 @@ function FileGlyph() {
   );
 }
 
-/// Both states of the seam. The counter shows why `collapsed` is a prop:
-/// rendering `start` outside the split remounts it and resets the count.
+/// The seam, and the layout the last drag reported.
 function SplitPaneSpecimen() {
-  const [collapsed, setCollapsed] = useState(false);
   const [layout, setLayout] = useState<SplitLayout>();
   return (
     <Stack gap={2}>
       <Panel>
         <div style={{ height: 160 }}>
           <SplitPane
-            collapsed={collapsed}
             layout={layout}
             onLayoutChanged={setLayout}
             start={
               <div className="gal__splitpane">
-                <StatefulPaneBody label="Run column" />
+                <Text size="xs" tone="faint">Run column</Text>
               </div>
             }
             end={
@@ -861,26 +842,9 @@ function SplitPaneSpecimen() {
           />
         </div>
       </Panel>
-      <Row gap={2}>
-        <Button size="sm" onClick={() => { setCollapsed((c) => !c); }}>
-          {collapsed ? "Open the seam" : "Collapse"}
-        </Button>
-        <Meta size="sm" tone={layout ? "default" : "ghost"}>
-          {layout ? `${layout.start.toFixed(0)} / ${layout.end.toFixed(0)}` : "-- / --"}
-        </Meta>
-      </Row>
-    </Stack>
-  );
-}
-
-function StatefulPaneBody({ label }: { label: string }) {
-  const [n, setN] = useState(0);
-  return (
-    <Stack gap={2}>
-      <Text size="xs" tone="faint">{label}</Text>
-      <Button size="sm" variant="ghost" onClick={() => { setN((v) => v + 1); }}>
-        Clicked {n}
-      </Button>
+      <Meta size="sm" tone={layout ? "default" : "ghost"}>
+        {layout ? `${layout.start.toFixed(0)} / ${layout.end.toFixed(0)}` : "-- / --"}
+      </Meta>
     </Stack>
   );
 }

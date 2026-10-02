@@ -19,9 +19,6 @@ export interface SplitPaneProps {
   layout?: SplitLayout;
   /// Only a settled drag or a keyboard resize. Persist from here.
   onLayoutChanged?: (layout: SplitLayout) => void;
-  /// Drop the seam and the end pane. A prop rather than the caller rendering
-  /// `start` alone, because moving it in the tree remounts it.
-  collapsed?: boolean;
   className?: string;
 }
 
@@ -39,7 +36,6 @@ export function SplitPane({
   minEnd = "50%",
   layout,
   onLayoutChanged,
-  collapsed = false,
   className,
 }: SplitPaneProps) {
   const intended = useMemo(() => paneLayout(layout, defaultStart), [layout, defaultStart]);
@@ -47,7 +43,7 @@ export function SplitPane({
   return (
     <Group
       orientation="horizontal"
-      className={cx("ui-split", collapsed && "ui-split--collapsed", className)}
+      className={cx("ui-split", className)}
       defaultLayout={intended}
       /* The library also fires on mount, on a recompute and after any
          imperative call, and saving those records a clamp as a choice. */
@@ -58,19 +54,15 @@ export function SplitPane({
         })
       }
     >
-      <Panel id="start" minSize={collapsed ? "0%" : minStart} className="ui-split__pane">
+      <Panel id="start" minSize={minStart} className="ui-split__pane">
         {start}
       </Panel>
       {/* A 1px rule with a 9px grab area. Widening it on hover twitches the
           window whenever the pointer crosses the middle. */}
-      {!collapsed && (
-        <>
-          <Separator className="ui-split__handle" />
-          <Panel id="end" minSize={minEnd} className="ui-split__pane">
-            {end}
-          </Panel>
-        </>
-      )}
+      <Separator className="ui-split__handle" />
+      <Panel id="end" minSize={minEnd} className="ui-split__pane">
+        {end}
+      </Panel>
     </Group>
   );
 }
