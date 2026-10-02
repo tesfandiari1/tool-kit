@@ -18,6 +18,8 @@ case "${KIND}" in
   *) printf 'FAIL: kind must be native or scanned, got %s\n' "${KIND}" >&2; exit 2 ;;
 esac
 
+# Removed first, or a file left by an earlier run passes the check below.
+rm -f "${OUT}"
 export TOOLKIT_CORPUS_PDF_OUT="${OUT}"
 export TOOLKIT_CORPUS_PDF_KIND="${KIND}"
 cargo test --locked --manifest-path "${CONVERTER_DIR}/Cargo.toml" \

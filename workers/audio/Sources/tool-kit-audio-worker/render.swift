@@ -18,7 +18,8 @@ struct Turn {
 
 /// Give each line the speaker who held the most talking time during it. A line
 /// can fall in a gap, because the speaker detector drops quiet audio, so then
-/// take the nearest segment within `snap` seconds.
+/// take the nearest segment within `snap` seconds. A tie goes to the lower id:
+/// Dictionary order changes per process, and a tie must not.
 func speaker(for line: Line, in segments: [TimedSpeakerSegment], snap: Double = 3.0) -> String? {
     var totals: [String: Double] = [:]
     for segment in segments {
@@ -27,7 +28,7 @@ func speaker(for line: Line, in segments: [TimedSpeakerSegment], snap: Double = 
             - max(line.start, Double(segment.startTimeSeconds))
         if overlap > 0 { totals[segment.speakerId, default: 0] += overlap }
     }
-    if let best = totals.max(by: { $0.value < $1.value })?.key { return best }
+    if let best = totals.max(by: { ($0.value, $1.key) < ($1.value, $0.key) })?.key { return best }
 
     func distance(_ segment: TimedSpeakerSegment) -> Double {
         min(
@@ -38,14 +39,15 @@ func speaker(for line: Line, in segments: [TimedSpeakerSegment], snap: Double = 
     return distance(nearest) <= snap ? nearest.speakerId : nil
 }
 
-/// Talk-time order, so the busiest voice is Speaker 1.
+/// Talk-time order, so the busiest voice is Speaker 1. A tie goes to the lower id.
 func speakerNames(_ segments: [TimedSpeakerSegment]) -> [String: String] {
     var talkTime: [String: Double] = [:]
     for segment in segments {
         talkTime[segment.speakerId, default: 0] += Double(segment.durationSeconds)
     }
     var names: [String: String] = [:]
-    for (index, id) in talkTime.sorted(by: { $0.value > $1.value }).map(\.key).enumerated() {
+    let order = talkTime.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
+    for (index, id) in order.enumerated() {
         names[id] = "Speaker \(index + 1)"
     }
     return names

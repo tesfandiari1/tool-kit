@@ -81,12 +81,12 @@ step "Host"
      set up here."
 # The Vision worker needs macOS 26 for RecognizeDocumentsRequest, and an absent
 # worker is not a build error to the converter: it logs one warning and
-# advertises 18 media types instead of 24. So the gate is here, loud, rather
-# than a skip that ships a DMG with no OCR.
+# advertises six fewer media types. So the gate is here, loud, rather than a
+# skip that ships a DMG with no OCR.
 MACOS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
 [ "${MACOS_MAJOR}" -ge 26 ] || fail "the Vision worker needs macOS 26, and this host runs $(sw_vers -productVersion).
      Shipping without it is a silent downgrade, not a smaller build, so this
-     stops here instead of staging two of the three binaries."
+     stops here instead of staging the other binaries without it."
 pass "macOS $(sw_vers -productVersion) on ${TARGET}"
 
 step "Converter (${PROFILE})"

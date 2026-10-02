@@ -39,7 +39,11 @@ MODELS="${DIR}/models/speaker-diarization-coreml"
 WANT="$("${OUT}/tool-kit-audio-worker" --version | sed -n 's/.*fluidaudio-\([^[:space:]]*\).*/\1/p')"
 HAVE="$(sed -n 's/.*"fluidAudioVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
   "${MODELS}/manifest.json" 2>/dev/null || true)"
-if [ -z "${WANT}" ] || [ "${HAVE}" != "${WANT}" ]; then
+if [ -z "${WANT}" ]; then
+  printf 'FAIL: %s --version printed no fluidaudio-<version>\n' "${OUT}/tool-kit-audio-worker" >&2
+  exit 1
+fi
+if [ "${HAVE}" != "${WANT}" ]; then
   rm -rf "${MODELS}.staging"
   "${OUT}/tool-kit-audio-worker" --fetch diarizer "${MODELS}.staging"
   rm -rf "${MODELS}"

@@ -8,7 +8,7 @@
 // failure.
 //
 // `--fetch diarizer <dir>` is the only path that downloads models, and the
-// desktop drives it. A job still lets the OS install SpeechAnalyzer locale
+// build scripts drive it. A job still lets the OS install SpeechAnalyzer locale
 // assets on first use; a failure there comes back as speech_assets_unavailable.
 //
 // The wire contract is crates/worker-protocol/src/audio.rs.
@@ -72,8 +72,8 @@ private struct Manifest: Encodable {
     let files: [ManifestFile]
 }
 
-/// Records what landed, so the desktop can tell a complete install from a
-/// half-finished one without asking HuggingFace.
+/// Records what landed and for which FluidAudio version, so the build scripts
+/// can tell a current set from a stale one without asking HuggingFace.
 private func writeManifest(in directory: URL) {
     let manifestURL = directory.appendingPathComponent("manifest.json")
     guard

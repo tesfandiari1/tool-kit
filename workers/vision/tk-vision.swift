@@ -1,5 +1,5 @@
 // tk-vision: read a PDF or image with Apple Vision, print Markdown.
-// Spike only. Nothing in Tool-Kit calls this yet.
+// A development tool. Nothing in Tool-Kit calls it.
 //
 //   tk-vision <file> [--flat] [--page N] [--dpi N] [--fast]
 //
@@ -74,7 +74,6 @@ func rasterize(_ url: URL, dpi: CGFloat) throws -> [CGImage] {
     else { throw Fail.unreadable(url.path) }
     return [img]
 }
-
 
 @main
 struct Tool {

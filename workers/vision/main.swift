@@ -137,7 +137,7 @@ private func readExactStdin(_ expected: Int) -> Data? {
 }
 
 private enum Decoded {
-    case image(CGImage)
+    case image(CGImage, CGImagePropertyOrientation)
     case rejected(Rejection)
 }
 
@@ -148,6 +148,10 @@ private enum Decoded {
 /// than truncated: a multi-page TIFF is the canonical scanned document, and
 /// publishing its first page as the whole thing is a silent loss no later
 /// stage can see.
+///
+/// The decoded pixels ignore the EXIF orientation a phone camera writes, so it
+/// travels beside them to Vision. Without it Vision still reads the words but
+/// its geometry is in the stored frame, and the blocks sort out of order.
 private func decodeOnlyFrame(_ source: Data) -> Decoded {
     guard let imageSource = CGImageSourceCreateWithData(source as CFData, nil) else {
         return .rejected(.invalidImage)
@@ -157,7 +161,10 @@ private func decodeOnlyFrame(_ source: Data) -> Decoded {
     guard frames == 1, let image = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
         return .rejected(.invalidImage)
     }
-    return .image(flattenedOntoWhite(image))
+    let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+    let orientation = (properties?[kCGImagePropertyOrientation] as? UInt32)
+        .flatMap(CGImagePropertyOrientation.init(rawValue:)) ?? .up
+    return .image(flattenedOntoWhite(image), orientation)
 }
 
 /// An image carrying real transparency has to land on an opaque background
@@ -198,9 +205,6 @@ private func flattenedOntoWhite(_ image: CGImage) -> CGImage {
     return context.makeImage() ?? image
 }
 
-// MARK: - Markdown rendering, ported from tk-vision.swift
-
-
 // MARK: - Run
 
 /// Writes the report and ends the process. `withoutOverwriting` is the
@@ -224,10 +228,13 @@ private func finish(_ outcome: Outcome, in staging: URL) -> Never {
 /// no observation at all or as a document with empty collections. Both are the
 /// same answer: an empty string.
 @available(macOS 26, *)
-private func recognize(_ image: CGImage, with request: RecognizeDocumentsRequest) async -> String {
+private func recognize(
+    _ image: CGImage, orientation: CGImagePropertyOrientation = .up,
+    with request: RecognizeDocumentsRequest
+) async -> String {
     let observations: [DocumentObservation]
     do {
-        observations = try await request.perform(on: image)
+        observations = try await request.perform(on: image, orientation: orientation)
     } catch {
         fail("Vision could not read the image: \(error)")
     }
@@ -290,7 +297,8 @@ private func run(_ stagingPath: String) async -> Never {
         rendered = pages.joined(separator: "\n\n")
     } else {
         switch decodeOnlyFrame(source) {
-        case .image(let image): rendered = await recognize(image, with: request)
+        case .image(let image, let orientation):
+            rendered = await recognize(image, orientation: orientation, with: request)
         case .rejected(let rejection): finish(.rejected(rejection), in: staging)
         }
     }

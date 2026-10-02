@@ -7,8 +7,8 @@
 # status codes, wrong content types, responses that do not match their schema,
 # missing declared headers, and accepted data the contract says is invalid.
 #
-# It is here because `tests/http_contract.rs` cannot do this job. Those 46
-# tests were written by whoever wrote the handlers, so they can only assert
+# It is here because `tests/http_contract.rs` cannot do this job. Those tests
+# were written by whoever wrote the handlers, so they can only assert
 # what their author already believed. This suite asserts the contract instead,
 # and the first run it ever made found three admission rules the contract did
 # not document.
