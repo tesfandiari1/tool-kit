@@ -309,7 +309,7 @@ fn stream_object(dictionary: &str, data: &[u8]) -> Vec<u8> {
     object
 }
 
-fn assemble(objects: &[Vec<u8>]) -> Vec<u8> {
+pub(crate) fn assemble(objects: &[Vec<u8>]) -> Vec<u8> {
     assemble_with_trailer(objects, "")
 }
 

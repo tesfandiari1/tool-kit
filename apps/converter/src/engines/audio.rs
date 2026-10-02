@@ -21,7 +21,9 @@ use tokio::{
     sync::{watch, OwnedSemaphorePermit, Semaphore},
 };
 
-use super::child::{self, is_lowercase_sha256, wait_for_child, WorkerStartupError};
+use super::child::{
+    self, is_dotted_number, is_lowercase_sha256, wait_for_child, WorkerStartupError,
+};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
@@ -245,17 +247,11 @@ fn verify_worker_identity(path: &Path) -> Result<String, WorkerStartupError> {
     Ok(version.to_owned())
 }
 
-fn is_dotted_number(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'.')
-}
-
 fn analysis(elapsed: Duration, detail: AudioDetail) -> Result<EngineAnalysis, EngineFailure> {
-    // The contract floors speakersFound at one, so a transcript naming none is
-    // a worker out of contract, never a manifest to publish.
-    if detail.speakers_found == 0 {
+    // The contract floors speakersFound at one and audioSeconds at zero, so a
+    // report under either is a worker out of contract, never a manifest to
+    // publish.
+    if detail.speakers_found == 0 || detail.audio_seconds < 0.0 {
         return Err(EngineFailure::Protocol);
     }
     Ok(EngineAnalysis {
@@ -560,6 +556,32 @@ mod tests {
         write_worker(
             &worker,
             &converting_worker_script("").replace("\"speakersFound\":2", "\"speakersFound\":0"),
+        );
+        let models = directory.path().join("models");
+        std::fs::create_dir(&models).unwrap();
+        let paths = paths(directory.path());
+        let source = source(&paths.source, b"audio bytes").await;
+
+        let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
+        let permit = engine.acquire().await.unwrap();
+        let (_cancel, cancellation) = watch::channel(false);
+        let result = engine
+            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .await;
+
+        assert_eq!(result.unwrap_err(), EngineFailure::Protocol);
+    }
+
+    /// The contract floors audioSeconds at zero, so a negative duration is a
+    /// worker out of contract and must not reach a published manifest.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_report_with_a_negative_duration_is_a_protocol_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker");
+        write_worker(
+            &worker,
+            &converting_worker_script("").replace("\"audioSeconds\":13.5", "\"audioSeconds\":-1"),
         );
         let models = directory.path().join("models");
         std::fs::create_dir(&models).unwrap();

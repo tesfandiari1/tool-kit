@@ -267,9 +267,7 @@ fn validate_needs_remote(
                 && !inspection.pages_needing_ocr.is_empty()
         }
         FallbackReason::LocalQualityFailed | FallbackReason::OutputTooLarge => {
-            inspection.pdf_type == PdfTypeLabel::TextBased
-                && !inspection.has_encoding_issues
-                && inspection.pages_needing_ocr.is_empty()
+            is_complete_native_inspection(inspection)
         }
     };
     if coherent {
@@ -281,10 +279,7 @@ fn validate_needs_remote(
 
 fn validate_complete_inspection(inspection: &Inspection) -> Result<(), EngineFailure> {
     validate_inspection(inspection)?;
-    if inspection.pdf_type != PdfTypeLabel::TextBased
-        || inspection.has_encoding_issues
-        || !inspection.pages_needing_ocr.is_empty()
-    {
+    if !is_complete_native_inspection(inspection) {
         return Err(EngineFailure::Protocol);
     }
     Ok(())

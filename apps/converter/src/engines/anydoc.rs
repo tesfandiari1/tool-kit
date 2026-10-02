@@ -608,9 +608,13 @@ fn fill_descriptions(
 mod tests {
     use super::*;
 
+    /// The manifest and capabilities report this constant, so a dependency
+    /// bump that leaves it behind would publish the wrong engine version.
     #[test]
     fn the_pinned_version_matches_the_crate() {
-        assert_eq!(ANYDOC_VERSION, "0.2.4");
+        assert!(
+            include_str!("../../Cargo.toml").contains(&format!("anydoc = \"={ANYDOC_VERSION}\""))
+        );
     }
 
     #[test]

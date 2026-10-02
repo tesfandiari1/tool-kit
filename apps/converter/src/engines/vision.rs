@@ -19,7 +19,9 @@ use tokio::{
     sync::{watch, OwnedSemaphorePermit, Semaphore},
 };
 
-use super::child::{self, is_lowercase_sha256, wait_for_child, WorkerStartupError};
+use super::child::{
+    self, is_dotted_number, is_lowercase_sha256, wait_for_child, WorkerStartupError,
+};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
@@ -221,11 +223,7 @@ fn verify_worker_identity(path: &Path) -> Result<String, WorkerStartupError> {
         .strip_prefix(VISION_WORKER_IDENTITY_PREFIX)
         .and_then(|tail| tail.strip_suffix('\n'))
         .ok_or_else(mismatch)?;
-    if version.is_empty()
-        || !version
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'.')
-    {
+    if !is_dotted_number(version) {
         return Err(mismatch());
     }
     Ok(version.to_owned())

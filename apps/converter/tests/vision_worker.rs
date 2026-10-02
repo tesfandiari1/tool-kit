@@ -24,6 +24,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use support::{corpus, pdf_with_content};
 use tool_kit_converter::vision_protocol::{
     VisionOutcome, VisionRejectionCode, VisionReport, VISION_ENGINE_NAME, VISION_MARKDOWN_FILE,
     VISION_WORKER_CUSTOM_WORDS_ENV, VISION_WORKER_EXPECTED_SOURCE_BYTES_ENV,
@@ -119,7 +120,7 @@ fn digest(bytes: &[u8]) -> String {
 fn png(directory: &Path, name: &str, content: &[u8]) -> PathBuf {
     let pdf2png = tool("pdf2png").expect("pdf2png is built alongside the worker");
     let pdf_path = directory.join(format!("{name}.pdf"));
-    fs::write(&pdf_path, one_page_pdf(content)).unwrap();
+    fs::write(&pdf_path, pdf_with_content(content)).unwrap();
     let png_path = directory.join(format!("{name}.png"));
     let status = Command::new(pdf2png)
         .arg(&pdf_path)
@@ -171,22 +172,6 @@ fn helvetica_lines(lines: &[&str]) -> Vec<u8> {
     }
     content.extend_from_slice(b"ET\n");
     content
-}
-
-fn one_page_pdf(content: &[u8]) -> Vec<u8> {
-    let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
-    stream.extend_from_slice(content);
-    stream.extend_from_slice(b"\nendstream");
-    let objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
-           /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
-            .to_vec(),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
-        stream,
-    ];
-    assemble(&objects)
 }
 
 /// Two pages that are only a JPEG of their text, the shape of a scanner's
@@ -242,30 +227,7 @@ fn scanned_pdf(directory: &Path, lines: [&str; 2]) -> Vec<u8> {
         stream.extend_from_slice(b"\nendstream");
         objects.push(stream);
     }
-    assemble(&objects)
-}
-
-fn assemble(objects: &[Vec<u8>]) -> Vec<u8> {
-    let mut pdf = b"%PDF-1.4\n".to_vec();
-    let mut offsets = Vec::new();
-    for (index, object) in objects.iter().enumerate() {
-        offsets.push(pdf.len());
-        writeln!(pdf, "{} 0 obj", index + 1).unwrap();
-        pdf.extend_from_slice(object);
-        pdf.extend_from_slice(b"\nendobj\n");
-    }
-    let xref = pdf.len();
-    write!(pdf, "xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).unwrap();
-    for offset in offsets {
-        writeln!(pdf, "{offset:010} 00000 n ").unwrap();
-    }
-    write!(
-        pdf,
-        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-        objects.len() + 1
-    )
-    .unwrap();
-    pdf
+    corpus::assemble(&objects)
 }
 
 fn read_report(staging: &Path) -> VisionReport {
@@ -447,7 +409,7 @@ fn a_transparent_background_is_flattened_rather_than_read_as_blank() {
     let pdf_path = directory.path().join("transparent.pdf");
     fs::write(
         &pdf_path,
-        one_page_pdf(&helvetica_lines(&["Transparent Background Marker"])),
+        pdf_with_content(&helvetica_lines(&["Transparent Background Marker"])),
     )
     .unwrap();
     let source = directory.path().join("transparent.png");

@@ -31,7 +31,7 @@ use super::EngineFailure;
 use crate::artifacts::AttemptPaths;
 
 /// A worker report is a handful of fields; anything larger is not one.
-pub(crate) const MAX_REPORT_BYTES: u64 = 1024 * 1024;
+const MAX_REPORT_BYTES: u64 = 1024 * 1024;
 
 /// Waits for a worker child under a hard deadline and a cancellation watch.
 pub(crate) async fn wait_for_child(
@@ -70,7 +70,7 @@ pub(crate) async fn wait_for_child(
     Ok(status)
 }
 
-pub(crate) async fn kill_and_reap(child: &mut Child) {
+async fn kill_and_reap(child: &mut Child) {
     let _ = child.start_kill();
     let _ = child.wait().await;
 }
@@ -111,7 +111,7 @@ pub(crate) async fn validate_staged_markdown(
     if relative_path != expected_name
         || byte_length == 0
         || byte_length > max_output_bytes
-        || !is_sha256(sha256)
+        || !is_lowercase_sha256(sha256)
     {
         return Err(EngineFailure::Protocol);
     }
@@ -119,11 +119,7 @@ pub(crate) async fn validate_staged_markdown(
     let metadata = fs::symlink_metadata(&markdown_path)
         .await
         .map_err(|_| EngineFailure::Protocol)?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() != byte_length
-        || metadata.len() > max_output_bytes
-    {
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != byte_length {
         return Err(EngineFailure::Protocol);
     }
     let (digest, has_content) = hash_and_check_content(&markdown_path).await?;
@@ -145,10 +141,6 @@ pub(crate) async fn reject_if_markdown_staged(paths: &AttemptPaths) -> Result<()
     Ok(())
 }
 
-pub(crate) fn is_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 pub(crate) fn is_lowercase_sha256(value: &str) -> bool {
     value.len() == 64
         && value
@@ -156,7 +148,15 @@ pub(crate) fn is_lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-pub(crate) async fn hash_and_check_content(path: &Path) -> Result<(String, bool), EngineFailure> {
+/// The shape of an OS or package version in a handshake line: digits and dots.
+pub(crate) fn is_dotted_number(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+}
+
+async fn hash_and_check_content(path: &Path) -> Result<(String, bool), EngineFailure> {
     let mut file = fs::File::open(path)
         .await
         .map_err(|_| EngineFailure::Protocol)?;

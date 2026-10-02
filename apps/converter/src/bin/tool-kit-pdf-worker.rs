@@ -330,6 +330,11 @@ mod tests {
         assert_eq!(WORKER_PROTOCOL_VERSION, 2);
         assert_eq!(identity.version, "1.25.2");
         assert!(identity.features.is_empty());
+        // The report names this version, so a dependency bump that leaves the
+        // constant behind would stamp every manifest with the wrong engine.
+        assert!(include_str!("../../Cargo.toml").contains(&format!(
+            "pdf-inspector = {{ version = \"={PDF_INSPECTOR_VERSION}\""
+        )));
     }
 
     #[test]
