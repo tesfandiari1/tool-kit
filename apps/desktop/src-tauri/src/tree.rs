@@ -506,7 +506,10 @@ mod tests {
         let root = project(&dir, &["deck.pdf", "deck.md"]);
         age(&root.join("Inbox/deck.md"), 7 * 24 * 60 * 60);
 
-        assert_eq!(paired_result(&root, "Inbox/deck.pdf", &settings("markdown")), None);
+        assert_eq!(
+            paired_result(&root, "Inbox/deck.pdf", &settings("markdown")),
+            None
+        );
     }
 
     #[test]

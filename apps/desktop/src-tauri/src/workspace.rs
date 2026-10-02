@@ -480,8 +480,7 @@ mod tests {
         let marker: serde_json::Value = read_json(&root.join(".toolkit/workspace.json")).unwrap();
         assert_eq!(marker["schemaVersion"], 1);
         assert_eq!(marker["id"].as_str().unwrap(), info.workspace_id);
-        let catch_all: serde_json::Value =
-            read_json(&root.join("Drop Box/project.json")).unwrap();
+        let catch_all: serde_json::Value = read_json(&root.join("Drop Box/project.json")).unwrap();
         assert_eq!(catch_all["id"].as_str().unwrap(), info.catch_all_project_id);
         assert_eq!(catch_all["title"], "Drop Box");
         assert!(catch_all["createdAt"].as_str().unwrap().ends_with('Z'));
