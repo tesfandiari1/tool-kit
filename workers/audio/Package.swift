@@ -1,15 +1,16 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 import PackageDescription
 
 let package = Package(
     name: "tool-kit-audio-worker",
-    // A string, not `.macOS(.v26)`: that enum case needs a SwiftPM newer than
-    // the one the Command Line Tools ship.
-    platforms: [.macOS("26.0")],
+    platforms: [.macOS(.v26)],
     dependencies: [
         // Pinned exactly: the CoreML layout the worker loads is coupled to
         // this version. Keep `fluidAudioVersion` in protocol.swift in step.
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.6")
+        // `traits: []` drops the NeMo text-normalization engine, which only
+        // TTS uses.
+        .package(
+            url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.5", traits: [])
     ],
     targets: [
         .executableTarget(

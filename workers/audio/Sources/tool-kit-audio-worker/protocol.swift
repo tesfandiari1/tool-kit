@@ -12,7 +12,7 @@ let identityPrefix = "tool-kit-audio-worker protocol=1 local-audio="
 
 /// The pin in Package.swift. Part of the engine version because the CoreML
 /// layout the worker loads is this package's, not the OS's.
-let fluidAudioVersion = "0.15.6"
+let fluidAudioVersion = "0.17.5"
 
 // The three source-binding names are the PDF worker's verbatim: identical
 // meaning, identical parent-side values.

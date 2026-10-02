@@ -201,8 +201,8 @@ the same CC BY 4.0 licence. The FluidAudio SDK that loads them is Apache-2.0;
 see FluidAudio-Apache-2.0.txt.
 NOTICE
 # The worker links FluidAudio's vendored fastcluster (BSD, which requires the
-# notice to ship with a binary redistribution), the VBx diarization code and
-# NemoTextProcessing. Apache-2.0 alone does not cover them.
+# notice to ship with a binary redistribution) and the VBx diarization code.
+# Apache-2.0 alone does not cover them.
 [ -d "${FLUIDAUDIO_SRC}/ThirdPartyLicenses" ] \
   || fail "no ThirdPartyLicenses in the FluidAudio checkout at ${FLUIDAUDIO_SRC}"
 rm -rf "${RES_AUDIO%/*}/FluidAudio-ThirdPartyLicenses"

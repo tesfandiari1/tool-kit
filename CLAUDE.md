@@ -216,7 +216,7 @@ Tool-Kit.app/Contents/
   MacOS/       tool-kit  tool-kit-converter  tool-kit-pdf-worker  tool-kit-vision-worker
                tool-kit-audio-worker
   Resources/   pdf-inspector/bcmaps/  (169 files)
-               fluidaudio/speaker-diarization-coreml/speaker-diarization/  (23 files + manifest)
+               fluidaudio/speaker-diarization-coreml/speaker-diarization/  (25 files + manifest)
 ```
 
 **`backend_host::Deployment` is not a setting.** Sidecar spawns the converter on

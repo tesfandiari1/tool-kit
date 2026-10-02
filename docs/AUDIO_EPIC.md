@@ -36,7 +36,7 @@ cited from source, not yet run.
 ## Decisions
 
 1. **One worker, `tool-kit-audio-worker`, Swift, SwiftPM, one dependency
-   (FluidAudio 0.15.6).** No Python, no MLX, no GPU memory in the bundle.
+   (FluidAudio 0.17.5).** No Python, no MLX, no GPU memory in the bundle.
    The first SwiftPM build in the tree: `swift build -c release`, not `swiftc`.
 2. **It is the converter's fourth engine, in the Vision worker's shape.**
    Staging dir as argv[1], source bytes on stdin, `env_clear` plus the shared
@@ -113,7 +113,7 @@ Tool-Kit.app/Contents/
   MacOS/       tool-kit  tool-kit-converter  tool-kit-pdf-worker
                tool-kit-vision-worker  tool-kit-audio-worker
   Resources/   pdf-inspector/bcmaps/
-               fluidaudio/speaker-diarization-coreml/speaker-diarization/  (23 files + manifest)
+               fluidaudio/speaker-diarization-coreml/speaker-diarization/  (25 files + manifest)
 
 desktop run_pipeline ──(conversion_route = Backend, ext in capabilities)──▶ sidecar
   POST /api/v1/conversions  multipart: source, profile, speakerCount
@@ -309,13 +309,13 @@ change makes a CRITICAL diff unreviewable) and the history provenance fix.
   collector needs a concrete `Sendable` row.
 - `downloadAndLoad` fetches four `.mlmodelc` bundles at int8 (470 MB), not the
   3.59 GB the HF tree lists. Size off the manifest, not the listing.
-- `libtext_processing_rs.a` (58.7 MB, prebuilt Rust) links into the worker,
-  which is why the stripped binary is 16.9 MB. Note it in
-  `THIRD_PARTY_NOTICES.md` with FluidAudio (Apache-2.0) and Parakeet's licence.
+- `libtext_processing_rs.a` (58.7 MB, prebuilt Rust, TTS only) linked into the
+  worker until 0.17.5, where `traits: []` drops it. The release binary went
+  from 16.6 MB to 10.0 MB.
 - FluidAudio's own `ThirdPartyLicenses/` ships in the bundle. Its vendored
   fastcluster is BSD and requires the notice with a binary redistribution, so
-  Apache-2.0 alone does not cover the worker. `verify-release.sh` checks all
-  three files.
+  Apache-2.0 alone does not cover the worker. `verify-release.sh` checks the
+  fastcluster and VBx files.
 - The diarizer set is re-fetched when the staged `manifest.json` records a
   different `fluidAudioVersion` than the worker's `--version`. Presence alone
   shipped the previous release's models against a bumped pin.

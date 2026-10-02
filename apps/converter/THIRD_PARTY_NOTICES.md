@@ -21,18 +21,14 @@ advisory RUSTSEC-2026-0192.
 
 ## Audio worker
 
-The bundled `tool-kit-audio-worker` links FluidAudio 0.15.6 under the Apache
+The bundled `tool-kit-audio-worker` links FluidAudio 0.17.5 under the Apache
 License 2.0. The app ships the complete notice at
 `Contents/Resources/fluidaudio/FluidAudio-Apache-2.0.txt`. FluidAudio is a
 macOS build input only: the Linux container has no audio engine.
 
-FluidAudio links the prebuilt `NemoTextProcessing` xcframework, the
-`text-processing-rs` build of NVIDIA NeMo Text Processing, also under the
-Apache License 2.0.
-
 It also links vendored fastcluster (BSD 2-Clause, which requires the notice to
 ship with a binary redistribution) and the VBx diarization code (Apache License
-2.0, copyright BUT Speech@FIT). Both notices, and NeMo's, ship at
+2.0, copyright BUT Speech@FIT). Both notices ship at
 `Contents/Resources/fluidaudio/FluidAudio-ThirdPartyLicenses/`.
 
 The speaker diarization models are `FluidInference/speaker-diarization-coreml`

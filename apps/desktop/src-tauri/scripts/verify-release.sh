@@ -227,17 +227,16 @@ GOT_MODELS="$(find "$DIARIZER" -type f | wc -l | tr -d ' ')"
 [ "$GOT_MODELS" = "$WANT_MODELS" ] || fail "the bundle carries ${GOT_MODELS} diarizer files and
      pnpm sidecars staged ${WANT_MODELS}. A CoreML bundle missing one weight file loads
      with an error the worker reports as a failed job, on every audio file"
-# The three ThirdPartyLicenses files cover code linked into the worker, not the
+# The two ThirdPartyLicenses files cover code linked into the worker, not the
 # models: fastcluster is BSD and its notice must ship with the binary.
 for notice in FluidAudio-Apache-2.0.txt speaker-diarization-CC-BY-4.0.txt \
   FluidAudio-ThirdPartyLicenses/fastcluster-LICENSE.md \
-  FluidAudio-ThirdPartyLicenses/vbx-LICENSE.md \
-  FluidAudio-ThirdPartyLicenses/NemoTextProcessing-LICENSE.md; do
+  FluidAudio-ThirdPartyLicenses/vbx-LICENSE.md; do
   [ -s "${APP}/Contents/Resources/fluidaudio/${notice}" ] \
     || fail "Resources/fluidaudio/${notice} is missing or empty, and its licence
      requires it to ship beside the code it covers"
 done
-pass "fluidaudio: ${GOT_MODELS} model files matching the staged set, five licence texts non-empty"
+pass "fluidaudio: ${GOT_MODELS} model files matching the staged set, four licence texts non-empty"
 
 printf '\n== Bundle metadata\n'
 PLIST="${APP}/Contents/Info.plist"
