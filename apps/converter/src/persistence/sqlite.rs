@@ -3186,7 +3186,7 @@ mod tests {
         LocalStart {
             engine: EngineRecord {
                 name: "pdf-inspector".to_owned(),
-                version: "1.15.0".to_owned(),
+                version: "1.25.2".to_owned(),
             },
             route: "local_pdf".to_owned(),
         }

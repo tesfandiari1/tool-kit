@@ -29,7 +29,7 @@ const WORKER_LABEL: &str = "PDF";
 // Ten seconds like the Swift workers: at two, a fork storm from the parallel
 // test suite on a loaded Mac timed out a script that only echoes.
 const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
-const EXPECTED_WORKER_IDENTITY: &str = "tool-kit-pdf-worker protocol=2 pdf-inspector=1.15.0\n";
+const EXPECTED_WORKER_IDENTITY: &str = "tool-kit-pdf-worker protocol=2 pdf-inspector=1.25.2\n";
 const REQUIRED_CMAPS: [&str; 4] = [
     "Adobe-CNS1-UCS2.bcmap",
     "Adobe-GB1-UCS2.bcmap",
@@ -393,7 +393,7 @@ mod tests {
     #[cfg(unix)]
     fn worker_script(body: &str) -> String {
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'tool-kit-pdf-worker protocol=2 pdf-inspector=1.15.0\\n'\n  exit 0\nfi\n{body}\n"
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'tool-kit-pdf-worker protocol=2 pdf-inspector=1.25.2\\n'\n  exit 0\nfi\n{body}\n"
         )
     }
 

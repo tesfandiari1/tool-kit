@@ -145,7 +145,7 @@ YAML
 cat > "${RUN_DIR}/stub/hold-worker.sh" <<'STUB'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo 'tool-kit-pdf-worker protocol=2 pdf-inspector=1.15.0'
+  echo 'tool-kit-pdf-worker protocol=2 pdf-inspector=1.25.2'
   exit 0
 fi
 exec /bin/sleep 3600
@@ -352,7 +352,7 @@ verify_bundle() {
   assert_json "manifest jobId" '.jobId' "$m" "$job"
   assert_json "manifest route" '.route.kind' "$m" "local_pdf"
   assert_json "manifest reason codes" '.route.reasonCodes|join(",")' "$m" "native_text_pdf"
-  assert_json "manifest engine version" '.engine.version' "$m" "1.15.0"
+  assert_json "manifest engine version" '.engine.version' "$m" "1.25.2"
   assert_json "manifest pdf type" '.document.pdfType' "$m" "text_based"
   # The host computed this before the bytes ever entered the container.
   assert_json "manifest source sha256" '.source.sha256' "$m" "$SOURCE_SHA"

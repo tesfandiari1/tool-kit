@@ -328,7 +328,7 @@ mod tests {
         };
 
         assert_eq!(WORKER_PROTOCOL_VERSION, 2);
-        assert_eq!(identity.version, "1.15.0");
+        assert_eq!(identity.version, "1.25.2");
         assert!(identity.features.is_empty());
     }
 

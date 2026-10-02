@@ -22,7 +22,7 @@ COPY apps/converter/migrations ./migrations
 COPY apps/converter/src ./src
 
 RUN cargo build --locked --release --bins \
-    && PDF_INSPECTOR_SOURCE="$(find /usr/local/cargo/registry/src -mindepth 2 -maxdepth 2 -type d -name 'pdf-inspector-1.15.0' -print -quit)" \
+    && PDF_INSPECTOR_SOURCE="$(find /usr/local/cargo/registry/src -mindepth 2 -maxdepth 2 -type d -name 'pdf-inspector-1.25.2' -print -quit)" \
     && test -n "${PDF_INSPECTOR_SOURCE}" \
     && mkdir -p /build/pdf-inspector-runtime/licenses \
     && cp -R "${PDF_INSPECTOR_SOURCE}/external/bcmaps" /build/pdf-inspector-runtime/bcmaps \

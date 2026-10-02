@@ -1,6 +1,6 @@
 # Third-party runtime notices
 
-The M1 container includes `pdf-inspector` 1.15.0 under the MIT License and its
+The M1 container includes `pdf-inspector` 1.25.2 under the MIT License and its
 bundled Adobe CMap resources under their separate BSD-style notice. The image
 stores the complete notices at:
 

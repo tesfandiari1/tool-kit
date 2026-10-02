@@ -1702,7 +1702,7 @@ mod tests {
             "clientRunId": Uuid::nil(),
             "profile": "standard",
             "source": {"mediaType": "application/pdf", "byteLength": 1, "sha256": "a".repeat(64)},
-            "engine": {"name": "pdf-inspector", "version": "1.15.0", "features": []},
+            "engine": {"name": "pdf-inspector", "version": "1.25.2", "features": []},
             "route": {"kind": "local_pdf", "reasonCodes": []},
             "document": document,
             "warnings": [],

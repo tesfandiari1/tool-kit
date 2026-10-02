@@ -108,7 +108,7 @@ async fn public_health_and_capabilities_are_truthful() {
     let engines = conversion["engines"].as_array().unwrap();
     assert_eq!(engines.len(), 2, "apple-vision is absent with its engine");
     assert_eq!(engines[0]["name"], "pdf-inspector");
-    assert_eq!(engines[0]["version"], "1.15.0");
+    assert_eq!(engines[0]["version"], "1.25.2");
     assert_eq!(engines[1]["name"], "anydoc");
     assert_eq!(engines[1]["version"], "0.1.9");
     assert!(
@@ -514,7 +514,7 @@ async fn clean_pdf_completes_and_idempotency_replays_the_job() {
     let manifest_bytes = manifest.into_body().collect().await.unwrap().to_bytes();
     let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
     assert_eq!(manifest["schemaVersion"], 1);
-    assert_eq!(manifest["engine"]["version"], "1.15.0");
+    assert_eq!(manifest["engine"]["version"], "1.25.2");
     assert_eq!(manifest["document"]["pdfType"], "text_based");
     assert_eq!(
         manifest["output"]["sha256"],
@@ -2328,15 +2328,15 @@ async fn malformed_or_untrusted_worker_outputs_never_publish() {
     let wrong_identity = r#"printf '%s' '{"protocolVersion":2,"engine":{"name":"pdf-inspector","version":"0.0.0","features":[]},"outcome":{"kind":"rejected","code":"invalid_pdf"}}' > "$1/worker-report.json"
 "#;
     let bad_hash = format!(
-        "printf X > \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.15.0\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$1/worker-report.json\"\n",
+        "printf X > \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.25.2\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$1/worker-report.json\"\n",
         "0".repeat(64)
     );
     let symlink = format!(
-        "ln -s /etc/passwd \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.15.0\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$1/worker-report.json\"\n",
+        "ln -s /etc/passwd \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.25.2\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$1/worker-report.json\"\n",
         "0".repeat(64)
     );
     let extra_file = format!(
-        "printf X > \"$1/result.md\"\nprintf extra > \"$1/unexpected.bin\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.15.0\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015\"}}}}}}' > \"$1/worker-report.json\"\n"
+        "printf X > \"$1/result.md\"\nprintf extra > \"$1/unexpected.bin\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.25.2\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015\"}}}}}}' > \"$1/worker-report.json\"\n"
     );
     let cases = [
         (

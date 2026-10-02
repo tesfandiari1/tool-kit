@@ -112,7 +112,7 @@ const INSPECTION: &str = r#""inspection":{"pdfType":"text_based","confidence":1.
 fn slow_successful_worker() -> String {
     let digest = "4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015";
     format!(
-        "/bin/sleep 2\nprintf X > \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.15.0\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{digest}\"}}}}}}' > \"$1/worker-report.json\"\n"
+        "/bin/sleep 2\nprintf X > \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.25.2\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{digest}\"}}}}}}' > \"$1/worker-report.json\"\n"
     )
 }
 
