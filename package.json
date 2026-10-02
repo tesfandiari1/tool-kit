@@ -3,9 +3,9 @@
   "private": true,
   "version": "1.0.0",
   "license": "MIT",
-  "packageManager": "pnpm@11.22.0",
+  "packageManager": "pnpm@11.28.3",
   "engines": {
-    "node": ">=20.19.0",
+    "node": ">=22.12.0",
     "pnpm": ">=11"
   },
   "type": "module",
