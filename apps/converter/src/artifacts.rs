@@ -570,6 +570,30 @@ impl ArtifactStore {
         .await
     }
 
+    /// Removes the stored source of a succeeded job. Nothing reads it again:
+    /// a succeeded job only ever leaves for `failed`, a replay matches the
+    /// stored fingerprint, and recovery checks a succeeded job's artifacts
+    /// alone. An hour of audio is otherwise a hidden gigabyte per job.
+    pub async fn discard_succeeded_source(&self, job_id: Uuid) -> Result<(), ArtifactError> {
+        let relative = source_relative_path(job_id);
+        if optional_metadata(&self.resolve_relative(&relative)?)
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let path = self.resolve_existing_relative(&relative).await?;
+        fs::remove_file(&path)
+            .await
+            .map_err(|source| ArtifactError::Discard {
+                path: path.clone(),
+                source,
+            })?;
+        sync_directory(self.job_paths(job_id).source_directory)
+            .await
+            .map_err(|source| ArtifactError::Discard { path, source })
+    }
+
     /// Removes one backend-owned directory. A symlink or a non-directory is
     /// corruption, so it is refused rather than followed.
     async fn discard_owned_directory(

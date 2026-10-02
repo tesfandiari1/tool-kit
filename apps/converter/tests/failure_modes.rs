@@ -80,7 +80,8 @@ async fn conflicting_key_at_active_capacity_leaves_no_staged_source() {
     let jobs_before = count_job_directories(app.data_dir());
     let sources_before = count_named_files(app.data_dir(), "input");
     assert_eq!(jobs_before, 2);
-    assert_eq!(sources_before, 2);
+    // The succeeded job's source is gone. Only the seeded row keeps one.
+    assert_eq!(sources_before, 1);
 
     // Same key, different client run id, so the fingerprint differs and the
     // conflict arm returns before the active-count query runs.

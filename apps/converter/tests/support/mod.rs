@@ -338,6 +338,16 @@ impl TestHarness {
         .unwrap();
         assert_eq!(conversion.rows_affected(), 1);
         transaction.commit().await.unwrap();
+        // A crash before the success commit also comes before the source is
+        // removed, so the finalizing job a real crash leaves still has it.
+        std::fs::write(
+            self.data_dir
+                .join("jobs")
+                .join(seeded.job_id.to_string())
+                .join("source/input"),
+            clean_pdf(),
+        )
+        .unwrap();
     }
 
     /// Break one succeeded attempt's metadata invariant without breaking a

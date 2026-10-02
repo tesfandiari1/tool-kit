@@ -161,8 +161,8 @@ impl AnyDocEngine {
                 })
                 .await?;
             (permit, bytes) = (returned, original);
-            if let Some((marked, pictures, rendered)) = prepared {
-                let found = describe(worker, &pictures, cancellation.clone()).await;
+            if let Some((marked, pictures, placements, rendered)) = prepared {
+                let found = describe(worker, &pictures, &placements, cancellation.clone()).await;
                 if !found.is_empty() {
                     described = Some((marked, found, rendered));
                 }
@@ -322,14 +322,19 @@ fn format_label(format: anydoc::Format) -> &'static str {
 const MAX_MARKED_PART_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_MARKED_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
-/// A marker token's number, the picture's bytes, and its file extension.
-type Picture = (u32, Vec<u8>, &'static str);
+/// A picture's bytes and its file extension.
+type Picture = (Vec<u8>, &'static str);
+/// A marker token's number and the index of its picture.
+type Placement = (u32, usize);
+/// The marked package, its pictures, their placements, and the token count.
+type Marked = (Vec<u8>, Vec<Picture>, Vec<Placement>, usize);
 
 /// Gives every picture with no alt text a `tkimg{n}tk` alt, so the renderer
-/// prints the token where the picture sits, and returns the marked package
-/// with each token's PNG or JPEG bytes and the number of tokens the Markdown
-/// will hold. `None` when there is nothing to describe or anything goes wrong.
-fn marked_pictures(bytes: &[u8], format: anydoc::Format) -> Option<(Vec<u8>, Vec<Picture>, usize)> {
+/// prints the token where the picture sits, and returns the marked package,
+/// each distinct PNG or JPEG once, where each token points, and the number of
+/// tokens the Markdown will hold. `None` when there is nothing to describe or
+/// anything goes wrong.
+fn marked_pictures(bytes: &[u8], format: anydoc::Format) -> Option<Marked> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
     let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let mut next = 0;
@@ -369,26 +374,36 @@ fn marked_pictures(bytes: &[u8], format: anydoc::Format) -> Option<(Vec<u8>, Vec
     }
     let marked = out.finish().ok()?.into_inner();
 
-    let document = anydoc::to_document(&marked, format).ok()?;
+    let mut document = anydoc::to_document(&marked, format).ok()?;
     let mut tokens = Vec::new();
     collect_tokens(&document.blocks, &mut tokens);
     for note in &document.notes {
         collect_tokens(&note.blocks, &mut tokens);
     }
     let rendered = tokens.len();
-    let pictures: Vec<_> = tokens
+    // AnyDoc keeps one asset per package part, so a logo on 300 slides is one
+    // asset under 300 tokens. Its bytes move out once, never per token.
+    let mut pictures = Vec::new();
+    let mut taken = HashMap::new();
+    let placements: Vec<_> = tokens
         .into_iter()
         .filter_map(|(n, id)| {
-            let asset = document.assets.iter().find(|asset| Some(asset.id) == id)?;
+            let id = id?;
+            if let Some(&index) = taken.get(&id) {
+                return Some((n, index));
+            }
+            let asset = document.assets.iter_mut().find(|asset| asset.id == id)?;
             let extension = match asset.media_type.as_str() {
                 "image/png" => "png",
                 "image/jpeg" => "jpg",
                 _ => return None,
             };
-            Some((n, asset.bytes.clone(), extension))
+            pictures.push((std::mem::take(&mut asset.bytes), extension));
+            taken.insert(id, pictures.len() - 1);
+            Some((n, pictures.len() - 1))
         })
         .collect();
-    (!pictures.is_empty()).then_some((marked, pictures, rendered))
+    (!placements.is_empty()).then_some((marked, pictures, placements, rendered))
 }
 
 /// Rewrites each `open` start tag whose `descr` is absent or empty to carry
@@ -504,14 +519,17 @@ fn collect_inline_tokens(inlines: &[Inline], tokens: &mut Vec<Token>) {
 async fn describe(
     worker: &Path,
     pictures: &[Picture],
+    placements: &[Placement],
     cancellation: watch::Receiver<bool>,
 ) -> HashMap<u32, String> {
     let mut found = HashMap::new();
     let Ok(directory) = tempfile::tempdir() else {
         return found;
     };
+    // Two parts can still hold the same bytes, so those share one file.
     let mut files: HashMap<&[u8], String> = HashMap::new();
-    for (_, bytes, extension) in pictures {
+    let mut names = Vec::with_capacity(pictures.len());
+    for (bytes, extension) in pictures {
         if !files.contains_key(bytes.as_slice()) {
             let name = format!("{}.{extension}", files.len());
             if tokio::fs::write(directory.path().join(&name), bytes)
@@ -522,6 +540,7 @@ async fn describe(
             }
             files.insert(bytes, name);
         }
+        names.push(files.get(bytes.as_slice()).cloned());
     }
     let Ok(mut child) = Command::new(worker)
         .arg("--describe")
@@ -539,8 +558,8 @@ async fn describe(
     // one Mac. A huge deck waits that long, cancellation still stops it.
     let budget = Duration::from_secs(20 + 5 * files.len() as u64);
     let _ = wait_for_child(&mut child, budget, cancellation).await;
-    for (n, bytes, _) in pictures {
-        let Some(name) = files.get(bytes.as_slice()) else {
+    for (n, index) in placements {
+        let Some(Some(name)) = names.get(*index) else {
             continue;
         };
         let path = directory.path().join(format!("{name}.txt"));
@@ -636,6 +655,43 @@ mod tests {
         );
         // Body text that spells a token makes one too many: today's output.
         assert_eq!(fill_descriptions("tkimg0tk tkimg0tk\n", &found, 1), None);
+    }
+
+    /// A logo on every slide is one part under many tokens. Its bytes were
+    /// copied per token, so a 20 MB photo on 300 slides held 6 GB.
+    #[test]
+    fn a_picture_placed_many_times_is_held_once() {
+        let fixture = include_bytes!("../../tests/fixtures/anydoc/text.docx");
+        let mut archive = zip::ZipArchive::new(Cursor::new(&fixture[..])).unwrap();
+        let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).unwrap();
+            let name = file.name().to_owned();
+            let mut content = Vec::new();
+            file.read_to_end(&mut content).unwrap();
+            if name == "word/document.xml" {
+                // Drop the alt text so the picture is marked, then place it
+                // three times.
+                let xml = String::from_utf8(content)
+                    .unwrap()
+                    .replace(" descr=\"tiny red dot\"></wp:docPr>", "></wp:docPr>");
+                let (head, rest) = xml.split_once("<w:drawing>").unwrap();
+                let (body, tail) = rest.split_once("</w:drawing>").unwrap();
+                let drawing = format!("<w:drawing>{body}</w:drawing>");
+                content = format!("{head}{}{tail}", drawing.repeat(3)).into_bytes();
+            }
+            out.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            out.write_all(&content).unwrap();
+        }
+        let docx = out.finish().unwrap().into_inner();
+
+        let (_, pictures, placements, rendered) =
+            marked_pictures(&docx, anydoc::Format::Docx).unwrap();
+        assert_eq!(rendered, 3);
+        assert_eq!(placements.len(), 3);
+        assert_eq!(pictures.len(), 1);
+        assert!(placements.iter().all(|(_, index)| *index == 0));
     }
 
     #[test]

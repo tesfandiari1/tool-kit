@@ -154,7 +154,12 @@ impl StartupRecovery {
             }
             ConversionState::Finalizing => self.reconcile_finalizing(service, &job).await,
             ConversionState::Succeeded => match service.validate_stored_artifacts(&job).await {
-                Ok(()) => Ok(()),
+                // Also sweeps the sources a build before this one kept, and
+                // any a crash left between the commit and the removal.
+                Ok(()) => {
+                    service.discard_succeeded_source(job.id).await;
+                    Ok(())
+                }
                 Err(ArtifactReadFailure::Integrity) => {
                     service
                         .recovery_repository()

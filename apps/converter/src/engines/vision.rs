@@ -39,6 +39,8 @@ use crate::{
 
 const WORKER_LABEL: &str = "Vision";
 const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
+/// One runner serves every engine, so one scan may hold it 10 minutes at most.
+const MAX_SCAN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Engine-specific detail persisted as attempt diagnostics and embedded in the
 /// manifest. Content-free, and wall time is all of it. The page counts go to
@@ -84,10 +86,13 @@ impl VisionEngine {
     }
 
     /// The same engine and permit with one more second per page, for a
-    /// scanned PDF the worker reads a page at a time.
+    /// scanned PDF the worker reads a page at a time, up to
+    /// [`MAX_SCAN_TIMEOUT`]. A scan past it times out into the inspector's
+    /// needs_remote.
     pub fn with_page_budget(&self, pages: u32) -> Self {
         Self {
-            timeout: self.timeout + Duration::from_secs(pages.into()),
+            timeout: (self.timeout + Duration::from_secs(pages.into()))
+                .min(MAX_SCAN_TIMEOUT.max(self.timeout)),
             ..self.clone()
         }
     }
@@ -373,6 +378,22 @@ mod tests {
             verify_worker_identity(&worker),
             Err(WorkerStartupError::WorkerIdentityMismatch { .. })
         ));
+    }
+
+    /// A second a page, so a 100 000-page scan held the only runner for a day.
+    #[cfg(unix)]
+    #[test]
+    fn the_scan_budget_stops_at_ten_minutes() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker");
+        write_worker(&worker, &worker_script("exit 0"));
+        let engine = VisionEngine::initialize(worker, Duration::from_secs(60), 1024).unwrap();
+
+        assert_eq!(engine.with_page_budget(30).timeout, Duration::from_secs(90));
+        assert_eq!(
+            engine.with_page_budget(100_000).timeout,
+            Duration::from_secs(600)
+        );
     }
 
     /// The handshake carries the running OS version, so it cannot be compared

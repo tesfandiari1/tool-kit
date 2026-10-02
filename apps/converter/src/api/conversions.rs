@@ -612,17 +612,28 @@ fn has_container_magic(magic: ContainerMagic, prefix: &[u8]) -> bool {
         ContainerMagic::Tiff => prefix.starts_with(b"II*\0") || prefix.starts_with(b"MM\0*"),
         ContainerMagic::Gif => prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a"),
         ContainerMagic::Bmp => prefix.starts_with(b"BM"),
-        ContainerMagic::Wave => prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WAVE"),
+        // RF64 is the same WAVE payload past 4 GB, and recorders write it.
+        ContainerMagic::Wave => {
+            (prefix.starts_with(b"RIFF") || prefix.starts_with(b"RF64"))
+                && prefix.get(8..12) == Some(b"WAVE")
+        }
         // The brand after `ftyp` names m4a, mp4 or mov; the media type already
-        // said which, and the worker reads the audio track either way.
-        ContainerMagic::IsoBmff => prefix.get(4..8) == Some(b"ftyp"),
+        // said which, and the worker reads the audio track either way. A
+        // QuickTime file older than `ftyp` opens on whichever top-level atom
+        // its writer put first.
+        ContainerMagic::IsoBmff => matches!(
+            prefix.get(4..8),
+            Some(b"ftyp" | b"wide" | b"mdat" | b"moov" | b"free" | b"skip" | b"pnot")
+        ),
         // An ID3 tag or a bare frame: sync bits are the whole first byte and
         // the top three of the second.
         ContainerMagic::MpegAudio => {
             prefix.starts_with(b"ID3")
                 || matches!(prefix, [0xFF, second, ..] if second & 0xE0 == 0xE0)
         }
-        ContainerMagic::Flac => prefix.starts_with(b"fLaC"),
+        // Some taggers put ID3 ahead of `fLaC`. Its size field can run past
+        // this window (cover art), so the tag alone admits, as for MP3.
+        ContainerMagic::Flac => prefix.starts_with(b"fLaC") || prefix.starts_with(b"ID3"),
         // CSV has no signature to check. Admission rests on the extension and
         // the declared media type; the engine still has the final say.
         ContainerMagic::None => true,
@@ -818,5 +829,44 @@ mod tests {
             b"RIFF\x24\x00\x00\x00WAVEfmt "
         ));
         assert!(!has_container_magic(ContainerMagic::Webp, b"RIFF"));
+    }
+
+    /// Recordings real devices write that a 415 refused before the engine
+    /// ever saw them.
+    #[test]
+    fn audio_signatures_admit_rf64_old_quicktime_and_tagged_flac() {
+        assert!(has_container_magic(
+            ContainerMagic::Wave,
+            b"RF64\xFF\xFF\xFF\xFFWAVEds64"
+        ));
+        assert!(has_container_magic(
+            ContainerMagic::Wave,
+            b"RIFF\x24\x00\x00\x00WAVEfmt "
+        ));
+        assert!(!has_container_magic(
+            ContainerMagic::Wave,
+            b"RF64\xFF\xFF\xFF\xFFAVI "
+        ));
+
+        for atom in [b"wide", b"mdat", b"moov", b"free", b"skip", b"pnot"] {
+            let mut mov = b"\x00\x00\x00\x08".to_vec();
+            mov.extend_from_slice(atom);
+            assert!(has_container_magic(ContainerMagic::IsoBmff, &mov));
+        }
+        assert!(has_container_magic(
+            ContainerMagic::IsoBmff,
+            b"\x00\x00\x00\x20ftypqt  "
+        ));
+        assert!(!has_container_magic(
+            ContainerMagic::IsoBmff,
+            b"\x00\x00\x00\x08junk"
+        ));
+
+        assert!(has_container_magic(
+            ContainerMagic::Flac,
+            b"ID3\x04\x00\x00\x00\x00\x00\x0AfLaC"
+        ));
+        assert!(has_container_magic(ContainerMagic::Flac, b"fLaC\x00"));
+        assert!(!has_container_magic(ContainerMagic::Flac, b"OggS\x00"));
     }
 }

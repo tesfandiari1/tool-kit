@@ -17,6 +17,7 @@ use std::{
 use thiserror::Error;
 use tokio::{
     fs,
+    io::{AsyncBufReadExt, AsyncRead, BufReader},
     process::Command,
     sync::{watch, OwnedSemaphorePermit, Semaphore},
 };
@@ -40,9 +41,22 @@ use crate::{
 
 const WORKER_LABEL: &str = "Audio";
 const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a failed worker's stderr gets to reach EOF after it exits.
+const STDERR_DRAIN: Duration = Duration::from_secs(1);
 /// The worker runs both stages on every job, so the report says so on a
 /// rejection too and the parent checks it either way.
 const WORKER_FEATURES: [&str; 2] = ["speech-analyzer", "diarization"];
+/// What `--fetch diarizer` stages and FluidAudio's `OfflineDiarizerModels.load`
+/// reads: the manifest beside a `speaker-diarization/` folder of four CoreML
+/// bundles and the PLDA parameters.
+const DIARIZER_LAYOUT: [&str; 6] = [
+    "manifest.json",
+    "speaker-diarization/Segmentation.mlmodelc",
+    "speaker-diarization/FBank.mlmodelc",
+    "speaker-diarization/Embedding.mlmodelc",
+    "speaker-diarization/PldaRho.mlmodelc",
+    "speaker-diarization/plda-parameters.json",
+];
 
 /// Engine-specific detail persisted as attempt diagnostics and embedded in the
 /// manifest. Content-free: durations and speaker counts, never words.
@@ -84,6 +98,15 @@ impl AudioEngine {
         })?;
         if !metadata.is_dir() {
             return Err(AudioStartupError::DiarizerNotDirectory(diarizer_dir));
+        }
+        if let Some(missing) = DIARIZER_LAYOUT
+            .into_iter()
+            .find(|entry| !diarizer_dir.join(entry).exists())
+        {
+            return Err(AudioStartupError::DiarizerIncomplete {
+                path: diarizer_dir,
+                missing,
+            });
         }
         let version = verify_worker_identity(&worker_path)?;
 
@@ -153,17 +176,27 @@ impl AudioEngine {
             )
             .stdin(Stdio::from(source))
             .stdout(Stdio::null())
-            // The diarizer prints `[Profiling]` lines on every run, and the
-            // report is the only channel back.
-            .stderr(Stdio::null())
+            // The diarizer prints `[Profiling]` lines on every run, so stderr
+            // is read here rather than inherited, and only the worker's own
+            // last word reaches the log.
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|_| EngineFailure::Unavailable)?;
+        let last_line = child
+            .stderr
+            .take()
+            .map(|stderr| tokio::spawn(last_line(stderr)));
         // A killed worker cannot run its own cleanup, and the attempt survives a
         // requeue, so the parent removes the scratch source copy itself.
         if let Err(failure) = wait_for_child(&mut child, self.timeout, cancellation).await {
             if let Some(extension) = audio_source_extension(media_type) {
                 let _ = fs::remove_file(paths.attempt.join(format!("source.{extension}"))).await;
+            }
+            if let Some(task) = last_line {
+                if let Ok(Ok(Some(line))) = tokio::time::timeout(STDERR_DRAIN, task).await {
+                    tracing::warn!(code = failure.code(), %line, "audio worker failed");
+                }
             }
             return Err(failure);
         }
@@ -226,6 +259,22 @@ impl AudioEngine {
         }
         Ok(())
     }
+}
+
+/// Reads the worker's stderr to the end, so a chatty diarizer never blocks on
+/// a full pipe, and keeps the last line that is not `[Profiling]` noise. That
+/// line is the worker's `fail()` reason when it exits 70.
+async fn last_line(stderr: impl AsyncRead + Unpin) -> Option<String> {
+    let mut lines = BufReader::new(stderr).split(b'\n');
+    let mut last = None;
+    while let Ok(Some(line)) = lines.next_segment().await {
+        let line = String::from_utf8_lossy(&line);
+        let line = line.trim();
+        if !line.is_empty() && !line.starts_with("[Profiling]") {
+            last = Some(line.to_owned());
+        }
+    }
+    last
 }
 
 /// Returns the engine version the worker reported: the macOS product version,
@@ -313,6 +362,11 @@ pub enum AudioStartupError {
     },
     #[error("audio diarizer path is not a directory: {0:?}")]
     DiarizerNotDirectory(PathBuf),
+    #[error("audio diarizer directory {path:?} has no {missing}")]
+    DiarizerIncomplete {
+        path: PathBuf,
+        missing: &'static str,
+    },
 }
 
 #[cfg(test)]
@@ -409,6 +463,90 @@ mod tests {
         ));
     }
 
+    /// The staged layout the worker loads, empty bundles included.
+    fn staged_models(root: &Path) -> std::path::PathBuf {
+        let models = root.join("models");
+        for entry in super::DIARIZER_LAYOUT {
+            let path = models.join(entry);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if entry.ends_with(".mlmodelc") {
+                std::fs::create_dir(&path).unwrap();
+            } else {
+                std::fs::write(&path, "{}").unwrap();
+            }
+        }
+        models
+    }
+
+    /// Any directory passed before, so an empty one booted and every
+    /// recording then failed in the worker with no reason in the log.
+    #[cfg(unix)]
+    #[test]
+    fn startup_rejects_a_diarizer_directory_without_the_models() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker");
+        write_worker(&worker, &worker_script("exit 0"));
+        let empty = directory.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(matches!(
+            AudioEngine::initialize(worker.clone(), empty, Duration::from_secs(5), 1024),
+            Err(super::AudioStartupError::DiarizerIncomplete {
+                missing: "manifest.json",
+                ..
+            })
+        ));
+
+        let models = staged_models(directory.path());
+        std::fs::remove_dir(models.join("speaker-diarization/PldaRho.mlmodelc")).unwrap();
+        assert!(matches!(
+            AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024),
+            Err(super::AudioStartupError::DiarizerIncomplete {
+                missing: "speaker-diarization/PldaRho.mlmodelc",
+                ..
+            })
+        ));
+    }
+
+    /// The diarizer's `[Profiling]` lines are noise, and the worker's own
+    /// `fail()` line is the one reason a crashed job has.
+    #[tokio::test]
+    async fn the_last_stderr_line_skips_profiling_noise() {
+        let stderr = b"[Profiling] load 1.2s\ntool-kit-audio-worker: source digest mismatch\n[Profiling] done\n\n";
+        assert_eq!(
+            super::last_line(&stderr[..]).await.as_deref(),
+            Some("tool-kit-audio-worker: source digest mismatch")
+        );
+        assert_eq!(super::last_line(&b"[Profiling] only\n"[..]).await, None);
+    }
+
+    /// A piped stderr nobody reads fills at 64 KB and blocks the worker until
+    /// the timeout kills it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_worker_that_floods_stderr_still_converts() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker");
+        write_worker(
+            &worker,
+            &converting_worker_script(
+                "i=0\nwhile [ $i -lt 4000 ]; do echo '[Profiling] segment 0123456789012345678901234567890123456789' >&2; i=$((i+1)); done\n",
+            ),
+        );
+        let models = staged_models(directory.path());
+        let paths = paths(directory.path());
+        let source = source(&paths.source, b"audio bytes").await;
+
+        let engine =
+            AudioEngine::initialize(worker, models, Duration::from_secs(10), 1024).unwrap();
+        let permit = engine.acquire().await.unwrap();
+        let (_cancel, cancellation) = watch::channel(false);
+        let outcome = engine
+            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, EngineOutcome::Converted { .. }));
+    }
+
     #[cfg(unix)]
     #[test]
     fn startup_rejects_a_worker_with_the_wrong_identity() {
@@ -457,8 +595,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("worker");
         write_worker(&worker, &converting_worker_script(""));
-        let models = directory.path().join("models");
-        std::fs::create_dir(&models).unwrap();
+        let models = staged_models(directory.path());
         let paths = paths(directory.path());
         let source = source(&paths.source, b"audio bytes").await;
 
@@ -506,8 +643,7 @@ mod tests {
                     "printf '%s' '{report}' > \"$1/worker-report.json\"\n"
                 )),
             );
-            let models = directory.path().join("models");
-            std::fs::create_dir(&models).unwrap();
+            let models = staged_models(directory.path());
             let paths = paths(directory.path());
             let source = source(&paths.source, b"audio bytes").await;
 
@@ -533,8 +669,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("worker");
         write_worker(&worker, &worker_script("exit 70"));
-        let models = directory.path().join("models");
-        std::fs::create_dir(&models).unwrap();
+        let models = staged_models(directory.path());
         let paths = paths(directory.path());
         let source = source(&paths.source, b"audio bytes").await;
 
@@ -559,8 +694,7 @@ mod tests {
             &worker,
             &converting_worker_script("").replace("\"speakersFound\":2", "\"speakersFound\":0"),
         );
-        let models = directory.path().join("models");
-        std::fs::create_dir(&models).unwrap();
+        let models = staged_models(directory.path());
         let paths = paths(directory.path());
         let source = source(&paths.source, b"audio bytes").await;
 
@@ -585,8 +719,7 @@ mod tests {
             &worker,
             &converting_worker_script("").replace("\"audioSeconds\":13.5", "\"audioSeconds\":-1"),
         );
-        let models = directory.path().join("models");
-        std::fs::create_dir(&models).unwrap();
+        let models = staged_models(directory.path());
         let paths = paths(directory.path());
         let source = source(&paths.source, b"audio bytes").await;
 
@@ -611,8 +744,7 @@ mod tests {
             &worker,
             &worker_script("printf 'audio' > source.wav\n/bin/sleep 2\n"),
         );
-        let models = directory.path().join("models");
-        std::fs::create_dir(&models).unwrap();
+        let models = staged_models(directory.path());
         let paths = paths(directory.path());
         let source = source(&paths.source, b"audio bytes").await;
 
@@ -646,8 +778,7 @@ mod tests {
                      \"$TOOLKIT_AUDIO_WORKER_LOCALE\" > env.txt\n",
                 ),
             );
-            let models = directory.path().join("models");
-            std::fs::create_dir(&models).unwrap();
+            let models = staged_models(directory.path());
             let paths = paths(directory.path());
             let source = source(&paths.source, b"audio bytes").await;
 

@@ -581,7 +581,20 @@ impl ConversionService {
                         Ok(converted)
                     }
                     Err(EngineFailure::Interrupted) => Err(EngineFailure::Interrupted),
-                    _ => conversion,
+                    // The job keeps the inspector's needs_remote, so this line
+                    // is the only trace that Vision tried the scan.
+                    scan => {
+                        let outcome = match &scan {
+                            Ok(EngineOutcome::NeedsRemote { reason_code, .. }) => {
+                                reason_code.as_str()
+                            }
+                            Ok(EngineOutcome::Rejected { rejection }) => rejection.code,
+                            Ok(EngineOutcome::Converted { .. }) => "converted",
+                            Err(failure) => failure.code(),
+                        };
+                        tracing::warn!(%job_id, %attempt_id, outcome, "Vision could not read the scan, so the job keeps needs_remote");
+                        conversion
+                    }
                 }
             }
             None => conversion,
@@ -897,7 +910,15 @@ impl ConversionService {
             status = "succeeded",
             "conversion attempt completed"
         );
+        self.discard_succeeded_source(job_id).await;
         Ok(())
+    }
+
+    /// Never fails the job: a source left behind costs disk, not a result.
+    pub(crate) async fn discard_succeeded_source(&self, job_id: Uuid) {
+        if let Err(error) = self.artifacts.discard_succeeded_source(job_id).await {
+            tracing::warn!(%job_id, %error, "failed to remove a succeeded job's source");
+        }
     }
 
     async fn fail_source_integrity(

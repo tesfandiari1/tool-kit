@@ -1103,7 +1103,8 @@ async fn completed_job_idempotency_and_downloads_survive_app_restart() {
         "idempotency_conflict"
     );
     assert_eq!(count_job_directories(restarted.data_dir()), 1);
-    assert_eq!(count_named_files(restarted.data_dir(), "input"), 1);
+    // Neither request stored a source, and the succeeded job's own is gone.
+    assert_eq!(count_named_files(restarted.data_dir(), "input"), 0);
     assert_eq!(count_named_files(restarted.data_dir(), "input.staging"), 0);
 }
 
@@ -1244,6 +1245,31 @@ async fn corrupt_active_source_fails_recovery_without_creating_a_retry() {
         seeded.attempt_id.to_string()
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
+}
+
+/// A build before this one kept every succeeded job's source, which for audio
+/// is a hidden copy of each recording. The next boot removes them.
+#[tokio::test]
+async fn restart_removes_the_source_a_succeeded_job_kept() {
+    let harness = TestHarness::new();
+    let first = harness.app().await;
+    let seeded = first.submit_succeeded_job("sweep-succeeded-source").await;
+    first.shutdown(Duration::from_secs(1)).await;
+    drop(first);
+    let source = harness
+        .data_dir()
+        .join("jobs")
+        .join(seeded.job_id.to_string())
+        .join("source/input");
+    assert!(!source.exists());
+    fs::write(&source, clean_pdf()).unwrap();
+
+    let restarted = harness.app().await;
+    let status = restarted
+        .authorized_get(&format!("/api/v1/conversions/{}", seeded.job_id))
+        .await;
+    assert_eq!(json_body(status).await["data"]["status"], "succeeded");
+    assert!(!source.exists());
 }
 
 #[tokio::test]
@@ -2039,8 +2065,14 @@ async fn capabilities_stop_accepting_new_jobs_at_active_capacity() {
     assert_eq!(replay.headers()["idempotency-replayed"], "true");
     assert_eq!(json_body(replay).await["data"]["id"], first_id);
     assert_eq!(count_job_directories(app.data_dir()), 1);
-    assert_eq!(count_named_files(app.data_dir(), "input"), 1);
     assert_eq!(count_named_files(app.data_dir(), "input.staging"), 0);
+    // The replay stored no source, and the first job's own goes when it
+    // succeeds.
+    let completed = app.wait_for_terminal(&first_id).await;
+    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+    // The status commits before the source is removed, so wait for the runner.
+    app.wait_for_job_runner_idle().await;
+    assert_eq!(count_named_files(app.data_dir(), "input"), 0);
 }
 
 #[cfg(unix)]
