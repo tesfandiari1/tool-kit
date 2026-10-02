@@ -4,16 +4,16 @@ Where the product stands, what is broken, and what someone still intends to
 build. CLAUDE.md owns the architecture contract and is not repeated here.
 Closed work is in [`archive/`](archive/README.md).
 
-**Last updated:** 2026-09-12
+**Last updated:** 2026-10-01
 
 ## Current state
 
 | Item | Value |
 | --- | --- |
-| Branch tip | `105cdf3` on `main`, plus the uncommitted audio epic sprint 1 |
+| Branch tip | `6450805` on `main`, not pushed. Sprint 1, local PDF OCR, image descriptions and the 2026-10-01 upgrades are committed |
 | OpenAPI contract | 0.5.0 (`contract/http/openapi.yaml`). The converter crate moves with it |
 | Desktop version | 1.0.0 (`package.json`, `Cargo.toml`, `tauri.conf.json`) |
-| Installed bundle | `/Applications/Tool-Kit.app`, built 2026-09-12 from the uncommitted sprint 1 tree, four sidecars. Signed, not notarized, cdhash `8448ad9e`, after the review pass. The two earlier builds of the day (`4f823ae8`, `0f297a6f`) are in the Trash. No gate rebuilds it |
+| Installed bundle | Stale: it predates every 2026-10-01 commit. `/Applications/Tool-Kit.app`, built 2026-09-12 from the uncommitted sprint 1 tree, four sidecars. Signed, not notarized, cdhash `8448ad9e`, after the review pass. The two earlier builds of the day (`4f823ae8`, `0f297a6f`) are in the Trash. No gate rebuilds it |
 | Backend | M0 to M4 complete. M5 unbuilt. M7 cancelled |
 | Desktop | M6 landed. Gate open on CVR-067 and CVR-081 |
 | Service | Sidecar inside the `.app`, loopback only. Docker needs a `backend-override.json` that only `pnpm backend:docker` writes |
@@ -33,6 +33,19 @@ Behaviour that is a decision, not an accident:
   origin.
 
 ## Known issues
+
+From 2026-10-01:
+
+- A lone U+FFFD sets pdf-inspector 1.25's `has_encoding_issues`, so a clean
+  PDF ends `garbled_text` and fails under Local-only
+  (`whillans-2021-psychology-behind-meeting-overload.pdf`, 1 in 91). The
+  "no encoding damage" rule lives in the worker, `validate_complete_inspection`
+  and `is_complete_native_inspection` (`engines/pdf_inspector.rs`). A tolerance
+  is a contract change, not a bug fix.
+- Mixed PDFs (some scanned pages) still need remote. The fix is a page splice of
+  `pagesNeedingOcr` through Vision, which needs per-page text from pdf-inspector.
+- The tray left-click fix in Tauri 2.12 is unverified by hand on macOS 27.
+- Scanned pages with `/Rotate` reach Vision sideways.
 
 Five, all low, from the verify pass over the 2026-09-12 fix.
 
@@ -54,7 +67,7 @@ Five, all low, from the verify pass over the 2026-09-12 fix.
 
 ## Next
 
-- **Audio epic, sprint 1 landed 2026-09-12, uncommitted.** One Swift worker on
+- **Audio epic, sprint 1 landed 2026-09-12, committed in `faaceb7`.** One Swift worker on
   the Neural Engine as the converter's fourth engine: SpeechAnalyzer words,
   FluidAudio speakers, Markdown turns. Transcribe follows `conversion_route`.
   A find, refute, fix review pass landed 24 fixes the same day, the run door
