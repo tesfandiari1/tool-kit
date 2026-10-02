@@ -19,7 +19,7 @@ webview or stored in plaintext application settings.
 
 ## Develop
 
-Requires Node 22.12+ (24 preferred), pnpm 11, and Rust 1.97. The repo pins
+Requires Node 22.12+ (24 preferred), pnpm 11, and Rust 1.99. The repo pins
 those in `.node-version`, `package.json`, and `rust-toolchain.toml`.
 
 ```bash
