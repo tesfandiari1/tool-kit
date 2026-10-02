@@ -78,7 +78,9 @@ impl BootstrapAuth {
         let Some((scheme, token)) = value.split_once(' ') else {
             return false;
         };
-        if !scheme.eq_ignore_ascii_case("Bearer") || token.contains(' ') {
+        // `validate_token` admits visible ASCII only, so a space inside the
+        // token fails there.
+        if !scheme.eq_ignore_ascii_case("Bearer") {
             return false;
         }
         let bytes = token.as_bytes();
@@ -155,6 +157,8 @@ mod tests {
 
         assert!(auth.authorizes(&headers(&format!("Bearer {TOKEN}"))));
         assert!(!auth.authorizes(&headers("Bearer wrong-wrong-wrong-wrong-wrong-wrong")));
+        assert!(!auth.authorizes(&headers(&format!("Bearer  {TOKEN}"))));
+        assert!(!auth.authorizes(&headers(&format!("Bearer {TOKEN} {TOKEN}"))));
     }
 
     #[test]

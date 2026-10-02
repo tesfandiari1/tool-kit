@@ -627,6 +627,32 @@ impl TestApp {
         }
         panic!("conversion did not reach a terminal state");
     }
+
+    /// Submits one clean PDF under `standard` and returns the accepted ids.
+    pub(crate) async fn submit_clean(&self, idempotency_key: &str) -> SeededJob {
+        let response = self
+            .submit(
+                multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "fixture.pdf"),
+                idempotency_key,
+                TOKEN,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let accepted = json_body(response).await;
+        SeededJob {
+            job_id: Uuid::parse_str(accepted["data"]["id"].as_str().unwrap()).unwrap(),
+            attempt_id: Uuid::parse_str(accepted["data"]["activeAttemptId"].as_str().unwrap())
+                .unwrap(),
+        }
+    }
+
+    /// Submits one clean PDF and returns once it has succeeded.
+    pub(crate) async fn submit_succeeded_job(&self, idempotency_key: &str) -> SeededJob {
+        let seeded = self.submit_clean(idempotency_key).await;
+        let completed = self.wait_for_terminal(&seeded.job_id.to_string()).await;
+        assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+        seeded
+    }
 }
 
 pub(crate) async fn test_app() -> TestApp {

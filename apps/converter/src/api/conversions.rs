@@ -623,12 +623,7 @@ fn has_container_magic(magic: ContainerMagic, prefix: &[u8]) -> bool {
 
 fn has_pdf_signature(prefix: &[u8]) -> bool {
     let without_bom = prefix.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(prefix);
-    let trimmed = without_bom
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .map(|index| &without_bom[index..])
-        .unwrap_or_default();
-    trimmed.starts_with(b"%PDF-")
+    without_bom.trim_ascii_start().starts_with(b"%PDF-")
 }
 
 fn parse_idempotency_key(headers: &HeaderMap, request_id: &RequestId) -> Result<String, ApiError> {

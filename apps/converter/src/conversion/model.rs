@@ -24,7 +24,7 @@ pub(crate) struct SourceFormat {
     pub magic: ContainerMagic,
     pub engine: LocalEngineKind,
     /// The family label AnyDoc reports in its diagnostics; used to check
-    /// manifest consistency for AnyDoc jobs. Unused for PDF and Vision.
+    /// manifest consistency for AnyDoc jobs. No other engine reads it.
     pub format_label: &'static str,
 }
 

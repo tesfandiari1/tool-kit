@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use tool_kit_converter::faults::FaultPoint;
 
-use support::{clean_pdf, json_body, multipart_body, SeededJob, TestApp, TestHarness, TOKEN};
+use support::{clean_pdf, json_body, SeededJob, TestApp, TestHarness};
 
 /// A parked worker never resumes, so an unreached barrier would hang the test
 /// run forever without a ceiling on the wait.
@@ -24,45 +24,11 @@ const BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 async fn park_at(app: &TestApp, point: FaultPoint, idempotency_key: &str) -> SeededJob {
     let barrier = app.fault_barrier();
     barrier.arm(point);
-
-    let response = app
-        .submit(
-            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "fixture.pdf"),
-            idempotency_key,
-            TOKEN,
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let accepted = json_body(response).await;
-    let seeded = SeededJob {
-        job_id: Uuid::parse_str(accepted["data"]["id"].as_str().unwrap()).unwrap(),
-        attempt_id: Uuid::parse_str(accepted["data"]["activeAttemptId"].as_str().unwrap()).unwrap(),
-    };
+    let seeded = app.submit_clean(idempotency_key).await;
 
     tokio::time::timeout(BARRIER_TIMEOUT, barrier.wait_reached())
         .await
         .expect("the worker never reached the armed fault point");
-    seeded
-}
-
-/// Submits one clean PDF and returns once it has succeeded.
-async fn submit_succeeded_job(app: &TestApp, idempotency_key: &str) -> SeededJob {
-    let response = app
-        .submit(
-            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "fixture.pdf"),
-            idempotency_key,
-            TOKEN,
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let submitted = json_body(response).await;
-    let seeded = SeededJob {
-        job_id: Uuid::parse_str(submitted["data"]["id"].as_str().unwrap()).unwrap(),
-        attempt_id: Uuid::parse_str(submitted["data"]["activeAttemptId"].as_str().unwrap())
-            .unwrap(),
-    };
-    let completed = app.wait_for_terminal(&seeded.job_id.to_string()).await;
-    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
     seeded
 }
 
@@ -347,8 +313,8 @@ async fn queued_job_survives_restart_on_its_original_attempt() {
 async fn an_unreadable_conversion_is_quarantined_instead_of_stopping_the_boot() {
     let harness = TestHarness::new();
     let app = harness.app().await;
-    let healthy = submit_succeeded_job(&app, "quarantine-healthy").await;
-    let poisoned = submit_succeeded_job(&app, "quarantine-poisoned").await;
+    let healthy = app.submit_succeeded_job("quarantine-healthy").await;
+    let poisoned = app.submit_succeeded_job("quarantine-poisoned").await;
     app.shutdown(Duration::from_secs(5)).await;
     drop(app);
 
@@ -392,8 +358,8 @@ async fn an_unreadable_conversion_is_quarantined_instead_of_stopping_the_boot() 
 async fn a_row_that_cannot_be_decoded_is_quarantined_instead_of_stopping_the_boot() {
     let harness = TestHarness::new();
     let app = harness.app().await;
-    let healthy = submit_succeeded_job(&app, "decode-healthy").await;
-    let corrupt = submit_succeeded_job(&app, "decode-corrupt").await;
+    let healthy = app.submit_succeeded_job("decode-healthy").await;
+    let corrupt = app.submit_succeeded_job("decode-corrupt").await;
     app.shutdown(Duration::from_secs(5)).await;
     drop(app);
 

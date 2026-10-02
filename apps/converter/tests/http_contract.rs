@@ -24,36 +24,15 @@ use support::{
     json_body, multipart_body, multipart_body_with_duplicate_profile,
     multipart_body_with_media_type, multipart_body_with_speaker_counts,
     multipart_body_without_source, pdf_with_content, slow_multipart_prefix,
-    slow_multipart_prefix_opening, streaming_body,
-    test_app, test_app_with_max_jobs, test_app_with_output_limit, test_app_with_poll_interval,
-    test_app_with_upload_limits, test_app_with_worker_script, SeededJob, TestApp, TestHarness,
-    TOKEN,
+    slow_multipart_prefix_opening, streaming_body, test_app, test_app_with_max_jobs,
+    test_app_with_output_limit, test_app_with_poll_interval, test_app_with_upload_limits,
+    test_app_with_worker_script, TestHarness, TOKEN,
 };
 
 async fn initialize_empty_harness(harness: &TestHarness) {
     let app = harness.app().await;
     app.shutdown(Duration::from_secs(1)).await;
     drop(app);
-}
-
-async fn submit_succeeded_job(app: &TestApp, idempotency_key: &str) -> SeededJob {
-    let response = app
-        .submit(
-            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "fixture.pdf"),
-            idempotency_key,
-            TOKEN,
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let submitted = json_body(response).await;
-    let seeded = SeededJob {
-        job_id: Uuid::parse_str(submitted["data"]["id"].as_str().unwrap()).unwrap(),
-        attempt_id: Uuid::parse_str(submitted["data"]["activeAttemptId"].as_str().unwrap())
-            .unwrap(),
-    };
-    let completed = app.wait_for_terminal(&seeded.job_id.to_string()).await;
-    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
-    seeded
 }
 
 #[tokio::test]
@@ -197,7 +176,7 @@ async fn readiness_fails_only_the_worker_check_after_the_runner_stops() {
 #[tokio::test]
 async fn readiness_probes_the_data_root_without_touching_stored_conversions() {
     let app = test_app().await;
-    let seeded = submit_succeeded_job(&app, "readiness-artifact-safety").await;
+    let seeded = app.submit_succeeded_job("readiness-artifact-safety").await;
     let jobs = count_job_directories(app.data_dir());
     let sources = count_named_files(app.data_dir(), "input");
     let markdown = count_named_files(app.data_dir(), "result.md");
@@ -232,7 +211,7 @@ async fn readiness_probes_the_data_root_without_touching_stored_conversions() {
 async fn startup_reconciliation_ignores_the_readiness_probe_directory() {
     let harness = TestHarness::new();
     let first = harness.app().await;
-    let seeded = submit_succeeded_job(&first, "readiness-reconciliation").await;
+    let seeded = first.submit_succeeded_job("readiness-reconciliation").await;
     assert_eq!(
         first
             .request(Method::GET, "/health/ready", None)
@@ -1277,7 +1256,7 @@ async fn corrupt_active_source_fails_recovery_without_creating_a_retry() {
 async fn finalizing_job_with_a_valid_published_bundle_completes_during_restart() {
     let harness = TestHarness::new();
     let first = harness.app().await;
-    let seeded = submit_succeeded_job(&first, "recover-valid-finalizing").await;
+    let seeded = first.submit_succeeded_job("recover-valid-finalizing").await;
     first.shutdown(Duration::from_secs(1)).await;
     drop(first);
     harness.demote_succeeded_to_finalizing(seeded).await;
@@ -1309,7 +1288,9 @@ async fn finalizing_job_with_a_valid_published_bundle_completes_during_restart()
 async fn corrupted_succeeded_bundle_is_persisted_failed_on_restart_and_retained_for_audit() {
     let harness = TestHarness::new();
     let first = harness.app().await;
-    let seeded = submit_succeeded_job(&first, "recover-corrupt-succeeded").await;
+    let seeded = first
+        .submit_succeeded_job("recover-corrupt-succeeded")
+        .await;
     first.shutdown(Duration::from_secs(1)).await;
     drop(first);
 
@@ -1369,7 +1350,7 @@ async fn corrupted_succeeded_bundle_is_persisted_failed_on_restart_and_retained_
 async fn database_less_canonical_job_is_quarantined_without_touching_an_owned_sibling() {
     let harness = TestHarness::new();
     let first = harness.app().await;
-    let owned = submit_succeeded_job(&first, "recover-owned-sibling").await;
+    let owned = first.submit_succeeded_job("recover-owned-sibling").await;
     first.shutdown(Duration::from_secs(1)).await;
     drop(first);
 
@@ -1414,7 +1395,7 @@ async fn invalid_finalizing_bundles_requeue_to_a_fresh_attempt() {
     for case in ["unknown-manifest-field", "extra-publication-file"] {
         let harness = TestHarness::new();
         let first = harness.app().await;
-        let seeded = submit_succeeded_job(&first, case).await;
+        let seeded = first.submit_succeeded_job(case).await;
         first.shutdown(Duration::from_secs(1)).await;
         drop(first);
         harness.demote_succeeded_to_finalizing(seeded).await;

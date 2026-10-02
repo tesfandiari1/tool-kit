@@ -1378,7 +1378,6 @@ fn validate_manifest(
     };
     // The document detail is engine-specific JSON, checked against the shape
     // of the engine that produced it.
-    let manifest_inspection = manifest.document.clone();
     let manifest_classification: &str = match engine.name.as_str() {
         "pdf-inspector" => {
             let document_inspection: Inspection = serde_json::from_value(manifest.document.clone())
@@ -1452,7 +1451,7 @@ fn validate_manifest(
         || manifest.route.reason_codes != job.reason_codes
         || manifest.warnings != attempt.warnings
         || manifest.warnings != job.warnings
-        || manifest_inspection != *inspection
+        || manifest.document != *inspection
         || classification != manifest_classification
         || manifest.output.media_type != MARKDOWN_MEDIA_TYPE
         || markdown_byte_length == 0
