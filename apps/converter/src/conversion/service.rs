@@ -682,6 +682,7 @@ impl ConversionService {
                     )
                     .await?;
                 self.discard_attempt(job_id, attempt_id).await;
+                self.discard_source(job_id).await;
                 tracing::info!(
                     %job_id,
                     %attempt_id,
@@ -910,14 +911,15 @@ impl ConversionService {
             status = "succeeded",
             "conversion attempt completed"
         );
-        self.discard_succeeded_source(job_id).await;
+        self.discard_source(job_id).await;
         Ok(())
     }
 
-    /// Never fails the job: a source left behind costs disk, not a result.
-    pub(crate) async fn discard_succeeded_source(&self, job_id: Uuid) {
-        if let Err(error) = self.artifacts.discard_succeeded_source(job_id).await {
-            tracing::warn!(%job_id, %error, "failed to remove a succeeded job's source");
+    /// Runs after the terminal commit. Never fails the job: a source left
+    /// behind costs disk, not a result.
+    pub(crate) async fn discard_source(&self, job_id: Uuid) {
+        if let Err(error) = self.artifacts.discard_source(job_id).await {
+            tracing::warn!(%job_id, %error, "failed to remove a terminal job's source");
         }
     }
 
@@ -956,6 +958,7 @@ impl ConversionService {
         self.repository
             .finish_failed(job_id, attempt_id, result)
             .await?;
+        self.discard_source(job_id).await;
         if discard_attempt {
             self.discard_attempt(job_id, attempt_id).await;
         }

@@ -157,7 +157,7 @@ impl StartupRecovery {
                 // Also sweeps the sources a build before this one kept, and
                 // any a crash left between the commit and the removal.
                 Ok(()) => {
-                    service.discard_succeeded_source(job.id).await;
+                    service.discard_source(job.id).await;
                     Ok(())
                 }
                 Err(ArtifactReadFailure::Integrity) => {
@@ -294,6 +294,7 @@ impl StartupRecovery {
                         },
                     )
                     .await?;
+                service.discard_source(job.id).await;
                 tracing::warn!(
                     job_id = %job.id,
                     attempt_id = %job.active_attempt.id,
@@ -444,6 +445,7 @@ async fn fail_source_integrity(
             },
         )
         .await?;
+    service.discard_source(job.id).await;
     tracing::warn!(
         job_id = %job.id,
         attempt_id = %job.active_attempt.id,

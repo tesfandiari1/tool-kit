@@ -570,11 +570,12 @@ impl ArtifactStore {
         .await
     }
 
-    /// Removes the stored source of a succeeded job. Nothing reads it again:
-    /// a succeeded job only ever leaves for `failed`, a replay matches the
-    /// stored fingerprint, and recovery checks a succeeded job's artifacts
-    /// alone. An hour of audio is otherwise a hidden gigabyte per job.
-    pub async fn discard_succeeded_source(&self, job_id: Uuid) -> Result<(), ArtifactError> {
+    /// Removes the stored source of a terminal job. Nothing reads it again: a
+    /// terminal job only ever leaves for `failed`, a replay matches the stored
+    /// fingerprint, and recovery checks a succeeded job's artifacts alone and
+    /// skips the other terminal states. An hour of audio is otherwise a hidden
+    /// gigabyte per job.
+    pub async fn discard_source(&self, job_id: Uuid) -> Result<(), ArtifactError> {
         let relative = source_relative_path(job_id);
         if optional_metadata(&self.resolve_relative(&relative)?)
             .await?

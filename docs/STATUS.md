@@ -53,9 +53,6 @@ From 2026-10-01:
 
 Open decisions from the 2026-10-02 code review, one per owner call:
 
-- The converter keeps the source of a failed or `needs_remote` job, up to 1 GiB
-  for a recording. No path reads it again, so deleting it is safe. A retention
-  call.
 - A recording transcribed before a same-stem PDF converts makes the tree pair
   `lecture.md` with the PDF and `lecture (1).md` with the recording. Nothing
   bills twice, but the PDF row opens the transcript. Recommended: keep it until

@@ -892,6 +892,8 @@ async fn anydoc_output_ceiling_fails_closed() {
         completed["data"]["failure"]["code"],
         "document_exceeds_limits"
     );
+    app.wait_for_job_runner_idle().await;
+    assert_eq!(count_named_files(app.data_dir(), "input"), 0);
 }
 
 #[tokio::test]
@@ -1219,6 +1221,7 @@ async fn recovery_limit_produces_a_stable_failure_without_another_attempt() {
         seeded.attempt_id.to_string()
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
+    assert_eq!(count_named_files(harness.data_dir(), "input"), 0);
 }
 
 #[tokio::test]
@@ -1245,6 +1248,7 @@ async fn corrupt_active_source_fails_recovery_without_creating_a_retry() {
         seeded.attempt_id.to_string()
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
+    assert!(!source.exists());
 }
 
 /// A build before this one kept every succeeded job's source, which for audio
@@ -1973,7 +1977,9 @@ async fn non_text_pdf_never_publishes_partial_markdown() {
         .await;
     assert_eq!(markdown.status(), StatusCode::NOT_FOUND);
     assert_eq!(count_job_directories(app.data_dir()), 1);
-    assert_eq!(count_named_files(app.data_dir(), "input"), 1);
+    // The status commits before the source is removed, so wait for the runner.
+    app.wait_for_job_runner_idle().await;
+    assert_eq!(count_named_files(app.data_dir(), "input"), 0);
     assert_eq!(count_named_files(app.data_dir(), "result.md"), 0);
 }
 
@@ -2320,7 +2326,8 @@ async fn worker_timeout_and_crash_fail_only_the_job() {
         assert_eq!(completed["data"]["status"], "failed");
         assert_eq!(completed["data"]["failure"]["code"], expected_code);
         assert_eq!(count_job_directories(app.data_dir()), 1);
-        assert_eq!(count_named_files(app.data_dir(), "input"), 1);
+        app.wait_for_job_runner_idle().await;
+        assert_eq!(count_named_files(app.data_dir(), "input"), 0);
         assert_eq!(count_named_files(app.data_dir(), "result.md"), 0);
         assert!(!app.job_runner_failed());
 
