@@ -69,15 +69,24 @@ jobs:
       # ponytail: empty placeholders satisfy the existence probe, which is all
       # this job needs. It compiles and unit-tests, it never bundles. Anything
       # that bundles or runs the sidecar must run `pnpm sidecars` for real.
+      # The names come from tauri.conf.json, so a new sidecar or resource
+      # cannot break this job again. A resource path with a dot is a file,
+      # any other is a folder.
       - name: Stage placeholder sidecar artifacts
+        working-directory: apps/desktop/src-tauri
         run: |
-          mkdir -p apps/desktop/src-tauri/binaries \
-                   apps/desktop/src-tauri/resources/pdf-inspector/bcmaps
-          touch apps/desktop/src-tauri/binaries/tool-kit-converter-aarch64-apple-darwin \
-                apps/desktop/src-tauri/binaries/tool-kit-pdf-worker-aarch64-apple-darwin \
-                apps/desktop/src-tauri/binaries/tool-kit-vision-worker-aarch64-apple-darwin \
-                apps/desktop/src-tauri/resources/pdf-inspector/pdf-inspector-MIT.txt \
-                apps/desktop/src-tauri/resources/pdf-inspector/adobe-bcmaps.txt
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          for bin in $(jq -r '.bundle.externalBin[]' tauri.conf.json); do
+            mkdir -p "$(dirname "$bin")"
+            touch "$bin-$triple"
+          done
+          for res in $(jq -r '.bundle.resources | keys[]' tauri.conf.json); do
+            [ -e "$res" ] && continue
+            case "$(basename "$res")" in
+              *.*) mkdir -p "$(dirname "$res")" && touch "$res" ;;
+              *) mkdir -p "$res" ;;
+            esac
+          done
       - run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib
 
