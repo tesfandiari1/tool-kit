@@ -88,10 +88,8 @@ async fn conversion_service_compatibility_live() {
         .file_name()
         .and_then(|name| name.to_str())
         .expect("conversion source must have a UTF-8 filename");
-    let media_type = mime_guess::from_path(source)
-        .first_or_octet_stream()
-        .essence_str()
-        .to_string();
+    // The upload's own mapping, so an m4a asks for the type it will send.
+    let media_type = crate::media_type(source);
 
     let capabilities = conversion_service::fetch_capabilities(&base_url)
         .await

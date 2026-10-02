@@ -96,7 +96,7 @@ fn ensure_workspace(app: AppHandle) -> Result<Option<workspace::WorkspaceInfo>, 
     let Some(path) = settings::load(&app).workspace_path else {
         return Ok(None);
     };
-    let info = workspace::setup_workspace(&path)?;
+    let info = workspace::adopt_workspace(&path)?;
     // After the folder rename, never before: the settings name that path.
     workspace::migrate_settings(&app);
     Ok(Some(info))
@@ -205,20 +205,11 @@ fn collect_files_where(
     inputs: &[String],
     accepts: &dyn Fn(&Path) -> bool,
 ) -> Vec<std::path::PathBuf> {
-    // Dotfiles only while walking in. A dropped dot-path is still honoured.
-    let hidden = |p: &Path| -> bool {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with('.'))
-            .unwrap_or(false)
-    };
-
     fn walk(
         dir: &Path,
         depth: usize,
         files: &mut Vec<std::path::PathBuf>,
         accepts: &dyn Fn(&Path) -> bool,
-        hidden: &dyn Fn(&Path) -> bool,
     ) {
         if depth > MAX_SCAN_DEPTH {
             return;
@@ -227,12 +218,13 @@ fn collect_files_where(
             return;
         };
         for entry in entries.flatten() {
-            let p = entry.path();
-            if hidden(&p) {
+            // Dotfiles only while walking in. A dropped dot-path is still honoured.
+            if entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
+            let p = entry.path();
             match entry.file_type() {
-                Ok(t) if t.is_dir() => walk(&p, depth + 1, files, accepts, hidden),
+                Ok(t) if t.is_dir() => walk(&p, depth + 1, files, accepts),
                 Ok(t) if t.is_file() && accepts(&p) => files.push(p),
                 _ => {}
             }
@@ -243,14 +235,13 @@ fn collect_files_where(
     for input in inputs {
         let path = Path::new(input);
         if path.is_dir() {
-            walk(path, 0, &mut files, &accepts, &hidden);
+            walk(path, 0, &mut files, &accepts);
         } else if path.is_file() && accepts(path) {
             files.push(path.to_path_buf());
         }
     }
     // Canonicalize so a file reached twice, itself and its folder, queues once.
     files.sort();
-    files.dedup();
     let mut seen = std::collections::HashSet::new();
     files.retain(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
     files
@@ -346,16 +337,21 @@ fn require_backend_capacity(
     }
 }
 
+/// What one job could send the service, before capabilities narrow it. Audio
+/// never becomes a Convert job, whatever the service advertises.
+fn backend_candidates(inputs: &[String], jt: JobType) -> Vec<std::path::PathBuf> {
+    match jt {
+        JobType::Convert => fallback_conversion_files(inputs),
+        JobType::Transcribe => collect_input_files(inputs, JobType::Transcribe),
+    }
+}
+
 async fn plan_backend_conversion_files(
     inputs: &[String],
     backend_url: &str,
     jt: JobType,
 ) -> Result<NativeConversionPlan, String> {
-    // Audio never becomes a Convert job, whatever the service advertises.
-    let candidates = match jt {
-        JobType::Convert => fallback_conversion_files(inputs),
-        JobType::Transcribe => collect_input_files(inputs, JobType::Transcribe),
-    };
+    let candidates = backend_candidates(inputs, jt);
     if jt == JobType::Convert && candidates.iter().all(|file| is_permanent_direct(file)) {
         return Ok(route_conversion_candidates(candidates, &HashSet::new(), jt));
     }
@@ -452,21 +448,17 @@ struct Scan {
     nodes: Vec<InputNode>,
 }
 
+/// The job a file feeds, read off its extension alone.
+fn job_of(path: &Path) -> Option<JobType> {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(|ext| tree::job_for(&ext.to_lowercase()))
+}
+
 /// Describe each dropped path for the drop well. One walk per input, and the
 /// same walk the run makes, so the well and the run cannot disagree.
 fn describe_inputs(inputs: &[String]) -> Vec<InputNode> {
-    let takeable = |path: &Path| -> bool {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .and_then(|ext| tree::job_for(&ext.to_lowercase()))
-            .is_some()
-    };
-    let job_of = |path: &Path| -> Option<&'static str> {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .and_then(|ext| tree::job_for(&ext.to_lowercase()))
-            .map(|jt| jt.id())
-    };
+    let takeable = |path: &Path| job_of(path).is_some();
     let name_of = |path: &Path| -> String {
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -482,7 +474,7 @@ fn describe_inputs(inputs: &[String]) -> Vec<InputNode> {
                     name: name_of(path),
                     path: input.clone(),
                     is_dir: false,
-                    job: job_of(path),
+                    job: job_of(path).map(|jt| jt.id()),
                     matches: Vec::new(),
                     truncated: 0,
                 };
@@ -499,7 +491,7 @@ fn describe_inputs(inputs: &[String]) -> Vec<InputNode> {
                             .unwrap_or(file)
                             .to_string_lossy()
                             .into_owned(),
-                        job: job_of(file)?,
+                        job: job_of(file)?.id(),
                         path: file.to_string_lossy().into_owned(),
                     })
                 })
@@ -516,16 +508,34 @@ fn describe_inputs(inputs: &[String]) -> Vec<InputNode> {
         .collect()
 }
 
-/// The scan's read of one job's plan. A host that cannot name an origin reads
-/// the same as a service that cannot answer.
-async fn planned_files(
+/// One job's files for the scan, direct-routed first, and how many of them are
+/// direct. `origin` is `None` on the direct route. A host that cannot name an
+/// origin reads the same as a service that cannot answer.
+async fn scan_files(
     inputs: &[String],
-    origin: &Result<String, String>,
+    origin: Option<&Result<String, String>>,
     jt: JobType,
-) -> Result<NativeConversionPlan, String> {
-    match origin {
-        Ok(origin) => plan_backend_conversion_files(inputs, origin, jt).await,
-        Err(error) => Err(error.clone()),
+) -> (Vec<std::path::PathBuf>, usize) {
+    let plan = match origin {
+        None => {
+            let files = collect_input_files(inputs, jt);
+            let direct_len = files.len();
+            return (files, direct_len);
+        }
+        Some(Ok(origin)) => plan_backend_conversion_files(inputs, origin, jt).await,
+        Some(Err(error)) => Err(error.clone()),
+    };
+    match plan {
+        Ok(mut plan) => {
+            let direct_len = plan.direct.len();
+            plan.direct.append(&mut plan.backend);
+            (plan.direct, direct_len)
+        }
+        // The frontend's own probe owns the outage message. The route is
+        // unknown, so the candidate list stands: the direct-only set drops
+        // odt, rtf and every other backend-only format. Nothing is
+        // reuse-checked while nothing is routed.
+        Err(_) => (backend_candidates(inputs, jt), 0),
     }
 }
 
@@ -537,39 +547,10 @@ async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String
     // `run_pipeline` keeps the backend-routed tail out of the reuse lookup too.
     let backend_route = cfg.conversion_route == settings::ConversionRoute::Backend;
     // A service still starting reads the same as one that cannot answer.
-    let origin = backend_host::backend_origin(&app);
-    let (convert, direct_len) = if backend_route {
-        match planned_files(&inputs, &origin, JobType::Convert).await {
-            Ok(mut plan) => {
-                let direct_len = plan.direct.len();
-                plan.direct.append(&mut plan.backend);
-                (plan.direct, direct_len)
-            }
-            // The frontend's own probe owns the outage message. The route is
-            // unknown, so the candidate list stands: the direct-only set drops
-            // odt, rtf and every other backend-only format. Nothing is
-            // reuse-checked while nothing is routed.
-            Err(_) => (fallback_conversion_files(&inputs), 0),
-        }
-    } else {
-        let files = collect_input_files(&inputs, JobType::Convert);
-        let direct_len = files.len();
-        (files, direct_len)
-    };
-    let (transcribe, transcribe_direct_len) = if backend_route {
-        match planned_files(&inputs, &origin, JobType::Transcribe).await {
-            Ok(mut plan) => {
-                let direct_len = plan.direct.len();
-                plan.direct.append(&mut plan.backend);
-                (plan.direct, direct_len)
-            }
-            Err(_) => (collect_input_files(&inputs, JobType::Transcribe), 0),
-        }
-    } else {
-        let files = collect_input_files(&inputs, JobType::Transcribe);
-        let direct_len = files.len();
-        (files, direct_len)
-    };
+    let origin = backend_route.then(|| backend_host::backend_origin(&app));
+    let (convert, direct_len) = scan_files(&inputs, origin.as_ref(), JobType::Convert).await;
+    let (transcribe, transcribe_direct_len) =
+        scan_files(&inputs, origin.as_ref(), JobType::Transcribe).await;
     let convert_reuse = split_reusable(&app, &convert[..direct_len], JobType::Convert, &cfg);
     let transcribe_reuse = split_reusable(
         &app,
@@ -1020,11 +1001,7 @@ fn import_into_project(
         return Err("That project folder is not there any more".into());
     }
     // Anything either job takes: a drop is filed before it is classified.
-    let importable = |p: &Path| -> bool {
-        p.extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| tree::job_for(&e.to_lowercase()).is_some())
-    };
+    let importable = |p: &Path| job_of(p).is_some();
 
     // Copy one file in unless it is already there, and carry its results over.
     // Reuse is keyed on the source path, so an import otherwise pays again.
@@ -1213,12 +1190,7 @@ async fn convert_one(
             "That file is not there any more.",
         ));
     }
-    let extension = source
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let Some(jt) = tree::job_for(&extension) else {
+    let Some(jt) = job_of(&source) else {
         return Ok(ConvertOneOutcome::blocked(
             "not_convertible",
             "Tool-Kit has no job that takes this kind of file.",
@@ -1418,17 +1390,20 @@ fn stop_run(app: AppHandle, state: State<JobManager>) -> Result<usize, String> {
     Ok(stopped)
 }
 
+/// Put a row back in the queue, for Retry and Retry all alike.
+fn requeue(job: &mut Job) {
+    job.status = "queued".into();
+    job.progress_note = "Queued".into();
+    job.error = None;
+    job.started_at = None;
+}
+
 #[tauri::command]
 fn retry_job(app: AppHandle, state: State<JobManager>, id: u64) -> Result<(), String> {
     // Retrying joins the current run, so a later Stop cancels it too.
     let generation = state.generation();
     let updated = state
-        .update(id, |j| {
-            j.status = "queued".into();
-            j.progress_note = "Queued".into();
-            j.error = None;
-            j.started_at = None;
-        })
+        .update(id, requeue)
         .ok_or_else(|| "Job not found".to_string())?;
     // Emit now: a permit can take minutes, and a failed row invites a click.
     let _ = app.emit("job-updated", updated);
@@ -1444,12 +1419,7 @@ fn retry_failed(app: AppHandle, state: State<JobManager>) -> Result<usize, Strin
     let mut ids = Vec::new();
     for job in state.list() {
         if job.status == "failed" {
-            if let Some(updated) = state.update(job.id, |j| {
-                j.status = "queued".into();
-                j.progress_note = "Queued".into();
-                j.error = None;
-                j.started_at = None;
-            }) {
+            if let Some(updated) = state.update(job.id, requeue) {
                 let _ = app.emit("job-updated", updated);
                 ids.push(job.id);
             }
@@ -1497,7 +1467,8 @@ mod document_io {
     use std::path::{Path, PathBuf};
     use std::time::UNIX_EPOCH;
 
-    #[derive(Debug)]
+    #[derive(Debug, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct Document {
         pub text: String,
         pub mtime_ms: u64,
@@ -1566,20 +1537,9 @@ mod document_io {
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DocumentPayload {
-    text: String,
-    mtime_ms: u64,
-}
-
 #[tauri::command]
-fn read_document(path: String) -> Result<DocumentPayload, String> {
-    let doc = document_io::read(Path::new(&path), MAX_PREVIEW_BYTES)?;
-    Ok(DocumentPayload {
-        text: doc.text,
-        mtime_ms: doc.mtime_ms,
-    })
+fn read_document(path: String) -> Result<document_io::Document, String> {
+    document_io::read(Path::new(&path), MAX_PREVIEW_BYTES)
 }
 
 /// Copy's own ceiling: a result too large to edit is still worth copying.
@@ -1650,9 +1610,7 @@ fn toggle_main_window(app: &AppHandle) {
         if visible && focused {
             let _ = w.hide();
         } else {
-            let _ = w.show();
-            let _ = w.unminimize();
-            let _ = w.set_focus();
+            show_main_window(app);
         }
     }
 }
@@ -1765,13 +1723,10 @@ pub fn run() {
                 };
                 // Not SUPER|SHIFT+V: macOS "Paste and Match Style", system-wide.
                 let toggle = Shortcut::new(Some(Modifiers::ALT | Modifiers::SUPER), Code::KeyV);
-                let toggle_for_handler = toggle;
                 app.handle().plugin(
                     tauri_plugin_global_shortcut::Builder::new()
                         .with_handler(move |app, scut, event| {
-                            if scut == &toggle_for_handler
-                                && event.state() == ShortcutState::Pressed
-                            {
+                            if scut == &toggle && event.state() == ShortcutState::Pressed {
                                 toggle_main_window(app);
                             }
                         })

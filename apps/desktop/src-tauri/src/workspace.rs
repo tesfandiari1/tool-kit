@@ -143,7 +143,7 @@ pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
     };
 
     // Record the seed once the file is there, so deleting it later is final.
-    if !workspace.welcome_seeded && (welcome_path.is_some() || welcome.exists()) {
+    if !workspace.welcome_seeded && welcome.exists() {
         workspace.welcome_seeded = true;
         let _ = write_json(&workspace_file, &workspace);
     }
@@ -168,6 +168,13 @@ pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
         catch_all_path: CATCH_ALL_TITLE.to_string(),
         welcome_path,
     })
+}
+
+/// Adopt the workspace this install is bound to. Never creates one: a folder
+/// moved or unmounted since errors, where setup would mint a decoy in its place.
+pub fn adopt_workspace(path: &str) -> Result<WorkspaceInfo, String> {
+    require_workspace(Path::new(path))?;
+    setup_workspace(path)
 }
 
 /// The welcome file an earlier setup left behind. The gate runs only with no
@@ -332,21 +339,16 @@ fn list_projects_at(workspace: &Path) -> Result<Vec<ProjectSummary>, String> {
     let mut stmt = conn
         .prepare("SELECT id, title, path, created_at FROM projects ORDER BY created_at, id")
         .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(ProjectSummary {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                path: row.get(2)?,
-                created_at: row.get(3)?,
-            })
+    stmt.query_map([], |row| {
+        Ok(ProjectSummary {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            path: row.get(2)?,
+            created_at: row.get(3)?,
         })
-        .map_err(|e| e.to_string())?;
-    let mut projects = Vec::new();
-    for row in rows {
-        projects.push(row.map_err(|e| e.to_string())?);
-    }
-    Ok(projects)
+    })
+    .and_then(Iterator::collect)
+    .map_err(|e| e.to_string())
 }
 
 /// The workspace's `.toolkit` directory, or an error naming the missing folder.
@@ -659,6 +661,20 @@ mod tests {
         // So the same name is still free once the index is reachable again.
         std::fs::remove_dir(root.join(".toolkit/index.db")).unwrap();
         assert!(create_project_at(root, "Acme").is_ok());
+    }
+
+    /// `ensure_workspace` runs on every launch. A folder moved in Finder must
+    /// error there, or an empty decoy at the old path hides the real library.
+    #[test]
+    fn adopting_a_moved_workspace_errors_instead_of_minting_a_decoy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = workspace_path(&dir);
+        setup_workspace(&path).unwrap();
+        std::fs::rename(&path, dir.path().join("moved")).unwrap();
+
+        let err = adopt_workspace(&path).unwrap_err();
+        assert!(err.contains("Workspace not found"), "unexpected: {err}");
+        assert!(!Path::new(&path).exists(), "a decoy workspace was created");
     }
 
     #[test]

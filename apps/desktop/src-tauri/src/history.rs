@@ -122,16 +122,11 @@ pub fn init(app: &AppHandle) -> History {
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             open(&dir.join("history.db")).map_err(|e| e.to_string())
         });
-    match db {
-        Ok(conn) => History {
-            db: Mutex::new(Some(conn)),
-        },
-        Err(e) => {
-            eprintln!("[tool-kit] history unavailable: {e}");
-            History {
-                db: Mutex::new(None),
-            }
-        }
+    History {
+        db: Mutex::new(
+            db.inspect_err(|e| eprintln!("[tool-kit] history unavailable: {e}"))
+                .ok(),
+        ),
     }
 }
 
@@ -813,7 +808,7 @@ fn with_db<T>(app: &AppHandle, f: impl FnOnce(&Connection) -> rusqlite::Result<T
     match f(conn) {
         Ok(v) => Some(v),
         Err(e) => {
-            eprintln!("[tool-kit] history write failed: {e}");
+            eprintln!("[tool-kit] history query failed: {e}");
             None
         }
     }
