@@ -195,10 +195,6 @@ gates. The ones that mattered:
   including download exists).
 - **A 60-minute file.** Both engines chunk or stream, neither is measured past
   16 minutes here. Gate on memory as much as on words.
-- **History provenance.** `output_format_for` files backend rows under
-  `backend:markdown`, which no reuse lookup asks for. Already on the STATUS
-  Next list for Convert. Transcribe on the Backend route re-runs every file
-  the same way until it lands.
 - **Container widening**, each with a fixture, and the Rev.ai fallback
   question once a rejection has been seen in the wild.
 

@@ -20,12 +20,15 @@ The service process is CPU-only. It links no OCR, model-serving, PDFium, ONNX,
 or accelerator runtime. Local OCR and transcription run in the macOS Vision and
 audio workers it spawns. Where the Vision worker runs, it reads images, and a
 PDF with no text on any page converts through it on route `local_vision`. A
-scan with a page Vision reads no text on publishes with the
-`pages_without_extractable_text` warning. A scan gets the PDF timeout plus 1
-second per page, capped at 10 minutes or the PDF timeout, whichever is longer.
-Other scanned, image-based, mixed, garbled, incomplete, or over-ceiling PDFs
-finish as `needs_remote` without publishing partial Markdown. Datalab routing
-is not active yet.
+mixed, `ocr_required` or `garbled_text` PDF takes the same route: the PDF
+worker stages each native page's Markdown in `native-pages.json`, Vision reads
+only the other pages, and the two are spliced in page order. OCR over a native
+page loses figures the text layer holds exactly. A scan with a page Vision
+reads no text on publishes with the `pages_without_extractable_text` warning.
+A scan gets the PDF timeout plus 1 second per page, capped at 10 minutes or
+the PDF timeout, whichever is longer. Every other incomplete or over-ceiling
+PDF finishes as `needs_remote` without publishing partial Markdown. Datalab
+routing is not active yet.
 
 Where the Vision worker runs on macOS 27, a DOCX or PPTX picture with no alt
 text gains an `*Image: …*` line from Apple's on-device Foundation Models at the

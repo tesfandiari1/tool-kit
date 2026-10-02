@@ -10,10 +10,10 @@ Closed work is in [`archive/`](archive/README.md).
 
 | Item | Value |
 | --- | --- |
-| Branch tip | `main`, not pushed. Sprint 1, local PDF OCR, image descriptions, the 2026-10-01 upgrades and the 2026-10-02 code-review fixes (`44867b9` to `aaea300`) are committed |
+| Branch tip | `main`, not pushed. Sprint 1, local PDF OCR, image descriptions, the 2026-10-01 upgrades, the 2026-10-02 code-review fixes (`44867b9` to `aaea300`) and the 2026-10-02 PDF splice (`87d482b`) are committed |
 | OpenAPI contract | 0.5.0 (`contract/http/openapi.yaml`). The converter crate moves with it |
 | Desktop version | 1.0.0 (`package.json`, `Cargo.toml`, `tauri.conf.json`) |
-| Installed bundle | Stale: `/Applications/Tool-Kit.app` was built 2026-10-01 23:32 and predates the 2026-10-02 code-review fixes. No gate rebuilds it |
+| Installed bundle | Stale: `/Applications/Tool-Kit.app` was built 2026-10-01 23:32 and predates the 2026-10-02 code-review fixes and the PDF splice. No gate rebuilds it |
 | Backend | M0 to M4 complete. M5 unbuilt. M7 cancelled |
 | Desktop | M6 landed. Gate open on CVR-067 and CVR-081 |
 | Service | Sidecar inside the `.app`, loopback only. Docker needs a `backend-override.json` that only `pnpm backend:docker` writes |
@@ -34,18 +34,9 @@ Behaviour that is a decision, not an accident:
 
 ## Known issues
 
-From 2026-10-01:
-
-- A lone U+FFFD sets pdf-inspector 1.25's `has_encoding_issues`, so a clean
-  PDF ends `garbled_text` and fails under Local-only
-  (`whillans-2021-psychology-behind-meeting-overload.pdf`, 1 in 91). The
-  "no encoding damage" rule lives in the worker, `validate_complete_inspection`
-  and `is_complete_native_inspection` (`engines/pdf_inspector.rs`). A tolerance
-  is a contract change, not a bug fix.
-- Mixed PDFs (some scanned pages) still need remote. The fix is a page splice of
-  `pagesNeedingOcr` through Vision, which needs per-page text from pdf-inspector.
 - The tray left-click fix in Tauri 2.12 is unverified by hand on macOS 27.
-- Scanned pages with `/Rotate` reach Vision sideways.
+- The PDF splice (`87d482b`) records a mixed PDF's classification as
+  `image_based`, because the Vision engine reports every conversion that way.
 - A crash between migration 0006's `COMMIT` and sqlx's bookkeeping row makes
   every later start fail with `duplicate column speaker_count`. Recovery: rename
   the converter data folder (`<app_data>/converter`). The window is milliseconds
@@ -67,23 +58,12 @@ Open decisions from the 2026-10-02 code review, one per owner call:
   desktop `lib.rs`, `routes.ts`). The desktop reads it only during an outage,
   so a stale copy can only fail to unblock a run. Recommended: keep the copies.
 
-Five, all low, from the verify pass over the 2026-09-12 fix.
+One low item left from the verify pass over the 2026-09-12 fix:
 
 - While the service is down, the scan counts every non-text, non-media
   extension, so the blocked hint can over-count a drop with junk in it. It
-  self-corrects on the recovery re-scan. Fix: narrow `fallback_conversion_files`
-  (`src-tauri/src/lib.rs`).
-- A folder whose refresh read fails without being gone shows an open branch
-  with no rows after one toast. Fix: cache a failure marker in `read` and render
-  a quiet row (`src/shell/useProjectTree.ts`,
-  `src/domains/library/ProjectTree.tsx`).
-- `open` in `useDocuments` depends on `docs`, so every door changes identity per
-  keystroke and App wraps `revealJob` in `useEffectEvent` for it. Fix: check
-  the open list through `docsRef` (`src/shell/useDocuments.ts`).
-- `rustfmt --check` is dirty at one site each in `tree.rs` and
-  `workspace.rs`. Fix: `cargo fmt` in its own commit.
-- `fileGlyph` maps `heic` and `m4v`, which no job accepts. Fix: drop both
-  (`src/domains/library/fileGlyph.ts`).
+  self-corrects on the recovery re-scan. A fix needs a fourth copy of the
+  converter's format list. Recommended: close it.
 
 ## Next
 
@@ -105,7 +85,8 @@ Five, all low, from the verify pass over the 2026-09-12 fix.
 - **Provenance-aware history reuse.** `jobs::output_format_for` yields a plain
   Datalab format, so a Convert result filed under `backend:markdown` never
   matches and every backend-converted document re-runs. It costs time, never
-  correctness. Transcripts already match on either route.
+  correctness. Transcripts already match on either route. On 2026-10-02
+  `history.db` held 96 converted sources and none ran twice.
 - **The M6 gate.** CVR-067 waits on M5. CVR-081 wants direct-path baselines over
   about ten files against the backend path before any cutover.
 
