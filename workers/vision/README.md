@@ -1,8 +1,12 @@
-# Vision tools
+# Vision worker and tools
 
-Development tools for judging Apple Vision's output on real documents. Nothing
-in the converter calls them. They exist so the quality question gets answered
-before the protocol worker is written.
+`main.swift` is `tool-kit-vision-worker`, the converter's Vision engine. It
+reads an image or a scanned PDF into Markdown, and describes DOCX and PPTX
+pictures through `--describe`. Its wire contract is
+`crates/worker-protocol/src/vision.rs`, and `pnpm sidecars` builds and stages it.
+
+`tk-vision` and `pdf2png` are development tools for judging Apple Vision's
+output on real documents. Nothing in the converter calls them.
 
 `swiftc` ships with the Command Line Tools, so there is no Xcode, no SwiftPM,
 no dependency, and no lockfile. `bin/` is gitignored.

@@ -223,13 +223,13 @@ export interface components {
             /**
              * @description Whether local OCR applies language correction to the text it recognizes. Omit the part to leave it on. A value other than `true` or `false` is 422 `invalid_language_correction`.
              *
-             *     Read only by the local image OCR engine and ignored by every other route, so sending it with a PDF or an Office document changes nothing.
+             *     Read only by the local Vision OCR engine, which reads images and PDFs with no text on any page. Every other route ignores it, so sending it with a text PDF or an Office document changes nothing.
              */
             languageCorrection?: boolean;
             /**
              * @description Words local OCR should prefer when it is unsure, one per line. Omit the part to send none. The field shares the 256-byte cap every text part has, and exceeding it is 422 `metadata_too_large`.
              *
-             *     Read only by the local image OCR engine and ignored by every other route.
+             *     Read only by the local Vision OCR engine, which reads images and PDFs with no text on any page. Every other route ignores it.
              */
             customWords?: string;
             /**

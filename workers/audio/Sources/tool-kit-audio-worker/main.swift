@@ -3,9 +3,10 @@
 // Spawned the way apps/converter/src/engines/vision.rs spawns
 // tool-kit-vision-worker: cleared environment, staging directory as argv[1],
 // attempt directory as the working directory, source bytes on stdin, stdout
-// and stderr on /dev/null. The report file is the only channel back, so every
-// decision has to land there. Exit 0 once a report is written, 70 on any
-// failure.
+// on /dev/null. The converter logs the last stderr line of a failed run, so a
+// fail() note reaches converter.log. The report file is the only channel the
+// converter acts on, so every decision has to land there. Exit 0 once a
+// report is written, 70 on any failure.
 //
 // `--fetch diarizer <dir>` is the only path that downloads models, and the
 // build scripts drive it. A job still lets the OS install SpeechAnalyzer locale

@@ -15,7 +15,7 @@ beside the input.
 | Job | Service | In → Out |
 |---|---|---|
 | Convert | Datalab (`/api/v1/convert`, or a pinned pipeline) | PDF / DOCX / images / … → markdown |
-| Transcribe | Local worker (SpeechAnalyzer + FluidAudio, Neural Engine); Rev.ai on the Direct route | audio / video → transcript (`.md` locally, `.txt` from Rev.ai) |
+| Transcribe | Local worker (SpeechAnalyzer + FluidAudio, Neural Engine). Rev.ai on the Direct route, and on the backend route for a recording the local worker cannot take (`ogg`, `aac`, `mkv`, …) | audio / video → transcript (`.md` locally, `.txt` from Rev.ai) |
 
 The bundle builds `app` + `dmg` only, and the four spawned sidecars plus the
 loopback converter rule out the Mac App Store.
@@ -257,7 +257,9 @@ image, so images and recordings convert locally in Sidecar mode only.
   - **Never do the same work twice**, and **ask per file, never per route**. A
     result in the output folder means nothing happens, one elsewhere is copied,
     the rest go to the provider. Backend rows file under `backend:markdown` or
-    `backend_fallback:{format}`, which never match.
+    `backend_fallback:{format}`, which a Convert lookup never matches. A
+    Transcribe lookup also matches `backend:markdown`, so a transcript counts
+    as done on either route and a route switch never bills Rev.ai again.
 - **`secrets.rs`**: keys in the **data protection keychain**, service
   `dev.esfandiari.toolkit`, group `92MA44797J.dev.esfandiari.toolkit`, accounts
   `datalab`/`revai`/`backend`. They never reach the webview or disk, and `set_key`
@@ -269,9 +271,9 @@ image, so images and recordings convert locally in Sidecar mode only.
 - **`tree.rs`**: one directory level from disk, owning every listing rule: the
   workspace-escape check, the dotfile and `project.json` filter, natural sort
   with folders interleaved, the source-to-result pairing (sibling stem plus
-  `result_extensions_for`, `{stem} (n).{ext}`), the 500-entry cap, and whether a
-  row opens. It holds no Tauri types, and `list_project_files` runs it off the
-  AppKit main thread.
+  `result_extensions_for`, `{stem} (n).{ext}`, documents before recordings), the
+  500-entry cap, and whether a row opens. It holds no Tauri types, and
+  `list_project_files` runs it off the AppKit main thread.
 - **`workspace.rs`**: the library is one folder, created or adopted. Identity
   is `.toolkit/workspace.json`, never the path, so a Finder rename changes
   nothing.
@@ -390,9 +392,9 @@ self-hosted: two OFL families plus DaVinci, licensed.
   dev`, or `?gallery` for the primitives.
 - **`Contents/Resources/fluidaudio/speaker-diarization-coreml` is the diarizer's
   parent directory.** FluidAudio keeps `speaker-diarization/` inside it, so
-  every env names the parent. A staged audio worker with no models fails the
-  converter's start by design: that is a packaging bug, not a host without the
-  engine.
+  every env names the parent. A staged audio worker with no models, or with
+  any of the six entries in `DIARIZER_LAYOUT` missing, fails the converter's
+  start by design: that is a packaging bug, not a host without the engine.
 - **`workers/audio` is the one SwiftPM build in the tree.** Its first
   `swift build` fetches FluidAudio and a prebuilt xcframework, and
   `build-sidecars.sh` fetches the 21 MB diarizer set once into

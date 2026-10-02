@@ -16,12 +16,16 @@ Stronger parser isolation, per-device credentials, TLS, and backups remain in
 Phase 3 of [`../../docs/STATUS.md`](../../docs/STATUS.md). M4 is complete. Datalab
 routing inside the backend is Phase 2 and is not active yet.
 
-The service is permanently CPU-only. It contains no local OCR, model-serving,
-PDFium, ONNX, or accelerator runtime. Where the Vision worker runs, a PDF with
-no text on any page converts through it on route `local_vision`. Other scanned,
-image-based, mixed, garbled, incomplete, or over-ceiling PDFs finish as
-`needs_remote` without publishing partial Markdown. Datalab routing is not
-active yet.
+The service process is CPU-only. It links no OCR, model-serving, PDFium, ONNX,
+or accelerator runtime. Local OCR and transcription run in the macOS Vision and
+audio workers it spawns. Where the Vision worker runs, it reads images, and a
+PDF with no text on any page converts through it on route `local_vision`. A
+scan with a page Vision reads no text on publishes with the
+`pages_without_extractable_text` warning. A scan gets the PDF timeout plus 1
+second per page, capped at 10 minutes or the PDF timeout, whichever is longer.
+Other scanned, image-based, mixed, garbled, incomplete, or over-ceiling PDFs
+finish as `needs_remote` without publishing partial Markdown. Datalab routing
+is not active yet.
 
 Where the Vision worker runs on macOS 27, a DOCX or PPTX picture with no alt
 text gains an `*Image: …*` line from Apple's on-device Foundation Models at the
@@ -124,8 +128,9 @@ key for different input returns `409`.
 ## Data root and local reset
 
 `/data` is the only persistent location. It holds `converter.sqlite`, the
-immutable source of every accepted job, attempt staging, published Markdown and
-manifests, the pre-acceptance quarantine, and the `.health` probe directory.
+immutable source of every unfinished, failed, or `needs_remote` job, attempt
+staging, published Markdown and manifests, the pre-acceptance quarantine, and
+the `.health` probe directory.
 
 `/tmp` is scratch, not storage. Compose mounts it as a `tmpfs` because the PDF
 worker calls `tempfile::tempfile()`. Nothing there is expected to survive.
@@ -135,8 +140,10 @@ WAL locking is same-host only, and a network filesystem corrupts the database.
 
 **The service never deletes the data root or an accepted conversion.** It has no
 retention, purge, or cleanup job, and it quarantines unowned job trees rather
-than removing them. It removes only its own unaccepted staging: a rejected
-submission's tree and superseded attempt staging. Resetting local development is
+than removing them. It removes only its own staging and one copy no path reads
+again: a rejected submission's tree, superseded attempt staging, and the source
+of a succeeded job, once its artifacts publish. Startup also removes the
+sources older builds kept for succeeded jobs. Resetting local development is
 a deliberate, manual act:
 
 ```bash
@@ -196,8 +203,10 @@ The Swift worker overrides differ from the PDF one in one way. A configured
 path is a promise, so the engine reports what it finds there whether or not the
 file exists. Only the implicit sibling probe is allowed to come back empty, and
 an absent Vision or audio worker means the engine is simply absent, which is
-the normal case off macOS. A present audio worker with no diarizer directory
-refuses to start: that is a packaging bug, not a host without the engine.
+the normal case off macOS. A present audio worker with no diarizer directory,
+or one missing any model file FluidAudio loads, refuses to start: that is a
+packaging bug, not a host without the engine. The audio worker's last stderr
+line reaches `converter.log` when it fails.
 
 `TOOLKIT_CONVERTER_BIND_ADDR` accepts port `0`. The kernel then picks a free
 port and the `conversion service listening` log line carries the bound address,
