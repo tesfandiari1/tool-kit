@@ -166,6 +166,21 @@ while IFS= read -r entry; do
 done < <(find "${APP}/Contents/MacOS" -mindepth 1 \! -type d)
 pass "${NESTED} Mach-O files under Contents/MacOS and nothing else"
 
+printf '\n== Sidecar entitlements\n'
+# tauri-cli appends --entitlements to every sign target, so restoring
+# bundle.macOS.entitlements hands the app's entitlements to each helper too.
+for BIN in "${APP}"/Contents/MacOS/*; do
+  [ "$(basename "$BIN")" = "tool-kit" ] && continue
+  SIDE_ENT="$(codesign -d --entitlements - --xml "$BIN" 2>/dev/null || true)"
+  case "$SIDE_ENT" in
+    *'<key>'*)
+      fail "Contents/MacOS/$(basename "$BIN") carries entitlements. Only the app
+     binary may. tauri-cli signs every target with bundle.macOS.entitlements, so
+     re-sign the helpers without them before notarizing." ;;
+  esac
+done
+pass "no sidecar carries entitlements"
+
 printf '\n== Converter resources\n'
 # validate_cmaps in apps/converter/src/engines/pdf_inspector.rs checks these
 # four sentinels and no others, so a copy that drops the remaining 165 files

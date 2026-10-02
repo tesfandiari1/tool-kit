@@ -30,7 +30,7 @@ REPO_ROOT="$(cd -- "${CONVERTER_DIR}/../.." && pwd -P)"
 # Pinned. An unpinned tool is a gate that can change its mind between runs
 # without a commit, and a new check arriving as a red CI job nobody asked for
 # teaches people to distrust it.
-SCHEMATHESIS_VERSION="4.24.3"
+SCHEMATHESIS_VERSION="4.29.0"
 
 PORT="${TOOLKIT_FUZZ_PORT:-18082}"
 BASE="http://127.0.0.1:${PORT}"

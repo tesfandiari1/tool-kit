@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 ARG RUST_VERSION=1.99.0
-ARG DEBIAN_VERSION=bookworm-20260623-slim
+ARG DEBIAN_VERSION=bookworm-20260918-slim
 
 FROM rust:${RUST_VERSION}-bookworm AS builder
 WORKDIR /build/apps/converter
