@@ -63,7 +63,11 @@ export function ProjectTree({
   /// the one shape the tree pattern has no answer for.
   const childrenOf = (rel: string, depth: number): ReactNode => {
     const listing = tree.listings[rel];
-    if (listing === undefined) return undefined;
+    if (listing === undefined) {
+      return tree.failed.has(rel)
+        ? quietRow(`${rel}${QUIET}failed`, depth, "Could not read this folder")
+        : undefined;
+    }
     if (listing.entries.length === 0) return quietRow(`${rel}${QUIET}empty`, depth, "Empty");
     return (
       <>

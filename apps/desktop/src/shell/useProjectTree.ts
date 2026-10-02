@@ -88,6 +88,9 @@ export interface ProjectTreeState {
   /// rather than an empty group.
   listings: Readonly<Record<string, DirListing | undefined>>;
   busy: ReadonlySet<string>;
+  /// Folders whose last read failed with nothing cached, so an open branch
+  /// says why it has no rows.
+  failed: ReadonlySet<string>;
   expanded: ReadonlySet<string>;
   selected: string | null;
   select: (rel: string) => void;
@@ -115,6 +118,7 @@ export function useProjectTree({
 }): ProjectTreeState {
   const [listings, setListings] = useState<Record<string, DirListing>>({});
   const [busy, setBusy] = useState<string[]>([]);
+  const [failed, setFailed] = useState<string[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   /// The cache `listings` renders. `read` compares against what it holds, which
   /// a `setListings` updater cannot answer: React decides when to run one.
@@ -138,6 +142,7 @@ export function useProjectTree({
 
   const expanded = useMemo(() => new Set(expandedPaths), [expandedPaths]);
   const busySet = useMemo(() => new Set(busy), [busy]);
+  const failedSet = useMemo(() => new Set(failed), [failed]);
 
   const setExpanded = useCallback(
     (next: (current: string[]) => string[]) => {
@@ -187,6 +192,7 @@ export function useProjectTree({
       const pending = (async () => {
         try {
           const listing = await commands.listProjectFiles(rel);
+          setFailed((cur) => (cur.includes(rel) ? cur.filter((p) => p !== rel) : cur));
           // `in` rather than a truth test: the index signature types every key
           // as present, so a bare read takes a property off undefined.
           const moved =
@@ -209,6 +215,9 @@ export function useProjectTree({
           // Dropping these on every failure lets one sleeping volume empty
           // `expandedPaths` for good.
           if (!failure.gone) {
+            if (!(rel in cache.current)) {
+              setFailed((cur) => (cur.includes(rel) ? cur : [...cur, rel]));
+            }
             if (mode === "click") setExpanded((cur) => cur.filter((p) => p !== rel));
             return null;
           }
@@ -320,5 +329,5 @@ export function useProjectTree({
     [load, setExpanded],
   );
 
-  return { listings, busy: busySet, expanded, selected, select: setSelected, toggle };
+  return { listings, busy: busySet, failed: failedSet, expanded, selected, select: setSelected, toggle };
 }
