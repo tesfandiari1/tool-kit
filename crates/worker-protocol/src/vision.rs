@@ -32,6 +32,9 @@ pub const VISION_WORKER_MAX_OUTPUT_BYTES_ENV: &str = "TOOLKIT_WORKER_MAX_OUTPUT_
 pub const VISION_WORKER_LANGUAGE_CORRECTION_ENV: &str = "TOOLKIT_VISION_WORKER_LANGUAGE_CORRECTION";
 /// Newline separated. Absent or empty means none.
 pub const VISION_WORKER_CUSTOM_WORDS_ENV: &str = "TOOLKIT_VISION_WORKER_CUSTOM_WORDS";
+/// A file in the staging directory holding the PDF worker's native pages. Set,
+/// the worker reads only the pages it lists as `null` and splices the rest in.
+pub const VISION_WORKER_NATIVE_PAGES_ENV: &str = "TOOLKIT_VISION_WORKER_NATIVE_PAGES";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

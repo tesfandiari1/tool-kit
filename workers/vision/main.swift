@@ -31,6 +31,13 @@ private let expectedSourceSha256Env = "TOOLKIT_WORKER_EXPECTED_SOURCE_SHA256"
 private let maxOutputBytesEnv = "TOOLKIT_WORKER_MAX_OUTPUT_BYTES"
 private let languageCorrectionEnv = "TOOLKIT_VISION_WORKER_LANGUAGE_CORRECTION"
 private let customWordsEnv = "TOOLKIT_VISION_WORKER_CUSTOM_WORDS"
+/// A file in the staging directory: the PDF worker's native pages, `null`
+/// where a page needs OCR.
+private let nativePagesEnv = "TOOLKIT_VISION_WORKER_NATIVE_PAGES"
+
+private struct NativePages: Decodable {
+    let pages: [String?]
+}
 
 /// The rejection codes worker-protocol declares. Nothing else may be sent.
 private enum Rejection: String {
@@ -306,8 +313,25 @@ private func run(_ stagingPath: String) async -> Never {
         guard let provider = CGDataProvider(data: source as CFData),
               let pdf = CGPDFDocument(provider), pdf.numberOfPages > 0
         else { finish(.rejected(.invalidImage), in: staging) }
+        // A PDF with some scanned pages keeps the native text of the others:
+        // OCR over a native page loses figures the text layer holds exactly.
+        var native: [String?]?
+        if let name = environment(nativePagesEnv) {
+            guard name == (name as NSString).lastPathComponent,
+                  let data = FileManager.default.contents(
+                      atPath: staging.appendingPathComponent(name).path),
+                  let decoded = try? JSONDecoder().decode(NativePages.self, from: data),
+                  decoded.pages.count == pdf.numberOfPages
+            else { fail("\(nativePagesEnv) does not name this PDF's pages") }
+            native = decoded.pages
+        }
         var pages: [String] = []
         for number in 1...pdf.numberOfPages {
+            if let text = native?[number - 1] {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { pages.append(trimmed) }
+                continue
+            }
             guard let page = pdf.page(at: number), let image = renderPage(page, dpi: 200) else {
                 finish(.rejected(.invalidImage), in: staging)
             }

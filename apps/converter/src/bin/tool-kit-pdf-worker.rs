@@ -8,13 +8,16 @@ use std::{
 
 #[cfg(target_os = "linux")]
 use pdf_inspector::process_pdf_with_options;
-use pdf_inspector::{DetectionConfig, PdfError, PdfOptions, PdfType, ScanStrategy};
+use pdf_inspector::{
+    extract_pages_markdown_mem, DetectionConfig, PdfError, PdfOptions, PdfType, ScanStrategy,
+};
 use sha2::{Digest, Sha256};
 use tool_kit_converter::worker_protocol::{
-    EngineIdentity, FallbackReason, Inspection, PageReasons, PdfTypeLabel, RejectionCode,
-    WorkerArtifact, WorkerOutcome, WorkerReport, MARKDOWN_FILE, PDF_ENGINE_NAME,
-    PDF_INSPECTOR_VERSION, WORKER_EXPECTED_SOURCE_BYTES_ENV, WORKER_EXPECTED_SOURCE_SHA256_ENV,
-    WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION, WORKER_REPORT_FILE,
+    EngineIdentity, FallbackReason, Inspection, NativePages, PageReasons, PdfTypeLabel,
+    RejectionCode, WorkerArtifact, WorkerOutcome, WorkerReport, MARKDOWN_FILE, NATIVE_PAGES_FILE,
+    PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION, WORKER_EXPECTED_SOURCE_BYTES_ENV,
+    WORKER_EXPECTED_SOURCE_SHA256_ENV, WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION,
+    WORKER_REPORT_FILE,
 };
 
 fn main() -> ExitCode {
@@ -67,7 +70,12 @@ fn run() -> Result<(), ()> {
         PdfOptions::new().detection(detection),
     )?;
     let outcome = match result {
-        Ok(result) => convert_result(result, &output_directory, max_output_bytes)?,
+        Ok(result) => convert_result(
+            result,
+            &mut private_source,
+            &output_directory,
+            max_output_bytes,
+        )?,
         Err(error) => WorkerOutcome::Rejected {
             code: rejection_code(&error),
         },
@@ -182,6 +190,7 @@ fn process_private_source(
 
 fn convert_result(
     result: pdf_inspector::PdfProcessResult,
+    source: &mut File,
     output_directory: &Path,
     max_output_bytes: u64,
 ) -> Result<WorkerOutcome, ()> {
@@ -229,9 +238,18 @@ fn convert_result(
         PdfTypeLabel::TextBased => None,
     };
     if let Some(reason_code) = fallback {
+        let native_pages = match reason_code {
+            FallbackReason::MixedPdf
+            | FallbackReason::OcrRequired
+            | FallbackReason::GarbledText => {
+                stage_native_pages(source, output_directory, max_output_bytes)?
+            }
+            _ => None,
+        };
         return Ok(WorkerOutcome::NeedsRemote {
             inspection,
             reason_code,
+            native_pages,
         });
     }
 
@@ -239,12 +257,14 @@ fn convert_result(
         return Ok(WorkerOutcome::NeedsRemote {
             inspection,
             reason_code: FallbackReason::LocalQualityFailed,
+            native_pages: None,
         });
     };
     if markdown.trim().is_empty() {
         return Ok(WorkerOutcome::NeedsRemote {
             inspection,
             reason_code: FallbackReason::LocalQualityFailed,
+            native_pages: None,
         });
     }
     let byte_length = u64::try_from(markdown.len()).map_err(|_| ())?;
@@ -252,26 +272,57 @@ fn convert_result(
         return Ok(WorkerOutcome::NeedsRemote {
             inspection,
             reason_code: FallbackReason::OutputTooLarge,
+            native_pages: None,
         });
     }
 
-    let markdown_path = output_directory.join(MARKDOWN_FILE);
+    Ok(WorkerOutcome::Converted {
+        inspection,
+        artifact: stage(output_directory, MARKDOWN_FILE, markdown.as_bytes())?,
+    })
+}
+
+/// The native pages of a PDF that needs OCR on some pages only. `None` when
+/// every page or no page needs it: a whole scan goes to Vision as it is, and
+/// with nothing to OCR there is nothing to splice.
+fn stage_native_pages(
+    source: &mut File,
+    output_directory: &Path,
+    max_output_bytes: u64,
+) -> Result<Option<WorkerArtifact>, ()> {
+    source.rewind().map_err(|_| ())?;
+    let mut bytes = Vec::new();
+    source.read_to_end(&mut bytes).map_err(|_| ())?;
+    let Ok(extraction) = extract_pages_markdown_mem(&bytes, None) else {
+        return Ok(None);
+    };
+    let pages: Vec<Option<String>> = extraction
+        .pages
+        .into_iter()
+        .map(|page| (!page.needs_ocr).then_some(page.markdown))
+        .collect();
+    if pages.iter().all(Option::is_some) || pages.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let encoded = serde_json::to_vec(&NativePages { pages }).map_err(|_| ())?;
+    if u64::try_from(encoded.len()).map_err(|_| ())? > max_output_bytes {
+        return Ok(None);
+    }
+    stage(output_directory, NATIVE_PAGES_FILE, &encoded).map(Some)
+}
+
+fn stage(output_directory: &Path, name: &str, bytes: &[u8]) -> Result<WorkerArtifact, ()> {
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(&markdown_path)
+        .open(output_directory.join(name))
         .map_err(|_| ())?;
-    file.write_all(markdown.as_bytes()).map_err(|_| ())?;
+    file.write_all(bytes).map_err(|_| ())?;
     file.sync_all().map_err(|_| ())?;
-    let digest = hex::encode(Sha256::digest(markdown.as_bytes()));
-
-    Ok(WorkerOutcome::Converted {
-        inspection,
-        artifact: WorkerArtifact {
-            relative_path: MARKDOWN_FILE.to_owned(),
-            byte_length,
-            sha256: digest,
-        },
+    Ok(WorkerArtifact {
+        relative_path: name.to_owned(),
+        byte_length: u64::try_from(bytes.len()).map_err(|_| ())?,
+        sha256: hex::encode(Sha256::digest(bytes)),
     })
 }
 

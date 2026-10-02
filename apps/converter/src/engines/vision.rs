@@ -31,10 +31,10 @@ use crate::{
         VISION_MARKDOWN_FILE, VISION_WORKER_CUSTOM_WORDS_ENV,
         VISION_WORKER_EXPECTED_SOURCE_BYTES_ENV, VISION_WORKER_EXPECTED_SOURCE_SHA256_ENV,
         VISION_WORKER_IDENTITY_PREFIX, VISION_WORKER_LANGUAGE_CORRECTION_ENV,
-        VISION_WORKER_MAX_OUTPUT_BYTES_ENV, VISION_WORKER_PROTOCOL_VERSION,
-        VISION_WORKER_REPORT_FILE,
+        VISION_WORKER_MAX_OUTPUT_BYTES_ENV, VISION_WORKER_NATIVE_PAGES_ENV,
+        VISION_WORKER_PROTOCOL_VERSION, VISION_WORKER_REPORT_FILE,
     },
-    worker_protocol::FallbackReason,
+    worker_protocol::{FallbackReason, NATIVE_PAGES_FILE},
 };
 
 const WORKER_LABEL: &str = "Vision";
@@ -61,6 +61,8 @@ pub struct VisionEngine {
     timeout: Duration,
     max_output_bytes: u64,
     permits: Arc<Semaphore>,
+    /// The PDF worker staged native pages, so Vision OCRs only the others.
+    native_pages: bool,
 }
 
 impl VisionEngine {
@@ -78,6 +80,7 @@ impl VisionEngine {
             timeout,
             max_output_bytes,
             permits: Arc::new(Semaphore::new(1)),
+            native_pages: false,
         })
     }
 
@@ -93,6 +96,14 @@ impl VisionEngine {
         Self {
             timeout: (self.timeout + Duration::from_secs(pages.into()))
                 .min(MAX_SCAN_TIMEOUT.max(self.timeout)),
+            ..self.clone()
+        }
+    }
+
+    /// The same engine, splicing its OCR into the native pages staged for it.
+    pub fn with_native_pages(&self) -> Self {
+        Self {
+            native_pages: true,
             ..self.clone()
         }
     }
@@ -124,7 +135,8 @@ impl VisionEngine {
         let source = file.into_std().await;
 
         let started = Instant::now();
-        let mut child = Command::new(self.worker_path.as_path())
+        let mut command = Command::new(self.worker_path.as_path());
+        command
             .arg(&paths.publication_staging)
             .current_dir(&paths.attempt)
             .env_clear()
@@ -147,9 +159,11 @@ impl VisionEngine {
             .stdin(Stdio::from(source))
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|_| EngineFailure::Unavailable)?;
+            .kill_on_drop(true);
+        if self.native_pages {
+            command.env(VISION_WORKER_NATIVE_PAGES_ENV, NATIVE_PAGES_FILE);
+        }
+        let mut child = command.spawn().map_err(|_| EngineFailure::Unavailable)?;
         wait_for_child(&mut child, self.timeout, cancellation).await?;
 
         self.read_and_validate_report(paths, started.elapsed())
@@ -198,6 +212,12 @@ impl VisionEngine {
         fs::remove_file(report_path)
             .await
             .map_err(|_| EngineFailure::Protocol)?;
+        // Publication holds the Markdown and the manifest, nothing else.
+        if self.native_pages {
+            fs::remove_file(paths.publication_staging.join(NATIVE_PAGES_FILE))
+                .await
+                .map_err(|_| EngineFailure::Protocol)?;
+        }
         Ok(outcome)
     }
 

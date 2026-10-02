@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::{
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{watch, Notify},
 };
@@ -33,7 +33,9 @@ use crate::{
         StoredFailure, SuccessfulArtifacts,
     },
     vision_protocol::VISION_ENGINE_NAME,
-    worker_protocol::{Inspection, PdfTypeLabel, PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION},
+    worker_protocol::{
+        Inspection, PdfTypeLabel, NATIVE_PAGES_FILE, PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION,
+    },
 };
 
 use super::{
@@ -553,13 +555,26 @@ impl ConversionService {
             },
         };
         // A PDF with no native text on any page is a scan, and Vision reads
-        // scans locally. Anything short of a conversion keeps the inspector's
-        // needs_remote and its reason.
+        // scans locally. One the worker left native pages for gets only its
+        // other pages read, and they are spliced in. Anything short of a
+        // conversion keeps the inspector's needs_remote and its reason.
         let scan_engine = match (&conversion, self.vision_engine.as_ref()) {
             (Ok(EngineOutcome::NeedsRemote { analysis, .. }), Some(engine))
                 if source_format.engine == LocalEngineKind::Pdf =>
             {
-                scanned_page_count(analysis).map(|pages| engine.with_page_budget(pages))
+                // The PDF engine fails a staged file its report did not name,
+                // so one here was validated.
+                let spliced = fs::try_exists(paths.publication_staging.join(NATIVE_PAGES_FILE))
+                    .await
+                    .unwrap_or(false);
+                scanned_page_count(analysis, spliced).map(|pages| {
+                    let engine = engine.with_page_budget(pages);
+                    if spliced {
+                        engine.with_native_pages()
+                    } else {
+                        engine
+                    }
+                })
             }
             _ => None,
         };
@@ -1300,9 +1315,9 @@ fn local_start(
 
 /// The page count of a PDF whose every page needs OCR, which is the only kind
 /// Vision takes over. A mixed PDF stays remote.
-fn scanned_page_count(analysis: &EngineAnalysis) -> Option<u32> {
+fn scanned_page_count(analysis: &EngineAnalysis, spliced: bool) -> Option<u32> {
     let inspection: Inspection = serde_json::from_value(analysis.diagnostics.clone()).ok()?;
-    (u32::try_from(inspection.pages_needing_ocr.len()) == Ok(inspection.page_count))
+    (spliced || u32::try_from(inspection.pages_needing_ocr.len()) == Ok(inspection.page_count))
         .then_some(inspection.page_count)
 }
 

@@ -98,7 +98,7 @@ pub(crate) async fn read_report<T: DeserializeOwned>(path: &Path) -> Result<T, E
     serde_json::from_slice(&encoded).map_err(|_| EngineFailure::Protocol)
 }
 
-/// Checks the staged Markdown against what the report claimed and returns its
+/// Checks a staged file against what the report claimed and returns its
 /// digest. The report is the worker's word; this is the measurement.
 pub(crate) async fn validate_staged_markdown(
     paths: &AttemptPaths,
@@ -115,7 +115,7 @@ pub(crate) async fn validate_staged_markdown(
     {
         return Err(EngineFailure::Protocol);
     }
-    let markdown_path = paths.staged_markdown();
+    let markdown_path = paths.publication_staging.join(expected_name);
     let metadata = fs::symlink_metadata(&markdown_path)
         .await
         .map_err(|_| EngineFailure::Protocol)?;

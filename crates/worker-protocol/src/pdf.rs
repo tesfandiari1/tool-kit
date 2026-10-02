@@ -11,6 +11,9 @@ pub const PDF_ENGINE_NAME: &str = "pdf-inspector";
 pub const PDF_INSPECTOR_VERSION: &str = "1.25.2";
 pub const WORKER_REPORT_FILE: &str = "worker-report.json";
 pub const MARKDOWN_FILE: &str = "result.md";
+/// A PDF with some scanned pages: [`NativePages`] as JSON, staged beside the
+/// report for the Vision worker to splice its OCR into.
+pub const NATIVE_PAGES_FILE: &str = "native-pages.json";
 /// Every engine worker is spawned with these, so they are named for the role
 /// and not for one engine. They were `TOOLKIT_PDF_WORKER_*` while the PDF
 /// worker was the only one; the Vision worker reads the same three with the
@@ -46,6 +49,9 @@ pub enum WorkerOutcome {
     NeedsRemote {
         inspection: Inspection,
         reason_code: FallbackReason,
+        /// Set when some pages read natively and the rest need OCR.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_pages: Option<WorkerArtifact>,
     },
     Rejected {
         code: RejectionCode,
@@ -89,6 +95,13 @@ pub struct WorkerArtifact {
     pub relative_path: String,
     pub byte_length: u64,
     pub sha256: String,
+}
+
+/// Every page in order: its native Markdown, or `None` where it needs OCR.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativePages {
+    pub pages: Vec<Option<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

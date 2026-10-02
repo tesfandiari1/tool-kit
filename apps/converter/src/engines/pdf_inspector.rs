@@ -18,10 +18,10 @@ use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
     persistence::DocumentClassification,
     worker_protocol::{
-        FallbackReason, Inspection, PdfTypeLabel, RejectionCode, WorkerOutcome, WorkerReport,
-        MARKDOWN_FILE, PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION, WORKER_EXPECTED_SOURCE_BYTES_ENV,
-        WORKER_EXPECTED_SOURCE_SHA256_ENV, WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION,
-        WORKER_REPORT_FILE,
+        FallbackReason, Inspection, PdfTypeLabel, RejectionCode, WorkerArtifact, WorkerOutcome,
+        WorkerReport, MARKDOWN_FILE, NATIVE_PAGES_FILE, PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION,
+        WORKER_EXPECTED_SOURCE_BYTES_ENV, WORKER_EXPECTED_SOURCE_SHA256_ENV,
+        WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_PROTOCOL_VERSION, WORKER_REPORT_FILE,
     },
 };
 
@@ -161,9 +161,12 @@ impl PdfInspectorEngine {
             WorkerOutcome::NeedsRemote {
                 inspection,
                 reason_code,
+                native_pages,
             } => {
                 validate_needs_remote(&inspection, reason_code)?;
                 child::reject_if_markdown_staged(paths).await?;
+                validate_native_pages(paths, reason_code, native_pages, self.max_output_bytes)
+                    .await?;
                 EngineOutcome::NeedsRemote {
                     analysis: into_analysis(&inspection)?,
                     reason_code,
@@ -181,6 +184,46 @@ impl PdfInspectorEngine {
             .map_err(|_| EngineFailure::Protocol)?;
         Ok(outcome)
     }
+}
+
+/// Native pages ride only on a PDF that is part text, and a staged file the
+/// report does not name is one nothing vetted.
+async fn validate_native_pages(
+    paths: &AttemptPaths,
+    reason: FallbackReason,
+    native_pages: Option<WorkerArtifact>,
+    max_output_bytes: u64,
+) -> Result<(), EngineFailure> {
+    match native_pages {
+        Some(artifact) => {
+            if !matches!(
+                reason,
+                FallbackReason::MixedPdf
+                    | FallbackReason::OcrRequired
+                    | FallbackReason::GarbledText
+            ) {
+                return Err(EngineFailure::Protocol);
+            }
+            child::validate_staged_markdown(
+                paths,
+                NATIVE_PAGES_FILE,
+                &artifact.relative_path,
+                artifact.byte_length,
+                &artifact.sha256,
+                max_output_bytes,
+            )
+            .await?;
+        }
+        None => {
+            if fs::try_exists(paths.publication_staging.join(NATIVE_PAGES_FILE))
+                .await
+                .map_err(|_| EngineFailure::Protocol)?
+            {
+                return Err(EngineFailure::Protocol);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn verify_worker_identity(path: &Path) -> Result<(), WorkerStartupError> {

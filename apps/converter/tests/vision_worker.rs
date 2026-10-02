@@ -230,48 +230,91 @@ fn scanned_pdf(directory: &Path, lines: [&str; 2]) -> Vec<u8> {
     corpus::assemble(&objects)
 }
 
-/// One scanned page stored sideways with `/Rotate 90`, the way a scanner fixes
-/// a landscape feed. The short line sits above the long one, and a sideways
-/// read sorts the long line first.
-fn rotated_scan(directory: &Path) -> Vec<u8> {
-    let upright = png(
-        directory,
-        "upright",
-        b"BT\n/F1 24 Tf\n1 0 0 1 72 700 Tm (Opening) Tj\n\
-          1 0 0 1 72 300 Tm (The closing line runs far longer than the opening) Tj\nET\n",
-    );
-    let jpeg = directory.join("sideways.jpg");
-    // sips turns clockwise, so 270 lays the page on its left side.
+/// `content` rendered by pdf2png and saved as a JPEG, `sips` arguments first.
+fn jpeg_of(directory: &Path, name: &str, content: &[u8], sips: &[&str]) -> Vec<u8> {
+    let png = png(directory, name, content);
+    let jpeg = directory.join(format!("{name}.jpg"));
     let status = Command::new("/usr/bin/sips")
-        .args(["-r", "270", "-s", "format", "jpeg"])
-        .arg(&upright)
+        .args(sips)
+        .args(["-s", "format", "jpeg"])
+        .arg(&png)
         .arg("--out")
         .arg(&jpeg)
         .stdout(Stdio::null())
         .status()
         .unwrap();
-    assert!(status.success(), "sips failed");
-    let samples = fs::read(jpeg).unwrap();
+    assert!(status.success(), "sips failed on {name}");
+    fs::read(jpeg).unwrap()
+}
+
+fn image_object(samples: &[u8], width: u32, height: u32) -> Vec<u8> {
     let mut image = format!(
-        "<< /Type /XObject /Subtype /Image /Width 2200 /Height 1700 /ColorSpace /DeviceRGB \
-         /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
+        "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} \
+         /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
         samples.len()
     )
     .into_bytes();
-    image.extend_from_slice(&samples);
+    image.extend_from_slice(samples);
     image.extend_from_slice(b"\nendstream");
-    let draw = b"q 792 0 0 612 0 0 cm /Im0 Do Q";
-    let mut stream = format!("<< /Length {} >>\nstream\n", draw.len()).into_bytes();
-    stream.extend_from_slice(draw);
+    image
+}
+
+fn stream_object(content: &[u8]) -> Vec<u8> {
+    let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    stream.extend_from_slice(content);
     stream.extend_from_slice(b"\nendstream");
+    stream
+}
+
+/// One scanned page stored sideways with `/Rotate 90`, the way a scanner fixes
+/// a landscape feed. The short line sits above the long one, and a sideways
+/// read sorts the long line first.
+fn rotated_scan(directory: &Path) -> Vec<u8> {
+    // sips turns clockwise, so 270 lays the page on its left side.
+    let samples = jpeg_of(
+        directory,
+        "sideways",
+        b"BT\n/F1 24 Tf\n1 0 0 1 72 700 Tm (Opening) Tj\n\
+          1 0 0 1 72 300 Tm (The closing line runs far longer than the opening) Tj\nET\n",
+        &["-r", "270"],
+    );
     corpus::assemble(&[
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 792 612] /Rotate 90 \
            /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>"
             .to_vec(),
-        image,
-        stream,
+        image_object(&samples, 2200, 1700),
+        stream_object(b"q 792 0 0 612 0 0 cm /Im0 Do Q"),
+    ])
+}
+
+/// A native text page, then a page that is only a JPEG of its text: the shape
+/// of a statement with a scanned cover. Only the second page needs OCR.
+fn mixed_pdf(directory: &Path) -> Vec<u8> {
+    let samples = jpeg_of(
+        directory,
+        "scanned",
+        &helvetica_lines(&["Scanned Page Two"]),
+        &[],
+    );
+    corpus::assemble(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+           /Resources << /Font << /F1 5 0 R >> >> /Contents 6 0 R >>"
+            .to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+           /Resources << /XObject << /Im0 7 0 R >> >> /Contents 8 0 R >>"
+            .to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        stream_object(&helvetica_lines(&[
+            "Native Page One",
+            "Balance 99,000.00 on the closing date.",
+            "Every figure here is exact native text.",
+        ])),
+        image_object(&samples, 1700, 2200),
+        stream_object(b"q 612 0 0 792 0 0 cm /Im0 Do Q"),
     ])
 }
 
@@ -612,6 +655,29 @@ fn a_page_turned_by_its_rotate_key_reads_top_to_bottom() {
         .find("closing line")
         .expect("the closing line was read");
     assert!(opening < closing, "read out of order:\n{markdown}");
+}
+
+/// The native page keeps pdf-inspector's exact text and only the scanned page
+/// goes to Vision. OCR over the native page drops figures a bank statement
+/// cannot lose.
+#[tokio::test]
+async fn a_mixed_pdf_keeps_its_native_text_and_reads_only_the_scanned_page() {
+    let Some(harness) = support::TestHarness::with_vision_worker() else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let pdf = mixed_pdf(directory.path());
+
+    let (data, markdown) = convert_scan(&harness, &pdf).await;
+
+    assert_eq!(data["warnings"], serde_json::json!([]), "{data}");
+    let native = markdown
+        .find("Balance 99,000.00 on the closing date.")
+        .expect("the native line survives byte for byte");
+    let scanned = markdown
+        .find("Scanned Page Two")
+        .expect("the scanned page was read");
+    assert!(native < scanned, "pages out of order:\n{markdown}");
 }
 
 /// Submits a scanned PDF and waits for the job to settle. Returns the job and
