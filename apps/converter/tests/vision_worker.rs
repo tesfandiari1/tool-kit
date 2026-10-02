@@ -601,3 +601,95 @@ async fn a_pdf_with_no_text_on_any_page_converts_locally_through_vision() {
     assert!(markdown.contains("Scanned Page One"), "{markdown}");
     assert!(markdown.contains("Scanned Page Two"), "{markdown}");
 }
+
+/// A DOCX picture with no alt text may gain a description from Foundation
+/// Models, one with author alt text keeps it, and the marker token never
+/// reaches the Markdown. Runs with or without the worker and the model.
+#[tokio::test]
+async fn docx_pictures_never_leak_the_description_marker() {
+    let harness =
+        support::TestHarness::with_vision_worker().unwrap_or_else(support::TestHarness::new);
+    let picture = |descr: &str| {
+        format!(
+            r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Picture"{descr}/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Picture"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+        )
+    };
+    let document = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:t>Before the pictures.</w:t></w:r></w:p>{}{}<w:p><w:r><w:t>After the pictures.</w:t></w:r></w:p></w:body></w:document>"#,
+        picture(r#" descr="""#),
+        picture(r#" descr="A red dot""#),
+    );
+    let parts = [
+        (
+            "[Content_Types].xml",
+            br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.as_slice(),
+        ),
+        (
+            "_rels/.rels",
+            br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.as_slice(),
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>"#.as_slice(),
+        ),
+        ("word/document.xml", document.as_bytes()),
+        (
+            "word/media/image1.png",
+            // A 1x1 red PNG.
+            b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0d\x49\x44\x41\x54\x78\xda\x63\xfc\xcf\xc0\x50\x0f\x00\x04\x85\x01\x80\x84\xa9\x8c\x21\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82".as_slice(),
+        ),
+    ];
+    let mut docx = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in parts {
+        docx.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        docx.write_all(bytes).unwrap();
+    }
+    let docx = docx.finish().unwrap().into_inner();
+
+    let app = harness.app().await;
+    let response = app
+        .submit(
+            support::multipart_body_with_media_type(
+                Uuid::new_v4(),
+                "standard",
+                &docx,
+                "pictures.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            "pictures",
+            support::TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job_id = support::json_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Foundation Models' first load can take most of a minute.
+    let mut data = Value::Null;
+    for _ in 0..1200 {
+        let response = app
+            .authorized_get(&format!("/api/v1/conversions/{job_id}"))
+            .await;
+        data = support::json_body(response).await["data"].clone();
+        if matches!(
+            data["status"].as_str(),
+            Some("succeeded" | "failed" | "needs_remote")
+        ) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(data["status"], "succeeded", "{data}");
+
+    let response = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
+        .await;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let markdown = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!markdown.contains("tkimg"), "{markdown}");
+    assert!(markdown.contains("A red dot"), "{markdown}");
+    assert!(markdown.contains("Before the pictures."), "{markdown}");
+    assert!(markdown.contains("After the pictures."), "{markdown}");
+}

@@ -68,11 +68,15 @@ impl AppState {
         // limits, and `catch_unwind` at the adapter. Parser concurrency one.
         // The hard timeout reuses the worker timeout: an in-process call
         // cannot be killed, so a hang fails the job and leaves a detached
-        // blocking task bounded by AnyDoc's internal limits.
+        // blocking task bounded by AnyDoc's internal limits. A working Vision
+        // worker also describes DOCX and PPTX pictures.
         let anydoc_engine = AnyDocEngine::new(
             settings.limits.max_output_bytes,
             1,
             settings.limits.pdf_timeout,
+            vision_engine
+                .as_ref()
+                .and(settings.vision_worker_path.clone()),
         );
 
         // Audio is optional the same way, with one exception: a worker that is

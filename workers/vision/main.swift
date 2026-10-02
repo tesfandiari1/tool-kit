@@ -14,6 +14,7 @@ import CoreGraphics
 import CryptoKit
 import Darwin
 import Foundation
+import FoundationModels
 import ImageIO
 import Vision
 
@@ -314,6 +315,41 @@ private func run(_ stagingPath: String) async -> Never {
         in: staging)
 }
 
+/// `--describe <dir>`: writes `<file>.txt` beside each image in `dir` that
+/// Foundation Models can describe. A decorative image, a per-image error, or no
+/// model writes nothing, and the run still exits 0.
+private func describe(_ directory: String) async -> Never {
+    guard #available(macOS 27, *) else { exit(0) }
+    let model = SystemLanguageModel.default
+    guard model.availability == .available, model.capabilities.contains(.vision) else { exit(0) }
+    let instructions = """
+        You describe images found inside documents for a reader who cannot see them.
+        Write one or two plain sentences. Write more only for a complex diagram.
+        For a chart, say what kind of chart it is and what its axes or categories are.
+        Never state any numbers or values.
+        For a logo or decorative graphic, answer with the single word: decorative.
+        """
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+    for name in names.sorted() where !name.hasSuffix(".txt") {
+        let image = URL(fileURLWithPath: directory).appendingPathComponent(name)
+        // One session per image, so no description leans on the last one.
+        // Greedy sampling, so the same picture gets the same answer.
+        let session = LanguageModelSession(model: model, instructions: instructions)
+        guard let response = try? await session.respond(
+            options: GenerationOptions(samplingMode: .greedy),
+            prompt: {
+                "Describe this image."
+                Attachment(imageURL: image)
+            })
+        else { continue }
+        let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let word = text.lowercased().trimmingCharacters(in: .punctuationCharacters)
+        if text.isEmpty || word == "decorative" { continue }
+        try? Data(text.utf8).write(to: image.appendingPathExtension("txt"), options: .atomic)
+    }
+    exit(0)
+}
+
 @main
 struct VisionWorker {
     static func main() async {
@@ -328,6 +364,9 @@ struct VisionWorker {
         if arguments == ["--version"] {
             FileHandle.standardOutput.write(Data("\(identityPrefix)\(macosVersion())\n".utf8))
             exit(0)
+        }
+        if arguments.count == 2, arguments[0] == "--describe" {
+            await describe(arguments[1])
         }
         guard arguments.count == 1 else {
             fail("usage: tool-kit-vision-worker <staging-directory>")

@@ -11,18 +11,25 @@
 //! never bypass it.
 
 use std::{
+    collections::HashMap,
+    io::{Cursor, Read, Write},
     panic,
+    path::{Path, PathBuf},
+    process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
 };
 
+use anydoc::model::{Block, CellSlot, ImageSource, Inline};
+
 use sha2::{Digest, Sha256};
 use tokio::{
     io::AsyncReadExt,
+    process::Command,
     sync::{watch, OwnedSemaphorePermit, Semaphore},
 };
 
-use super::child::{self, is_lowercase_sha256};
+use super::child::{self, is_lowercase_sha256, wait_for_child};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
@@ -48,14 +55,22 @@ pub struct AnyDocEngine {
     max_output_bytes: u64,
     timeout: Duration,
     permits: Arc<Semaphore>,
+    /// The Vision worker, which also describes DOCX and PPTX pictures.
+    describer: Option<PathBuf>,
 }
 
 impl AnyDocEngine {
-    pub fn new(max_output_bytes: u64, parser_concurrency: usize, timeout: Duration) -> Self {
+    pub fn new(
+        max_output_bytes: u64,
+        parser_concurrency: usize,
+        timeout: Duration,
+        describer: Option<PathBuf>,
+    ) -> Self {
         Self {
             max_output_bytes,
             timeout,
             permits: Arc::new(Semaphore::new(parser_concurrency.max(1))),
+            describer,
         }
     }
 
@@ -130,6 +145,33 @@ impl AnyDocEngine {
             return Ok(rejected(AnyDocRejection::InvalidDocument));
         }
 
+        // Pictures with no alt text get a description where the model is
+        // available. Any failure here leaves today's output untouched.
+        // ponytail: a timeout in the marking parse still fails the job, since
+        // the detached task keeps the permit. Merge both parses into one
+        // bounded closure if a document ever parses in time but marks too slowly.
+        let mut described = None;
+        let mut permit = permit;
+        if let (Some(worker), anydoc::Format::Docx | anydoc::Format::Pptx) =
+            (self.describer.as_deref(), format)
+        {
+            let (returned, original, prepared) = self
+                .run_bounded(move || {
+                    let prepared = panic::catch_unwind(|| marked_pictures(&bytes, format))
+                        .ok()
+                        .flatten();
+                    (permit, bytes, prepared)
+                })
+                .await?;
+            (permit, bytes) = (returned, original);
+            if let Some((marked, pictures, rendered)) = prepared {
+                let found = describe(worker, &pictures, cancellation.clone()).await;
+                if !found.is_empty() {
+                    described = Some((marked, found, rendered));
+                }
+            }
+        }
+
         let conversion = self
             .run_bounded(move || {
                 // Held inside the blocking closure, not by `convert`. On
@@ -139,9 +181,17 @@ impl AnyDocEngine {
                 // invariant the epic states.
                 let _permit = permit;
                 let started = Instant::now();
-                let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                    anydoc::to_markdown_bytes(&bytes, format)
-                }));
+                let filled = described.and_then(|(marked, found, rendered)| {
+                    let markdown =
+                        panic::catch_unwind(|| anydoc::to_markdown_bytes(&marked, format)).ok()?;
+                    fill_descriptions(&markdown.ok()?, &found, rendered)
+                });
+                let result = match filled {
+                    Some(markdown) => Ok(Ok(markdown)),
+                    None => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                        anydoc::to_markdown_bytes(&bytes, format)
+                    })),
+                };
                 (result, started.elapsed())
             })
             .await?;
@@ -269,6 +319,291 @@ fn format_label(format: anydoc::Format) -> &'static str {
     }
 }
 
+/// AnyDoc's own ceilings for one part and for all parts together, so the
+/// marker pass reads nothing AnyDoc would refuse and a ZIP bomb costs no more
+/// memory here than in AnyDoc.
+const MAX_MARKED_PART_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_MARKED_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+
+/// A marker token's number, the picture's bytes, and its file extension.
+type Picture = (u32, Vec<u8>, &'static str);
+
+/// Gives every picture with no alt text a `tkimg{n}tk` alt, so the renderer
+/// prints the token where the picture sits, and returns the marked package
+/// with each token's PNG or JPEG bytes and the number of tokens the Markdown
+/// will hold. `None` when there is nothing to describe or anything goes wrong.
+fn marked_pictures(bytes: &[u8], format: anydoc::Format) -> Option<(Vec<u8>, Vec<Picture>, usize)> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
+    let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let mut next = 0;
+    let mut left = MAX_MARKED_TOTAL_BYTES;
+    for index in 0..archive.len() {
+        let name = archive.name_for_index(index)?.to_owned();
+        let open = match format {
+            anydoc::Format::Docx if name == "word/document.xml" => "<wp:docPr",
+            anydoc::Format::Pptx
+                if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") =>
+            {
+                "<p:cNvPr"
+            }
+            _ => {
+                out.raw_copy_file(archive.by_index_raw(index).ok()?).ok()?;
+                continue;
+            }
+        };
+        let mut xml = String::new();
+        archive
+            .by_index(index)
+            .ok()?
+            .take(MAX_MARKED_PART_BYTES.min(left))
+            .read_to_string(&mut xml)
+            .ok()?;
+        left = left
+            .checked_sub(xml.len() as u64)
+            .filter(|left| *left > 0)?;
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        out.start_file(name, options).ok()?;
+        out.write_all(mark_tags(&xml, open, &mut next).as_bytes())
+            .ok()?;
+    }
+    if next == 0 {
+        return None;
+    }
+    let marked = out.finish().ok()?.into_inner();
+
+    let document = anydoc::to_document(&marked, format).ok()?;
+    let mut tokens = Vec::new();
+    collect_tokens(&document.blocks, &mut tokens);
+    for note in &document.notes {
+        collect_tokens(&note.blocks, &mut tokens);
+    }
+    let rendered = tokens.len();
+    let pictures: Vec<_> = tokens
+        .into_iter()
+        .filter_map(|(n, id)| {
+            let asset = document.assets.iter().find(|asset| Some(asset.id) == id)?;
+            let extension = match asset.media_type.as_str() {
+                "image/png" => "png",
+                "image/jpeg" => "jpg",
+                _ => return None,
+            };
+            Some((n, asset.bytes.clone(), extension))
+        })
+        .collect();
+    (!pictures.is_empty()).then_some((marked, pictures, rendered))
+}
+
+/// Rewrites each `open` start tag whose `descr` is absent or empty to carry
+/// `descr="tkimg{n}tk"`. Plain scanning: a tag it misreads yields XML AnyDoc
+/// rejects, and the caller then falls back to the unmarked package.
+fn mark_tags(xml: &str, open: &str, next: &mut u32) -> String {
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(start) = rest.find(open) {
+        let (before, tag) = rest.split_at(start + open.len());
+        out.push_str(before);
+        let Some(end) = tag.find('>') else {
+            rest = tag;
+            break;
+        };
+        let (attributes, after) = tag.split_at(end);
+        rest = after;
+        if !attributes.is_empty() && !attributes.starts_with([' ', '\t', '\r', '\n', '/']) {
+            out.push_str(attributes);
+            continue;
+        }
+        let token = format!(" descr=\"tkimg{next}tk\"");
+        match attributes.split_once(" descr=") {
+            // A `descr` this scan cannot read stays as written.
+            None if attributes.contains("descr") => {
+                out.push_str(attributes);
+                continue;
+            }
+            None => {
+                out.push_str(&token);
+                out.push_str(attributes);
+            }
+            Some((head, value)) => {
+                let mut chars = value.chars();
+                let quoted = chars
+                    .next()
+                    .and_then(|quote| chars.as_str().split_once(quote));
+                match quoted {
+                    // Office writes its own guess as alt text and signs it
+                    // with this line. Only author alt text stays as written.
+                    Some((text, tail))
+                        if text.trim().is_empty()
+                            || text.contains("Description automatically generated") =>
+                    {
+                        out.push_str(head);
+                        out.push_str(&token);
+                        out.push_str(tail);
+                    }
+                    _ => {
+                        out.push_str(attributes);
+                        continue;
+                    }
+                }
+            }
+        }
+        *next += 1;
+    }
+    out.push_str(rest);
+    out
+}
+
+type Token = (u32, Option<anydoc::model::AssetId>);
+
+fn collect_tokens(blocks: &[Block], tokens: &mut Vec<Token>) {
+    for block in blocks {
+        match block {
+            Block::Heading { content, .. } | Block::Paragraph(content) => {
+                collect_inline_tokens(content, tokens);
+            }
+            Block::List(list) => {
+                for item in &list.items {
+                    collect_tokens(&item.blocks, tokens);
+                }
+            }
+            Block::Table(table) => {
+                for slot in table.grid.iter().flatten() {
+                    if let CellSlot::Origin(cell) = slot {
+                        collect_tokens(&cell.blocks, tokens);
+                    }
+                }
+            }
+            Block::BlockQuote(blocks) => collect_tokens(blocks, tokens),
+            Block::CodeBlock { .. } | Block::Rule => {}
+        }
+    }
+}
+
+fn collect_inline_tokens(inlines: &[Inline], tokens: &mut Vec<Token>) {
+    for inline in inlines {
+        match inline {
+            Inline::Image { alt, source } => {
+                let n = alt
+                    .strip_prefix("tkimg")
+                    .and_then(|tail| tail.strip_suffix("tk"))
+                    .and_then(|n| n.parse().ok());
+                if let Some(n) = n {
+                    let id = match source {
+                        ImageSource::Asset(id) => Some(*id),
+                        _ => None,
+                    };
+                    tokens.push((n, id));
+                }
+            }
+            Inline::Link { content, .. } => collect_inline_tokens(content, tokens),
+            _ => {}
+        }
+    }
+}
+
+/// Runs the Vision worker once over every distinct picture and returns the
+/// descriptions it wrote by token. A decorative picture, a per-picture error,
+/// or no model leaves a token out, and a failed run returns what it finished.
+async fn describe(
+    worker: &Path,
+    pictures: &[Picture],
+    cancellation: watch::Receiver<bool>,
+) -> HashMap<u32, String> {
+    let mut found = HashMap::new();
+    let Ok(directory) = tempfile::tempdir() else {
+        return found;
+    };
+    let mut files: HashMap<&[u8], String> = HashMap::new();
+    for (_, bytes, extension) in pictures {
+        if !files.contains_key(bytes.as_slice()) {
+            let name = format!("{}.{extension}", files.len());
+            if tokio::fs::write(directory.path().join(&name), bytes)
+                .await
+                .is_err()
+            {
+                return found;
+            }
+            files.insert(bytes, name);
+        }
+    }
+    let Ok(mut child) = Command::new(worker)
+        .arg("--describe")
+        .arg(directory.path())
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+    else {
+        return found;
+    };
+    // ponytail: about 5 s per picture after a cold model load, measured on
+    // one Mac. A huge deck waits that long, cancellation still stops it.
+    let budget = Duration::from_secs(20 + 5 * files.len() as u64);
+    let _ = wait_for_child(&mut child, budget, cancellation).await;
+    for (n, bytes, _) in pictures {
+        let Some(name) = files.get(bytes.as_slice()) else {
+            continue;
+        };
+        let path = directory.path().join(format!("{name}.txt"));
+        let Ok(text) = tokio::fs::read_to_string(path).await else {
+            continue;
+        };
+        let text = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace(['*', '|', '\\', '`', '_', '~', '[', ']', '<', '>'], "");
+        if !text.is_empty() {
+            found.insert(*n, text);
+        }
+    }
+    found
+}
+
+/// Replaces each `tkimg{n}tk` with `*Image: <description>*`, or with nothing
+/// when there is none. A token alone on its line takes its blank line with it.
+/// `None` when the Markdown holds more tokens than the pictures put there,
+/// because then the document's own text spells one.
+fn fill_descriptions(
+    markdown: &str,
+    found: &HashMap<u32, String>,
+    expected: usize,
+) -> Option<String> {
+    let mut seen = 0;
+    let mut out = String::with_capacity(markdown.len());
+    let mut rest = markdown;
+    while let Some(start) = rest.find("tkimg") {
+        let (before, tail) = rest.split_at(start);
+        let tail = tail.strip_prefix("tkimg").unwrap_or(tail);
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        let (number, after) = tail.split_at(digits);
+        let Some(after) = after.strip_prefix("tk").filter(|_| digits > 0) else {
+            out.push_str(before);
+            out.push_str("tkimg");
+            rest = tail;
+            continue;
+        };
+        out.push_str(before);
+        rest = after;
+        seen += 1;
+        match number.parse().ok().and_then(|n: u32| found.get(&n)) {
+            Some(text) => {
+                out.push_str("*Image: ");
+                out.push_str(text);
+                out.push('*');
+            }
+            None if out.is_empty() || out.ends_with("\n\n") => {
+                rest = rest.trim_start_matches('\n');
+            }
+            None => {}
+        }
+    }
+    out.push_str(rest);
+    (seen == expected).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +611,30 @@ mod tests {
     #[test]
     fn the_pinned_version_matches_the_crate() {
         assert_eq!(ANYDOC_VERSION, "0.1.9");
+    }
+
+    #[test]
+    fn markers_go_on_pictures_without_alt_text_and_come_out_filled() {
+        let mut next = 0;
+        let xml = r#"<p:cNvPr id="1"/><p:cNvPr id="2" descr=""/><p:cNvPr id="3" descr="Kept"/><p:cNvPr id="4" descr="A cat&#xA;&#xA;Description automatically generated"/><p:cNvPr id="5"	descr="Tabbed"/><p:cNvPicPr/>"#;
+        assert_eq!(
+            mark_tags(xml, "<p:cNvPr", &mut next),
+            r#"<p:cNvPr descr="tkimg0tk" id="1"/><p:cNvPr id="2" descr="tkimg1tk"/><p:cNvPr id="3" descr="Kept"/><p:cNvPr id="4" descr="tkimg2tk"/><p:cNvPr id="5"	descr="Tabbed"/><p:cNvPicPr/>"#
+        );
+        assert_eq!(next, 3);
+
+        let found = HashMap::from([(0, "A grid.".to_owned())]);
+        assert_eq!(
+            fill_descriptions(
+                "Intro\n\ntkimg0tk\n\ntkimg1tk\n\nEnd tkimg7tk.\n",
+                &found,
+                3
+            )
+            .as_deref(),
+            Some("Intro\n\n*Image: A grid.*\n\nEnd .\n")
+        );
+        // Body text that spells a token makes one too many: today's output.
+        assert_eq!(fill_descriptions("tkimg0tk tkimg0tk\n", &found, 1), None);
     }
 
     #[test]
@@ -306,7 +665,7 @@ mod tests {
             sha256: hex::encode(Sha256::digest(pdf)),
         };
 
-        let engine = AnyDocEngine::new(1024 * 1024, 1, Duration::from_secs(30));
+        let engine = AnyDocEngine::new(1024 * 1024, 1, Duration::from_secs(30), None);
         let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
@@ -342,7 +701,7 @@ mod tests {
             sha256: hex::encode(Sha256::digest(rtf)),
         };
 
-        let engine = AnyDocEngine::new(1024 * 1024, 1, Duration::from_secs(30));
+        let engine = AnyDocEngine::new(1024 * 1024, 1, Duration::from_secs(30), None);
         let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
@@ -368,7 +727,7 @@ mod tests {
     /// its own permit wait rather than blocking forever.
     #[tokio::test]
     async fn a_timed_out_parse_keeps_its_permit_until_it_finishes() {
-        let engine = AnyDocEngine::new(1024, 1, Duration::from_millis(50));
+        let engine = AnyDocEngine::new(1024, 1, Duration::from_millis(50), None);
         let permit = engine.acquire().await.unwrap();
         let hung = engine
             .run_bounded(move || {
@@ -394,7 +753,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicking_conversion_is_a_crash_not_a_wedge() {
-        let engine = AnyDocEngine::new(1024, 1, Duration::from_secs(5));
+        let engine = AnyDocEngine::new(1024, 1, Duration::from_secs(5), None);
         let result: Result<(), EngineFailure> =
             engine.run_bounded(|| panic!("deliberate test panic")).await;
         assert_eq!(result.unwrap_err(), EngineFailure::Crashed);

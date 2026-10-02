@@ -23,6 +23,11 @@ image-based, mixed, garbled, incomplete, or over-ceiling PDFs finish as
 `needs_remote` without publishing partial Markdown. Datalab routing is not
 active yet.
 
+Where the Vision worker runs on macOS 27, a DOCX or PPTX picture with no alt
+text gains an `*Image: …*` line from Apple's on-device Foundation Models at the
+picture's position. Decorative pictures add nothing, and any failure leaves
+today's output.
+
 ## Implemented API
 
 | Method | Path | Authentication | Purpose |

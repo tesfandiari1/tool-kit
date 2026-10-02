@@ -50,6 +50,7 @@ thiserror = "2.0.20"
 tool-kit-worker-protocol = { path = "../../crates/worker-protocol", version = "0.1.0" }
 uuid = { version = "1.24.1", features = ["serde", "v4"] }
 zeroize = "1.9.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 http-body-util = "0.1.5"
