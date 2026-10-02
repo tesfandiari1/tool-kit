@@ -77,6 +77,7 @@ export function largeRunConfirmation({
   directFiles,
   highAccuracy,
   profile,
+  jobType,
 }: {
   totalFiles: number;
   provider: string;
@@ -84,7 +85,10 @@ export function largeRunConfirmation({
   directFiles: number;
   highAccuracy: boolean;
   profile: ConversionProfile;
+  jobType: JobId;
 }): string {
+  // The service fails a recording it cannot finish. It never sends it to Rev.ai.
+  const neverFallsBack = jobType === "transcribe" && profile !== "local_only";
   const accuracy =
     highAccuracy && directFiles > 0
       ? ", with high-accuracy convert on (slower, more credits per page)"
@@ -100,13 +104,17 @@ export function largeRunConfirmation({
     const cost =
       profile === "local_only"
         ? `Local only forbids ${provider} fallback, so no ${provider} credits are planned.`
-        : `Files that require remote fallback may also use ${provider} credits${fallbackAccuracy}.`;
+        : neverFallsBack
+          ? `Transcription never falls back to ${provider}, so no ${provider} credits are planned.`
+          : `Files that require remote fallback may also use ${provider} credits${fallbackAccuracy}.`;
     return `This will send ${totalFiles} files to your conversion backend.\n\n${cost}`;
   }
   const fallback =
     profile === "local_only"
       ? ` Backend files cannot fall back to ${provider} under Local only.`
-      : ` Backend files may also use ${provider} credits if remote fallback is required.`;
+      : neverFallsBack
+        ? ""
+        : ` Backend files may also use ${provider} credits if remote fallback is required.`;
   return (
     `This will send ${backendFiles} files to your conversion backend and ${directFiles} files to ${provider}${accuracy}.` +
     `\n\nThe ${directFiles} files routed directly to ${provider} use provider credits.${fallback}`

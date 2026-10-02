@@ -126,6 +126,21 @@ describe("planConversionRoutes", () => {
     ]);
   });
 
+  it("sends a recording only Rev.ai takes direct while the backend is down", () => {
+    const voicemail = file("/drop/voicemail.amr", "audio/amr");
+    const call = file("/drop/call.wav", "audio/wav");
+    const plan = planConversionRoutes({
+      files: [voicemail, call],
+      route: "backend",
+      profile: "standard",
+      capabilities: { state: "unavailable" },
+      skipAlreadyDone: true,
+    });
+
+    expect(plan.direct).toEqual([voicemail]);
+    expect(plan.blocked).toEqual([{ file: call, reason: "backend_unavailable" }]);
+  });
+
   it("never falls back to a remote provider in local-only mode", () => {
     const image = file("/drop/scan.webp", "image/webp");
     const unsupported = file("/drop/report.docx", "application/x-not-supported-today");

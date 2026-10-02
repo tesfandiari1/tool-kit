@@ -257,6 +257,18 @@ pub(crate) const ALREADY_TEXT: &[&str] = &[
 /// from live `capabilities.inputFormats`: the Vision engine needs macOS 26.
 const PERMANENT_DIRECT_FORMATS: &[&str] = &["html", "htm"];
 
+/// Every recording the audio engine can take, from the audio rows of
+/// `SOURCE_FORMATS` in apps/converter/src/conversion/model.rs. Read only while
+/// the service cannot answer, so a stale copy never moves a live route.
+const LOCAL_AUDIO_MEDIA_TYPES: &[&str] = &[
+    "audio/wav",
+    "audio/mp4",
+    "video/mp4",
+    "video/quicktime",
+    "audio/mpeg",
+    "audio/flac",
+];
+
 fn is_permanent_direct(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -323,6 +335,19 @@ fn route_conversion_candidates(
     plan
 }
 
+/// The engine options a new submission carries. A speaker count rides only on
+/// a recording, and one outside the contract's 1 to 20 is dropped so the
+/// diarizer guesses, rather than the service refusing every file with a 422.
+fn submission_options(cfg: &Settings, jt: JobType) -> conversion_service::OcrOptions {
+    conversion_service::OcrOptions {
+        language_correction: cfg.language_correction,
+        custom_words: cfg.custom_words.clone(),
+        speaker_count: cfg
+            .speaker_count
+            .filter(|count| jt == JobType::Transcribe && (1..=20).contains(count)),
+    }
+}
+
 /// Named because `convert_one` matches on it to build a reason code.
 const BACKEND_NOT_ACCEPTING: &str = "The local conversion service is not accepting jobs";
 
@@ -346,9 +371,11 @@ fn backend_candidates(inputs: &[String], jt: JobType) -> Vec<std::path::PathBuf>
     }
 }
 
+/// `origin` is the host's answer, so a service that is not running reaches the
+/// one rule below that decides whether the outage matters.
 async fn plan_backend_conversion_files(
     inputs: &[String],
-    backend_url: &str,
+    origin: &Result<String, String>,
     jt: JobType,
 ) -> Result<NativeConversionPlan, String> {
     let candidates = backend_candidates(inputs, jt);
@@ -356,9 +383,26 @@ async fn plan_backend_conversion_files(
         return Ok(route_conversion_candidates(candidates, &HashSet::new(), jt));
     }
 
-    let capabilities = conversion_service::fetch_capabilities(backend_url)
-        .await
-        .map_err(|error| format!("The local conversion service is unavailable: {error}"))?;
+    let capabilities = match origin {
+        Ok(origin) => conversion_service::fetch_capabilities(origin)
+            .await
+            .map_err(|error| format!("The local conversion service is unavailable: {error}")),
+        Err(error) => Err(error.clone()),
+    };
+    let capabilities = match capabilities {
+        Ok(capabilities) => capabilities,
+        // Rev.ai takes these whatever the service says, so its outage is moot.
+        // Asked only on an outage: a live service still decides every file.
+        Err(_)
+            if jt == JobType::Transcribe
+                && candidates
+                    .iter()
+                    .all(|file| !LOCAL_AUDIO_MEDIA_TYPES.contains(&media_type(file).as_str())) =>
+        {
+            return Ok(route_conversion_candidates(candidates, &HashSet::new(), jt));
+        }
+        Err(error) => return Err(error),
+    };
     let accepting_jobs = capabilities.accepting_jobs;
     let supported = capabilities
         .input_formats
@@ -522,8 +566,7 @@ async fn scan_files(
             let direct_len = files.len();
             return (files, direct_len);
         }
-        Some(Ok(origin)) => plan_backend_conversion_files(inputs, origin, jt).await,
-        Some(Err(error)) => Err(error.clone()),
+        Some(origin) => plan_backend_conversion_files(inputs, origin, jt).await,
     };
     match plan {
         Ok(mut plan) => {
@@ -544,20 +587,15 @@ async fn scan_files(
 #[tauri::command]
 async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String> {
     let cfg = settings::load(&app);
-    // `run_pipeline` keeps the backend-routed tail out of the reuse lookup too.
+    // `run_pipeline` keeps Convert's backend-routed tail out of the reuse lookup too.
     let backend_route = cfg.conversion_route == settings::ConversionRoute::Backend;
     // A service still starting reads the same as one that cannot answer.
     let origin = backend_route.then(|| backend_host::backend_origin(&app));
     let (convert, direct_len) = scan_files(&inputs, origin.as_ref(), JobType::Convert).await;
-    let (transcribe, transcribe_direct_len) =
-        scan_files(&inputs, origin.as_ref(), JobType::Transcribe).await;
+    // Every recording: a transcript is done on either route.
+    let (transcribe, _) = scan_files(&inputs, origin.as_ref(), JobType::Transcribe).await;
     let convert_reuse = split_reusable(&app, &convert[..direct_len], JobType::Convert, &cfg);
-    let transcribe_reuse = split_reusable(
-        &app,
-        &transcribe[..transcribe_direct_len],
-        JobType::Transcribe,
-        &cfg,
-    );
+    let transcribe_reuse = split_reusable(&app, &transcribe, JobType::Transcribe, &cfg);
     let convert_files = describe_conversion_files(&convert, &convert_reuse);
     let transcribe_files = describe_conversion_files(&transcribe, &transcribe_reuse);
     Ok(Scan {
@@ -753,8 +791,10 @@ async fn run_pipeline(
     // Read once. In Sidecar mode the origin is this launch's own port.
     let mut backend_origin = String::new();
     let mut files = if cfg.conversion_route == settings::ConversionRoute::Backend {
-        backend_origin = backend_host::backend_origin(&app)?;
-        let plan = plan_backend_conversion_files(&inputs, &backend_origin, jt).await?;
+        let origin = backend_host::backend_origin(&app);
+        let plan = plan_backend_conversion_files(&inputs, &origin, jt).await?;
+        // Empty only when the plan sends nothing to the service.
+        backend_origin = origin.unwrap_or_default();
         if cfg.conversion_profile == settings::ConversionProfile::LocalOnly
             && !plan.direct.is_empty()
         {
@@ -783,10 +823,10 @@ async fn run_pipeline(
     let mut skipped = 0;
     if cfg.skip_already_done {
         // Per file, not per route: every file the service refuses goes to
-        // Datalab and is filed under this key.
+        // Datalab and is filed under this key. A transcript counts on both.
         let direct: Vec<std::path::PathBuf> = files
             .iter()
-            .filter(|file| !backend_files.contains(file))
+            .filter(|file| jt == JobType::Transcribe || !backend_files.contains(file))
             .cloned()
             .collect();
         let found = history::reusable(&app, &direct, jt.id(), &jobs::output_format_for(jt, &cfg));
@@ -856,11 +896,7 @@ async fn run_pipeline(
 
     let client_run_id = uuid::Uuid::new_v4().to_string();
     // From the run snapshot: the service folds OCR into the replay key.
-    let ocr = conversion_service::OcrOptions {
-        language_correction: cfg.language_correction,
-        custom_words: cfg.custom_words.clone(),
-        speaker_count: cfg.speaker_count,
-    };
+    let ocr = submission_options(&cfg, jt);
     let ocr_custom_words = ocr.custom_words_wire();
     for source in &files {
         let id = state.next_id();
@@ -1227,11 +1263,8 @@ async fn convert_one(
     let mut ledger_origin = String::new();
     let mut use_backend = false;
     if cfg.conversion_route == settings::ConversionRoute::Backend {
-        backend_origin = match backend_host::backend_origin(&app) {
-            Ok(origin) => origin,
-            Err(error) => return Ok(ConvertOneOutcome::blocked("backend_unavailable", error)),
-        };
-        let plan = match plan_backend_conversion_files(&inputs, &backend_origin, jt).await {
+        let origin = backend_host::backend_origin(&app);
+        let plan = match plan_backend_conversion_files(&inputs, &origin, jt).await {
             Ok(plan) => plan,
             Err(error) if error == BACKEND_NOT_ACCEPTING => {
                 return Ok(ConvertOneOutcome::blocked("backend_not_accepting", error))
@@ -1250,6 +1283,7 @@ async fn convert_one(
             ));
         }
         use_backend = !plan.backend.is_empty();
+        backend_origin = origin.unwrap_or_default();
         if plan.backend.is_empty() && plan.direct.is_empty() {
             return Ok(ConvertOneOutcome::blocked(
                 "not_convertible",
@@ -1289,7 +1323,7 @@ async fn convert_one(
     state.set_run_config(cfg.clone());
 
     // The tree is blind to a result the user moved, so this gate still runs.
-    if cfg.skip_already_done && !use_backend {
+    if cfg.skip_already_done && (!use_backend || jt == JobType::Transcribe) {
         let found = history::reusable(
             &app,
             std::slice::from_ref(&source),
@@ -1325,11 +1359,7 @@ async fn convert_one(
     let job = if use_backend {
         let client_run_id = uuid::Uuid::new_v4().to_string();
         let idempotency_key = uuid::Uuid::new_v4().to_string();
-        let ocr = conversion_service::OcrOptions {
-            language_correction: cfg.language_correction,
-            custom_words: cfg.custom_words.clone(),
-            speaker_count: cfg.speaker_count,
-        };
+        let ocr = submission_options(&cfg, jt);
         history::upsert_in_flight(
             &app,
             &history::NewInFlight {
@@ -1565,7 +1595,7 @@ fn show_main_window(app: &AppHandle) {
 }
 
 /// Quit from the tray, asking first if a run is in flight. Once the window is
-/// hidden the tray is the only way out, and a background run is already billed.
+/// hidden the tray is the only way out, and a file already sent is billed.
 fn quit_with_confirm(app: &AppHandle) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -1586,8 +1616,9 @@ fn quit_with_confirm(app: &AppHandle) {
     let handle = app.clone();
     app.dialog()
         .message(format!(
-            "{active} file{} still processing. The provider has already been billed for them. \
-             Backend conversions resume when you reopen Tool-Kit; direct ones do not.",
+            "{active} file{} still processing. A file already sent to a provider is billed \
+             even if it does not finish. Backend conversions resume when you reopen Tool-Kit. \
+             Direct ones do not.",
             if active == 1 { " is" } else { "s are" }
         ))
         .title("Quit Tool-Kit?")
@@ -2139,6 +2170,53 @@ mod scan_tests {
 
         assert_eq!(names(&plan.backend), vec!["call.wav", "interview.m4a"]);
         assert_eq!(names(&plan.direct), vec!["voicemail.amr"]);
+    }
+
+    /// A service that is down cannot matter to a recording only Rev.ai takes,
+    /// and must still stop one it would have transcribed locally.
+    #[tokio::test]
+    async fn an_outage_blocks_only_recordings_the_service_could_take() {
+        let root = tree("transcribe-outage", &["voicemail.amr", "call.wav"]);
+        let down: Result<String, String> = Err("The service is starting".into());
+        let amr = [root.join("voicemail.amr").to_string_lossy().into_owned()];
+        let plan = plan_backend_conversion_files(&amr, &down, JobType::Transcribe)
+            .await
+            .unwrap();
+        assert!(plan.backend.is_empty());
+        assert_eq!(names(&plan.direct), vec!["voicemail.amr"]);
+
+        let both = [root.to_string_lossy().into_owned()];
+        assert!(
+            plan_backend_conversion_files(&both, &down, JobType::Transcribe)
+                .await
+                .is_err()
+        );
+    }
+
+    /// The service 422s a count outside 1 to 20 on any file, and a document
+    /// has no speakers to count.
+    #[test]
+    fn a_speaker_count_rides_only_on_a_recording_and_only_in_range() {
+        let with = |count| Settings {
+            speaker_count: Some(count),
+            ..Settings::default()
+        };
+        assert_eq!(
+            submission_options(&with(3), JobType::Transcribe).speaker_count,
+            Some(3)
+        );
+        assert_eq!(
+            submission_options(&with(3), JobType::Convert).speaker_count,
+            None
+        );
+        assert_eq!(
+            submission_options(&with(0), JobType::Transcribe).speaker_count,
+            None
+        );
+        assert_eq!(
+            submission_options(&with(21), JobType::Transcribe).speaker_count,
+            None
+        );
     }
 
     /// mime_guess answers audio/m4a, which the contract does not list, so an

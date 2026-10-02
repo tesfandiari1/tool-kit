@@ -890,6 +890,7 @@ export default function App() {
           highAccuracy:
             settings.jobType === "convert" && settings.datalabHighAccuracy,
           profile: settings.conversionProfile,
+          jobType: settings.jobType,
         }),
         { title: `${job.verb} ${toRun} files?`, kind: "warning", okLabel: `${job.verb} all`, cancelLabel: "Cancel" }
       );

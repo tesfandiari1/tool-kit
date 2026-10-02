@@ -13,6 +13,17 @@ import type {
 /// Must stay identical to `PERMANENT_DIRECT_FORMATS` in `lib.rs`.
 const PERMANENT_DIRECT_EXTENSIONS = new Set(["html", "htm"]);
 
+/// Every recording the audio engine can take. Read only while the service
+/// cannot answer. Must stay identical to `LOCAL_AUDIO_MEDIA_TYPES` in `lib.rs`.
+const LOCAL_AUDIO_MEDIA_TYPES = new Set([
+  "audio/wav",
+  "audio/mp4",
+  "video/mp4",
+  "video/quicktime",
+  "audio/mpeg",
+  "audio/flac",
+]);
+
 export type ConversionCapabilities =
   | { state: "idle" | "loading" }
   /// The host's own reason: nothing in Settings moves the service.
@@ -73,7 +84,12 @@ export function planConversionRoutes({
       continue;
     }
 
-    if (isPermanentDirect(file.sourcePath)) {
+    // A recording only Rev.ai takes cannot wait on a service that is down.
+    // `plan_backend_conversion_files` applies the same rule.
+    if (
+      isPermanentDirect(file.sourcePath) ||
+      (capabilities.state === "unavailable" && isRevAiOnly(file.mediaType))
+    ) {
       if (profile === "local_only") {
         plan.blocked.push({ file, reason: "local_only_requires_remote" });
       } else {
@@ -129,6 +145,14 @@ export function missingConversionCredentials(
 
 function normalizeMediaType(mediaType: string): string {
   return mediaType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+}
+
+function isRevAiOnly(mediaType: string): boolean {
+  const media = normalizeMediaType(mediaType);
+  return (
+    (media.startsWith("audio/") || media.startsWith("video/")) &&
+    !LOCAL_AUDIO_MEDIA_TYPES.has(media)
+  );
 }
 
 function isPermanentDirect(sourcePath: string): boolean {

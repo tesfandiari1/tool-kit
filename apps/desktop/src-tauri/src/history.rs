@@ -684,14 +684,23 @@ fn reuse_map(
     job_type: &str,
     output_format: &str,
 ) -> HashMap<String, String> {
+    // A transcript is one result on either route. The service files its own
+    // as `backend:markdown`, and Direct asks for `text`, so a route switch
+    // would buy the same recording from Rev.ai again.
     let mut stmt = match conn.prepare(
         "SELECT output_path, source_mtime FROM history
-          WHERE source_path = ?1 AND job_type = ?2 AND output_format = ?3
+          WHERE source_path = ?1 AND job_type = ?2
+            AND (output_format = ?3
+                 OR (?2 = 'transcribe' AND output_format = 'backend:markdown'))
             AND status = 'done' AND output_path IS NOT NULL
           ORDER BY finished_at DESC LIMIT 8",
     ) {
         Ok(s) => s,
-        Err(_) => return HashMap::new(),
+        Err(e) => {
+            // Logged, or a broken query reads as "nothing done" and bills again.
+            eprintln!("[tool-kit] history reuse query failed: {e}");
+            return HashMap::new();
+        }
     };
 
     let mut found = HashMap::new();
@@ -1491,6 +1500,40 @@ mod tests {
             "job switch"
         );
         assert_eq!(reuse_map(&conn, &[src], "convert", "markdown").len(), 1);
+    }
+
+    /// A local transcript must stop Direct from billing Rev.ai for it again,
+    /// while a service Markdown result never stands in for a Datalab one.
+    #[test]
+    fn a_transcript_counts_as_done_on_either_route() {
+        let conn = db();
+        let (src, out) = pair("transcript-routes");
+        let file = |job_type, output_format| {
+            insert(
+                &conn,
+                &Finished {
+                    file_name: "report.pdf",
+                    source_path: &src.to_string_lossy(),
+                    output_path: Some(&out.to_string_lossy()),
+                    job_type,
+                    output_format,
+                    status: "done",
+                    error: None,
+                },
+            )
+            .unwrap();
+        };
+        file("transcribe", "backend:markdown");
+        file("convert", "backend:markdown");
+        assert_eq!(
+            reuse_map(&conn, std::slice::from_ref(&src), "transcribe", "text").len(),
+            1,
+            "a local transcript is done for Direct"
+        );
+        assert!(
+            reuse_map(&conn, &[src], "convert", "markdown").is_empty(),
+            "Convert keeps its route-scoped key"
+        );
     }
 
     #[test]

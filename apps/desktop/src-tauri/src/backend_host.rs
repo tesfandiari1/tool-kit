@@ -877,6 +877,13 @@ fn converter_env(layout: &Layout, bcmaps: &Path, diarizer: &Path) -> BTreeMap<St
             "TOOLKIT_CONVERTER_MAX_AUDIO_UPLOAD_BYTES".to_string(),
             "1073741824".to_string(),
         ),
+        // The default 120s needs 9 MB/s for that 1 GiB. 1800s, the host's own
+        // stream timeout, covers it at 0.6 MB/s: a slow network share or a
+        // USB 2 disk.
+        (
+            "TOOLKIT_CONVERTER_UPLOAD_TIMEOUT_SECS".to_string(),
+            "1800".to_string(),
+        ),
         (
             "TOOLKIT_CONVERTER_SHUTDOWN_GRACE_SECS".to_string(),
             SHUTDOWN_GRACE_SECS.to_string(),
@@ -1018,9 +1025,10 @@ mod tests {
             env["TOOLKIT_CONVERTER_MAX_AUDIO_UPLOAD_BYTES"],
             "1073741824"
         );
+        assert_eq!(env["TOOLKIT_CONVERTER_UPLOAD_TIMEOUT_SECS"], "1800");
         assert_eq!(env["TOOLKIT_CONVERTER_SHUTDOWN_GRACE_SECS"], "5");
         assert_eq!(env["TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF"], "1");
-        assert_eq!(env.len(), 13);
+        assert_eq!(env.len(), 14);
     }
 
     /// A quieter inherited filter drops the listening line, and the handshake

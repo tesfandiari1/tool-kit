@@ -292,13 +292,20 @@ fn pair_results(raws: &[Raw], cfg: &Settings) -> Pairing {
         of: vec![None; raws.len()],
         claimed: vec![false; raws.len()],
     };
-    for (index, raw) in raws.iter().enumerate() {
-        if raw.is_dir {
-            continue;
-        }
-        let Some(jt) = job_for(&raw.ext) else {
-            continue;
-        };
+    // Documents claim first. `lecture.mp4` sorts ahead of `lecture.pdf`, and
+    // both pair with `lecture.md`, so name order hands the recording the
+    // document's result and the tree offers a paid Convert again. A recording
+    // left unpaired still meets the history check in `convert_one`.
+    let mut sources: Vec<(usize, JobType)> = raws
+        .iter()
+        .enumerate()
+        .filter(|(_, raw)| !raw.is_dir)
+        .filter_map(|(index, raw)| Some((index, job_for(&raw.ext)?)))
+        .collect();
+    // Stable, so name order still decides within each job.
+    sources.sort_by_key(|&(_, jt)| jt == JobType::Transcribe);
+    for (index, jt) in sources {
+        let raw = &raws[index];
         let stem = stem_of(&raw.name).to_lowercase();
         // Every extension this route can write: the service writes `.md`
         // whatever the format says, so the format alone reads as unconverted.
@@ -581,6 +588,22 @@ mod tests {
             Some("deck.md")
         );
         assert_eq!(listing.pending, 0);
+    }
+
+    /// `lecture.mp4` sorts first, and both sources pair with `lecture.md`. The
+    /// recording must not take it, or the PDF is offered a paid Convert again.
+    #[test]
+    fn a_document_claims_a_shared_stem_result_before_a_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(&dir, &["lecture.mp4", "lecture.pdf", "lecture.md"]);
+
+        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+
+        assert_eq!(
+            row(&listing, "lecture.pdf").result_name.as_deref(),
+            Some("lecture.md")
+        );
+        assert_eq!(row(&listing, "lecture.mp4").result_name, None);
     }
 
     /// The output format decides the extension, so one folder pairs differently

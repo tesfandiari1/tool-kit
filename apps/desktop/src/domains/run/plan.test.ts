@@ -152,6 +152,7 @@ describe("largeRunConfirmation", () => {
         directFiles: 25,
         highAccuracy: true,
         profile: "standard",
+        jobType: "convert",
       }),
     ).toBe(
       "This will send 25 files to Datalab, with high-accuracy convert on (slower, more credits per page).\n\nEach file uses Datalab credits.",
@@ -167,6 +168,7 @@ describe("largeRunConfirmation", () => {
         directFiles: 0,
         highAccuracy: true,
         profile: "standard",
+        jobType: "convert",
       }),
     ).toBe(
       "This will send 25 files to your conversion backend.\n\nFiles that require remote fallback may also use Datalab credits with high-accuracy convert on (slower, more credits per page).",
@@ -182,6 +184,7 @@ describe("largeRunConfirmation", () => {
         directFiles: 7,
         highAccuracy: false,
         profile: "standard",
+        jobType: "convert",
       }),
     ).toBe(
       "This will send 18 files to your conversion backend and 7 files to Datalab.\n\nThe 7 files routed directly to Datalab use provider credits. Backend files may also use Datalab credits if remote fallback is required.",
@@ -197,9 +200,32 @@ describe("largeRunConfirmation", () => {
         directFiles: 0,
         highAccuracy: true,
         profile: "local_only",
+        jobType: "convert",
       }),
     ).toBe(
       "This will send 25 files to your conversion backend.\n\nLocal only forbids Datalab fallback, so no Datalab credits are planned.",
+    );
+  });
+});
+
+describe("largeRunConfirmation for transcription", () => {
+  /// A recording the service cannot finish fails. Rev.ai is never its fallback.
+  it("plans no Rev.ai credits for recordings sent to the backend", () => {
+    const confirm = (backendFiles: number, directFiles: number) =>
+      largeRunConfirmation({
+        totalFiles: backendFiles + directFiles,
+        provider: "Rev.ai",
+        backendFiles,
+        directFiles,
+        highAccuracy: false,
+        profile: "standard",
+        jobType: "transcribe",
+      });
+    expect(confirm(25, 0)).toBe(
+      "This will send 25 files to your conversion backend.\n\nTranscription never falls back to Rev.ai, so no Rev.ai credits are planned.",
+    );
+    expect(confirm(18, 7)).toBe(
+      "This will send 18 files to your conversion backend and 7 files to Rev.ai.\n\nThe 7 files routed directly to Rev.ai use provider credits.",
     );
   });
 });
