@@ -20,14 +20,20 @@ private let maxPageSide: CGFloat = 8192
 ///
 /// The crop box is the visible page, and CoreGraphics already clips it to the
 /// media box. The media box can carry bleed or a whole sheet around it.
+///
+/// `drawPDFPage` ignores `/Rotate`, so the page is turned here. Vision reads a
+/// sideways scan's words but sorts them into the wrong reading order.
 func renderPage(_ page: CGPDFPage, dpi: CGFloat) -> CGImage? {
     let box = page.getBoxRect(.cropBox)
     guard box.width.isFinite, box.height.isFinite, box.width > 0, box.height > 0 else {
         return nil
     }
-    let scale = min(dpi / 72.0, maxPageSide / max(box.width, box.height))
-    let w = max(1, Int((box.width * scale).rounded()))
-    let h = max(1, Int((box.height * scale).rounded()))
+    let rotation = (Int(page.rotationAngle) % 360 + 360) % 360
+    let quarter = rotation == 90 || rotation == 270
+    let (pageW, pageH) = quarter ? (box.height, box.width) : (box.width, box.height)
+    let scale = min(dpi / 72.0, maxPageSide / max(pageW, pageH))
+    let w = max(1, Int((pageW * scale).rounded()))
+    let h = max(1, Int((pageH * scale).rounded()))
     guard let ctx = CGContext(
         data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
         space: CGColorSpaceCreateDeviceRGB(),
@@ -36,6 +42,20 @@ func renderPage(_ page: CGPDFPage, dpi: CGFloat) -> CGImage? {
     ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
     ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
     ctx.scaleBy(x: scale, y: scale)
+    // `/Rotate` turns the page clockwise for display.
+    switch rotation {
+    case 90:
+        ctx.translateBy(x: 0, y: box.width)
+        ctx.rotate(by: -.pi / 2)
+    case 180:
+        ctx.translateBy(x: box.width, y: box.height)
+        ctx.rotate(by: .pi)
+    case 270:
+        ctx.translateBy(x: box.height, y: 0)
+        ctx.rotate(by: .pi / 2)
+    default:
+        break
+    }
     ctx.translateBy(x: -box.origin.x, y: -box.origin.y)
     ctx.drawPDFPage(page)
     return ctx.makeImage()

@@ -230,6 +230,51 @@ fn scanned_pdf(directory: &Path, lines: [&str; 2]) -> Vec<u8> {
     corpus::assemble(&objects)
 }
 
+/// One scanned page stored sideways with `/Rotate 90`, the way a scanner fixes
+/// a landscape feed. The short line sits above the long one, and a sideways
+/// read sorts the long line first.
+fn rotated_scan(directory: &Path) -> Vec<u8> {
+    let upright = png(
+        directory,
+        "upright",
+        b"BT\n/F1 24 Tf\n1 0 0 1 72 700 Tm (Opening) Tj\n\
+          1 0 0 1 72 300 Tm (The closing line runs far longer than the opening) Tj\nET\n",
+    );
+    let jpeg = directory.join("sideways.jpg");
+    // sips turns clockwise, so 270 lays the page on its left side.
+    let status = Command::new("/usr/bin/sips")
+        .args(["-r", "270", "-s", "format", "jpeg"])
+        .arg(&upright)
+        .arg("--out")
+        .arg(&jpeg)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "sips failed");
+    let samples = fs::read(jpeg).unwrap();
+    let mut image = format!(
+        "<< /Type /XObject /Subtype /Image /Width 2200 /Height 1700 /ColorSpace /DeviceRGB \
+         /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
+        samples.len()
+    )
+    .into_bytes();
+    image.extend_from_slice(&samples);
+    image.extend_from_slice(b"\nendstream");
+    let draw = b"q 792 0 0 612 0 0 cm /Im0 Do Q";
+    let mut stream = format!("<< /Length {} >>\nstream\n", draw.len()).into_bytes();
+    stream.extend_from_slice(draw);
+    stream.extend_from_slice(b"\nendstream");
+    corpus::assemble(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 792 612] /Rotate 90 \
+           /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>"
+            .to_vec(),
+        image,
+        stream,
+    ])
+}
+
 fn read_report(staging: &Path) -> VisionReport {
     let encoded = fs::read(staging.join(VISION_WORKER_REPORT_FILE)).unwrap();
     serde_json::from_slice(&encoded).unwrap()
@@ -541,6 +586,32 @@ fn a_scan_behind_a_bom_is_read_as_a_pdf_and_its_blank_page_is_counted() {
             without_text: 1
         })
     );
+}
+
+/// `drawPDFPage` ignores `/Rotate`. Vision still reads a sideways page's words,
+/// so only the order shows the page reached it on its side.
+#[test]
+fn a_page_turned_by_its_rotate_key_reads_top_to_bottom() {
+    let Some(worker) = tool("tool-kit-vision-worker") else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let pdf = rotated_scan(directory.path());
+    let source = directory.path().join("rotated.pdf");
+    fs::write(&source, &pdf).unwrap();
+
+    let run = run_worker(&worker, directory.path(), &source, &digest(&pdf), &[]);
+
+    assert!(run.status.success(), "worker exited {:?}", run.status);
+    let VisionOutcome::Converted { .. } = read_report(&run.staging).outcome else {
+        panic!("a rotated scan should convert");
+    };
+    let markdown = fs::read_to_string(run.staging.join(VISION_MARKDOWN_FILE)).unwrap();
+    let opening = markdown.find("Opening").expect("the opening line was read");
+    let closing = markdown
+        .find("closing line")
+        .expect("the closing line was read");
+    assert!(opening < closing, "read out of order:\n{markdown}");
 }
 
 /// Submits a scanned PDF and waits for the job to settle. Returns the job and
