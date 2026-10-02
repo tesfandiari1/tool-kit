@@ -275,6 +275,15 @@ fn is_permanent_direct(path: &Path) -> bool {
 }
 
 pub(crate) fn media_type(path: &Path) -> String {
+    // mime_guess answers audio/m4a, which the contract does not list, so an
+    // m4a upload is refused 415.
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
+    {
+        return "audio/mp4".to_string();
+    }
     mime_guess::from_path(path)
         .first_or_octet_stream()
         .essence_str()
@@ -290,14 +299,27 @@ struct NativeConversionPlan {
 fn route_conversion_candidates(
     candidates: Vec<std::path::PathBuf>,
     supported: &HashSet<String>,
+    jt: JobType,
 ) -> NativeConversionPlan {
     let mut plan = NativeConversionPlan::default();
     for file in candidates {
-        if is_permanent_direct(&file) {
-            plan.direct.push(file);
-        } else if supported.contains(&media_type(&file)) {
+        let media = media_type(&file);
+        if jt == JobType::Convert {
+            // Formats no local engine will ever take.
+            if is_permanent_direct(&file) {
+                plan.direct.push(file);
+                continue;
+            }
+            // mime_guess maps mpga, qt, wave and seven more onto the audio
+            // engine while Transcribe's extension list misses them. Neither
+            // route converts audio, and counting it flips autodetect.
+            if media.starts_with("audio/") || media.starts_with("video/") {
+                continue;
+            }
+        }
+        if supported.contains(&media) {
             plan.backend.push(file);
-        } else if JobType::Convert.accepts(
+        } else if jt.accepts(
             file.extension()
                 .and_then(|extension| extension.to_str())
                 .unwrap_or_default()
@@ -327,10 +349,15 @@ fn require_backend_capacity(
 async fn plan_backend_conversion_files(
     inputs: &[String],
     backend_url: &str,
+    jt: JobType,
 ) -> Result<NativeConversionPlan, String> {
-    let candidates = collect_backend_candidates(inputs);
-    if candidates.iter().all(|file| is_permanent_direct(file)) {
-        return Ok(route_conversion_candidates(candidates, &HashSet::new()));
+    // Audio never becomes a Convert job, whatever the service advertises.
+    let candidates = match jt {
+        JobType::Convert => fallback_conversion_files(inputs),
+        JobType::Transcribe => collect_input_files(inputs, JobType::Transcribe),
+    };
+    if jt == JobType::Convert && candidates.iter().all(|file| is_permanent_direct(file)) {
+        return Ok(route_conversion_candidates(candidates, &HashSet::new(), jt));
     }
 
     let capabilities = conversion_service::fetch_capabilities(backend_url)
@@ -343,7 +370,7 @@ async fn plan_backend_conversion_files(
         .map(|value| value.to_ascii_lowercase())
         .collect::<HashSet<_>>();
     require_backend_capacity(
-        route_conversion_candidates(candidates, &supported),
+        route_conversion_candidates(candidates, &supported, jt),
         accepting_jobs,
     )
 }
@@ -414,6 +441,9 @@ struct Scan {
     reusable_transcribe: usize,
     /// Concrete Convert files with MIME and reuse. No file bytes cross IPC.
     convert_files: Vec<ScannedConversionFile>,
+    /// The same for Transcribe: the preflight routes both jobs, or a local
+    /// transcription demands a Rev.ai key it never uses.
+    transcribe_files: Vec<ScannedConversionFile>,
     /// Files skipped because they are already text.
     already_text: usize,
     /// The folder to default the output to: the dropped folder, or a shared one.
@@ -486,19 +516,30 @@ fn describe_inputs(inputs: &[String]) -> Vec<InputNode> {
         .collect()
 }
 
+/// The scan's read of one job's plan. A host that cannot name an origin reads
+/// the same as a service that cannot answer.
+async fn planned_files(
+    inputs: &[String],
+    origin: &Result<String, String>,
+    jt: JobType,
+) -> Result<NativeConversionPlan, String> {
+    match origin {
+        Ok(origin) => plan_backend_conversion_files(inputs, origin, jt).await,
+        Err(error) => Err(error.clone()),
+    }
+}
+
 /// Count what each job would process, and how much is already done. `(async)`
 /// on a sync fn moves three tree walks and a stat per match off the main thread.
 #[tauri::command]
 async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String> {
     let cfg = settings::load(&app);
     // `run_pipeline` keeps the backend-routed tail out of the reuse lookup too.
-    let (convert, direct_len) = if cfg.conversion_route == settings::ConversionRoute::Backend {
-        // A service still starting reads the same as one that cannot answer.
-        let planned = match backend_host::backend_origin(&app) {
-            Ok(origin) => plan_backend_conversion_files(&inputs, &origin).await,
-            Err(error) => Err(error),
-        };
-        match planned {
+    let backend_route = cfg.conversion_route == settings::ConversionRoute::Backend;
+    // A service still starting reads the same as one that cannot answer.
+    let origin = backend_host::backend_origin(&app);
+    let (convert, direct_len) = if backend_route {
+        match planned_files(&inputs, &origin, JobType::Convert).await {
             Ok(mut plan) => {
                 let direct_len = plan.direct.len();
                 plan.direct.append(&mut plan.backend);
@@ -515,16 +556,36 @@ async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String
         let direct_len = files.len();
         (files, direct_len)
     };
-    let transcribe = collect_input_files(&inputs, JobType::Transcribe);
+    let (transcribe, transcribe_direct_len) = if backend_route {
+        match planned_files(&inputs, &origin, JobType::Transcribe).await {
+            Ok(mut plan) => {
+                let direct_len = plan.direct.len();
+                plan.direct.append(&mut plan.backend);
+                (plan.direct, direct_len)
+            }
+            Err(_) => (collect_input_files(&inputs, JobType::Transcribe), 0),
+        }
+    } else {
+        let files = collect_input_files(&inputs, JobType::Transcribe);
+        let direct_len = files.len();
+        (files, direct_len)
+    };
     let convert_reuse = split_reusable(&app, &convert[..direct_len], JobType::Convert, &cfg);
-    let transcribe_reuse = split_reusable(&app, &transcribe, JobType::Transcribe, &cfg);
+    let transcribe_reuse = split_reusable(
+        &app,
+        &transcribe[..transcribe_direct_len],
+        JobType::Transcribe,
+        &cfg,
+    );
     let convert_files = describe_conversion_files(&convert, &convert_reuse);
+    let transcribe_files = describe_conversion_files(&transcribe, &transcribe_reuse);
     Ok(Scan {
         already_here_convert: convert_reuse.already_here,
         already_here_transcribe: transcribe_reuse.already_here,
         reusable_convert: convert_reuse.reusable,
         reusable_transcribe: transcribe_reuse.reusable,
         convert_files,
+        transcribe_files,
         convert: convert.len(),
         transcribe: transcribe.len(),
         already_text: count_matching(&inputs, ALREADY_TEXT),
@@ -710,28 +771,28 @@ async fn run_pipeline(
     let mut backend_files = Vec::new();
     // Read once. In Sidecar mode the origin is this launch's own port.
     let mut backend_origin = String::new();
-    let mut files =
-        if jt == JobType::Convert && cfg.conversion_route == settings::ConversionRoute::Backend {
-            backend_origin = backend_host::backend_origin(&app)?;
-            let plan = plan_backend_conversion_files(&inputs, &backend_origin).await?;
-            if cfg.conversion_profile == settings::ConversionProfile::LocalOnly
-                && !plan.direct.is_empty()
-            {
-                let file_name = plan.direct[0]
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("This file");
-                return Err(format!(
-                    "{file_name} requires Datalab and cannot run with the Local-only profile"
-                ));
-            }
-            backend_files = plan.backend;
-            let mut routed = plan.direct;
-            routed.extend(backend_files.iter().cloned());
-            routed
-        } else {
-            collect_input_files(&inputs, jt)
-        };
+    let mut files = if cfg.conversion_route == settings::ConversionRoute::Backend {
+        backend_origin = backend_host::backend_origin(&app)?;
+        let plan = plan_backend_conversion_files(&inputs, &backend_origin, jt).await?;
+        if cfg.conversion_profile == settings::ConversionProfile::LocalOnly
+            && !plan.direct.is_empty()
+        {
+            let file_name = plan.direct[0]
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("This file");
+            return Err(format!(
+                "{file_name} requires {} and cannot run with the Local-only profile",
+                jt.provider().label()
+            ));
+        }
+        backend_files = plan.backend;
+        let mut routed = plan.direct;
+        routed.extend(backend_files.iter().cloned());
+        routed
+    } else {
+        collect_input_files(&inputs, jt)
+    };
     if files.is_empty() {
         return Err(format!("No {} files in your selection", jt.id()));
     }
@@ -817,6 +878,7 @@ async fn run_pipeline(
     let ocr = conversion_service::OcrOptions {
         language_correction: cfg.language_correction,
         custom_words: cfg.custom_words.clone(),
+        speaker_count: cfg.speaker_count,
     };
     let ocr_custom_words = ocr.custom_words_wire();
     for source in &files {
@@ -840,14 +902,17 @@ async fn run_pipeline(
                     client_run_id: &client_run_id,
                     idempotency_key: &idempotency_key,
                     conversion_profile: cfg.conversion_profile.id(),
+                    job_type: jt.id(),
                     ocr_language_correction: ocr.language_correction,
                     ocr_custom_words: &ocr_custom_words,
+                    speaker_count: ocr.speaker_count,
                 },
             );
             Job::new_backend(
                 id,
                 source_path,
                 output_dir.clone(),
+                jt,
                 jobs::BackendContext::new(
                     backend_origin.clone(),
                     client_run_id.clone(),
@@ -1188,12 +1253,12 @@ async fn convert_one(
     let mut backend_origin = String::new();
     let mut ledger_origin = String::new();
     let mut use_backend = false;
-    if jt == JobType::Convert && cfg.conversion_route == settings::ConversionRoute::Backend {
+    if cfg.conversion_route == settings::ConversionRoute::Backend {
         backend_origin = match backend_host::backend_origin(&app) {
             Ok(origin) => origin,
             Err(error) => return Ok(ConvertOneOutcome::blocked("backend_unavailable", error)),
         };
-        let plan = match plan_backend_conversion_files(&inputs, &backend_origin).await {
+        let plan = match plan_backend_conversion_files(&inputs, &backend_origin, jt).await {
             Ok(plan) => plan,
             Err(error) if error == BACKEND_NOT_ACCEPTING => {
                 return Ok(ConvertOneOutcome::blocked("backend_not_accepting", error))
@@ -1205,7 +1270,10 @@ async fn convert_one(
         {
             return Ok(ConvertOneOutcome::blocked(
                 "local_only_requires_remote",
-                format!("{file_name} requires Datalab and cannot run with the Local-only profile"),
+                format!(
+                    "{file_name} requires {} and cannot run with the Local-only profile",
+                    jt.provider().label()
+                ),
             ));
         }
         use_backend = !plan.backend.is_empty();
@@ -1287,6 +1355,7 @@ async fn convert_one(
         let ocr = conversion_service::OcrOptions {
             language_correction: cfg.language_correction,
             custom_words: cfg.custom_words.clone(),
+            speaker_count: cfg.speaker_count,
         };
         history::upsert_in_flight(
             &app,
@@ -1298,14 +1367,17 @@ async fn convert_one(
                 client_run_id: &client_run_id,
                 idempotency_key: &idempotency_key,
                 conversion_profile: cfg.conversion_profile.id(),
+                job_type: jt.id(),
                 ocr_language_correction: ocr.language_correction,
                 ocr_custom_words: &ocr.custom_words_wire(),
+                speaker_count: ocr.speaker_count,
             },
         );
         Job::new_backend(
             id,
             source_path,
             output_dir,
+            jt,
             jobs::BackendContext::new(
                 backend_origin,
                 client_run_id,
@@ -2021,6 +2093,29 @@ mod scan_tests {
         );
     }
 
+    /// mime_guess maps extensions onto the audio engine that Transcribe's list
+    /// misses, and a Convert job must take none of them.
+    #[test]
+    fn convert_never_routes_audio_only_mime_guess_recognises() {
+        let root = tree(
+            "convert-audio-guard",
+            &["voicemail.mpga", "clip.qt", "note.wave", "legacy.docx"],
+        );
+        let inputs = [root.to_string_lossy().into_owned()];
+        let candidates = fallback_conversion_files(&inputs);
+        // The extension filter cannot see them: Transcribe accepts none.
+        assert!(names(&candidates).contains(&"voicemail.mpga".into()));
+
+        let supported = HashSet::from([
+            "audio/mpeg".to_string(),
+            "audio/wav".to_string(),
+            "video/quicktime".to_string(),
+        ]);
+        let plan = route_conversion_candidates(candidates, &supported, JobType::Convert);
+        assert!(plan.backend.is_empty(), "{:?}", names(&plan.backend));
+        assert_eq!(names(&plan.direct), vec!["legacy.docx"]);
+    }
+
     #[test]
     fn backend_routes_are_the_union_of_live_support_and_direct_convert() {
         let root = tree(
@@ -2046,7 +2141,7 @@ mod scan_tests {
             "application/vnd.oasis.opendocument.text".to_string(),
             "image/png".to_string(),
         ]);
-        let plan = route_conversion_candidates(candidates, &supported);
+        let plan = route_conversion_candidates(candidates, &supported, JobType::Convert);
         assert_eq!(
             names(&plan.backend),
             vec!["document.odt", "image.png", "table.csv"]
@@ -2062,9 +2157,43 @@ mod scan_tests {
         let direct_only = route_conversion_candidates(
             vec![root.join("legacy.docx"), root.join("image.png")],
             &HashSet::new(),
+            JobType::Convert,
         );
         assert_eq!(names(&direct_only.direct), vec!["image.png", "legacy.docx"]);
         assert!(require_backend_capacity(direct_only, false).is_ok());
+    }
+
+    /// The audio engine ships only in the sidecar, so a recording the service
+    /// does not advertise still has Rev.ai, and one it does never sees it.
+    #[test]
+    fn transcribe_routes_advertised_audio_local_and_the_rest_to_rev_ai() {
+        let root = tree(
+            "transcribe-capabilities",
+            &["interview.m4a", "call.wav", "voicemail.amr", "report.pdf"],
+        );
+        let inputs = [root.to_string_lossy().into_owned()];
+        let candidates = collect_input_files(&inputs, JobType::Transcribe);
+        assert_eq!(
+            names(&candidates),
+            vec!["call.wav", "interview.m4a", "voicemail.amr"]
+        );
+
+        let supported = HashSet::from(["audio/mp4".to_string(), "audio/wav".to_string()]);
+        let plan = route_conversion_candidates(candidates, &supported, JobType::Transcribe);
+
+        assert_eq!(names(&plan.backend), vec!["call.wav", "interview.m4a"]);
+        assert_eq!(names(&plan.direct), vec!["voicemail.amr"]);
+    }
+
+    /// mime_guess answers audio/m4a, which the contract does not list, so an
+    /// m4a upload would be refused 415.
+    #[test]
+    fn the_m4a_media_type_is_the_one_the_contract_names() {
+        assert_eq!(media_type(Path::new("/tmp/interview.m4a")), "audio/mp4");
+        assert_eq!(media_type(Path::new("/tmp/interview.M4A")), "audio/mp4");
+        assert_eq!(media_type(Path::new("/tmp/call.wav")), "audio/wav");
+        assert_eq!(media_type(Path::new("/tmp/clip.mp4")), "video/mp4");
+        assert_eq!(media_type(Path::new("/tmp/report.pdf")), "application/pdf");
     }
 
     #[test]
@@ -2074,6 +2203,7 @@ mod scan_tests {
             2,
             "/tmp/report.pdf".into(),
             "/tmp".into(),
+            JobType::Convert,
             jobs::BackendContext::new(
                 "http://127.0.0.1:8080".into(),
                 "11111111-1111-4111-8111-111111111111".into(),

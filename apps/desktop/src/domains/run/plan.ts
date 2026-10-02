@@ -113,20 +113,20 @@ export function largeRunConfirmation({
   );
 }
 
+/// Transcribe follows `conversion_route` too, so the header names the local
+/// service on the Backend route rather than a provider the run never calls.
 export function runServiceDescription({
   description,
   provider,
-  jobType,
   conversionRoute,
   profile,
 }: {
   description: string;
   provider: string;
-  jobType: JobId;
   conversionRoute: ConversionRoute;
   profile: ConversionProfile;
 }): string {
-  if (jobType !== "convert" || conversionRoute === "direct") {
+  if (conversionRoute === "direct") {
     return `${description}, via ${provider}`;
   }
   if (profile === "local_only") {

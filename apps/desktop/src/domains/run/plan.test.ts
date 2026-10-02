@@ -209,7 +209,6 @@ describe("runServiceDescription", () => {
     runServiceDescription({
       description: jobType === "convert" ? "Extract structured text" : "Transcribe audio",
       provider: jobType === "convert" ? "Datalab" : "Rev.ai",
-      jobType,
       conversionRoute: route,
       profile,
     });
@@ -218,8 +217,18 @@ describe("runServiceDescription", () => {
     expect(describe("convert", "direct", "standard")).toBe(
       "Extract structured text, via Datalab",
     );
-    expect(describe("transcribe", "backend", "local_only")).toBe(
+    expect(describe("transcribe", "direct", "standard")).toBe(
       "Transcribe audio, via Rev.ai",
+    );
+  });
+
+  /// Local-only forbids Rev.ai outright, so naming it in the header is a lie.
+  it("names the local service for a backend transcription", () => {
+    expect(describe("transcribe", "backend", "local_only")).toBe(
+      "Transcribe audio, via your conversion backend only",
+    );
+    expect(describe("transcribe", "backend", "standard")).toBe(
+      "Transcribe audio, via your conversion backend with Rev.ai fallback where required",
     );
   });
 

@@ -2,7 +2,7 @@
 
 mod support;
 
-use std::{fs, time::Duration};
+use std::{fs, path::Path, process::Command, time::Duration};
 
 use axum::{
     body::Body,
@@ -13,14 +13,18 @@ use serde_json::Value;
 use serde_yaml_ng::Value as YamlValue;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
-use tool_kit_converter::worker_protocol::FallbackReason;
+use tool_kit_converter::{
+    audio_protocol::AUDIO_WORKER_IDENTITY_PREFIX, worker_protocol::FallbackReason,
+};
 use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::{
-    assert_server_request_id, clean_pdf, count_job_directories, count_named_files, json_body,
-    multipart_body, multipart_body_with_duplicate_profile, multipart_body_with_media_type,
-    multipart_body_without_source, pdf_with_content, slow_multipart_prefix, streaming_body,
+    assert_server_request_id, audio_tools, clean_pdf, count_job_directories, count_named_files,
+    json_body, multipart_body, multipart_body_with_duplicate_profile,
+    multipart_body_with_media_type, multipart_body_with_speaker_counts,
+    multipart_body_without_source, pdf_with_content, slow_multipart_prefix,
+    slow_multipart_prefix_opening, streaming_body,
     test_app, test_app_with_max_jobs, test_app_with_output_limit, test_app_with_poll_interval,
     test_app_with_upload_limits, test_app_with_worker_script, SeededJob, TestApp, TestHarness,
     TOKEN,
@@ -71,6 +75,12 @@ async fn public_health_and_capabilities_are_truthful() {
     assert_eq!(conversion["durability"], "persistent");
     assert!(conversion["limits"]["maxActiveJobs"].is_u64());
     assert!(conversion["limits"]["maxEphemeralJobs"].is_null());
+    assert_eq!(
+        conversion["limits"]["maxAudioUploadBytes"].as_u64(),
+        Some(1024 * 1024),
+        "audio has its own ceiling, and a client that reads only maxUploadBytes \
+         refuses recordings this service accepts"
+    );
     assert_eq!(
         conversion["inputFormats"],
         serde_json::json!([
@@ -308,7 +318,10 @@ fn conversion_profile_job_status_and_route_json_values_are_stable() {
             "needs_remote",
         ]
     );
-    assert_eq!(route_values, ["local_pdf", "local_anydoc", "local_vision"]);
+    assert_eq!(
+        route_values,
+        ["local_pdf", "local_anydoc", "local_vision", "local_audio"]
+    );
 }
 
 /// Pull the published strings out of one `as_str` match in policy.rs. The
@@ -1448,6 +1461,300 @@ async fn invalid_finalizing_bundles_requeue_to_a_fresh_attempt() {
     }
 }
 
+const AUDIO_MEDIA_TYPES: [&str; 6] = [
+    "audio/wav",
+    "audio/mp4",
+    "video/mp4",
+    "video/quicktime",
+    "audio/mpeg",
+    "audio/flac",
+];
+const TWO_SPEAKERS_WAV: &[u8] = include_bytes!("fixtures/audio/two-speakers.wav");
+const SILENCE_WAV: &[u8] = include_bytes!("fixtures/audio/silence.wav");
+
+/// The version half of the worker's handshake line, which is the version
+/// capabilities must publish for the engine.
+fn worker_identity_version(worker: &Path) -> String {
+    let output = Command::new(worker).arg("--version").output().unwrap();
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .strip_prefix(AUDIO_WORKER_IDENTITY_PREFIX)
+        .and_then(|tail| tail.strip_suffix('\n'))
+        .expect("the worker must answer --version with its identity line")
+        .to_owned()
+}
+
+/// Runs everywhere, because the default harness stages no audio worker. An
+/// advertised format with no engine behind it is a job that is accepted and
+/// never claimed, so the whole audio surface has to be absent instead.
+#[tokio::test]
+async fn audio_is_unadvertised_and_refused_without_the_worker() {
+    let app = test_app().await;
+    let payload = json_body(app.request(Method::GET, "/api/v1/capabilities", None).await).await;
+    let conversion = &payload["data"]["conversion"];
+    assert!(conversion["engines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|engine| engine["name"] != "local-audio"));
+    let formats = conversion["inputFormats"].as_array().unwrap();
+    for media_type in AUDIO_MEDIA_TYPES {
+        assert!(
+            !formats.iter().any(|format| format == media_type),
+            "{media_type} is advertised with no engine"
+        );
+    }
+
+    let response = app
+        .submit(
+            multipart_body_with_media_type(
+                Uuid::new_v4(),
+                "standard",
+                TWO_SPEAKERS_WAV,
+                "two-speakers.wav",
+                "audio/wav",
+            ),
+            "audio-absent-1",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "source_format_unavailable"
+    );
+}
+
+#[tokio::test]
+async fn a_two_speaker_recording_transcribes_end_to_end() {
+    let Some(harness) = TestHarness::with_audio_worker() else {
+        eprintln!(
+            "SKIPPED a_two_speaker_recording_transcribes_end_to_end: workers/audio/bin and \
+             workers/audio/models are unbuilt on this machine"
+        );
+        return;
+    };
+    let app = harness.app().await;
+
+    let payload = json_body(app.request(Method::GET, "/api/v1/capabilities", None).await).await;
+    let conversion = &payload["data"]["conversion"];
+    let engine = conversion["engines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|engine| engine["name"] == "local-audio")
+        .expect("a staged worker must be advertised");
+    let (worker, _) = audio_tools().unwrap();
+    assert_eq!(engine["version"], worker_identity_version(&worker));
+    let formats = conversion["inputFormats"].as_array().unwrap();
+    for media_type in AUDIO_MEDIA_TYPES {
+        assert!(
+            formats.iter().any(|format| format == media_type),
+            "{media_type} is missing from a host that can transcribe"
+        );
+    }
+
+    let response = app
+        .submit(
+            multipart_body_with_speaker_counts(
+                Uuid::new_v4(),
+                TWO_SPEAKERS_WAV,
+                "two-speakers.wav",
+                "audio/wav",
+                &["2"],
+            ),
+            "audio-transcript-1",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job_id = json_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let completed = app.wait_for_terminal(&job_id).await;
+    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+    assert_eq!(completed["data"]["route"]["kind"], "local_audio");
+    assert_eq!(
+        completed["data"]["route"]["reasonCodes"],
+        serde_json::json!(["transcribed_audio"])
+    );
+
+    let markdown = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
+        .await;
+    assert_eq!(markdown.status(), StatusCode::OK);
+    let markdown = markdown.into_body().collect().await.unwrap().to_bytes();
+    let transcript = String::from_utf8_lossy(&markdown);
+    assert!(
+        transcript.contains("Speaker 1") && transcript.contains("Speaker 2"),
+        "a pinned count of two should name two speakers:\n{transcript}"
+    );
+    assert!(
+        !transcript.contains("Speakers guessed"),
+        "a pinned count is not a guess:\n{transcript}"
+    );
+
+    // Serving the manifest at all is the classification assertion: the read
+    // path refuses one whose stored classification disagrees with the engine
+    // that produced it, and "audio" is the only value local-audio may carry.
+    let manifest = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
+        .await;
+    assert_eq!(manifest.status(), StatusCode::OK);
+    let manifest: Value =
+        serde_json::from_slice(&manifest.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(manifest["engine"]["name"], "local-audio");
+    assert_eq!(manifest["route"]["kind"], "local_audio");
+    assert_eq!(
+        manifest["route"]["reasonCodes"],
+        serde_json::json!(["transcribed_audio"])
+    );
+    assert_eq!(manifest["document"]["speakersFound"], 2);
+    assert_eq!(manifest["document"]["speakerCountGuessed"], false);
+    assert_eq!(
+        manifest["output"]["sha256"],
+        hex::encode(Sha256::digest(&markdown))
+    );
+}
+
+/// A rejection ends the job. v1 has no remote leg for a local transcription,
+/// so `needs_remote` here would strand it.
+#[tokio::test]
+async fn a_recording_with_no_speech_fails_rather_than_asking_for_a_remote() {
+    let Some(harness) = TestHarness::with_audio_worker() else {
+        eprintln!(
+            "SKIPPED a_recording_with_no_speech_fails_rather_than_asking_for_a_remote: \
+             workers/audio/bin and workers/audio/models are unbuilt on this machine"
+        );
+        return;
+    };
+    let app = harness.app().await;
+
+    let response = app
+        .submit(
+            multipart_body_with_media_type(
+                Uuid::new_v4(),
+                "standard",
+                SILENCE_WAV,
+                "silence.wav",
+                "audio/wav",
+            ),
+            "audio-silence-1",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job_id = json_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let completed = app.wait_for_terminal(&job_id).await;
+    assert_eq!(completed["data"]["status"], "failed", "{completed:#}");
+    assert_eq!(completed["data"]["failure"]["code"], "no_speech_found");
+}
+
+#[tokio::test]
+async fn speaker_count_is_validated_and_part_of_the_request_identity() {
+    let app = test_app().await;
+    let pdf = clean_pdf();
+    for (counts, key, code) in [
+        (["0"].as_slice(), "speakers-zero", "invalid_speaker_count"),
+        (["21"].as_slice(), "speakers-over", "invalid_speaker_count"),
+        (["two"].as_slice(), "speakers-word", "invalid_speaker_count"),
+        (
+            ["2", "3"].as_slice(),
+            "speakers-twice",
+            "duplicate_multipart_field",
+        ),
+    ] {
+        let body = multipart_body_with_speaker_counts(
+            Uuid::new_v4(),
+            &pdf,
+            "fixture.pdf",
+            "application/pdf",
+            counts,
+        );
+        let response = app.submit(body, key, TOKEN).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{key}");
+        assert_eq!(json_body(response).await["error"]["code"], code, "{key}");
+    }
+    assert_eq!(count_job_directories(app.data_dir()), 0);
+
+    // Same key, same bytes, a different count is a different request, so it
+    // must conflict rather than replay the first job's transcript settings.
+    let client_run_id = Uuid::new_v4();
+    let two = multipart_body_with_speaker_counts(
+        client_run_id,
+        &pdf,
+        "fixture.pdf",
+        "application/pdf",
+        &["2"],
+    );
+    let response = app.submit(two.clone(), "speakers-identity", TOKEN).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let replay = app.submit(two, "speakers-identity", TOKEN).await;
+    assert_eq!(replay.headers()["idempotency-replayed"], "true");
+
+    let three = multipart_body_with_speaker_counts(
+        client_run_id,
+        &pdf,
+        "fixture.pdf",
+        "application/pdf",
+        &["3"],
+    );
+    let conflict = app.submit(three, "speakers-identity", TOKEN).await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(conflict).await["error"]["code"],
+        "idempotency_conflict"
+    );
+}
+
+/// An hour of audio clears the document ceiling by an order of magnitude, so
+/// the two limits are separate and the format's engine picks which one binds.
+#[tokio::test]
+async fn the_audio_ceiling_bounds_recordings_without_touching_documents() {
+    let Some(harness) = TestHarness::with_audio_worker() else {
+        eprintln!(
+            "SKIPPED the_audio_ceiling_bounds_recordings_without_touching_documents: \
+             workers/audio/bin and workers/audio/models are unbuilt on this machine"
+        );
+        return;
+    };
+    let app = harness.with_upload_ceilings(1024 * 1024, 1024).app().await;
+
+    let response = app
+        .submit(
+            multipart_body_with_media_type(
+                Uuid::new_v4(),
+                "standard",
+                TWO_SPEAKERS_WAV,
+                "two-speakers.wav",
+                "audio/wav",
+            ),
+            "audio-ceiling-1",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "upload_too_large"
+    );
+
+    let response = app
+        .submit(
+            multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "fixture.pdf"),
+            "audio-ceiling-2",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+}
+
 #[tokio::test]
 async fn invalid_submission_fields_are_rejected_without_creating_jobs() {
     let app = test_app().await;
@@ -1549,6 +1856,47 @@ async fn multipart_boundaries_enforce_fields_media_type_extension_and_size() {
         "upload_too_large"
     );
     assert_eq!(count_job_directories(bounded.data_dir()), 0);
+}
+
+#[tokio::test]
+async fn a_body_with_no_container_signature_is_refused_before_the_upload_ends() {
+    let app = test_app().await;
+    let (mut writer, reader) = tokio::io::duplex(16 * 1024);
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/conversions")
+        .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header("idempotency-key", "unadmittable-upload")
+        .header(
+            "content-type",
+            "multipart/form-data; boundary=tool-kit-boundary",
+        )
+        .body(streaming_body(reader))
+        .unwrap();
+    let router = app.router();
+    let response = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+
+    // Enough bytes to fill the signature window, and no end to the body: the
+    // service must answer off the prefix rather than stream a gigabyte first.
+    writer
+        .write_all(&slow_multipart_prefix_opening(
+            Uuid::new_v4(),
+            b"PK\x03\x04not-a-pdf",
+        ))
+        .await
+        .unwrap();
+    writer.write_all(&vec![b'x'; 4096]).await.unwrap();
+
+    let response = tokio::time::timeout(Duration::from_secs(5), response)
+        .await
+        .expect("the signature verdict must not wait for the last chunk")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "invalid_source_signature"
+    );
+    drop(writer);
 }
 
 #[tokio::test]
@@ -2196,6 +2544,7 @@ fn openapi_parses_and_documents_only_the_live_routes() {
     );
     let limits = &capabilities["properties"]["limits"];
     assert!(string_sequence(&limits["required"]).contains(&"maxActiveJobs"));
+    assert!(string_sequence(&limits["required"]).contains(&"maxAudioUploadBytes"));
     assert!(!string_sequence(&limits["required"]).contains(&"maxEphemeralJobs"));
     assert_eq!(
         limits["properties"]["maxActiveJobs"]["minimum"].as_u64(),

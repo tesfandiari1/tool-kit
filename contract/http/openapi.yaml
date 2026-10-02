@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Tool-Kit Conversion Service
-  version: 0.4.4
+  version: 0.5.0
   description: >-
     CPU-only contract for durable, authenticated document conversion.
     Accepted conversions, idempotency records, and published artifacts are
@@ -70,7 +70,7 @@ paths:
               $ref: "#/components/schemas/ConversionSubmission"
             encoding:
               source:
-                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/msword, application/vnd.openxmlformats-officedocument.presentationml.presentation, application/vnd.ms-powerpoint, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel, application/epub+zip, application/vnd.oasis.opendocument.text, application/vnd.oasis.opendocument.spreadsheet, application/vnd.oasis.opendocument.presentation, application/rtf, text/csv, application/vnd.ms-word.document.macroEnabled.12, application/vnd.ms-excel.sheet.macroEnabled.12, application/vnd.ms-powerpoint.presentation.macroEnabled.12, application/vnd.openxmlformats-officedocument.presentationml.slideshow, application/vnd.ms-powerpoint.slideshow.macroEnabled.12, image/png, image/jpeg, image/webp, image/tiff, image/gif, image/bmp
+                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/msword, application/vnd.openxmlformats-officedocument.presentationml.presentation, application/vnd.ms-powerpoint, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel, application/epub+zip, application/vnd.oasis.opendocument.text, application/vnd.oasis.opendocument.spreadsheet, application/vnd.oasis.opendocument.presentation, application/rtf, text/csv, application/vnd.ms-word.document.macroEnabled.12, application/vnd.ms-excel.sheet.macroEnabled.12, application/vnd.ms-powerpoint.presentation.macroEnabled.12, application/vnd.openxmlformats-officedocument.presentationml.slideshow, application/vnd.ms-powerpoint.slideshow.macroEnabled.12, image/png, image/jpeg, image/webp, image/tiff, image/gif, image/bmp, audio/wav, audio/mp4, video/mp4, video/quicktime, audio/mpeg, audio/flac
                 headers:
                   Content-Disposition:
                     required: true
@@ -460,15 +460,15 @@ components:
         inputFormats:
           description: >-
             What this deployment can convert, not what the contract knows. The
-            image types need the Apple Vision engine, which ships only with
-            macOS 26 and later, so a deployment without it advertises the
-            other 18 and refuses an image upload with 409
-            `source_format_unavailable`. Read this list rather than assuming
-            the whole enum.
+            image types need the Apple Vision engine and the audio types the
+            Apple speech engine, both of which ship only with macOS 26 and
+            later, so a deployment without them advertises the other 18 and
+            refuses those uploads with 409 `source_format_unavailable`. Read
+            this list rather than assuming the whole enum.
 
 
-            Table order, and the image types are the tail, so the short list
-            is the long one's prefix.
+            Table order: the 18 document types first, then the image types,
+            then the audio and video ones.
           type: array
           items:
             type: string
@@ -497,8 +497,14 @@ components:
               - image/tiff
               - image/gif
               - image/bmp
+              - audio/wav
+              - audio/mp4
+              - video/mp4
+              - video/quicktime
+              - audio/mpeg
+              - audio/flac
           minItems: 18
-          maxItems: 24
+          maxItems: 30
         outputFormats:
           type: array
           items:
@@ -516,9 +522,11 @@ components:
         engines:
           description: >-
             The engines running in this process, pdf-inspector then anydoc.
-            apple-vision is third and present only where it initialized; its
-            version is the host's macOS product version, because Vision ships
-            with the OS and has no version of its own.
+            apple-vision and local-audio follow, each present only where it
+            initialized. apple-vision's version is the host's macOS product
+            version, because Vision ships with the OS and has no version of its
+            own; local-audio's is that version plus the speaker model package
+            it was built against, `<macOS>+fluidaudio-<version>`.
           type: array
           items:
             type: object
@@ -526,16 +534,29 @@ components:
             properties:
               name:
                 type: string
-                enum: [pdf-inspector, anydoc, apple-vision]
+                enum: [pdf-inspector, anydoc, apple-vision, local-audio]
               version:
                 type: string
           minItems: 2
-          maxItems: 3
+          maxItems: 4
         limits:
           type: object
-          required: [maxUploadBytes, maxOutputBytes, maxActiveJobs, maxConcurrentUploads]
+          required:
+            [
+              maxUploadBytes,
+              maxAudioUploadBytes,
+              maxOutputBytes,
+              maxActiveJobs,
+              maxConcurrentUploads,
+            ]
           properties:
             maxUploadBytes:
+              description: >-
+                The ceiling for every source except audio, which is bounded by
+                maxAudioUploadBytes.
+              type: integer
+              minimum: 1
+            maxAudioUploadBytes:
               type: integer
               minimum: 1
             maxOutputBytes:
@@ -591,6 +612,19 @@ components:
 
 
             Read only by the local image OCR engine and ignored by every other
+            route.
+        speakerCount:
+          type: integer
+          minimum: 1
+          maximum: 20
+          description: >-
+            How many people speak in the recording. Omit the part and the
+            diarizer guesses, which the transcript says in its first line. A
+            value outside 1 to 20, or one that is not an integer, is 422
+            `invalid_speaker_count`.
+
+
+            Read only by the local audio engine and ignored by every other
             route.
     ConversionProfile:
       type: string
@@ -713,7 +747,7 @@ components:
           properties:
             name:
               type: string
-              enum: [pdf-inspector, anydoc, apple-vision]
+              enum: [pdf-inspector, anydoc, apple-vision, local-audio]
             version:
               type: string
             features:
@@ -727,11 +761,12 @@ components:
           description: >-
             Engine diagnostics. Inspection when engine.name is pdf-inspector,
             AnyDocDiagnostics when it is anydoc, VisionDiagnostics when it is
-            apple-vision.
+            apple-vision, AudioDiagnostics when it is local-audio.
           oneOf:
             - $ref: "#/components/schemas/Inspection"
             - $ref: "#/components/schemas/AnyDocDiagnostics"
             - $ref: "#/components/schemas/VisionDiagnostics"
+            - $ref: "#/components/schemas/AudioDiagnostics"
         warnings:
           type: array
           items:
@@ -810,14 +845,14 @@ components:
       properties:
         kind:
           type: string
-          enum: [local_pdf, local_anydoc, local_vision]
+          enum: [local_pdf, local_anydoc, local_vision, local_audio]
         reasonCodes:
           description: >-
             Why the conversion routed the way it did, in decision order.
             native_text_pdf, structured_document, recognized_image_text, and
-            incomplete_local_text are the policy's own codes. The rest are the
-            reason an engine gave for producing no Markdown, which always ends
-            the job needs_remote.
+            transcribed_audio are the policy's own codes, one per engine that
+            published. The rest are the reason an engine gave for producing no
+            Markdown, which always ends the job needs_remote.
 
 
             Open vocabulary, deliberately not an enum: the remote route adds
@@ -830,6 +865,7 @@ components:
               - native_text_pdf
               - structured_document
               - recognized_image_text
+              - transcribed_audio
               - scanned_pdf
               - image_based_pdf
               - mixed_pdf
@@ -867,12 +903,38 @@ components:
       type: object
       required: [processingTimeMs]
       # Closed, because wall time is the whole of it and an open object here
-      # would also match the other two engines' diagnostics.
+      # would also match the other three engines' diagnostics.
       additionalProperties: false
       properties:
         processingTimeMs:
           type: integer
           minimum: 0
+    AudioDiagnostics:
+      description: >-
+        Content-free measurements of one transcription: durations, the speaker
+        count the diarizer settled on and whether it guessed it, never words.
+      type: object
+      required:
+        - processingTimeMs
+        - audioSeconds
+        - speakersFound
+        - speakerCountGuessed
+        - locale
+      additionalProperties: false
+      properties:
+        processingTimeMs:
+          type: integer
+          minimum: 0
+        audioSeconds:
+          type: number
+          minimum: 0
+        speakersFound:
+          type: integer
+          minimum: 1
+        speakerCountGuessed:
+          type: boolean
+        locale:
+          type: string
     Sha256:
       type: string
       pattern: "^[a-f0-9]{64}$"

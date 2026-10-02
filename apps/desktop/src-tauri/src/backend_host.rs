@@ -513,10 +513,11 @@ struct Running {
 async fn launch(app: &AppHandle, layout: &Layout) -> Result<Running, String> {
     let binary = converter_binary()?;
     let bcmaps = bcmaps_dir(app)?;
+    let diarizer = diarizer_dir(app)?;
 
     let mut command = tokio::process::Command::new(&binary);
     command
-        .envs(converter_env(layout, &bcmaps))
+        .envs(converter_env(layout, &bcmaps, &diarizer))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -809,10 +810,30 @@ fn bcmaps_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// The CoreML speaker models the audio worker loads. A missing directory fails
+/// the start the same way: the worker runs offline, so an unset directory is
+/// not a slow path, it is no diarization at all.
+fn diarizer_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let path = app
+        .path()
+        .resolve(
+            "fluidaudio/speaker-diarization-coreml",
+            BaseDirectory::Resource,
+        )
+        .map_err(|e| format!("Could not locate the bundled speaker models: {e}"))?;
+    if !path.is_dir() {
+        return Err(format!(
+            "The bundled speaker models are missing ({}). Run `pnpm sidecars`.",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
 /// Every variable the child gets, named here rather than inherited. The
 /// environment is not cleared, because the service needs `TMPDIR`. `RUST_LOG`
 /// is set, because a quieter value suppresses the listening line.
-fn converter_env(layout: &Layout, bcmaps: &Path) -> BTreeMap<String, String> {
+fn converter_env(layout: &Layout, bcmaps: &Path, diarizer: &Path) -> BTreeMap<String, String> {
     let text = |path: &Path| path.to_string_lossy().into_owned();
     BTreeMap::from([
         // Port 0 asks the kernel: no race, and no squatter to hand a token.
@@ -831,6 +852,12 @@ fn converter_env(layout: &Layout, bcmaps: &Path) -> BTreeMap<String, String> {
             text(&layout.token_file),
         ),
         ("TOOLKIT_CONVERTER_PDF_BCMAPS_DIR".to_string(), text(bcmaps)),
+        // The parent that holds `speaker-diarization/`. Unset, a present audio
+        // worker refuses to boot rather than reaching Hugging Face.
+        (
+            "TOOLKIT_CONVERTER_AUDIO_DIARIZER_DIR".to_string(),
+            text(diarizer),
+        ),
         // The queue is durable and the runner serial, so depth is free.
         ("TOOLKIT_CONVERTER_MAX_JOBS".to_string(), "512".to_string()),
         // JobManager runs four at once and the service uses try_acquire, so a
@@ -843,6 +870,16 @@ fn converter_env(layout: &Layout, bcmaps: &Path) -> BTreeMap<String, String> {
         (
             "TOOLKIT_CONVERTER_PDF_TIMEOUT_SECS".to_string(),
             "300".to_string(),
+        ),
+        // Audio needs its own ceilings: an hour of WAV clears the PDF ones by
+        // an order of magnitude.
+        (
+            "TOOLKIT_CONVERTER_AUDIO_TIMEOUT_SECS".to_string(),
+            "1800".to_string(),
+        ),
+        (
+            "TOOLKIT_CONVERTER_MAX_AUDIO_UPLOAD_BYTES".to_string(),
+            "1073741824".to_string(),
         ),
         (
             "TOOLKIT_CONVERTER_SHUTDOWN_GRACE_SECS".to_string(),
@@ -955,6 +992,9 @@ mod tests {
         let env = converter_env(
             &layout(),
             Path::new("/Applications/Tool-Kit.app/Contents/Resources/pdf-inspector/bcmaps"),
+            Path::new(
+                "/Applications/Tool-Kit.app/Contents/Resources/fluidaudio/speaker-diarization-coreml",
+            ),
         );
 
         assert_eq!(env["TOOLKIT_CONVERTER_BIND_ADDR"], "127.0.0.1:0");
@@ -970,19 +1010,32 @@ mod tests {
             env["TOOLKIT_CONVERTER_PDF_BCMAPS_DIR"],
             "/Applications/Tool-Kit.app/Contents/Resources/pdf-inspector/bcmaps"
         );
+        assert_eq!(
+            env["TOOLKIT_CONVERTER_AUDIO_DIARIZER_DIR"],
+            "/Applications/Tool-Kit.app/Contents/Resources/fluidaudio/speaker-diarization-coreml"
+        );
         assert_eq!(env["TOOLKIT_CONVERTER_MAX_JOBS"], "512");
         assert_eq!(env["TOOLKIT_CONVERTER_MAX_CONCURRENT_UPLOADS"], "8");
         assert_eq!(env["TOOLKIT_CONVERTER_PDF_TIMEOUT_SECS"], "300");
+        assert_eq!(env["TOOLKIT_CONVERTER_AUDIO_TIMEOUT_SECS"], "1800");
+        assert_eq!(
+            env["TOOLKIT_CONVERTER_MAX_AUDIO_UPLOAD_BYTES"],
+            "1073741824"
+        );
         assert_eq!(env["TOOLKIT_CONVERTER_SHUTDOWN_GRACE_SECS"], "5");
         assert_eq!(env["TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF"], "1");
-        assert_eq!(env.len(), 10);
+        assert_eq!(env.len(), 13);
     }
 
     /// A quieter inherited filter drops the listening line, and the handshake
     /// then waits 30 seconds for nothing.
     #[test]
     fn the_log_filter_is_set_rather_than_inherited() {
-        let env = converter_env(&layout(), Path::new("/tmp/bcmaps"));
+        let env = converter_env(
+            &layout(),
+            Path::new("/tmp/bcmaps"),
+            Path::new("/tmp/diarizer"),
+        );
 
         assert_eq!(env["RUST_LOG"], "tool_kit_converter=info");
     }

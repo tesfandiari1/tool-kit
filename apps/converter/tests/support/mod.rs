@@ -41,11 +41,15 @@ pub(crate) const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 struct TestOptions {
     worker_timeout: Duration,
     max_upload_bytes: u64,
+    max_audio_upload_bytes: u64,
     max_output_bytes: u64,
     max_jobs: usize,
     max_concurrent_uploads: usize,
     worker_poll_interval: Duration,
     recovery_limit: usize,
+    vision_worker_path: Option<PathBuf>,
+    audio_worker_path: Option<PathBuf>,
+    audio_diarizer_dir: Option<PathBuf>,
 }
 
 impl Default for TestOptions {
@@ -53,13 +57,31 @@ impl Default for TestOptions {
         Self {
             worker_timeout: Duration::from_secs(10),
             max_upload_bytes: 1024 * 1024,
+            max_audio_upload_bytes: 1024 * 1024,
             max_output_bytes: 2 * 1024 * 1024,
             max_jobs: 8,
             max_concurrent_uploads: 2,
             worker_poll_interval: Duration::from_secs(1),
             recovery_limit: 3,
+            vision_worker_path: None,
+            audio_worker_path: None,
+            audio_diarizer_dir: None,
         }
     }
+}
+
+/// The Swift audio worker and its staged diarizer models, on the
+/// `audio_worker.rs` shape: both are built by `workers/audio/build.sh` into
+/// gitignored directories, so a fresh checkout and Linux CI find neither and
+/// the caller skips.
+pub(crate) fn audio_tools() -> Option<(PathBuf, PathBuf)> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workers/audio");
+    let worker = root.join("bin/tool-kit-audio-worker");
+    let diarizer = root.join("models/speaker-diarization-coreml");
+    (worker.is_file() && diarizer.is_dir()).then_some((worker, diarizer))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,6 +142,41 @@ impl TestHarness {
         let mut harness = Self::new();
         harness.options.worker_poll_interval = worker_poll_interval;
         harness
+    }
+
+    /// `None` where this machine has no audio worker to run.
+    pub(crate) fn with_audio_worker() -> Option<Self> {
+        let (worker, diarizer) = audio_tools()?;
+        let mut harness = Self::new();
+        harness.options.audio_worker_path = Some(worker);
+        harness.options.audio_diarizer_dir = Some(diarizer);
+        Some(harness)
+    }
+
+    /// `None` where this machine has no Vision worker built. The timeout
+    /// covers Vision's cold model load, which runs past the default.
+    pub(crate) fn with_vision_worker() -> Option<Self> {
+        let worker = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../workers/vision/bin/tool-kit-vision-worker");
+        if !cfg!(target_os = "macos") || !worker.is_file() {
+            return None;
+        }
+        let mut harness = Self::new();
+        harness.options.vision_worker_path = Some(worker);
+        harness.options.worker_timeout = Duration::from_secs(120);
+        Some(harness)
+    }
+
+    /// Chains onto `with_audio_worker`: the audio ceiling only means anything
+    /// on a host that advertises audio at all.
+    pub(crate) fn with_upload_ceilings(
+        mut self,
+        max_upload_bytes: u64,
+        max_audio_upload_bytes: u64,
+    ) -> Self {
+        self.options.max_upload_bytes = max_upload_bytes;
+        self.options.max_audio_upload_bytes = max_audio_upload_bytes;
+        self
     }
 
     pub(crate) fn with_recovery_limit(recovery_limit: usize) -> Self {
@@ -195,6 +252,7 @@ impl TestHarness {
                 origin_request_id: Uuid::new_v4().to_string(),
                 ocr_language_correction: true,
                 ocr_custom_words: String::new(),
+                speaker_count: None,
             })
             .await
             .unwrap();
@@ -414,14 +472,18 @@ impl TestHarness {
             scratch_parent: self.data_dir.clone(),
             pdf_worker_path: self.worker_path.clone(),
             pdf_bcmaps_dir: None,
-            vision_worker_path: None,
+            vision_worker_path: self.options.vision_worker_path.clone(),
+            audio_worker_path: self.options.audio_worker_path.clone(),
+            audio_diarizer_dir: self.options.audio_diarizer_dir.clone(),
             limits: Limits {
                 max_upload_bytes: self.options.max_upload_bytes,
+                max_audio_upload_bytes: self.options.max_audio_upload_bytes,
                 max_output_bytes: self.options.max_output_bytes,
                 max_jobs: self.options.max_jobs,
                 max_concurrent_uploads: self.options.max_concurrent_uploads,
                 upload_timeout: Duration::from_secs(5),
                 pdf_timeout: self.options.worker_timeout,
+                audio_timeout: self.options.worker_timeout,
             },
             pdf_threads: 2,
             database_busy_timeout: Duration::from_secs(5),
@@ -649,6 +711,44 @@ pub(crate) fn multipart_body_with_media_type(
     body
 }
 
+/// `speaker_counts` are raw part values written verbatim, so a test can send
+/// one the parser must refuse, or send the part twice.
+pub(crate) fn multipart_body_with_speaker_counts(
+    client_run_id: Uuid,
+    source: &[u8],
+    filename: &str,
+    media_type: &str,
+    speaker_counts: &[&str],
+) -> Vec<u8> {
+    let boundary = "tool-kit-boundary";
+    let mut body = Vec::new();
+    write!(
+        body,
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"clientRunId\"\r\n\r\n{client_run_id}\r\n"
+    )
+    .unwrap();
+    write!(
+        body,
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\nstandard\r\n"
+    )
+    .unwrap();
+    for count in speaker_counts {
+        write!(
+            body,
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"speakerCount\"\r\n\r\n{count}\r\n"
+        )
+        .unwrap();
+    }
+    write!(
+        body,
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"source\"; filename=\"{filename}\"\r\nContent-Type: {media_type}\r\n\r\n"
+    )
+    .unwrap();
+    body.extend_from_slice(source);
+    write!(body, "\r\n--{boundary}--\r\n").unwrap();
+    body
+}
+
 pub(crate) fn multipart_body_with_duplicate_profile(client_run_id: Uuid, source: &[u8]) -> Vec<u8> {
     let mut body = multipart_body(client_run_id, "standard", source, "fixture.pdf");
     let closing = b"--tool-kit-boundary--\r\n";
@@ -667,10 +767,19 @@ pub(crate) fn multipart_body_without_source(client_run_id: Uuid, profile: &str) 
 }
 
 pub(crate) fn slow_multipart_prefix(client_run_id: Uuid) -> Vec<u8> {
-    format!(
-        "--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"clientRunId\"\r\n\r\n{client_run_id}\r\n--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\nstandard\r\n--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"source\"; filename=\"slow.pdf\"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4\n"
+    slow_multipart_prefix_opening(client_run_id, b"%PDF-1.4\n")
+}
+
+/// The same prefix with the source part's first bytes chosen by the caller,
+/// so a test can open a still-running upload with content that can never be
+/// admitted.
+pub(crate) fn slow_multipart_prefix_opening(client_run_id: Uuid, opening: &[u8]) -> Vec<u8> {
+    let mut prefix = format!(
+        "--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"clientRunId\"\r\n\r\n{client_run_id}\r\n--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\nstandard\r\n--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"source\"; filename=\"slow.pdf\"\r\nContent-Type: application/pdf\r\n\r\n"
     )
-    .into_bytes()
+    .into_bytes();
+    prefix.extend_from_slice(opening);
+    prefix
 }
 
 pub(crate) fn count_named_files(root: &Path, expected: &str) -> usize {

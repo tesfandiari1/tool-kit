@@ -12,14 +12,15 @@ use super::ConversionProfile;
 
 /// Where a conversion's Markdown comes from.
 ///
-/// Every route is local until M5's remote leg lands, which is the whole point
-/// of the shared prefix, so the naming lint has nothing to say here yet.
+/// Every route runs on this machine, and the shared prefix says so: the remote
+/// leg is a separate contract, not another variant here.
 #[expect(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RouteKind {
     LocalPdf,
     LocalAnyDoc,
     LocalVision,
+    LocalAudio,
 }
 
 impl RouteKind {
@@ -28,6 +29,7 @@ impl RouteKind {
             Self::LocalPdf => "local_pdf",
             Self::LocalAnyDoc => "local_anydoc",
             Self::LocalVision => "local_vision",
+            Self::LocalAudio => "local_audio",
         }
     }
 }
@@ -44,6 +46,9 @@ pub(crate) enum ReasonCode {
     /// photograph or a screenshot, and the difference matters to a reader
     /// judging the output.
     RecognizedImageText,
+    /// Speech read off an audio or video track. The Markdown is a transcript,
+    /// not a rendering of anything that was written down.
+    TranscribedAudio,
     /// The engine gave up before producing Markdown. Carries the engine's own
     /// reason.
     Engine(FallbackReason),
@@ -55,6 +60,7 @@ impl ReasonCode {
             Self::NativeTextPdf => "native_text_pdf",
             Self::StructuredDocument => "structured_document",
             Self::RecognizedImageText => "recognized_image_text",
+            Self::TranscribedAudio => "transcribed_audio",
             Self::Engine(reason) => reason.as_str(),
         }
     }
@@ -208,6 +214,7 @@ fn converted_reason(route: RouteKind) -> ReasonCode {
         RouteKind::LocalPdf => ReasonCode::NativeTextPdf,
         RouteKind::LocalAnyDoc => ReasonCode::StructuredDocument,
         RouteKind::LocalVision => ReasonCode::RecognizedImageText,
+        RouteKind::LocalAudio => ReasonCode::TranscribedAudio,
     }
 }
 
@@ -351,6 +358,7 @@ mod tests {
             ReasonCode::NativeTextPdf,
             ReasonCode::StructuredDocument,
             ReasonCode::RecognizedImageText,
+            ReasonCode::TranscribedAudio,
             ReasonCode::Engine(FallbackReason::ScannedPdf),
         ] {
             let value = code.as_str();

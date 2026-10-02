@@ -9,20 +9,29 @@
 # runs this ahead of both `tauri` and `verify` rather than only before a
 # release build.
 #
-# Six artifacts, in two places:
+# Eleven artifacts, in two places:
 #
 #   binaries/tool-kit-converter-aarch64-apple-darwin
 #   binaries/tool-kit-pdf-worker-aarch64-apple-darwin
 #   binaries/tool-kit-vision-worker-aarch64-apple-darwin
+#   binaries/tool-kit-audio-worker-aarch64-apple-darwin
 #   resources/pdf-inspector/bcmaps/
 #   resources/pdf-inspector/pdf-inspector-MIT.txt
 #   resources/pdf-inspector/adobe-bcmaps.txt
+#   resources/fluidaudio/speaker-diarization-coreml/
+#   resources/fluidaudio/FluidAudio-Apache-2.0.txt
+#   resources/fluidaudio/speaker-diarization-CC-BY-4.0.txt
+#   resources/fluidaudio/FluidAudio-ThirdPartyLicenses/
 #
-# The bundler strips the target suffix and writes the three binaries into
+# The bundler strips the target suffix and writes the four binaries into
 # Contents/MacOS, which is where the converter probes for its sibling workers,
-# so no worker path env var is needed at runtime. The bcmaps go to
-# Contents/Resources instead: Contents/MacOS is sealed nested code and a data
-# file there breaks the seal.
+# so no worker path env var is needed at runtime. The bcmaps and the diarizer
+# models go to Contents/Resources instead: Contents/MacOS is sealed nested code
+# and a data file there breaks the seal.
+#
+# Downloading the diarizer models is the one build-time network step, and it
+# runs only when resources/fluidaudio holds no set for the FluidAudio version
+# the worker was built against.
 #
 # Usage: apps/desktop/src-tauri/scripts/build-sidecars.sh [--debug]
 #
@@ -48,7 +57,9 @@ while [ $# -gt 0 ]; do
     # unbound variable. --profile dev names the same build cargo already does
     # by default, so the array stays non-empty on both branches.
     --debug) PROFILE="debug"; CARGO_PROFILE_ARGS=("--profile" "dev"); shift ;;
-    -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    # Range ends at the blank line after the header, not a line number: the
+    # number went stale twice while the header grew.
+    -h|--help) sed -n '2,/^$/p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -59,6 +70,7 @@ fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
 
 BIN_DIR="${CRATE_DIR}/binaries"
 RES_DIR="${CRATE_DIR}/resources/pdf-inspector"
+RES_AUDIO="${CRATE_DIR}/resources/fluidaudio/speaker-diarization-coreml"
 CONVERTER_MANIFEST="${REPO_ROOT}/apps/converter/Cargo.toml"
 
 step "Host"
@@ -112,6 +124,12 @@ VISION_BIN="${REPO_ROOT}/workers/vision/bin/tool-kit-vision-worker"
 [ -x "${VISION_BIN}" ] || fail "workers/vision/build.sh left no ${VISION_BIN}"
 pass "tool-kit-vision-worker"
 
+step "Audio worker"
+"${REPO_ROOT}/workers/audio/build.sh"
+AUDIO_BIN="${REPO_ROOT}/workers/audio/bin/tool-kit-audio-worker"
+[ -x "${AUDIO_BIN}" ] || fail "workers/audio/build.sh left no ${AUDIO_BIN}"
+pass "tool-kit-audio-worker"
+
 step "Stage binaries"
 mkdir -p "${BIN_DIR}"
 # install replaces the file rather than writing through it, so a re-run cannot
@@ -120,7 +138,8 @@ mkdir -p "${BIN_DIR}"
 install -m 0755 "${BUILT}/tool-kit-converter" "${BIN_DIR}/tool-kit-converter-${TARGET}"
 install -m 0755 "${BUILT}/tool-kit-pdf-worker" "${BIN_DIR}/tool-kit-pdf-worker-${TARGET}"
 install -m 0755 "${VISION_BIN}" "${BIN_DIR}/tool-kit-vision-worker-${TARGET}"
-for name in tool-kit-converter tool-kit-pdf-worker tool-kit-vision-worker; do
+install -m 0755 "${AUDIO_BIN}" "${BIN_DIR}/tool-kit-audio-worker-${TARGET}"
+for name in tool-kit-converter tool-kit-pdf-worker tool-kit-vision-worker tool-kit-audio-worker; do
   pass "binaries/${name}-${TARGET}"
 done
 
@@ -140,5 +159,56 @@ install -m 0644 "${PDF_INSPECTOR_SRC}/LICENSE" "${RES_DIR}/pdf-inspector-MIT.txt
 install -m 0644 "${PDF_INSPECTOR_SRC}/external/bcmaps/LICENSE" "${RES_DIR}/adobe-bcmaps.txt"
 pass "resources/pdf-inspector/bcmaps ($(find "${RES_DIR}/bcmaps" -type f | wc -l | tr -d ' ') files)"
 pass "resources/pdf-inspector/{pdf-inspector-MIT.txt,adobe-bcmaps.txt}"
+
+step "Stage diarizer models"
+mkdir -p "$(dirname "${RES_AUDIO}")"
+# The manifest records the FluidAudio version the set was fetched for. Compare
+# it against the worker's own pin, or a version bump ships the previous
+# release's CoreML set against a worker compiled for the new one.
+WANT_FLUIDAUDIO="$("${AUDIO_BIN}" --version | sed -n 's/.*fluidaudio-\([^[:space:]]*\).*/\1/p')"
+[ -n "${WANT_FLUIDAUDIO}" ] \
+  || fail "${AUDIO_BIN} --version printed no fluidaudio-<version> to stage the models against"
+HAVE_FLUIDAUDIO="$(sed -n 's/.*"fluidAudioVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "${RES_AUDIO}/manifest.json" 2>/dev/null || true)"
+if [ "${HAVE_FLUIDAUDIO}" = "${WANT_FLUIDAUDIO}" ]; then
+  pass "resources/fluidaudio/speaker-diarization-coreml (already staged, FluidAudio ${HAVE_FLUIDAUDIO})"
+else
+  # Same staging-and-swap as the bcmaps: an interrupted download leaves the
+  # previous set whole rather than a half-fetched one the worker loads anyway.
+  rm -rf "${RES_AUDIO}.staging"
+  "${AUDIO_BIN}" --fetch diarizer "${RES_AUDIO}.staging"
+  [ -f "${RES_AUDIO}.staging/manifest.json" ] \
+    || fail "--fetch diarizer wrote no manifest.json under ${RES_AUDIO}.staging"
+  rm -rf "${RES_AUDIO}"
+  mv "${RES_AUDIO}.staging" "${RES_AUDIO}"
+  pass "resources/fluidaudio/speaker-diarization-coreml (fetched for FluidAudio ${WANT_FLUIDAUDIO})"
+fi
+FLUIDAUDIO_SRC="${REPO_ROOT}/workers/audio/.build/checkouts/FluidAudio"
+[ -f "${FLUIDAUDIO_SRC}/LICENSE" ] \
+  || fail "no LICENSE in the FluidAudio checkout at ${FLUIDAUDIO_SRC}"
+install -m 0644 "${FLUIDAUDIO_SRC}/LICENSE" "${RES_AUDIO%/*}/FluidAudio-Apache-2.0.txt"
+cat > "${RES_AUDIO%/*}/speaker-diarization-CC-BY-4.0.txt" <<'NOTICE'
+Speaker diarization CoreML models
+
+Model:   FluidInference/speaker-diarization-coreml
+Source:  https://huggingface.co/FluidInference/speaker-diarization-coreml
+Licence: Creative Commons Attribution 4.0 International (CC BY 4.0)
+         https://creativecommons.org/licenses/by/4.0/
+
+Converted for the Apple Neural Engine from pyannote/speaker-diarization-community-1
+(https://huggingface.co/pyannote/speaker-diarization-community-1), which carries
+the same CC BY 4.0 licence. The FluidAudio SDK that loads them is Apache-2.0;
+see FluidAudio-Apache-2.0.txt.
+NOTICE
+# The worker links FluidAudio's vendored fastcluster (BSD, which requires the
+# notice to ship with a binary redistribution), the VBx diarization code and
+# NemoTextProcessing. Apache-2.0 alone does not cover them.
+[ -d "${FLUIDAUDIO_SRC}/ThirdPartyLicenses" ] \
+  || fail "no ThirdPartyLicenses in the FluidAudio checkout at ${FLUIDAUDIO_SRC}"
+rm -rf "${RES_AUDIO%/*}/FluidAudio-ThirdPartyLicenses"
+cp -R "${FLUIDAUDIO_SRC}/ThirdPartyLicenses" "${RES_AUDIO%/*}/FluidAudio-ThirdPartyLicenses"
+chmod -R u+w,a+r "${RES_AUDIO%/*}/FluidAudio-ThirdPartyLicenses"
+pass "resources/fluidaudio ($(find "${RES_AUDIO}" -type f | wc -l | tr -d ' ') model files, \
+$(find "${RES_AUDIO%/*}" -maxdepth 2 -type f \( -name '*.txt' -o -name '*LICENSE*.md' \) | wc -l | tr -d ' ') licence texts)"
 
 printf '\nRESULT: PASS\n'

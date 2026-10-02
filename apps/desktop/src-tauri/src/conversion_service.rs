@@ -105,14 +105,17 @@ struct ConversionSubmission {
     profile: String,
     language_correction: bool,
     custom_words: String,
+    speaker_count: Option<u32>,
 }
 
-/// The local-OCR settings a submission was made with, read by the image engine
-/// alone. Part of the replay fingerprint, so a recovered job resubmits them.
+/// Every per-run engine setting the service folds into its replay key, named
+/// for the first of them. Read by the image engine and the audio engine alone,
+/// so a recovered job must resubmit exactly what it was submitted with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OcrOptions {
     pub(crate) language_correction: bool,
     pub(crate) custom_words: Vec<String>,
+    pub(crate) speaker_count: Option<u32>,
 }
 
 impl Default for OcrOptions {
@@ -121,6 +124,7 @@ impl Default for OcrOptions {
         Self {
             language_correction: true,
             custom_words: Vec::new(),
+            speaker_count: None,
         }
     }
 }
@@ -132,10 +136,15 @@ impl OcrOptions {
     }
 
     /// Rebuild from the stored wire form.
-    pub(crate) fn from_wire(language_correction: bool, custom_words: &str) -> Self {
+    pub(crate) fn from_wire(
+        language_correction: bool,
+        custom_words: &str,
+        speaker_count: Option<u32>,
+    ) -> Self {
         Self {
             language_correction,
             custom_words: custom_words.lines().map(str::to_owned).collect(),
+            speaker_count,
         }
     }
 }
@@ -209,6 +218,7 @@ pub(crate) async fn submit_conversion(
         "profile": profile,
         "languageCorrection": ocr.language_correction,
         "customWords": custom_words,
+        "speakerCount": ocr.speaker_count,
     }))
     .map_err(|e| format!("Could not prepare conversion submission: {e}"))?;
     let response = send_service_request(
@@ -575,9 +585,7 @@ async fn send_conversion(
     if !metadata.is_file() {
         return Err("Conversion source must be a regular file".into());
     }
-    let media_type = mime_guess::from_path(source)
-        .first_or_octet_stream()
-        .to_string();
+    let media_type = crate::media_type(source);
     let source_part = multipart::Part::file(source)
         .await
         .map_err(|e| format!("Could not open conversion source: {e}"))?
@@ -594,6 +602,9 @@ async fn send_conversion(
     }
     if !submission.custom_words.is_empty() {
         form = form.text("customWords", submission.custom_words);
+    }
+    if let Some(speakers) = submission.speaker_count {
+        form = form.text("speakerCount", speakers.to_string());
     }
 
     client
@@ -848,6 +859,7 @@ mod tests {
         OcrOptions {
             language_correction: true,
             custom_words: Vec::new(),
+            speaker_count: None,
         }
     }
 
@@ -858,6 +870,7 @@ mod tests {
         let ocr = OcrOptions {
             language_correction: true,
             custom_words: vec!["Uniwise".into(); 40],
+            speaker_count: None,
         };
         assert!(ocr.custom_words_wire().len() > MAX_METADATA_BYTES);
         let error = submit_conversion(
@@ -1186,6 +1199,7 @@ mod tests {
             &OcrOptions {
                 language_correction: false,
                 custom_words: vec!["Datalab".into(), "Rev.ai".into()],
+                speaker_count: Some(2),
             },
             "stable-replay-key",
         )
@@ -1200,6 +1214,7 @@ mod tests {
         // The list reaches the wire as one part, one word per line.
         assert!(request.contains("name=\"languageCorrection\"\r\n\r\nfalse"));
         assert!(request.contains("name=\"customWords\"\r\n\r\nDatalab\nRev.ai"));
+        assert!(request.contains("name=\"speakerCount\"\r\n\r\n2"));
         server.task.await.unwrap();
     }
 
@@ -1256,6 +1271,7 @@ mod tests {
             // still accepts the submission.
             assert!(!request.contains("name=\"languageCorrection\""));
             assert!(!request.contains("name=\"customWords\""));
+            assert!(!request.contains("name=\"speakerCount\""));
         }
         server.await.unwrap();
     }

@@ -149,6 +149,8 @@ pub enum DocumentClassification {
     /// A structured non-PDF document (Word, PowerPoint, Excel, EPUB) parsed
     /// locally by AnyDoc.
     StructuredDocument,
+    /// A recording transcribed locally by the Audio engine.
+    Audio,
 }
 
 impl DocumentClassification {
@@ -159,6 +161,7 @@ impl DocumentClassification {
             Self::ImageBased => "image_based",
             Self::Mixed => "mixed",
             Self::StructuredDocument => "structured_document",
+            Self::Audio => "audio",
         }
     }
 
@@ -173,6 +176,7 @@ impl DocumentClassification {
             Self::ImageBased,
             Self::Mixed,
             Self::StructuredDocument,
+            Self::Audio,
         ]
         .into_iter()
         .find(|candidate| candidate.as_str() == value)
@@ -299,6 +303,9 @@ pub struct NewConversion {
     /// long after the request is gone.
     pub ocr_language_correction: bool,
     pub ocr_custom_words: String,
+    /// The speaker count the request pinned, `None` to let the diarizer guess.
+    /// Stored for the same reason the OCR settings are.
+    pub speaker_count: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -379,4 +386,5 @@ pub struct StoredConversion {
     pub updated_at: String,
     pub ocr_language_correction: bool,
     pub ocr_custom_words: String,
+    pub speaker_count: Option<u32>,
 }

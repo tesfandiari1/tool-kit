@@ -17,9 +17,11 @@ use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::{
+    config::Limits,
     conversion::{
         source_format_by_extension, ArtifactKind, ArtifactLookup, ArtifactView, ContainerMagic,
-        ConversionProfile, JobView, SourceMetadata, Submission, SubmissionDecision,
+        ConversionProfile, EngineAvailability, JobView, LocalEngineKind, SourceMetadata,
+        Submission, SubmissionDecision,
     },
     error::{ApiError, RequestId},
     AppState,
@@ -110,8 +112,8 @@ pub async fn create(
         stage_multipart(
             multipart,
             &prepared.paths.source_staging,
-            state.limits().max_upload_bytes,
-            state.service().vision_version().is_some(),
+            state.limits(),
+            state.service().engine_availability(),
             &request_id,
         ),
     )
@@ -157,6 +159,7 @@ pub async fn create(
             source: staged.source,
             language_correction: staged.language_correction,
             custom_words: staged.custom_words,
+            speaker_count: staged.speaker_count,
             idempotency_key,
             origin_request_id: request_id.as_str().to_owned(),
         })
@@ -286,8 +289,8 @@ async fn download(
 async fn stage_multipart(
     mut multipart: Multipart,
     source_path: &std::path::Path,
-    max_upload_bytes: u64,
-    vision_available: bool,
+    limits: &Limits,
+    available: EngineAvailability,
     request_id: &RequestId,
 ) -> Result<StagedSubmission, ApiError> {
     let mut client_run_id = None;
@@ -295,6 +298,7 @@ async fn stage_multipart(
     let mut source = None;
     let mut language_correction = None;
     let mut custom_words = None;
+    let mut speaker_count = None;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -355,19 +359,31 @@ async fn stage_multipart(
                 }
                 custom_words = Some(value);
             }
-            Some("source") if source.is_none() => {
-                source = Some(
-                    stream_source(
-                        field,
-                        source_path,
-                        max_upload_bytes,
-                        vision_available,
-                        request_id,
-                    )
-                    .await?,
+            Some("speakerCount") if speaker_count.is_none() => {
+                let value = read_text(field, request_id).await?;
+                speaker_count = Some(
+                    value
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|count| (1..=20).contains(count))
+                        .ok_or_else(|| {
+                            error(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                "invalid_speaker_count",
+                                "speakerCount must be an integer between 1 and 20.",
+                                request_id,
+                            )
+                        })?,
                 );
             }
-            Some("clientRunId" | "profile" | "source" | "languageCorrection" | "customWords") => {
+            Some("source") if source.is_none() => {
+                source =
+                    Some(stream_source(field, source_path, limits, available, request_id).await?);
+            }
+            Some(
+                "clientRunId" | "profile" | "source" | "languageCorrection" | "customWords"
+                | "speakerCount",
+            ) => {
                 return Err(error(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "duplicate_multipart_field",
@@ -379,7 +395,7 @@ async fn stage_multipart(
                 return Err(error(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "unexpected_multipart_field",
-                    "Only source, clientRunId, profile, languageCorrection, and customWords are accepted.",
+                    "Only source, clientRunId, profile, languageCorrection, customWords, and speakerCount are accepted.",
                     request_id,
                 ));
             }
@@ -393,6 +409,8 @@ async fn stage_multipart(
         // Both are optional; absent is the documented default.
         language_correction: language_correction.unwrap_or(true),
         custom_words: custom_words.unwrap_or_default(),
+        // Absent means the diarizer guesses.
+        speaker_count,
     })
 }
 
@@ -429,8 +447,8 @@ async fn read_text(
 async fn stream_source(
     mut field: axum::extract::multipart::Field<'_>,
     source_path: &std::path::Path,
-    max_upload_bytes: u64,
-    vision_available: bool,
+    limits: &Limits,
+    available: EngineAvailability,
     request_id: &RequestId,
 ) -> Result<SourceMetadata, ApiError> {
     let filename = field.file_name().ok_or_else(|| {
@@ -479,7 +497,7 @@ async fn stream_source(
     // host just has no engine for it. Refused here, before a byte is stored,
     // because the alternative is a job accepted and never claimed. Conflict
     // rather than 415: nothing about the upload is wrong.
-    if !format.is_servable(vision_available) {
+    if !format.is_servable(available) {
         return Err(error(
             StatusCode::CONFLICT,
             "source_format_unavailable",
@@ -487,6 +505,15 @@ async fn stream_source(
             request_id,
         ));
     }
+
+    // An hour of audio is orders of magnitude past the document ceiling, so
+    // the format's engine picks which limit bounds the stream.
+    let max_upload_bytes = match format.engine {
+        LocalEngineKind::Audio => limits.max_audio_upload_bytes,
+        LocalEngineKind::Pdf | LocalEngineKind::AnyDoc | LocalEngineKind::Vision => {
+            limits.max_upload_bytes
+        }
+    };
 
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
@@ -505,6 +532,7 @@ async fn stream_source(
     let mut digest = Sha256::new();
     let mut byte_length = 0_u64;
     let mut signature = Vec::with_capacity(1024);
+    let mut signature_checked = false;
     while let Some(chunk) = field.chunk().await.map_err(|_| {
         error(
             StatusCode::BAD_REQUEST,
@@ -521,18 +549,22 @@ async fn stream_source(
         }
         let remaining = 1024_usize.saturating_sub(signature.len());
         signature.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        // The window the post-loop check reads is full, so its verdict is
+        // already final: refuse here rather than stream the rest of a
+        // gigabyte of audio to disk first.
+        if !signature_checked && signature.len() == 1024 {
+            signature_checked = true;
+            if !has_container_magic(format.magic, &signature) {
+                return Err(invalid_source_signature(request_id));
+            }
+        }
         digest.update(&chunk);
         file.write_all(&chunk)
             .await
             .map_err(|_| scratch_write_failed(request_id))?;
     }
     if byte_length == 0 || !has_container_magic(format.magic, &signature) {
-        return Err(error(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "invalid_source_signature",
-            "The source content does not match its extension.",
-            request_id,
-        ));
+        return Err(invalid_source_signature(request_id));
     }
     file.sync_all()
         .await
@@ -542,6 +574,15 @@ async fn stream_source(
         byte_length,
         sha256: hex::encode(digest.finalize()),
     })
+}
+
+fn invalid_source_signature(request_id: &RequestId) -> ApiError {
+    error(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "invalid_source_signature",
+        "The source content does not match its extension.",
+        request_id,
+    )
 }
 
 /// The cheap admission check: the container signature each format family
@@ -563,6 +604,17 @@ fn has_container_magic(magic: ContainerMagic, prefix: &[u8]) -> bool {
         ContainerMagic::Tiff => prefix.starts_with(b"II*\0") || prefix.starts_with(b"MM\0*"),
         ContainerMagic::Gif => prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a"),
         ContainerMagic::Bmp => prefix.starts_with(b"BM"),
+        ContainerMagic::Wave => prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WAVE"),
+        // The brand after `ftyp` names m4a, mp4 or mov; the media type already
+        // said which, and the worker reads the audio track either way.
+        ContainerMagic::IsoBmff => prefix.get(4..8) == Some(b"ftyp"),
+        // An ID3 tag or a bare frame: sync bits are the whole first byte and
+        // the top three of the second.
+        ContainerMagic::MpegAudio => {
+            prefix.starts_with(b"ID3")
+                || matches!(prefix, [0xFF, second, ..] if second & 0xE0 == 0xE0)
+        }
+        ContainerMagic::Flac => prefix.starts_with(b"fLaC"),
         // CSV has no signature to check. Admission rests on the extension and
         // the declared media type; the engine still has the final say.
         ContainerMagic::None => true,
@@ -711,6 +763,7 @@ struct StagedSubmission {
     source: SourceMetadata,
     language_correction: bool,
     custom_words: String,
+    speaker_count: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]

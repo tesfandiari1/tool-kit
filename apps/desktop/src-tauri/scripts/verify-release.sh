@@ -17,10 +17,10 @@
 # legacy keychain, where access is an ACL bound to the code signature and every
 # rebuild re-prompts for every key, with nothing on screen to explain it.
 #
-# The sidecar signatures. The bundler copies the conversion service and its two
-# workers into Contents/MacOS and signs each one on its own. A sidecar that
-# missed --options runtime passes codesign --verify --deep --strict here and is
-# rejected by the notary an hour later, taking the whole submission with it.
+# The sidecar signatures. The bundler copies the conversion service and its
+# three workers into Contents/MacOS and signs each one on its own. A sidecar
+# that missed --options runtime passes codesign --verify --deep --strict here
+# and is rejected by the notary an hour later, taking the whole submission.
 #
 # Usage: apps/desktop/src-tauri/scripts/verify-release.sh [--notarized]
 #
@@ -105,7 +105,7 @@ printf '\n== Sidecars\n'
 # Each sidecar is signed on its own by the bundler, so each carries its own
 # flags, its own team and its own timestamp, and the app's signature does not
 # cover a single one of those three.
-for sidecar in tool-kit-converter tool-kit-pdf-worker tool-kit-vision-worker; do
+for sidecar in tool-kit-converter tool-kit-pdf-worker tool-kit-vision-worker tool-kit-audio-worker; do
   BIN="${APP}/Contents/MacOS/${sidecar}"
   [ -f "$BIN" ] || fail "Contents/MacOS/${sidecar} is missing. The app spawns the
      conversion service by name beside its own executable, so this bundle has no
@@ -193,6 +193,36 @@ GOT_CMAPS="$(find "$BCMAPS" -type f | wc -l | tr -d ' ')"
      partial copy starts clean and silently loses ToUnicode mapping for every
      ordering whose file did not make it"
 pass "bcmaps: ${GOT_CMAPS} files matching the staged set, four CMap sentinels non-empty"
+
+# The audio worker sets ModelHub.offlineMode and loads the diarizer from an
+# explicit directory, so a missing or partial model set is not a download at
+# runtime: the worker refuses to boot and the converter advertises no audio at
+# all. The count is compared against what build-sidecars.sh staged, the same
+# way as the CMaps, so a FluidAudio model bump moves both at once.
+DIARIZER="${APP}/Contents/Resources/fluidaudio/speaker-diarization-coreml"
+[ -s "${DIARIZER}/manifest.json" ] || fail "no Contents/Resources/fluidaudio/speaker-diarization-coreml/manifest.json.
+     The audio worker loads the diarizer from the bundle and never goes online,
+     so this bundle transcribes nothing: every Transcribe job on the backend
+     route fails at worker startup"
+STAGED_DIARIZER="${CRATE_DIR}/resources/fluidaudio/speaker-diarization-coreml"
+[ -d "$STAGED_DIARIZER" ] || fail "no ${STAGED_DIARIZER} to compare the bundled models
+     against. Run pnpm sidecars, which stages the set this bundle should carry"
+WANT_MODELS="$(find "$STAGED_DIARIZER" -type f | wc -l | tr -d ' ')"
+GOT_MODELS="$(find "$DIARIZER" -type f | wc -l | tr -d ' ')"
+[ "$GOT_MODELS" = "$WANT_MODELS" ] || fail "the bundle carries ${GOT_MODELS} diarizer files and
+     pnpm sidecars staged ${WANT_MODELS}. A CoreML bundle missing one weight file loads
+     with an error the worker reports as a failed job, on every audio file"
+# The three ThirdPartyLicenses files cover code linked into the worker, not the
+# models: fastcluster is BSD and its notice must ship with the binary.
+for notice in FluidAudio-Apache-2.0.txt speaker-diarization-CC-BY-4.0.txt \
+  FluidAudio-ThirdPartyLicenses/fastcluster-LICENSE.md \
+  FluidAudio-ThirdPartyLicenses/vbx-LICENSE.md \
+  FluidAudio-ThirdPartyLicenses/NemoTextProcessing-LICENSE.md; do
+  [ -s "${APP}/Contents/Resources/fluidaudio/${notice}" ] \
+    || fail "Resources/fluidaudio/${notice} is missing or empty, and its licence
+     requires it to ship beside the code it covers"
+done
+pass "fluidaudio: ${GOT_MODELS} model files matching the staged set, five licence texts non-empty"
 
 printf '\n== Bundle metadata\n'
 PLIST="${APP}/Contents/Info.plist"

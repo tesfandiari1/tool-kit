@@ -2,7 +2,9 @@ import { basename } from "@/app/format";
 import type {
   ConversionProfile,
   ConversionRoute,
+  JobId,
   ScannedConversionFile,
+  SecretId,
   SecretStatus,
 } from "@/app/types";
 
@@ -110,12 +112,17 @@ export function planConversionRoutes({
   return plan;
 }
 
+/// The keys the plan in force actually spends. `needsDatalabKey` is the direct
+/// provider, which is Rev.ai for Transcribe: a run routed to the sidecar needs
+/// neither, and demanding one disables the button for local transcription.
 export function missingConversionCredentials(
+  jobType: JobId,
   plan: Pick<ConversionRoutePlan, "needsDatalabKey" | "needsBackendToken">,
   secrets: SecretStatus,
-): ("datalab" | "backend")[] {
-  const missing: ("datalab" | "backend")[] = [];
-  if (plan.needsDatalabKey && !secrets.datalab) missing.push("datalab");
+): SecretId[] {
+  const direct: SecretId = jobType === "transcribe" ? "revai" : "datalab";
+  const missing: SecretId[] = [];
+  if (plan.needsDatalabKey && !secrets[direct]) missing.push(direct);
   if (plan.needsBackendToken && !secrets.backend) missing.push("backend");
   return missing;
 }

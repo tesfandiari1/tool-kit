@@ -242,10 +242,15 @@ impl Job {
         id: u64,
         source_path: String,
         output_dir: String,
+        job_type: JobType,
         backend: BackendContext,
     ) -> Self {
-        let mut job = Self::new(id, source_path, output_dir, JobType::Convert);
-        job.service = "Conversion service".into();
+        let mut job = Self::new(id, source_path, output_dir, job_type);
+        job.service = match job_type {
+            JobType::Convert => "Conversion service",
+            JobType::Transcribe => "Local transcription",
+        }
+        .into();
         job.backend = Some(backend);
         job
     }
@@ -409,11 +414,17 @@ pub fn output_extension_for(jt: JobType, cfg: &settings::Settings) -> &'static s
 
 /// Every extension a finished result may carry on the route in force, which is
 /// what the tree's pairing rule has to ask. The Backend route writes Markdown
-/// whatever the format says, and only its Datalab fallback writes the chosen
-/// format, so pairing on the format alone never matches a service result.
+/// whatever the format or the job says, and only Convert's Datalab fallback
+/// writes the chosen format, so pairing on the format alone never matches a
+/// service result. Transcribe's Direct `.txt` stays paired for older runs.
 pub fn result_extensions_for(jt: JobType, cfg: &settings::Settings) -> Vec<&'static str> {
+    // Route-independent: both are transcripts of the same source, and dropping
+    // `.md` on a route flip unpairs every local transcript and re-bills it.
+    if jt == JobType::Transcribe {
+        return vec!["md", "txt"];
+    }
     let chosen = output_extension_for(jt, cfg);
-    if jt == JobType::Convert && cfg.conversion_route == settings::ConversionRoute::Backend {
+    if cfg.conversion_route == settings::ConversionRoute::Backend {
         // Markdown first: the service writes it, the fallback is the odd one.
         let mut both = vec!["md"];
         if chosen != "md" {
@@ -735,6 +746,26 @@ fn backend_action(view: &ConversionJob) -> BackendAction {
     }
 }
 
+/// A `needs_remote` view carries one engine reason code. Name it in plain words.
+fn local_only_failure(view: &ConversionJob) -> String {
+    let code = view
+        .route
+        .as_ref()
+        .and_then(|route| route.reason_codes.first())
+        .map_or("", String::as_str);
+    let reason = match code {
+        "" => return "Local-only conversion could not finish locally. Choose Standard to allow Datalab fallback.".into(),
+        "mixed_pdf" => "some pages are scanned images",
+        "image_based_pdf" | "scanned_pdf" => "every page is a scanned image",
+        "ocr_required" => "the text layer is missing or unreadable",
+        "garbled_text" => "the text layer is garbled",
+        "local_quality_failed" => "no readable text was found",
+        "output_too_large" => "the result was too large",
+        other => other,
+    };
+    format!("Local-only conversion could not finish because {reason}. Choose Standard to allow Datalab fallback.")
+}
+
 /// The origin one request goes to, resolved at the moment of the request. The
 /// kernel hands the sidecar a new port at every restart, so a queued origin is
 /// refused once the child relaunches. `held` covers only the mid-restart gap.
@@ -914,13 +945,19 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                 return;
             }
             BackendAction::NeedsRemote => {
-                if backend.profile == settings::ConversionProfile::LocalOnly {
+                // The service never sends this for audio. The guard is what
+                // keeps a recording away from Datalab if it ever does.
+                if job.job_type == JobType::Transcribe {
                     fail(
                         &app,
                         id,
                         generation,
-                        "Local-only conversion could not finish locally. Choose Standard to allow Datalab fallback.",
+                        "Local transcription could not finish. Switch the route to Direct to use Rev.ai.",
                     );
+                    return;
+                }
+                if backend.profile == settings::ConversionProfile::LocalOnly {
+                    fail(&app, id, generation, &local_only_failure(&view));
                     return;
                 }
                 if app
@@ -1309,8 +1346,10 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
             client_run_id: &backend.client_run_id,
             idempotency_key: &backend.idempotency_key,
             conversion_profile: backend.profile.id(),
+            job_type: job.job_type.id(),
             ocr_language_correction: backend.ocr.language_correction,
             ocr_custom_words: &ocr_custom_words,
+            speaker_count: backend.ocr.speaker_count,
         },
     ) {
         return;
@@ -1635,6 +1674,7 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
             conversion_service::OcrOptions::from_wire(
                 entry.ocr_language_correction,
                 &entry.ocr_custom_words,
+                entry.speaker_count,
             ),
         );
         if let Some(fallback) = resumed_fallback {
@@ -1642,7 +1682,8 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
         }
         context.recovery_blocker.clone_from(&recovery_error);
         let id = manager.next_id();
-        let mut job = Job::new_backend(id, entry.source_path, entry.output_dir, context);
+        let job_type = JobType::from_id(&entry.job_type).unwrap_or(JobType::Convert);
+        let mut job = Job::new_backend(id, entry.source_path, entry.output_dir, job_type, context);
         job.file_name = entry.file_name;
         manager.insert(job.clone());
         emit(&app, job);
@@ -1753,8 +1794,10 @@ mod backend_tests {
             fallback_request_id: None,
             fallback_check_url: None,
             conversion_profile: "standard".into(),
+            job_type: "convert".into(),
             ocr_language_correction: true,
             ocr_custom_words: String::new(),
+            speaker_count: None,
             source_mtime: 1,
             created_at: 1,
         }
@@ -1779,6 +1822,19 @@ mod backend_tests {
             warnings: Vec::new(),
             failure: None,
         }
+    }
+
+    #[test]
+    fn local_only_failure_names_the_reason() {
+        let mut needs_remote = view("needs_remote");
+        needs_remote.route = Some(conversion_service::ConversionRoute {
+            kind: "local_pdf".into(),
+            reason_codes: vec!["mixed_pdf".into()],
+        });
+        assert_eq!(
+            local_only_failure(&needs_remote),
+            "Local-only conversion could not finish because some pages are scanned images. Choose Standard to allow Datalab fallback."
+        );
     }
 
     #[test]
@@ -1980,7 +2036,13 @@ mod backend_tests {
             settings::ConversionProfile::Standard,
             conversion_service::OcrOptions::default(),
         );
-        let job = Job::new_backend(1, "/tmp/report.pdf".into(), "/tmp".into(), context.clone());
+        let job = Job::new_backend(
+            1,
+            "/tmp/report.pdf".into(),
+            "/tmp".into(),
+            JobType::Convert,
+            context.clone(),
+        );
 
         assert_eq!(
             job.backend.as_ref().unwrap().backend_url,
@@ -1995,10 +2057,48 @@ mod backend_tests {
         assert!(serialized.get("outputText").is_none());
     }
 
+    /// The service writes `.md` for a transcript too, so pairing on `.txt`
+    /// alone would leave every backend transcript looking unconverted.
+    #[test]
+    fn a_backend_transcript_pairs_on_markdown_and_on_the_direct_text() {
+        let mut cfg = settings::Settings::default();
+
+        assert_eq!(
+            result_extensions_for(JobType::Transcribe, &cfg),
+            ["md", "txt"]
+        );
+        assert_eq!(output_extension_for(JobType::Transcribe, &cfg), "txt");
+
+        // A route flip must not unpair a transcript already on disk.
+        cfg.conversion_route = settings::ConversionRoute::Direct;
+        assert_eq!(
+            result_extensions_for(JobType::Transcribe, &cfg),
+            ["md", "txt"]
+        );
+    }
+
+    #[test]
+    fn a_backend_job_is_labelled_by_the_job_it_runs() {
+        let job = |jt| {
+            Job::new_backend(
+                1,
+                "/tmp/interview.m4a".into(),
+                "/tmp".into(),
+                jt,
+                context(None),
+            )
+        };
+
+        assert_eq!(job(JobType::Convert).service, "Conversion service");
+        assert_eq!(job(JobType::Transcribe).service, "Local transcription");
+        assert_eq!(job(JobType::Transcribe).job_type, JobType::Transcribe);
+    }
+
     /// The OCR options are in the replay fingerprint, so reading Settings 409s.
     #[test]
     fn a_recovered_context_carries_the_recorded_ocr_options() {
-        let recorded = conversion_service::OcrOptions::from_wire(false, "Uniwise\nDatalab");
+        let recorded =
+            conversion_service::OcrOptions::from_wire(false, "Uniwise\nDatalab", Some(2));
         let context = BackendContext::new(
             "http://127.0.0.1:9123".into(),
             "22222222-2222-4222-8222-222222222222".into(),

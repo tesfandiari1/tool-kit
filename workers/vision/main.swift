@@ -1,4 +1,5 @@
-// tool-kit-vision-worker: read one image with Apple Vision, write Markdown.
+// tool-kit-vision-worker: read one image or one scanned PDF with Apple Vision,
+// write Markdown.
 //
 // Spawned the way apps/converter/src/engines/pdf_inspector.rs spawns
 // tool-kit-pdf-worker: cleared environment, staging directory as argv[1],
@@ -218,6 +219,21 @@ private func finish(_ outcome: Outcome, in staging: URL) -> Never {
     exit(0)
 }
 
+/// One bitmap's Markdown. A page Vision found nothing on comes back either as
+/// no observation at all or as a document with empty collections. Both are the
+/// same answer: an empty string.
+@available(macOS 26, *)
+private func recognize(_ image: CGImage, with request: RecognizeDocumentsRequest) async -> String {
+    let observations: [DocumentObservation]
+    do {
+        observations = try await request.perform(on: image)
+    } catch {
+        fail("Vision could not read the image: \(error)")
+    }
+    guard let document = observations.first?.document else { return "" }
+    return markdown(document).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 @available(macOS 26, *)
 private func run(_ stagingPath: String) async -> Never {
     // `attributesOfItem` reports a symlink as a symlink, so this rejects one
@@ -251,28 +267,32 @@ private func run(_ stagingPath: String) async -> Never {
     }
     guard hexDigest(source) == expectedSha256 else { fail("source digest mismatch") }
 
-    let image: CGImage
-    switch decodeOnlyFrame(source) {
-    case .image(let decoded): image = decoded
-    case .rejected(let rejection): finish(.rejected(rejection), in: staging)
-    }
-
     var request = RecognizeDocumentsRequest()
     request.textRecognitionOptions.useLanguageCorrection = languageCorrection
     request.textRecognitionOptions.customWords = customWords
 
-    let observations: [DocumentObservation]
-    do {
-        observations = try await request.perform(on: image)
-    } catch {
-        fail("Vision could not read the image: \(error)")
+    let rendered: String
+    if source.starts(with: Data("%PDF-".utf8)) {
+        // A scanned PDF the inspector found no text in. One page is rendered,
+        // read and released at a time, and a page with no text adds nothing.
+        guard let provider = CGDataProvider(data: source as CFData),
+              let pdf = CGPDFDocument(provider), pdf.numberOfPages > 0
+        else { finish(.rejected(.invalidImage), in: staging) }
+        var pages: [String] = []
+        for number in 1...pdf.numberOfPages {
+            guard let page = pdf.page(at: number), let image = renderPage(page, dpi: 200) else {
+                finish(.rejected(.invalidImage), in: staging)
+            }
+            let text = await recognize(image, with: request)
+            if !text.isEmpty { pages.append(text) }
+        }
+        rendered = pages.joined(separator: "\n\n")
+    } else {
+        switch decodeOnlyFrame(source) {
+        case .image(let image): rendered = await recognize(image, with: request)
+        case .rejected(let rejection): finish(.rejected(rejection), in: staging)
+        }
     }
-    // A page Vision found nothing on comes back either as no observation at
-    // all or as a document with empty collections. Both are the same answer.
-    guard let document = observations.first?.document else {
-        finish(.rejected(.noTextFound), in: staging)
-    }
-    let rendered = markdown(document).trimmingCharacters(in: .whitespacesAndNewlines)
     if rendered.isEmpty {
         finish(.rejected(.noTextFound), in: staging)
     }

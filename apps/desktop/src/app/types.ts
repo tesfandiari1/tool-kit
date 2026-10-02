@@ -110,6 +110,8 @@ export interface Scan {
   reusableConvert: number;
   reusableTranscribe: number;
   convertFiles: ScannedConversionFile[];
+  /// The same for Transcribe: the preflight routes both jobs.
+  transcribeFiles: ScannedConversionFile[];
   alreadyText: number;
   suggestedOutput: string | null;
   nodes: InputNode[];
@@ -160,6 +162,8 @@ export interface Settings {
   languageCorrection: boolean;
   /// Words local OCR should prefer when it is unsure.
   customWords: string[];
+  /// How many people speak in a recording. Null lets the transcriber guess.
+  speakerCount: number | null;
   skipAlreadyDone: boolean;
   /// Last SplitPane layout. Null until the user has dragged the seam.
   splitLayout: Record<string, number> | null;
@@ -190,6 +194,7 @@ export const DEFAULT_SETTINGS: Settings = {
   conversionProfile: "standard",
   languageCorrection: true,
   customWords: [],
+  speakerCount: null,
   skipAlreadyDone: true,
   splitLayout: null,
   expandedWidth: null,
@@ -223,6 +228,7 @@ export const EMPTY_SCAN: Scan = {
   reusableConvert: 0,
   reusableTranscribe: 0,
   convertFiles: [],
+  transcribeFiles: [],
   alreadyText: 0,
   suggestedOutput: null,
   nodes: [],

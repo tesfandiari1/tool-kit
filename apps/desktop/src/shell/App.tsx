@@ -855,19 +855,17 @@ export default function App() {
     skipAlreadyDone,
   );
 
+  /// The job in force, both of them routed the same way: Transcribe on the
+  /// Backend route runs in the sidecar and spends nothing, so it must not
+  /// demand a Rev.ai key and its refusals belong in the preflight too.
   const conversionPlan = planConversionRoutes({
-    files: scan.convertFiles,
+    files: settings.jobType === "convert" ? scan.convertFiles : scan.transcribeFiles,
     route: settings.conversionRoute,
     profile: settings.conversionProfile,
     capabilities,
     skipAlreadyDone,
   });
-  const missingCredentials =
-    settings.jobType === "convert"
-      ? missingConversionCredentials(conversionPlan, secrets)
-      : toRun > 0 && !secrets.revai
-        ? ["revai" as const]
-        : [];
+  const missingCredentials = missingConversionCredentials(settings.jobType, conversionPlan, secrets);
   /// For naming and revealing the destination, never for deciding it. Keep it
   /// in step with `output_dir_for`, which settles that.
   const destination =
@@ -880,7 +878,7 @@ export default function App() {
         ? { rel: null, path: settings.outputDir }
         : null;
 
-  const routeBlocked = settings.jobType === "convert" && conversionPlan.blocked.length > 0;
+  const routeBlocked = conversionPlan.blocked.length > 0;
   const preflightReady =
     scanCurrent && !routeBlocked && missingCredentials.length === 0;
   const canRun = canStartRun({
@@ -899,10 +897,8 @@ export default function App() {
     if (starting || !canRun) return;
     // A large batch spends the moment it starts, and Stop is too late.
     if (toRun >= BIG_RUN) {
-      const backendFiles =
-        settings.jobType === "convert" ? conversionPlan.backend.length : 0;
-      const directFiles =
-        settings.jobType === "convert" ? conversionPlan.direct.length : toRun;
+      const backendFiles = conversionPlan.backend.length;
+      const directFiles = conversionPlan.direct.length;
       const go = await confirm(
         largeRunConfirmation({
           totalFiles: toRun,
@@ -1042,7 +1038,7 @@ export default function App() {
       hint = `Conversion service is not accepting jobs for ${count} file${count > 1 ? "s" : ""} right now`;
       hintOpensSettings = true;
     } else {
-      hint = `${count} file${count > 1 ? "s need" : " needs"} Datalab, but Local only forbids remote fallback — choose Standard or remove ${count > 1 ? "them" : "it"}`;
+      hint = `${count} file${count > 1 ? "s need" : " needs"} ${job.service}, but Local only forbids remote fallback — choose Standard or remove ${count > 1 ? "them" : "it"}`;
       hintOpensSettings = true;
     }
   } else if (missingCredentials.length > 0) {
@@ -1076,14 +1072,8 @@ export default function App() {
     );
   }
   if (copying > 0 && toRun > 0) noteParts.push(`${copying} copied from an earlier run`);
-  if (
-    settings.jobType === "convert" &&
-    settings.conversionRoute === "backend" &&
-    conversionPlan.direct.length > 0
-  ) {
-    noteParts.push(
-      `${conversionPlan.direct.length} routed direct to Datalab`,
-    );
+  if (settings.conversionRoute === "backend" && conversionPlan.direct.length > 0) {
+    noteParts.push(`${conversionPlan.direct.length} routed direct to ${job.service}`);
   }
   const note = noteParts.length > 0 ? noteParts.join(" · ") : null;
 

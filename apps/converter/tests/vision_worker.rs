@@ -8,14 +8,21 @@
 //! nothing to spawn. A skip there is the honest answer; a failure would only
 //! say the platform is not macOS.
 
+mod support;
+
 use std::{
     fs::{self, File},
     io::Write as _,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
+    time::Duration,
 };
 
+use axum::http::StatusCode;
+use http_body_util::BodyExt;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use tool_kit_converter::vision_protocol::{
     VisionOutcome, VisionRejectionCode, VisionReport, VISION_ENGINE_NAME, VISION_MARKDOWN_FILE,
@@ -179,7 +186,66 @@ fn one_page_pdf(content: &[u8]) -> Vec<u8> {
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
         stream,
     ];
+    assemble(&objects)
+}
 
+/// Two pages that are only a JPEG of their text, the shape of a scanner's
+/// output: pdf-inspector finds no text on either page, so every page needs OCR.
+fn scanned_pdf(directory: &Path, lines: [&str; 2]) -> Vec<u8> {
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+    ];
+    for page in 0..2 {
+        objects.push(
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+                 /Resources << /XObject << /Im0 {} 0 R >> >> /Contents {} 0 R >>",
+                5 + page,
+                7 + page
+            )
+            .into_bytes(),
+        );
+    }
+    for (page, line) in lines.iter().enumerate() {
+        let png = png(
+            directory,
+            &format!("scan-{page}"),
+            &helvetica_lines(&[line]),
+        );
+        let jpeg = directory.join(format!("scan-{page}.jpg"));
+        let status = Command::new("/usr/bin/sips")
+            .args(["-s", "format", "jpeg"])
+            .arg(&png)
+            .arg("--out")
+            .arg(&jpeg)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "sips failed on page {page}");
+        let samples = fs::read(jpeg).unwrap();
+        // pdf2png renders 612x792 points at 200 dpi.
+        let mut image = format!(
+            "<< /Type /XObject /Subtype /Image /Width 1700 /Height 2200 /ColorSpace /DeviceRGB \
+             /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
+            samples.len()
+        )
+        .into_bytes();
+        image.extend_from_slice(&samples);
+        image.extend_from_slice(b"\nendstream");
+        objects.push(image);
+    }
+    for _ in 0..2 {
+        let draw = b"q 612 0 0 792 0 0 cm /Im0 Do Q";
+        let mut stream = format!("<< /Length {} >>\nstream\n", draw.len()).into_bytes();
+        stream.extend_from_slice(draw);
+        stream.extend_from_slice(b"\nendstream");
+        objects.push(stream);
+    }
+    assemble(&objects)
+}
+
+fn assemble(objects: &[Vec<u8>]) -> Vec<u8> {
     let mut pdf = b"%PDF-1.4\n".to_vec();
     let mut offsets = Vec::new();
     for (index, object) in objects.iter().enumerate() {
@@ -483,4 +549,55 @@ fn markdown_over_the_ceiling_is_rejected_and_nothing_is_published() {
     };
     assert_eq!(code, VisionRejectionCode::OutputTooLarge);
     assert!(!run.staging.join(VISION_MARKDOWN_FILE).exists());
+}
+
+/// A scan converts on this machine instead of waiting for Datalab: the
+/// inspector gives up on a PDF with no text on any page, and Vision reads it.
+#[tokio::test]
+async fn a_pdf_with_no_text_on_any_page_converts_locally_through_vision() {
+    let Some(harness) = support::TestHarness::with_vision_worker() else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let pdf = scanned_pdf(directory.path(), ["Scanned Page One", "Scanned Page Two"]);
+    let app = harness.app().await;
+
+    let response = app
+        .submit(
+            support::multipart_body(Uuid::new_v4(), "standard", &pdf, "scan.pdf"),
+            "scan",
+            support::TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job_id = support::json_body(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Vision's first model load can take most of a minute.
+    let mut data = Value::Null;
+    for _ in 0..1200 {
+        let response = app
+            .authorized_get(&format!("/api/v1/conversions/{job_id}"))
+            .await;
+        data = support::json_body(response).await["data"].clone();
+        if matches!(
+            data["status"].as_str(),
+            Some("succeeded" | "failed" | "needs_remote")
+        ) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    assert_eq!(data["status"], "succeeded", "{data}");
+    assert_eq!(data["route"]["kind"], "local_vision", "{data}");
+    let response = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let markdown = String::from_utf8(body.to_vec()).unwrap();
+    assert!(markdown.contains("Scanned Page One"), "{markdown}");
+    assert!(markdown.contains("Scanned Page Two"), "{markdown}");
 }

@@ -68,9 +68,9 @@ describe("planConversionRoutes", () => {
     expect(plan.backend).toEqual([pdf]);
     expect(plan.direct).toEqual([image]);
     expect(plan.blocked).toEqual([]);
-    expect(missingConversionCredentials(plan, secrets())).toEqual(["datalab", "backend"]);
-    expect(missingConversionCredentials(plan, secrets({ datalab: true }))).toEqual(["backend"]);
-    expect(missingConversionCredentials(plan, secrets({ datalab: true, backend: true }))).toEqual([]);
+    expect(missingConversionCredentials("convert", plan, secrets())).toEqual(["datalab", "backend"]);
+    expect(missingConversionCredentials("convert", plan, secrets({ datalab: true }))).toEqual(["backend"]);
+    expect(missingConversionCredentials("convert", plan, secrets({ datalab: true, backend: true }))).toEqual([]);
   });
 
   it("keeps HTML direct but routes images on what the service advertises", () => {
@@ -180,6 +180,44 @@ describe("planConversionRoutes", () => {
 
     expect(enabled.backend).toEqual([]);
     expect(disabled.backend).toEqual([reused]);
+  });
+
+  /// The flagship path: a local transcription spends no Rev.ai credits, and an
+  /// unadvertised container is a blocked preflight, not a failed run.
+  it("asks a backend transcription for the backend token alone", () => {
+    const m4a = file("/drop/interview.m4a", "audio/mp4");
+    const amr = file("/drop/voicemail.amr", "audio/amr");
+    const local = planConversionRoutes({
+      files: [m4a],
+      route: "backend",
+      profile: "standard",
+      capabilities: ready([m4a.mediaType]),
+      skipAlreadyDone: true,
+    });
+
+    expect(local.backend).toEqual([m4a]);
+    expect(missingConversionCredentials("transcribe", local, secrets({ backend: true }))).toEqual(
+      [],
+    );
+
+    const mixed = planConversionRoutes({
+      files: [m4a, amr],
+      route: "backend",
+      profile: "local_only",
+      capabilities: ready([m4a.mediaType]),
+      skipAlreadyDone: true,
+    });
+    expect(mixed.blocked).toEqual([{ file: amr, reason: "local_only_requires_remote" }]);
+    expect(missingConversionCredentials("transcribe", mixed, secrets())).toEqual(["backend"]);
+
+    const direct = planConversionRoutes({
+      files: [m4a],
+      route: "direct",
+      profile: "standard",
+      capabilities: ready([m4a.mediaType]),
+      skipAlreadyDone: true,
+    });
+    expect(missingConversionCredentials("transcribe", direct, secrets())).toEqual(["revai"]);
   });
 
   it("blocks supported files while the service is not accepting jobs", () => {

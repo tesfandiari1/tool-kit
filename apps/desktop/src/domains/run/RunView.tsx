@@ -151,7 +151,6 @@ export function RunView({
               {runServiceDescription({
                 description: job.desc,
                 provider: job.service,
-                jobType: settings.jobType,
                 conversionRoute: settings.conversionRoute,
                 profile: settings.conversionProfile,
               })}

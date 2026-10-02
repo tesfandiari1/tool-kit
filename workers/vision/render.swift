@@ -5,8 +5,29 @@
 // landed in the worker while tk-vision kept its own copy and went on printing
 // the table the worker had stopped emitting.
 
+import CoreGraphics
 import Foundation
 import Vision
+
+/// One PDF page as an opaque bitmap at `dpi`, white behind the page. Callers
+/// render a page, read it and drop it before the next, so a long scan never
+/// holds every bitmap at once.
+func renderPage(_ page: CGPDFPage, dpi: CGFloat) -> CGImage? {
+    let scale = dpi / 72.0
+    let box = page.getBoxRect(.mediaBox)
+    let w = Int((box.width * scale).rounded()), h = Int((box.height * scale).rounded())
+    guard let ctx = CGContext(
+        data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+    ) else { return nil }
+    ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    ctx.scaleBy(x: scale, y: scale)
+    ctx.translateBy(x: -box.origin.x, y: -box.origin.y)
+    ctx.drawPDFPage(page)
+    return ctx.makeImage()
+}
 
 /// Vision normalizes with the origin at the bottom left, so a larger top edge
 /// means higher on the page. Sorting descending puts blocks in reading order.

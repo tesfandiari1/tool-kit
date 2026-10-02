@@ -19,7 +19,7 @@ use tauri::{AppHandle, Manager};
 const MAX_ENTRIES: i64 = 5_000;
 
 /// Bump on a schema change, with a matching `if version < N` in `migrate`.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// The open database, or `None`, which makes every operation a silent no-op.
 pub struct History {
@@ -66,9 +66,12 @@ pub struct NewInFlight<'a> {
     pub client_run_id: &'a str,
     pub idempotency_key: &'a str,
     pub conversion_profile: &'a str,
+    /// `JobType::id`, so recovery rebuilds the job it was, not a conversion.
+    pub job_type: &'a str,
     pub ocr_language_correction: bool,
     /// Newline-joined custom words, the same form the submission sends.
     pub ocr_custom_words: &'a str,
+    pub speaker_count: Option<u32>,
 }
 
 /// A backend conversion that can be recovered after an app restart.
@@ -93,10 +96,13 @@ pub struct InFlightEntry {
     pub fallback_request_id: Option<String>,
     pub fallback_check_url: Option<String>,
     pub conversion_profile: String,
-    /// The OCR options this submission was made with, and part of the replay
+    /// `JobType::id`, so recovery rebuilds the job it was, not a conversion.
+    pub job_type: String,
+    /// The engine options this submission was made with, and part of the replay
     /// fingerprint, so recovery resubmits these and not today's.
     pub ocr_language_correction: bool,
     pub ocr_custom_words: String,
+    pub speaker_count: Option<u32>,
     /// Source modification time in Unix milliseconds at submit time.
     pub source_mtime: i64,
     /// Unix seconds.
@@ -208,7 +214,18 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                  ADD COLUMN ocr_custom_words TEXT NOT NULL DEFAULT '';",
         )?;
     }
-    // Add `if version < 6 { … }` above and bump SCHEMA_VERSION. A file from a
+    if version < 6 {
+        // Transcribe reaches the service too, so a recovered row that assumed
+        // Convert would write the wrong extension and pair with nothing. The
+        // speaker count is part of the replay fingerprint alongside the OCR
+        // options.
+        conn.execute_batch(
+            "ALTER TABLE inflight_conversions
+                 ADD COLUMN job_type TEXT NOT NULL DEFAULT 'convert';
+             ALTER TABLE inflight_conversions ADD COLUMN speaker_count INTEGER;",
+        )?;
+    }
+    // Add `if version < 7 { … }` above and bump SCHEMA_VERSION. A file from a
     // newer build is left alone: rewriting it would lose history.
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -274,10 +291,10 @@ fn upsert_in_flight_row(conn: &Connection, pending: &NewInFlight<'_>) -> rusqlit
     let changed = conn.execute(
         "INSERT INTO inflight_conversions
            (idempotency_key, source_path, file_name, output_dir, backend_url,
-            client_run_id, backend_job_id, conversion_profile,
-            ocr_language_correction, ocr_custom_words, source_mtime,
-            created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)
+            client_run_id, backend_job_id, conversion_profile, job_type,
+            ocr_language_correction, ocr_custom_words, speaker_count,
+            source_mtime, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(idempotency_key) DO NOTHING",
         rusqlite::params![
             pending.idempotency_key,
@@ -287,8 +304,10 @@ fn upsert_in_flight_row(conn: &Connection, pending: &NewInFlight<'_>) -> rusqlit
             pending.backend_url,
             pending.client_run_id,
             pending.conversion_profile,
+            pending.job_type,
             pending.ocr_language_correction,
             pending.ocr_custom_words,
+            pending.speaker_count,
             source_mtime,
             now_secs(),
         ],
@@ -366,8 +385,8 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
         "SELECT source_path, file_name, output_dir, backend_url,
                 client_run_id, idempotency_key, backend_job_id,
                 fallback_provider, fallback_request_id, fallback_check_url,
-                conversion_profile, ocr_language_correction, ocr_custom_words,
-                source_mtime, created_at
+                conversion_profile, job_type, ocr_language_correction,
+                ocr_custom_words, speaker_count, source_mtime, created_at
            FROM inflight_conversions
           ORDER BY created_at ASC, idempotency_key ASC",
     )?;
@@ -384,10 +403,12 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
             fallback_request_id: row.get(8)?,
             fallback_check_url: row.get(9)?,
             conversion_profile: row.get(10)?,
-            ocr_language_correction: row.get(11)?,
-            ocr_custom_words: row.get(12)?,
-            source_mtime: row.get(13)?,
-            created_at: row.get(14)?,
+            job_type: row.get(11)?,
+            ocr_language_correction: row.get(12)?,
+            ocr_custom_words: row.get(13)?,
+            speaker_count: row.get(14)?,
+            source_mtime: row.get(15)?,
+            created_at: row.get(16)?,
         })
     })?;
     rows.collect()
@@ -576,9 +597,7 @@ fn carry_forward_rows(conn: &Connection, from: &str, to: &str) -> rusqlite::Resu
 /// rather than two `&str`. `insert` canonicalizes `source_path` and writes
 /// `output_path` exactly as the writer spelled it.
 pub fn relocate(app: &AppHandle, from: &MovedFrom, to_source: &str, to_output: Option<&str>) {
-    with_db(app, |conn| {
-        relocate_rows(conn, from, to_source, to_output)
-    });
+    with_db(app, |conn| relocate_rows(conn, from, to_source, to_output));
 }
 
 fn relocate_rows(
@@ -738,7 +757,9 @@ fn select(conn: &Connection, query: &str, limit: u32) -> rusqlite::Result<Vec<En
             source_path: r.get(2)?,
             // One `stat` per listed row: the panel offers Open on a path the
             // log remembers, and a deleted result answered with a toast.
-            output_exists: output_path.as_deref().is_some_and(|p| Path::new(p).exists()),
+            output_exists: output_path
+                .as_deref()
+                .is_some_and(|p| Path::new(p).exists()),
             output_path,
             status: r.get(4)?,
             error: r.get(5)?,
@@ -845,10 +866,7 @@ mod tests {
 
         // Snapshot while both are where the rows say, then move. Rename keeps
         // the mtime, so the identity check still passes.
-        let before = MovedFrom::snapshot(
-            from.to_str().unwrap(),
-            Some(from_out.to_str().unwrap()),
-        );
+        let before = MovedFrom::snapshot(from.to_str().unwrap(), Some(from_out.to_str().unwrap()));
         let to = acme.join("deck.pdf");
         let to_out = acme.join("deck.md");
         fs::rename(&from, &to).unwrap();
@@ -858,7 +876,9 @@ mod tests {
 
         let found = reuse_map(&conn, std::slice::from_ref(&to), "convert", "markdown");
         assert_eq!(
-            found.get(&to.to_string_lossy().to_string()).map(String::as_str),
+            found
+                .get(&to.to_string_lossy().to_string())
+                .map(String::as_str),
             Some(to_out.to_str().unwrap()),
             "the moved file should still be answered from the result that moved with it"
         );
@@ -887,7 +907,9 @@ mod tests {
 
         let found = reuse_map(&conn, std::slice::from_ref(&to), "convert", "markdown");
         assert_eq!(
-            found.get(&to.to_string_lossy().to_string()).map(String::as_str),
+            found
+                .get(&to.to_string_lossy().to_string())
+                .map(String::as_str),
             Some(out.to_str().unwrap())
         );
     }
@@ -1157,8 +1179,10 @@ mod tests {
             client_run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             idempotency_key: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             conversion_profile: "standard",
+            job_type: "convert",
             ocr_language_correction: true,
             ocr_custom_words: "",
+            speaker_count: None,
         };
         assert!(
             !upsert_in_flight_row(&conn, &pending).unwrap(),
@@ -1184,8 +1208,10 @@ mod tests {
             client_run_id: "11111111-1111-4111-8111-111111111111",
             idempotency_key: "22222222-2222-4222-8222-222222222222",
             conversion_profile: "standard",
+            job_type: "convert",
             ocr_language_correction: false,
             ocr_custom_words: "Uniwise\nDatalab",
+            speaker_count: Some(2),
         };
 
         assert!(upsert_in_flight_row(&conn, &pending).unwrap());
@@ -1241,8 +1267,10 @@ mod tests {
             client_run_id: "56565656-5656-4656-8656-565656565656",
             idempotency_key: "78787878-7878-4878-8878-787878787878",
             conversion_profile: "standard",
+            job_type: "convert",
             ocr_language_correction: true,
             ocr_custom_words: "",
+            speaker_count: None,
         };
 
         assert!(upsert_in_flight_row(&conn, &pending).unwrap());
@@ -1268,8 +1296,10 @@ mod tests {
             client_run_id: "12121212-1212-4212-8212-121212121212",
             idempotency_key: "34343434-3434-4434-8434-343434343434",
             conversion_profile: "standard",
+            job_type: "convert",
             ocr_language_correction: true,
             ocr_custom_words: "",
+            speaker_count: None,
         };
         assert!(upsert_in_flight_row(&conn, &original).unwrap());
 
@@ -1302,8 +1332,10 @@ mod tests {
             client_run_id: "55555555-5555-4555-8555-555555555555",
             idempotency_key: "66666666-6666-4666-8666-666666666666",
             conversion_profile: "local_only",
+            job_type: "convert",
             ocr_language_correction: true,
             ocr_custom_words: "",
+            speaker_count: None,
         };
 
         assert!(upsert_in_flight_row(&conn, &pending).unwrap());
@@ -1336,8 +1368,10 @@ mod tests {
             client_run_id: "77777777-7777-4777-8777-777777777777",
             idempotency_key: "88888888-8888-4888-8888-888888888888",
             conversion_profile: "standard",
+            job_type: "convert",
             ocr_language_correction: true,
             ocr_custom_words: "",
+            speaker_count: None,
         };
 
         {
@@ -1582,8 +1616,10 @@ mod tests {
                 client_run_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
                 idempotency_key: key,
                 conversion_profile: "standard",
+                job_type: "convert",
                 ocr_language_correction: true,
                 ocr_custom_words: "",
+                speaker_count: None,
             },
         )
         .unwrap();
@@ -1657,6 +1693,84 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v5_rows_read_back_as_conversions_with_no_speaker_count() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_v2_schema(&conn);
+        conn.execute_batch(
+            "ALTER TABLE inflight_conversions
+                 ADD COLUMN backend_url TEXT NOT NULL DEFAULT '';
+             ALTER TABLE inflight_conversions ADD COLUMN fallback_provider TEXT;
+             ALTER TABLE inflight_conversions ADD COLUMN fallback_request_id TEXT;
+             ALTER TABLE inflight_conversions ADD COLUMN fallback_check_url TEXT;
+             ALTER TABLE inflight_conversions
+                 ADD COLUMN ocr_language_correction INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE inflight_conversions
+                 ADD COLUMN ocr_custom_words TEXT NOT NULL DEFAULT '';
+             PRAGMA user_version = 5;",
+        )
+        .unwrap();
+        let (src, _out) = pair("v5-migration");
+        let source_path = fs::canonicalize(&src)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        conn.execute(
+            "INSERT INTO inflight_conversions
+               (idempotency_key, source_path, file_name, output_dir, backend_url,
+                client_run_id, conversion_profile, source_mtime, created_at)
+             VALUES (?1, ?2, 'report.pdf', ?3, 'http://127.0.0.1:8080', ?4, 'standard', 7, 42)",
+            rusqlite::params![
+                "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                source_path,
+                src.parent().unwrap().to_string_lossy(),
+                "88888888-8888-4888-8888-888888888888",
+            ],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let rows = select_in_flight(&conn).unwrap();
+        assert_eq!(rows.len(), 1, "an existing recovery row must survive");
+        // Every pre-6 row is a conversion, and none named a speaker count.
+        assert_eq!(rows[0].job_type, "convert");
+        assert_eq!(rows[0].speaker_count, None);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// The count is part of the replay fingerprint, so recovery must resubmit
+    /// the recorded one and not today's setting.
+    #[test]
+    fn a_transcription_records_its_job_type_and_speaker_count() {
+        let conn = db();
+        let (src, out) = pair("inflight-transcribe");
+        let source_path = src.to_string_lossy().into_owned();
+        let output_dir = out.parent().unwrap().to_string_lossy().into_owned();
+        let pending = NewInFlight {
+            source_path: &source_path,
+            file_name: "interview.m4a",
+            output_dir: &output_dir,
+            backend_url: BACKEND_URL,
+            client_run_id: "77777777-7777-4777-8777-777777777777",
+            idempotency_key: "aaaa1111-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            conversion_profile: "standard",
+            job_type: "transcribe",
+            ocr_language_correction: true,
+            ocr_custom_words: "",
+            speaker_count: Some(2),
+        };
+
+        assert!(upsert_in_flight_row(&conn, &pending).unwrap());
+
+        let rows = select_in_flight(&conn).unwrap();
+        assert_eq!(rows[0].job_type, "transcribe");
+        assert_eq!(rows[0].speaker_count, Some(2));
     }
 
     #[test]

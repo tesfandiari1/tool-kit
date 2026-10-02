@@ -61,22 +61,12 @@ func parseArgs() throws -> Options {
 /// file is one page.
 func rasterize(_ url: URL, dpi: CGFloat) throws -> [CGImage] {
     if url.pathExtension.lowercased() == "pdf", let doc = CGPDFDocument(url as CFURL) {
-        let scale = dpi / 72.0
         return try (1...max(doc.numberOfPages, 1)).compactMap { n -> CGImage? in
             guard let page = doc.page(at: n) else { return nil }
-            let box = page.getBoxRect(.mediaBox)
-            let w = Int((box.width * scale).rounded()), h = Int((box.height * scale).rounded())
-            guard let ctx = CGContext(
-                data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
-            ) else { throw Fail.unreadable("could not allocate a \(w)x\(h) bitmap") }
-            ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-            ctx.scaleBy(x: scale, y: scale)
-            ctx.translateBy(x: -box.origin.x, y: -box.origin.y)
-            ctx.drawPDFPage(page)
-            return ctx.makeImage()
+            guard let image = renderPage(page, dpi: dpi) else {
+                throw Fail.unreadable("could not render page \(n)")
+            }
+            return image
         }
     }
     guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),

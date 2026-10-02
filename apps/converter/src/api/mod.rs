@@ -44,10 +44,14 @@ pub fn router(state: AppState) -> Router {
             state.auth().clone(),
             require_auth,
         ));
+    // The widest ceiling any format can claim: audio carries its own, and a
+    // layer sized to the document limit would answer every recording with 413
+    // before admission ever read the extension.
     let body_limit = usize::try_from(
         state
             .limits()
             .max_upload_bytes
+            .max(state.limits().max_audio_upload_bytes)
             .saturating_add(MULTIPART_OVERHEAD_BYTES),
     )
     .expect("configured body limit must fit usize");

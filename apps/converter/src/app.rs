@@ -8,7 +8,10 @@ use crate::{
     auth::{AuthLoadError, BootstrapAuth},
     config::{Limits, Settings},
     conversion::ConversionService,
-    engines::{AnyDocEngine, EngineStartupError, PdfInspectorEngine, VisionEngine},
+    engines::{
+        AnyDocEngine, AudioEngine, AudioStartupError, EngineStartupError, PdfInspectorEngine,
+        VisionEngine,
+    },
     faults::FaultBarrier,
     jobs::{JobRuntime, StartupRecovery},
     persistence::{RepositoryError, SqliteRepository},
@@ -42,17 +45,6 @@ impl AppState {
             settings.limits.max_output_bytes,
             settings.pdf_threads,
         )?;
-        // AnyDoc runs in-process: pure Rust, typed errors, internal resource
-        // limits, and `catch_unwind` at the adapter. Parser concurrency one.
-        // The hard timeout reuses the worker timeout: an in-process call
-        // cannot be killed, so a hang fails the job and leaves a detached
-        // blocking task bounded by AnyDoc's internal limits.
-        let anydoc_engine = AnyDocEngine::new(
-            settings.limits.max_output_bytes,
-            1,
-            settings.limits.pdf_timeout,
-        );
-
         // Vision is optional and its absence is the normal case: no worker
         // binary, or a host below macOS 26, and the engine is simply not
         // there. A broken one is logged and dropped for the same reason.
@@ -72,12 +64,51 @@ impl AppState {
             }
         });
 
+        // AnyDoc runs in-process: pure Rust, typed errors, internal resource
+        // limits, and `catch_unwind` at the adapter. Parser concurrency one.
+        // The hard timeout reuses the worker timeout: an in-process call
+        // cannot be killed, so a hang fails the job and leaves a detached
+        // blocking task bounded by AnyDoc's internal limits.
+        let anydoc_engine = AnyDocEngine::new(
+            settings.limits.max_output_bytes,
+            1,
+            settings.limits.pdf_timeout,
+        );
+
+        // Audio is optional the same way, with one exception: a worker that is
+        // staged without its diarizer models fails every job it is handed, so
+        // that combination fails the boot instead of hiding until the first
+        // recording arrives.
+        let audio_engine = match settings.audio_worker_path.as_ref() {
+            Some(path) => {
+                let diarizer_dir = settings
+                    .audio_diarizer_dir
+                    .clone()
+                    .ok_or(StartupError::AudioDiarizerUnset)?;
+                match AudioEngine::initialize(
+                    path.clone(),
+                    diarizer_dir,
+                    settings.limits.audio_timeout,
+                    settings.limits.max_output_bytes,
+                ) {
+                    Ok(engine) => Some(engine),
+                    Err(error @ AudioStartupError::Startup(_)) => {
+                        tracing::warn!(%error, "audio engine is unavailable; transcription is off");
+                        None
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            None => None,
+        };
+
         let service = ConversionService::new(
             repository,
             artifacts,
             pdf_engine,
             anydoc_engine,
             vision_engine,
+            audio_engine,
             settings.limits.max_output_bytes,
             // A parse that outlives its own hard timeout keeps the permit while
             // it detaches. Give the next claim one more timeout to wait, then
@@ -164,6 +195,10 @@ pub enum StartupError {
     Persistence(#[from] RepositoryError),
     #[error(transparent)]
     PdfEngine(#[from] EngineStartupError),
+    #[error(transparent)]
+    AudioEngine(#[from] AudioStartupError),
+    #[error("the audio worker is staged without a diarizer model directory")]
+    AudioDiarizerUnset,
     #[error("startup recovery failed")]
     Recovery(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("configured active job limit does not fit the persistence layer")]

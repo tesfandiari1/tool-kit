@@ -30,14 +30,24 @@ pub(crate) struct SourceFormat {
 
 impl SourceFormat {
     /// Whether the engine that converts this format came up in this process.
-    /// Vision is the only one whose absence is normal: a broken PDF worker
-    /// fails startup, and AnyDoc runs in-process.
-    pub(crate) fn is_servable(&self, vision_available: bool) -> bool {
+    /// Only the spawned Swift workers can be absent normally: a broken PDF
+    /// worker fails startup, and AnyDoc runs in-process.
+    pub(crate) fn is_servable(&self, available: EngineAvailability) -> bool {
         match self.engine {
             LocalEngineKind::Pdf | LocalEngineKind::AnyDoc => true,
-            LocalEngineKind::Vision => vision_available,
+            LocalEngineKind::Vision => available.vision,
+            LocalEngineKind::Audio => available.audio,
         }
     }
+}
+
+/// Which optional engines came up in this process. A record rather than one
+/// positional bool per engine, because a second bool is how audio ends up
+/// gated on the Vision worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EngineAvailability {
+    pub vision: bool,
+    pub audio: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,6 +65,16 @@ pub(crate) enum ContainerMagic {
     Tiff,
     Gif,
     Bmp,
+    /// `RIFF` then `WAVE` at byte 8. The four bytes after the length name the
+    /// payload, which is what separates a WAV from a WebP or an AVI.
+    Wave,
+    /// `ftyp` at byte 4. m4a, mp4 and mov are one container under three media
+    /// types; the worker treats them alike and the brand does not gate
+    /// admission.
+    IsoBmff,
+    /// An `ID3` tag or a bare MPEG frame sync. An MP3 may start with either.
+    MpegAudio,
+    Flac,
     /// CSV carries no signature at all, so admission cannot check one. The
     /// extension and declared media type are the whole gate, and the engine
     /// names the format explicitly because detection returns `None`.
@@ -66,6 +86,7 @@ pub(crate) enum LocalEngineKind {
     Pdf,
     AnyDoc,
     Vision,
+    Audio,
 }
 
 pub(crate) const SOURCE_FORMATS: &[SourceFormat] = &[
@@ -271,6 +292,50 @@ pub(crate) const SOURCE_FORMATS: &[SourceFormat] = &[
         engine: LocalEngineKind::Vision,
         format_label: "bmp",
     },
+    // Audio and video containers, transcribed by the Audio engine. `mp4` and
+    // `mov` are here for the audio track: the worker never looks at video.
+    SourceFormat {
+        extension: "wav",
+        media_type: "audio/wav",
+        magic: ContainerMagic::Wave,
+        engine: LocalEngineKind::Audio,
+        format_label: "wav",
+    },
+    SourceFormat {
+        extension: "m4a",
+        media_type: "audio/mp4",
+        magic: ContainerMagic::IsoBmff,
+        engine: LocalEngineKind::Audio,
+        format_label: "m4a",
+    },
+    SourceFormat {
+        extension: "mp4",
+        media_type: "video/mp4",
+        magic: ContainerMagic::IsoBmff,
+        engine: LocalEngineKind::Audio,
+        format_label: "mp4",
+    },
+    SourceFormat {
+        extension: "mov",
+        media_type: "video/quicktime",
+        magic: ContainerMagic::IsoBmff,
+        engine: LocalEngineKind::Audio,
+        format_label: "mov",
+    },
+    SourceFormat {
+        extension: "mp3",
+        media_type: "audio/mpeg",
+        magic: ContainerMagic::MpegAudio,
+        engine: LocalEngineKind::Audio,
+        format_label: "mp3",
+    },
+    SourceFormat {
+        extension: "flac",
+        media_type: "audio/flac",
+        magic: ContainerMagic::Flac,
+        engine: LocalEngineKind::Audio,
+        format_label: "flac",
+    },
 ];
 
 pub(crate) fn source_format_by_extension(extension: &str) -> Option<&'static SourceFormat> {
@@ -300,16 +365,17 @@ pub(crate) fn advertised_media_types() -> Vec<&'static str> {
 
 /// The media types this process can actually convert.
 ///
-/// The contract is one list and a deployment is another. Vision ships only on
-/// macOS 26 and up, so a Linux container knows every image format and can
-/// convert none of them. Advertising what the host cannot serve turns a clean
-/// refusal at admission into a job that never runs.
-pub(crate) fn servable_media_types(vision_available: bool) -> Vec<&'static str> {
+/// The contract is one list and a deployment is another. Vision and Audio are
+/// Swift workers that ship only on macOS 26 and up, so a Linux container knows
+/// every image and audio format and can convert none of them. Advertising what
+/// the host cannot serve turns a clean refusal at admission into a job that
+/// never runs.
+pub(crate) fn servable_media_types(available: EngineAvailability) -> Vec<&'static str> {
     let mut servable = advertised_media_types();
     servable.retain(|media_type| {
         SOURCE_FORMATS
             .iter()
-            .any(|format| format.media_type == *media_type && format.is_servable(vision_available))
+            .any(|format| format.media_type == *media_type && format.is_servable(available))
     });
     servable
 }
@@ -478,24 +544,62 @@ mod tests {
         "image/bmp",
     ];
 
-    /// The contract never shrinks and a deployment often is smaller. Pinned
-    /// both ways because either half alone passes on a lie: an unconditional
-    /// list serves formats it cannot convert, and an over-eager filter hides
-    /// formats from the host that can.
+    const AUDIO_MEDIA_TYPES: [&str; 6] = [
+        "audio/wav",
+        "audio/mp4",
+        "video/mp4",
+        "video/quicktime",
+        "audio/mpeg",
+        "audio/flac",
+    ];
+
+    fn sorted(media_types: impl IntoIterator<Item = &'static str>) -> Vec<&'static str> {
+        let mut media_types: Vec<&'static str> = media_types.into_iter().collect();
+        media_types.sort_unstable();
+        media_types
+    }
+
+    /// The contract never shrinks and a deployment often is smaller. Every
+    /// availability shape is pinned to an exact set, because 18 documents plus
+    /// 6 images and 18 plus 6 audio types are both 24: a count cannot tell a
+    /// Vision-only host from an Audio-only one.
     #[test]
     fn servable_media_types_follow_the_engines_this_process_started() {
-        assert_eq!(servable_media_types(true), advertised_media_types());
-        assert_eq!(servable_media_types(true).len(), 24);
+        let documents: Vec<&'static str> = advertised_media_types()
+            .into_iter()
+            .filter(|media_type| {
+                !IMAGE_MEDIA_TYPES.contains(media_type) && !AUDIO_MEDIA_TYPES.contains(media_type)
+            })
+            .collect();
 
-        let without_vision = servable_media_types(false);
-        assert_eq!(without_vision.len(), 18);
-        assert_eq!(
-            without_vision,
-            advertised_media_types()
-                .into_iter()
-                .filter(|media_type| !IMAGE_MEDIA_TYPES.contains(media_type))
-                .collect::<Vec<_>>(),
-        );
+        for (vision, audio, expected) in [
+            (false, false, sorted(documents.clone())),
+            (
+                true,
+                false,
+                sorted(documents.iter().copied().chain(IMAGE_MEDIA_TYPES)),
+            ),
+            (
+                false,
+                true,
+                sorted(documents.iter().copied().chain(AUDIO_MEDIA_TYPES)),
+            ),
+            (true, true, sorted(advertised_media_types())),
+        ] {
+            let available = EngineAvailability { vision, audio };
+            assert_eq!(
+                sorted(servable_media_types(available)),
+                expected,
+                "vision={vision} audio={audio}"
+            );
+        }
+
+        // Every engine up serves the whole contract, in table order.
+        let all = EngineAvailability {
+            vision: true,
+            audio: true,
+        };
+        assert_eq!(servable_media_types(all), advertised_media_types());
     }
 
     /// The admission table and the database CHECK are two copies of one list.
@@ -503,7 +607,7 @@ mod tests {
     /// constraint error instead of a clean 415, so pin them together.
     #[test]
     fn advertised_media_types_match_the_migration_check() {
-        let sql = include_str!("../../migrations/0004_image_source_formats.sql");
+        let sql = include_str!("../../migrations/0005_audio_source_formats.sql");
         let check = sql
             .split_once("source_media_type     TEXT NOT NULL")
             .expect("the conversions CHECK must exist")

@@ -19,10 +19,11 @@ use crate::{
         artifact_relative_path, source_relative_path, ArtifactError, ArtifactStore, AttemptPaths,
         PreparedSubmission, PublishedArtifact,
     },
+    audio_protocol::AUDIO_ENGINE_NAME,
     engines::{
-        is_complete_native_inspection, AnyDocDiagnostics, AnyDocEngine, EngineAnalysis,
-        EngineFailure, EngineOutcome, PdfInspectorEngine, VisionDiagnostics, VisionEngine,
-        ANYDOC_ENGINE_NAME, ANYDOC_VERSION,
+        is_complete_native_inspection, AnyDocDiagnostics, AnyDocEngine, AudioDiagnostics,
+        AudioEngine, EngineAnalysis, EngineFailure, EngineOutcome, PdfInspectorEngine,
+        VisionDiagnostics, VisionEngine, ANYDOC_ENGINE_NAME, ANYDOC_VERSION,
     },
     faults::{FaultBarrier, FaultPoint},
     persistence::{
@@ -37,8 +38,8 @@ use crate::{
 
 use super::{
     model::{
-        now, source_format_by_media_type, LocalEngineKind, ManifestEngine, ManifestRoute,
-        ManifestSource,
+        now, servable_media_types, source_format_by_media_type, EngineAvailability,
+        LocalEngineKind, ManifestEngine, ManifestRoute, ManifestSource,
     },
     policy::{self, LocalResult, PolicyDecision, RouteKind},
     ArtifactKind, ArtifactRecord, ArtifactView, ConversionManifest, ConversionProfile, JobView,
@@ -68,6 +69,8 @@ pub struct ConversionService {
     /// Absent wherever the Vision worker does not run. Image jobs then fail
     /// closed as `worker_unavailable`; nothing else changes.
     vision_engine: Option<VisionEngine>,
+    /// Absent wherever the audio worker does not run, exactly like Vision.
+    audio_engine: Option<AudioEngine>,
     max_output_bytes: u64,
     /// How long a claimed job may wait for its engine's parser permit before
     /// the runner gives up and lets startup recovery requeue it.
@@ -77,12 +80,16 @@ pub struct ConversionService {
 }
 
 impl ConversionService {
+    // Four engines and their two shared limits. Grouping them into a record
+    // would be a second name for the field list right below.
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         repository: SqliteRepository,
         artifacts: ArtifactStore,
         pdf_engine: PdfInspectorEngine,
         anydoc_engine: AnyDocEngine,
         vision_engine: Option<VisionEngine>,
+        audio_engine: Option<AudioEngine>,
         max_output_bytes: u64,
         permit_wait_limit: Duration,
     ) -> Self {
@@ -92,6 +99,7 @@ impl ConversionService {
             pdf_engine,
             anydoc_engine,
             vision_engine,
+            audio_engine,
             max_output_bytes,
             permit_wait_limit,
             work_notification: Arc::new(Notify::new()),
@@ -158,6 +166,7 @@ impl ConversionService {
             &published_source.sha256,
             submission.language_correction,
             &submission.custom_words,
+            submission.speaker_count,
         );
         let input = NewConversion {
             id: job_id,
@@ -175,6 +184,7 @@ impl ConversionService {
             origin_request_id: submission.origin_request_id,
             ocr_language_correction: submission.language_correction,
             ocr_custom_words: submission.custom_words,
+            speaker_count: submission.speaker_count,
         };
 
         let decision = match self.repository.create_or_replay(input).await {
@@ -217,11 +227,24 @@ impl ConversionService {
     }
 
     /// The macOS product version the Vision worker handshook with, or `None`
-    /// where that engine is not running here. Doubles as the availability
-    /// answer: what capabilities advertises and what admission accepts both
-    /// turn on it.
+    /// where that engine is not running here.
     pub fn vision_version(&self) -> Option<&str> {
         self.vision_engine.as_ref().map(VisionEngine::version)
+    }
+
+    /// The macOS product version plus the pinned FluidAudio version the audio
+    /// worker handshook with, or `None` where that engine is not running here.
+    pub fn audio_version(&self) -> Option<&str> {
+        self.audio_engine.as_ref().map(AudioEngine::version)
+    }
+
+    /// Which optional engines came up here. What capabilities advertises and
+    /// what admission accepts both turn on it.
+    pub(crate) fn engine_availability(&self) -> EngineAvailability {
+        EngineAvailability {
+            vision: self.vision_engine.is_some(),
+            audio: self.audio_engine.is_some(),
+        }
     }
 
     pub async fn accepting_jobs(&self) -> bool {
@@ -286,8 +309,12 @@ impl ConversionService {
         &self,
     ) -> Result<Option<StoredConversion>, RepositoryError> {
         let vision_version = self.vision_version();
+        let audio_version = self.audio_version();
+        let servable = servable_media_types(self.engine_availability());
         self.repository
-            .claim_next_queued(|media_type| local_start(media_type, vision_version))
+            .claim_next_queued(&servable, |media_type| {
+                local_start(media_type, vision_version, audio_version)
+            })
             .await
     }
 
@@ -427,6 +454,10 @@ impl ConversionService {
                     Some(engine) => engine.acquire().await,
                     None => Err(EngineFailure::Unavailable),
                 },
+                LocalEngineKind::Audio => match self.audio_engine.as_ref() {
+                    Some(engine) => engine.acquire().await,
+                    None => Err(EngineFailure::Unavailable),
+                },
             }
         };
         let mut cancellation = shutdown.clone();
@@ -475,6 +506,7 @@ impl ConversionService {
             }
         };
 
+        let scan_cancellation = shutdown.clone();
         let conversion = match source_format.engine {
             LocalEngineKind::Pdf => {
                 self.pdf_engine
@@ -504,11 +536,65 @@ impl ConversionService {
                 }
                 None => Err(EngineFailure::Unavailable),
             },
+            LocalEngineKind::Audio => match self.audio_engine.as_ref() {
+                Some(engine) => {
+                    engine
+                        .convert(
+                            &paths,
+                            source,
+                            permit,
+                            shutdown,
+                            &job.source.media_type,
+                            job.speaker_count,
+                        )
+                        .await
+                }
+                None => Err(EngineFailure::Unavailable),
+            },
         };
+        // A PDF with no native text on any page is a scan, and Vision reads
+        // scans locally. Anything short of a conversion keeps the inspector's
+        // needs_remote and its reason.
+        let scan_engine = match (&conversion, self.vision_engine.as_ref()) {
+            (Ok(EngineOutcome::NeedsRemote { analysis, .. }), Some(engine))
+                if source_format.engine == LocalEngineKind::Pdf =>
+            {
+                scanned_page_count(analysis).map(|pages| engine.with_page_budget(pages))
+            }
+            _ => None,
+        };
+        let mut relabel = None;
+        let conversion = match scan_engine {
+            Some(engine) => {
+                // Boxed: inline, this future pushed `execute_claimed` past a
+                // test thread's stack in debug builds.
+                let scan = Box::pin(self.read_scan(&job, &paths, &engine, scan_cancellation));
+                match scan.await {
+                    Ok(converted @ EngineOutcome::Converted { .. }) => {
+                        relabel = Some(LocalStart {
+                            engine: EngineRecord {
+                                name: VISION_ENGINE_NAME.to_owned(),
+                                version: engine.version().to_owned(),
+                            },
+                            route: RouteKind::LocalVision.as_str().to_owned(),
+                        });
+                        Ok(converted)
+                    }
+                    Err(EngineFailure::Interrupted) => Err(EngineFailure::Interrupted),
+                    _ => conversion,
+                }
+            }
+            None => conversion,
+        };
+
         // Everything below this line is the routing policy's call, not the
         // engine's. The engine reports what it measured; `policy::decide` says
         // whether that is publishable under this profile.
-        let route = route_for(source_format.engine);
+        let route = if relabel.is_some() {
+            RouteKind::LocalVision
+        } else {
+            route_for(source_format.engine)
+        };
         let (analysis, local_result, published_bytes) = match conversion {
             Ok(EngineOutcome::Converted {
                 analysis,
@@ -564,7 +650,7 @@ impl ConversionService {
         let decision = policy::decide(job.profile, route, local_result);
         match (&decision, published_bytes) {
             (PolicyDecision::Publish { .. }, Some(markdown)) => {
-                self.finalize_success(job, paths, analysis, decision, route, markdown)
+                self.finalize_success(job, paths, analysis, decision, markdown, relabel)
                     .await?;
             }
             // The policy refused to publish output the engine did produce, so
@@ -619,15 +705,47 @@ impl ConversionService {
         Ok(())
     }
 
+    /// OCRs a scanned PDF with Vision. Any failure before the worker runs is
+    /// `Unavailable`, which keeps the inspector's needs_remote.
+    async fn read_scan(
+        &self,
+        job: &StoredConversion,
+        paths: &AttemptPaths,
+        engine: &VisionEngine,
+        cancellation: watch::Receiver<bool>,
+    ) -> Result<EngineOutcome, EngineFailure> {
+        let source = self
+            .artifacts
+            .open_validated_source(
+                job.id,
+                Some(job.source.byte_length),
+                Some(&job.source.sha256),
+            )
+            .await
+            .map_err(|_| EngineFailure::Unavailable)?;
+        let permit = engine.acquire().await?;
+        engine
+            .convert(
+                paths,
+                source,
+                permit,
+                cancellation,
+                job.ocr_language_correction,
+                &job.ocr_custom_words,
+            )
+            .await
+    }
+
     async fn finalize_success(
         &self,
         job: StoredConversion,
         paths: AttemptPaths,
         engine_analysis: EngineAnalysis,
         decision: PolicyDecision,
-        route: RouteKind,
         // The staged Markdown's size and digest, as the engine measured them.
         markdown: (u64, String),
+        // The engine that wrote the Markdown, when it is not the one claimed.
+        relabel: Option<LocalStart>,
     ) -> Result<(), ConversionExecutionError> {
         let (markdown_bytes, markdown_sha256) = markdown;
         let job_id = job.id;
@@ -636,11 +754,15 @@ impl ConversionService {
         let analysis = local_analysis(&engine_analysis, &decision);
         let finalizing = self
             .repository
-            .mark_finalizing(job_id, attempt_id, analysis)
+            .mark_finalizing(job_id, attempt_id, analysis, relabel.as_ref())
             .await?;
         self.faults.hold(FaultPoint::AfterFinalizing).await;
 
-        let Some(engine_record) = finalizing.active_attempt.engine.clone() else {
+        // The stored row names the engine and route, relabeled or not.
+        let (Some(engine_record), Some(route)) = (
+            finalizing.active_attempt.engine.clone(),
+            finalizing.active_attempt.route.clone(),
+        ) else {
             self.finish_failure(
                 job_id,
                 attempt_id,
@@ -670,7 +792,7 @@ impl ConversionService {
                 features: Vec::new(),
             },
             route: ManifestRoute {
-                kind: route.as_str().to_owned(),
+                kind: route,
                 reason_codes: decision.reason_strings(),
             },
             document: engine_analysis.diagnostics,
@@ -1031,6 +1153,9 @@ pub struct Submission {
     pub language_correction: bool,
     /// Newline separated, as the worker's env var wants it.
     pub custom_words: String,
+    /// Read by the Audio engine and by nothing else. `None` lets the diarizer
+    /// guess how many speakers the recording holds.
+    pub speaker_count: Option<u32>,
     pub idempotency_key: String,
     pub origin_request_id: String,
 }
@@ -1081,15 +1206,16 @@ pub(crate) enum ConversionExecutionError {
 }
 
 /// The request identity a replay is matched on, so every field the job is run
-/// with belongs in it. The OCR options are persisted and read by the engine
-/// much later, so leaving them out lets a resumed run replay onto a job
-/// converted with the settings the user has since turned off.
+/// with belongs in it. The OCR options and the speaker count are persisted and
+/// read by the engine much later, so leaving them out lets a resumed run replay
+/// onto a job converted with the settings the user has since turned off.
 pub(crate) fn submission_fingerprint(
     client_run_id: Uuid,
     profile: ConversionProfile,
     source_sha256: &str,
     language_correction: bool,
     custom_words: &str,
+    speaker_count: Option<u32>,
 ) -> String {
     let mut digest = Sha256::new();
     // Bumped with the fields below, so an old fingerprint cannot collide.
@@ -1103,14 +1229,26 @@ pub(crate) fn submission_fingerprint(
     digest.update(if language_correction { b"1" } else { b"0" });
     digest.update(b"\0");
     digest.update(custom_words.as_bytes());
+    digest.update(b"\0");
+    // Empty for "guess", which is a different job from any pinned count.
+    digest.update(
+        speaker_count
+            .map(|count| count.to_string())
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     hex::encode(digest.finalize())
 }
 
-/// `vision_version` is the macOS product version the Vision worker handshook
-/// with, or `None` where that worker does not run. An image job claimed with no
-/// Vision engine has no engine record to write, so it fails unclaimable rather
-/// than starting against nothing.
-fn local_start(media_type: &str, vision_version: Option<&str>) -> Option<LocalStart> {
+/// The two worker versions are the ones their handshakes reported, or `None`
+/// where that worker does not run. `None` here is not a verdict on the job:
+/// the claim's SELECT already skipped the media types this boot cannot serve,
+/// so a job that reaches this and answers `None` names a type no build knows.
+fn local_start(
+    media_type: &str,
+    vision_version: Option<&str>,
+    audio_version: Option<&str>,
+) -> Option<LocalStart> {
     let format = source_format_by_media_type(media_type)?;
     let engine = match format.engine {
         LocalEngineKind::Pdf => EngineRecord {
@@ -1125,11 +1263,23 @@ fn local_start(media_type: &str, vision_version: Option<&str>) -> Option<LocalSt
             name: VISION_ENGINE_NAME.to_owned(),
             version: vision_version?.to_owned(),
         },
+        LocalEngineKind::Audio => EngineRecord {
+            name: AUDIO_ENGINE_NAME.to_owned(),
+            version: audio_version?.to_owned(),
+        },
     };
     Some(LocalStart {
         engine,
         route: route_for(format.engine).as_str().to_owned(),
     })
+}
+
+/// The page count of a PDF whose every page needs OCR, which is the only kind
+/// Vision takes over. A mixed PDF stays remote.
+fn scanned_page_count(analysis: &EngineAnalysis) -> Option<u32> {
+    let inspection: Inspection = serde_json::from_value(analysis.diagnostics.clone()).ok()?;
+    (u32::try_from(inspection.pages_needing_ocr.len()) == Ok(inspection.page_count))
+        .then_some(inspection.page_count)
 }
 
 /// The one place the engine-to-route rule lives. Both the manifest and the
@@ -1139,6 +1289,7 @@ fn route_for(engine: LocalEngineKind) -> RouteKind {
         LocalEngineKind::Pdf => RouteKind::LocalPdf,
         LocalEngineKind::AnyDoc => RouteKind::LocalAnyDoc,
         LocalEngineKind::Vision => RouteKind::LocalVision,
+        LocalEngineKind::Audio => RouteKind::LocalAudio,
     }
 }
 
@@ -1257,6 +1408,11 @@ fn validate_manifest(
             serde_json::from_value::<VisionDiagnostics>(manifest.document.clone())
                 .map_err(|_| ArtifactReadFailure::Integrity)?;
             "image_based"
+        }
+        AUDIO_ENGINE_NAME => {
+            serde_json::from_value::<AudioDiagnostics>(manifest.document.clone())
+                .map_err(|_| ArtifactReadFailure::Integrity)?;
+            "audio"
         }
         _ => return Err(ArtifactReadFailure::Integrity),
     };
@@ -1415,20 +1571,32 @@ mod tests {
     use crate::persistence::{ArtifactKind, StoredArtifact};
     use crate::worker_protocol::Inspection;
 
-    /// A replay is matched on the fingerprint alone, so an OCR option outside
-    /// it means a resumed run silently replays onto a job converted with the
-    /// setting the user has since changed.
+    /// A replay is matched on the fingerprint alone, so a per-run setting
+    /// outside it means a resumed run silently replays onto a job converted
+    /// with the setting the user has since changed.
     #[test]
-    fn the_ocr_options_are_part_of_the_request_identity() {
+    fn the_per_run_engine_settings_are_part_of_the_request_identity() {
         let run = Uuid::new_v4();
         let sha = "a".repeat(64);
-        let fingerprint = |correction, words| {
-            submission_fingerprint(run, ConversionProfile::Standard, &sha, correction, words)
+        let fingerprint = |correction, words, speakers| {
+            submission_fingerprint(
+                run,
+                ConversionProfile::Standard,
+                &sha,
+                correction,
+                words,
+                speakers,
+            )
         };
-        let baseline = fingerprint(true, "Acme");
-        assert_ne!(baseline, fingerprint(false, "Acme"));
-        assert_ne!(baseline, fingerprint(true, ""));
-        assert_eq!(baseline, fingerprint(true, "Acme"));
+        let baseline = fingerprint(true, "Acme", None);
+        assert_ne!(baseline, fingerprint(false, "Acme", None));
+        assert_ne!(baseline, fingerprint(true, "", None));
+        assert_ne!(baseline, fingerprint(true, "Acme", Some(2)));
+        assert_ne!(
+            fingerprint(true, "Acme", Some(2)),
+            fingerprint(true, "Acme", Some(3))
+        );
+        assert_eq!(baseline, fingerprint(true, "Acme", None));
     }
 
     #[test]

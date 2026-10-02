@@ -14,7 +14,9 @@ pub mod persistence;
 // after Vision cannot each grow a private copy. Re-exported under the names
 // they already had, because every call site here and in the worker binaries
 // names them that way and a rename would be churn, not a change.
-pub use tool_kit_worker_protocol::{pdf as worker_protocol, vision as vision_protocol};
+pub use tool_kit_worker_protocol::{
+    audio as audio_protocol, pdf as worker_protocol, vision as vision_protocol,
+};
 
 mod api;
 mod app;

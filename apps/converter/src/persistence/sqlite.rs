@@ -131,10 +131,10 @@ impl SqliteRepository {
                 source_media_type, source_byte_length, source_sha256,
                 reason_codes_json, warnings_json,
                 origin_request_id, created_at, updated_at,
-                ocr_language_correction, ocr_custom_words
+                ocr_language_correction, ocr_custom_words, speaker_count
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8, ?9, ?10,
-                '[]', '[]', ?11, ?12, ?12, ?13, ?14
+                '[]', '[]', ?11, ?12, ?12, ?13, ?14, ?15
              )",
         )
         .bind(&conversion_id)
@@ -151,6 +151,7 @@ impl SqliteRepository {
         .bind(&created_at)
         .bind(input.ocr_language_correction)
         .bind(&input.ocr_custom_words)
+        .bind(input.speaker_count.map(i64::from))
         .execute(&mut *transaction)
         .await?;
 
@@ -218,11 +219,22 @@ impl SqliteRepository {
         Ok(conversion)
     }
 
+    /// Claims the oldest queued row this process can actually run.
+    ///
+    /// `servable_media_types` is the boot's engine set, not the contract's:
+    /// a row whose engine is absent here is left queued for a boot that has
+    /// it, while the rows behind it still run. Failing it instead would
+    /// destroy an audio job admitted while the worker was up.
     pub async fn claim_next_queued(
         &self,
+        servable_media_types: &[&str],
         start_for: impl FnOnce(&str) -> Option<LocalStart>,
     ) -> Result<Option<StoredConversion>, RepositoryError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // The list is bound as one JSON array rather than spliced into the
+        // SQL: the statement stays a literal, and the set varies per boot.
+        let servable = serde_json::to_string(servable_media_types)
+            .map_err(|_| RepositoryError::InvalidInput("servable media types are invalid"))?;
         let next = sqlx::query(
             "SELECT c.id AS conversion_id, a.id AS attempt_id, c.source_media_type
              FROM conversions AS c
@@ -232,10 +244,12 @@ impl SqliteRepository {
              WHERE c.auth_scope = ?1
                AND c.status = 'queued'
                AND a.state = 'queued'
+               AND c.source_media_type IN (SELECT value FROM json_each(?2))
              ORDER BY a.queue_seq ASC
              LIMIT 1",
         )
         .bind(AUTH_SCOPE)
+        .bind(&servable)
         .fetch_optional(&mut *transaction)
         .await?;
 
@@ -247,9 +261,9 @@ impl SqliteRepository {
         let attempt_id = parse_uuid(next.try_get("attempt_id")?, "attempts.id")?;
         let source_media_type: String = next.try_get("source_media_type")?;
         let Some(start) = start_for(&source_media_type) else {
-            // A queued row whose source media type has no engine cannot be
-            // executed. Fail it in the same transaction so it never poisons
-            // the queue.
+            // The SELECT already skipped every media type this boot cannot
+            // serve, so reaching here means no build knows the type at all.
+            // Fail it in the same transaction so it never poisons the queue.
             fail_unclaimable_source(&mut transaction, conversion_id, attempt_id).await?;
             commit_transition(
                 transaction,
@@ -278,6 +292,9 @@ impl SqliteRepository {
         conversion_id: Uuid,
         attempt_id: Uuid,
         analysis: LocalAnalysis,
+        // The engine that wrote the Markdown, when it is not the one the claim
+        // recorded: a scanned PDF Vision read publishes under Vision's name.
+        relabel: Option<&LocalStart>,
     ) -> Result<StoredConversion, RepositoryError> {
         let analysis = encode_local_analysis(&analysis)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -290,6 +307,32 @@ impl SqliteRepository {
         )
         .await?;
         let updated_at = now_rfc3339()?;
+        if let Some(start) = relabel {
+            validate_local_start(start)?;
+            let attempt = sqlx::query(
+                "UPDATE attempts SET engine_name = ?1, engine_version = ?2, route = ?3
+                 WHERE conversion_id = ?4 AND id = ?5",
+            )
+            .bind(&start.engine.name)
+            .bind(&start.engine.version)
+            .bind(&start.route)
+            .bind(conversion_id.hyphenated().to_string())
+            .bind(attempt_id.hyphenated().to_string())
+            .execute(&mut *transaction)
+            .await?;
+            require_one_transition_row(attempt.rows_affected(), "attempts.route")?;
+            let conversion = sqlx::query(
+                "UPDATE conversions SET route = ?1
+                 WHERE id = ?2 AND auth_scope = ?3 AND active_attempt_id = ?4",
+            )
+            .bind(&start.route)
+            .bind(conversion_id.hyphenated().to_string())
+            .bind(AUTH_SCOPE)
+            .bind(attempt_id.hyphenated().to_string())
+            .execute(&mut *transaction)
+            .await?;
+            require_one_transition_row(conversion.rows_affected(), "conversions.route")?;
+        }
 
         update_attempt_analysis(
             &mut transaction,
@@ -853,9 +896,10 @@ struct ActiveAttemptHeader {
     highest_recovery_count: u32,
 }
 
-/// Fails a queued conversion in place when its source media type has no
-/// engine. Defense in depth: upload validation keeps such rows out, so this
-/// only fires on corrupted or hand-edited data.
+/// Fails a queued conversion in place when no build of this service has an
+/// engine for its source media type. Defense in depth: upload validation keeps
+/// such rows out, so this only fires on corrupted or hand-edited data. A row
+/// whose engine is merely absent on this boot never reaches here.
 async fn fail_unclaimable_source(
     transaction: &mut Transaction<'_, Sqlite>,
     conversion_id: Uuid,
@@ -1349,6 +1393,7 @@ async fn load_conversion(
             c.updated_at AS conversion_updated_at,
             c.ocr_language_correction,
             c.ocr_custom_words,
+            c.speaker_count,
             a.id AS attempt_id,
             a.queue_seq,
             a.attempt_number,
@@ -1538,6 +1583,10 @@ fn decode_conversion(row: &SqliteRow) -> Result<StoredConversion, RepositoryErro
         updated_at: row.try_get("conversion_updated_at")?,
         ocr_language_correction: row.try_get("ocr_language_correction")?,
         ocr_custom_words: row.try_get("ocr_custom_words")?,
+        speaker_count: row
+            .try_get::<Option<i64>, _>("speaker_count")?
+            .map(|count| nonnegative_u32(count, "conversions.speaker_count"))
+            .transpose()?,
     })
 }
 
@@ -2339,7 +2388,7 @@ mod tests {
         assert!(converting.active_attempt.started_at.is_some());
 
         let finalizing = repository
-            .mark_finalizing(conversion_id, attempt_id, local_analysis())
+            .mark_finalizing(conversion_id, attempt_id, local_analysis(), None)
             .await
             .unwrap();
         assert_eq!(finalizing.state, ConversionState::Finalizing);
@@ -2453,6 +2502,7 @@ mod tests {
                 finalizing_failure.id,
                 finalizing_failure.active_attempt.id,
                 local_analysis(),
+                None,
             )
             .await
             .unwrap();
@@ -2481,7 +2531,7 @@ mod tests {
         ));
         assert!(matches!(
             repository
-                .mark_finalizing(queued.id, queued.active_attempt.id, local_analysis())
+                .mark_finalizing(queued.id, queued.active_attempt.id, local_analysis(), None)
                 .await,
             Err(RepositoryError::IllegalTransition { .. })
         ));
@@ -2515,6 +2565,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_queued_row_this_boot_cannot_serve_waits_instead_of_failing() {
+        let (_directory, repository) = open_repository(2).await;
+        let mut audio = new_conversion("claim-audio", "a");
+        audio.source.media_type = "audio/wav".to_owned();
+        let audio = created(repository.create_or_replay(audio).await.unwrap());
+        let pdf = queued_conversion(&repository, "claim-pdf", "b").await;
+
+        // A boot without the audio worker: the older audio row is skipped and
+        // left queued, and the PDF behind it still runs.
+        let claimed = repository
+            .claim_next_queued(&["application/pdf"], |_| Some(local_start()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, pdf.id);
+        let waiting = repository.get(audio.id).await.unwrap().unwrap();
+        assert_eq!(waiting.state, ConversionState::Queued);
+
+        // A boot with the worker claims it.
+        let claimed = repository
+            .claim_next_queued(&["application/pdf", "audio/wav"], |_| Some(local_start()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, audio.id);
+    }
+
+    #[tokio::test]
     async fn concurrent_fifo_claims_take_each_queued_attempt_once_in_order() {
         let (_directory, repository) = open_repository(4).await;
         let first = queued_conversion(&repository, "fifo-first", "a").await;
@@ -2533,7 +2611,7 @@ mod tests {
             tasks.push(tokio::spawn(async move {
                 barrier.wait().await;
                 repository
-                    .claim_next_queued(|_| Some(local_start()))
+                    .claim_next_queued(&["application/pdf"], |_| Some(local_start()))
                     .await
                     .unwrap()
                     .unwrap()
@@ -2556,13 +2634,13 @@ mod tests {
             .all(|conversion| conversion.state == ConversionState::ConvertingLocal));
 
         let last = repository
-            .claim_next_queued(|_| Some(local_start()))
+            .claim_next_queued(&["application/pdf"], |_| Some(local_start()))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(last.id, third.id);
         assert!(repository
-            .claim_next_queued(|_| Some(local_start()))
+            .claim_next_queued(&["application/pdf"], |_| Some(local_start()))
             .await
             .unwrap()
             .is_none());
@@ -2612,6 +2690,7 @@ mod tests {
                 conversion.id,
                 conversion.active_attempt.id,
                 local_analysis(),
+                None,
             )
             .await
             .unwrap();
@@ -2716,13 +2795,13 @@ mod tests {
             .is_some());
 
         let claimed_second = repository
-            .claim_next_queued(|_| Some(local_start()))
+            .claim_next_queued(&["application/pdf"], |_| Some(local_start()))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(claimed_second.id, second.id);
         let claimed_recovery = repository
-            .claim_next_queued(|_| Some(local_start()))
+            .claim_next_queued(&["application/pdf"], |_| Some(local_start()))
             .await
             .unwrap()
             .unwrap();
@@ -2765,7 +2844,7 @@ mod tests {
             .await
             .unwrap();
         repository
-            .mark_finalizing(queued.id, queued.active_attempt.id, local_analysis())
+            .mark_finalizing(queued.id, queued.active_attempt.id, local_analysis(), None)
             .await
             .unwrap();
         assert!(matches!(
@@ -2846,12 +2925,18 @@ mod tests {
                 finalizing.id,
                 finalizing.active_attempt.id,
                 local_analysis(),
+                None,
             )
             .await
             .unwrap();
         let succeeded = converting_conversion(&repository, "list-succeeded", "d").await;
         repository
-            .mark_finalizing(succeeded.id, succeeded.active_attempt.id, local_analysis())
+            .mark_finalizing(
+                succeeded.id,
+                succeeded.active_attempt.id,
+                local_analysis(),
+                None,
+            )
             .await
             .unwrap();
         repository
@@ -3093,6 +3178,7 @@ mod tests {
             origin_request_id: Uuid::new_v4().to_string(),
             ocr_language_correction: true,
             ocr_custom_words: String::new(),
+            speaker_count: None,
         }
     }
 

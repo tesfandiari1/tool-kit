@@ -123,6 +123,12 @@ export function SettingsPanel({
                   }}
                   onToast={onToast}
                 />
+                <SpeakerCountField
+                  value={settings.speakerCount}
+                  onCommit={(speakerCount) => {
+                    onPersist({ speakerCount });
+                  }}
+                />
               </Stack>
             )}
           </Stack>
@@ -299,6 +305,55 @@ function CustomWordsField({
       invalid={left < 0}
       value={draft}
       placeholder="Comma separated"
+      onChange={(e) => {
+        setDraft(e.target.value);
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+      }}
+    />
+  );
+}
+
+/// The transcriber wants a count, not a hint: blank is the only way to ask it
+/// to guess. Committed on blur or Enter, so "1" on the way to "12" is not saved.
+const SPEAKERS_MIN = 1;
+const SPEAKERS_MAX = 20;
+
+function SpeakerCountField({
+  value,
+  onCommit,
+}: {
+  value: number | null;
+  onCommit: (value: number | null) => void;
+}) {
+  const [draft, setDraft] = useState(value === null ? "" : String(value));
+  const commit = () => {
+    const typed = draft.trim();
+    if (!typed) {
+      setDraft("");
+      onCommit(null);
+      return;
+    }
+    const parsed = Number.parseInt(typed, 10);
+    if (Number.isNaN(parsed)) {
+      setDraft(value === null ? "" : String(value));
+      return;
+    }
+    const count = Math.min(Math.max(parsed, SPEAKERS_MIN), SPEAKERS_MAX);
+    setDraft(String(count));
+    onCommit(count);
+  };
+  return (
+    <Input
+      label="Speakers"
+      hint="How many people speak in the recordings. Leave it blank to let the transcriber guess, which is less accurate."
+      type="number"
+      min={SPEAKERS_MIN}
+      max={SPEAKERS_MAX}
+      step={1}
+      value={draft}
       onChange={(e) => {
         setDraft(e.target.value);
       }}

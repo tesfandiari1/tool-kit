@@ -9,6 +9,10 @@ publish = false
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 
+[dev-dependencies]
+# The round-trip test asserts the exact JSON the Swift worker is written against.
+serde_json = "1.0.151"
+
 # Copied verbatim from apps/converter/Cargo.toml [lints]. There is no root workspace
 # to share them from, so all three crates carry their own copy.
 [lints.rust]

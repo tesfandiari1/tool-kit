@@ -2,6 +2,7 @@ use axum::{extract::State, Json};
 use serde::Serialize;
 
 use crate::{
+    audio_protocol::AUDIO_ENGINE_NAME,
     conversion::servable_media_types,
     engines::{ANYDOC_ENGINE_NAME, ANYDOC_VERSION},
     vision_protocol::VISION_ENGINE_NAME,
@@ -53,6 +54,10 @@ struct EngineCapability {
 #[serde(rename_all = "camelCase")]
 struct LimitCapabilities {
     max_upload_bytes: u64,
+    /// Audio is bounded on its own key, an order of magnitude above the
+    /// document ceiling. One published limit would refuse recordings the
+    /// service accepts.
+    max_audio_upload_bytes: u64,
     max_output_bytes: u64,
     max_active_jobs: usize,
     max_concurrent_uploads: usize,
@@ -67,10 +72,10 @@ struct RemoteFallbackCapabilities {
 pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
     let accepting_jobs = state.service().accepting_jobs().await;
     let vision_version = state.service().vision_version().map(str::to_owned);
-    let vision_available = vision_version.is_some();
-    // Two engines everywhere, three where Vision came up. The client reads
-    // this to know what it can send, so an entry for an engine that is not
-    // here would be an invitation to a job that cannot run.
+    let audio_version = state.service().audio_version().map(str::to_owned);
+    // Two engines everywhere, plus whichever Swift workers came up. The client
+    // reads this to know what it can send, so an entry for an engine that is
+    // not here would be an invitation to a job that cannot run.
     let mut engines = vec![
         EngineCapability {
             name: "pdf-inspector",
@@ -87,6 +92,12 @@ pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
             version,
         });
     }
+    if let Some(version) = audio_version {
+        engines.push(EngineCapability {
+            name: AUDIO_ENGINE_NAME,
+            version,
+        });
+    }
     Json(CapabilitiesEnvelope {
         data: Capabilities {
             api_version: "v1",
@@ -94,7 +105,7 @@ pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
             conversion: ConversionCapabilities {
                 accepting_jobs,
                 durability: "persistent",
-                input_formats: servable_media_types(vision_available),
+                input_formats: servable_media_types(state.service().engine_availability()),
                 output_formats: vec!["text/markdown", "application/json"],
                 profiles: vec![
                     ProfileCapability {
@@ -113,6 +124,7 @@ pub async fn get(State(state): State<AppState>) -> Json<CapabilitiesEnvelope> {
                 engines,
                 limits: LimitCapabilities {
                     max_upload_bytes: state.limits().max_upload_bytes,
+                    max_audio_upload_bytes: state.limits().max_audio_upload_bytes,
                     max_output_bytes: state.limits().max_output_bytes,
                     max_active_jobs: state.limits().max_jobs,
                     max_concurrent_uploads: state.limits().max_concurrent_uploads,

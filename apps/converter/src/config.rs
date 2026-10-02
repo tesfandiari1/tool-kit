@@ -14,6 +14,10 @@ const DEFAULT_MAX_JOBS: usize = 32;
 const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 2;
 const DEFAULT_UPLOAD_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_PDF_TIMEOUT_SECS: u64 = 60;
+/// Audio gets its own ceilings. An hour of WAV is orders of magnitude past
+/// both document limits, and a transcription runs for minutes, not seconds.
+const DEFAULT_AUDIO_TIMEOUT_SECS: u64 = 1800;
+const DEFAULT_MAX_AUDIO_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_PDF_THREADS: usize = 2;
 const DEFAULT_DATABASE_BUSY_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_WORKER_POLL_INTERVAL_SECS: u64 = 1;
@@ -24,6 +28,7 @@ const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 30;
 const DEFAULT_SHUTDOWN_ON_STDIN_EOF: u64 = 0;
 const PDF_WORKER_NAME: &str = "tool-kit-pdf-worker";
 const VISION_WORKER_NAME: &str = "tool-kit-vision-worker";
+const AUDIO_WORKER_NAME: &str = "tool-kit-audio-worker";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Settings {
@@ -37,6 +42,11 @@ pub struct Settings {
     /// `None` where the Vision worker does not ship, which is every host but
     /// macOS. The engine is then simply absent.
     pub vision_worker_path: Option<PathBuf>,
+    /// Same rule as Vision: absent off macOS.
+    pub audio_worker_path: Option<PathBuf>,
+    /// The staged speaker-diarization models. Required wherever the audio
+    /// worker is, because a worker without them fails every job.
+    pub audio_diarizer_dir: Option<PathBuf>,
     pub limits: Limits,
     pub pdf_threads: usize,
     pub database_busy_timeout: Duration,
@@ -52,11 +62,15 @@ pub struct Settings {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Limits {
     pub max_upload_bytes: u64,
+    /// The ceiling for a source the Audio engine converts. Every other format
+    /// is bounded by `max_upload_bytes`.
+    pub max_audio_upload_bytes: u64,
     pub max_output_bytes: u64,
     pub max_jobs: usize,
     pub max_concurrent_uploads: usize,
     pub upload_timeout: Duration,
     pub pdf_timeout: Duration,
+    pub audio_timeout: Duration,
 }
 
 impl Settings {
@@ -92,18 +106,15 @@ impl Settings {
             Some(path) => absolute_path("TOOLKIT_CONVERTER_PDF_WORKER_PATH", path)?,
             None => sibling_worker_path(PDF_WORKER_NAME)?,
         };
-        // A configured path is a promise, so it is kept whether or not the file
-        // is there and the engine reports what it finds. Only the implicit
-        // sibling probe is allowed to come back empty.
-        let vision_worker_path = match read_optional_env("TOOLKIT_CONVERTER_VISION_WORKER_PATH")? {
-            Some(path) => Some(absolute_path("TOOLKIT_CONVERTER_VISION_WORKER_PATH", path)?),
-            None => {
-                let sibling = sibling_worker_path(VISION_WORKER_NAME)?;
-                sibling.try_exists().unwrap_or(false).then_some(sibling)
-            }
-        };
+        let vision_worker_path =
+            optional_worker_path("TOOLKIT_CONVERTER_VISION_WORKER_PATH", VISION_WORKER_NAME)?;
+        let audio_worker_path =
+            optional_worker_path("TOOLKIT_CONVERTER_AUDIO_WORKER_PATH", AUDIO_WORKER_NAME)?;
         let pdf_bcmaps_dir = read_optional_env("TOOLKIT_CONVERTER_PDF_BCMAPS_DIR")?
             .map(|path| absolute_path("TOOLKIT_CONVERTER_PDF_BCMAPS_DIR", path))
+            .transpose()?;
+        let audio_diarizer_dir = read_optional_env("TOOLKIT_CONVERTER_AUDIO_DIARIZER_DIR")?
+            .map(|path| absolute_path("TOOLKIT_CONVERTER_AUDIO_DIARIZER_DIR", path))
             .transpose()?;
 
         Ok(Self {
@@ -115,12 +126,20 @@ impl Settings {
             pdf_worker_path,
             pdf_bcmaps_dir,
             vision_worker_path,
+            audio_worker_path,
+            audio_diarizer_dir,
             limits: Limits {
                 max_upload_bytes: read_bounded_u64(
                     "TOOLKIT_CONVERTER_MAX_UPLOAD_BYTES",
                     DEFAULT_MAX_UPLOAD_BYTES,
                     1024,
                     1024 * 1024 * 1024,
+                )?,
+                max_audio_upload_bytes: read_bounded_u64(
+                    "TOOLKIT_CONVERTER_MAX_AUDIO_UPLOAD_BYTES",
+                    DEFAULT_MAX_AUDIO_UPLOAD_BYTES,
+                    1024,
+                    4 * 1024 * 1024 * 1024,
                 )?,
                 max_output_bytes: read_bounded_u64(
                     "TOOLKIT_CONVERTER_MAX_OUTPUT_BYTES",
@@ -149,6 +168,12 @@ impl Settings {
                 pdf_timeout: Duration::from_secs(read_bounded_u64(
                     "TOOLKIT_CONVERTER_PDF_TIMEOUT_SECS",
                     DEFAULT_PDF_TIMEOUT_SECS,
+                    1,
+                    3600,
+                )?),
+                audio_timeout: Duration::from_secs(read_bounded_u64(
+                    "TOOLKIT_CONVERTER_AUDIO_TIMEOUT_SECS",
+                    DEFAULT_AUDIO_TIMEOUT_SECS,
                     1,
                     3600,
                 )?),
@@ -190,6 +215,22 @@ impl Settings {
                 1,
             )? == 1,
         })
+    }
+}
+
+/// A configured path is a promise, so it is kept whether or not the file is
+/// there and the engine reports what it finds. Only the implicit sibling probe
+/// is allowed to come back empty.
+fn optional_worker_path(
+    variable: &'static str,
+    name: &str,
+) -> Result<Option<PathBuf>, ConfigError> {
+    match read_optional_env(variable)? {
+        Some(path) => Ok(Some(absolute_path(variable, path)?)),
+        None => {
+            let sibling = sibling_worker_path(name)?;
+            Ok(sibling.try_exists().unwrap_or(false).then_some(sibling))
+        }
     }
 }
 
@@ -299,8 +340,9 @@ mod tests {
     use tracing_subscriber::EnvFilter;
 
     use super::{
-        read_bounded_u64, DEFAULT_BIND_ADDRESS, DEFAULT_DATABASE_BUSY_TIMEOUT_SECS,
-        DEFAULT_LOG_FILTER, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_MAX_UPLOAD_BYTES,
+        read_bounded_u64, DEFAULT_AUDIO_TIMEOUT_SECS, DEFAULT_BIND_ADDRESS,
+        DEFAULT_DATABASE_BUSY_TIMEOUT_SECS, DEFAULT_LOG_FILTER, DEFAULT_MAX_AUDIO_UPLOAD_BYTES,
+        DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_PDF_TIMEOUT_SECS,
         DEFAULT_RECOVERY_LIMIT, DEFAULT_SHUTDOWN_GRACE_SECS, DEFAULT_SHUTDOWN_ON_STDIN_EOF,
         DEFAULT_WORKER_POLL_INTERVAL_SECS,
     };
@@ -322,6 +364,16 @@ mod tests {
     fn default_limits_fit_the_development_tmpfs() {
         assert_eq!(DEFAULT_MAX_UPLOAD_BYTES, 25 * 1024 * 1024);
         assert_eq!(DEFAULT_MAX_OUTPUT_BYTES, 50 * 1024 * 1024);
+    }
+
+    /// An hour of WAV clears both document ceilings by an order of magnitude,
+    /// which is why audio carries its own pair.
+    #[test]
+    fn audio_limits_are_larger_than_the_document_ones() {
+        assert_eq!(DEFAULT_MAX_AUDIO_UPLOAD_BYTES, 1024 * 1024 * 1024);
+        assert_eq!(DEFAULT_AUDIO_TIMEOUT_SECS, 1800);
+        const { assert!(DEFAULT_MAX_AUDIO_UPLOAD_BYTES > DEFAULT_MAX_UPLOAD_BYTES) };
+        const { assert!(DEFAULT_AUDIO_TIMEOUT_SECS > DEFAULT_PDF_TIMEOUT_SECS) };
     }
 
     #[test]

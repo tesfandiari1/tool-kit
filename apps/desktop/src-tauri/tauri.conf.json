@@ -49,14 +49,16 @@
     "externalBin": [
       "binaries/tool-kit-converter",
       "binaries/tool-kit-pdf-worker",
-      "binaries/tool-kit-vision-worker"
+      "binaries/tool-kit-vision-worker",
+      "binaries/tool-kit-audio-worker"
     ],
     "resources": {
       "../src/ui/fonts/OFL.txt": "OFL.txt",
       "../src/ui/fonts/THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
       "resources/pdf-inspector/bcmaps": "pdf-inspector/bcmaps",
       "resources/pdf-inspector/pdf-inspector-MIT.txt": "pdf-inspector-MIT.txt",
-      "resources/pdf-inspector/adobe-bcmaps.txt": "adobe-bcmaps.txt"
+      "resources/pdf-inspector/adobe-bcmaps.txt": "adobe-bcmaps.txt",
+      "resources/fluidaudio": "fluidaudio"
     },
     "macOS": {
       "minimumSystemVersion": "26.0"

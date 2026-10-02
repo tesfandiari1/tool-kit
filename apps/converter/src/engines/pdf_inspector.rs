@@ -26,7 +26,9 @@ use crate::{
 };
 
 const WORKER_LABEL: &str = "PDF";
-const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(2);
+// Ten seconds like the Swift workers: at two, a fork storm from the parallel
+// test suite on a loaded Mac timed out a script that only echoes.
+const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 const EXPECTED_WORKER_IDENTITY: &str = "tool-kit-pdf-worker protocol=2 pdf-inspector=1.15.0\n";
 const REQUIRED_CMAPS: [&str; 4] = [
     "Adobe-CNS1-UCS2.bcmap",
@@ -426,10 +428,14 @@ mod tests {
         std::fs::write(&worker, "#!/bin/sh\necho wrong-worker\n").unwrap();
         std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
 
-        assert!(matches!(
-            verify_worker_identity(&worker),
-            Err(WorkerStartupError::WorkerIdentityMismatch { .. })
-        ));
+        let result = verify_worker_identity(&worker);
+        assert!(
+            matches!(
+                result,
+                Err(WorkerStartupError::WorkerIdentityMismatch { .. })
+            ),
+            "{result:?}"
+        );
     }
 
     #[test]

@@ -17,9 +17,11 @@ Phase 3 of [`../../docs/STATUS.md`](../../docs/STATUS.md). M4 is complete. Datal
 routing inside the backend is Phase 2 and is not active yet.
 
 The service is permanently CPU-only. It contains no local OCR, model-serving,
-PDFium, ONNX, or accelerator runtime. PDFs that are scanned, image-based, mixed,
-garbled, incomplete, or over the local output ceiling finish as `needs_remote`
-without publishing partial Markdown. Datalab routing is not active yet.
+PDFium, ONNX, or accelerator runtime. Where the Vision worker runs, a PDF with
+no text on any page converts through it on route `local_vision`. Other scanned,
+image-based, mixed, garbled, incomplete, or over-ceiling PDFs finish as
+`needs_remote` without publishing partial Markdown. Datalab routing is not
+active yet.
 
 ## Implemented API
 
@@ -166,6 +168,10 @@ values or unavailable startup dependencies prevent the listener from binding.
 | `TOOLKIT_CONVERTER_SCRATCH_PARENT` | `/tmp` | Read by the config loader and used nowhere else |
 | `TOOLKIT_CONVERTER_PDF_WORKER_PATH` | sibling binary | Absolute worker override |
 | `TOOLKIT_CONVERTER_VISION_WORKER_PATH` | sibling binary where it exists | Absolute macOS Vision worker override |
+| `TOOLKIT_CONVERTER_AUDIO_WORKER_PATH` | sibling binary where it exists | Absolute macOS audio worker override |
+| `TOOLKIT_CONVERTER_AUDIO_DIARIZER_DIR` | unset | Parent of the staged `speaker-diarization/` CoreML set. Required whenever the audio worker is present |
+| `TOOLKIT_CONVERTER_AUDIO_TIMEOUT_SECS` | `1800` | Audio worker wall deadline |
+| `TOOLKIT_CONVERTER_MAX_AUDIO_UPLOAD_BYTES` | `1073741824` | Per-recording streaming ceiling. Documents keep `MAX_UPLOAD_BYTES` |
 | `TOOLKIT_CONVERTER_PDF_BCMAPS_DIR` | crate fallback | Runtime CMap directory; container sets this explicitly |
 | `TOOLKIT_CONVERTER_MAX_UPLOAD_BYTES` | `26214400` | Per-source streaming ceiling |
 | `TOOLKIT_CONVERTER_MAX_OUTPUT_BYTES` | `52428800` | Markdown ceiling enforced before worker write |
@@ -181,10 +187,12 @@ values or unavailable startup dependencies prevent the listener from binding.
 | `TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF` | `0` | Shut down when stdin closes; `0` or `1` |
 | `RUST_LOG` | `tool_kit_converter=info` | Structured tracing filter |
 
-The two worker overrides differ in one way. A configured path is a promise, so
-the engine reports what it finds there whether or not the file exists. Only the
-implicit sibling probe is allowed to come back empty, and an absent Vision
-worker means the engine is simply absent, which is the normal case off macOS.
+The Swift worker overrides differ from the PDF one in one way. A configured
+path is a promise, so the engine reports what it finds there whether or not the
+file exists. Only the implicit sibling probe is allowed to come back empty, and
+an absent Vision or audio worker means the engine is simply absent, which is
+the normal case off macOS. A present audio worker with no diarizer directory
+refuses to start: that is a packaging bug, not a host without the engine.
 
 `TOOLKIT_CONVERTER_BIND_ADDR` accepts port `0`. The kernel then picks a free
 port and the `conversion service listening` log line carries the bound address,
@@ -200,6 +208,43 @@ container leaves it off and shuts down on SIGTERM alone.
 `TOOLKIT_CONVERTER_SCRATCH_PARENT` does not work. The config loader parses and
 validates it, and no other code reads it. It stays until a separate decision on
 the environment surface, so setting it changes nothing.
+
+## Traps
+
+- **The Dockerfile must keep copying `migrations/` and `build.rs`.**
+  `sqlx::migrate!` reads the SQL at compile time, so both are build inputs.
+- **Keep `RUN install -d -o 10001 -g 10001 -m 0700 /data`.** Without it a fresh
+  named volume lands as `root:root` while the service runs as `10001`.
+- **No `VOLUME` instruction.** It hands a plain `docker run` an anonymous volume
+  nobody prunes.
+- **`TOOLKIT_CONVERTER_TOKEN_FILE` means two different things in
+  `compose.yaml`.** Under `environment:` it is the container path. Under
+  `secrets:` it is a host-side substitution. Leave it unset on the host.
+- **`stop_grace_period` is 45s on purpose.** Docker's default 10s kills the
+  service 20s before its own 30s drain can finish, so every stop reads as a
+  crash.
+- **Run the container smoke through a CPU-capped builder.**
+  `TOOLKIT_SMOKE_BUILDER` names one. The default builder lives inside the Docker
+  VM, where `docker update` cannot reach it.
+- **A PDF-shaped assumption in an engine-neutral layer crash-looped the
+  service.** When you add an engine, grep the shared layers for the other
+  engine's vocabulary.
+- **`src/faults.rs` is production code that production never arms.** Only a
+  test holding an `AppState` reaches it. Do not add a flag, a variable, or a
+  route that arms it.
+- **A format is advertised only with a passing round-trip fixture.** Two tests
+  pin the admission table to the migration CHECK and the upload contract. Drift
+  turns a clean 415 into an INSERT constraint error at runtime.
+- **A no-transaction migration must wrap its rebuild in one transaction.**
+  `every_no_transaction_migration_wraps_its_rebuild_in_one_transaction` pins
+  every one of them. After the first deployment, a broken migration needs a new
+  file.
+- **`execute_claimed` bounds its engine-permit wait and honors shutdown.** A
+  detached AnyDoc parse still holds its permit, so the wait is real.
+- **`TOOLKIT_CONVERTER_SCRATCH_PARENT` is dead config.** `config.rs` parses and
+  validates it, and nothing reads it. Do not wire it to anything.
+- **`/health/ready` is unauthenticated** and opens a `BEGIN IMMEDIATE`
+  transaction per request against a four-connection pool. Loopback only today.
 
 ## Verify
 
@@ -221,11 +266,11 @@ healthy.
 in `src/bin/tool-kit-pdf-worker.rs`, so a local pass is necessary and not
 sufficient. CI is the only gate that lints them.
 
-The exact `pdf-inspector` pin, bundled CMap/license requirements, dependency
-exception register, and container-smoke evidence are in
-[`../../docs/STATUS.md`](../../docs/STATUS.md) sections 7 and 9. This crate remains independent from `apps/desktop/src-tauri` and keeps
-its own lockfile; do not create a root Cargo workspace without a separate
-migration decision.
+The exact `pdf-inspector` pin, bundled CMap and license requirements, the
+dependency exception register and the container-smoke evidence are in
+[`../../docs/archive/STATUS_2026-09-12.md`](../../docs/archive/STATUS_2026-09-12.md).
+This crate stays independent from `apps/desktop/src-tauri` and keeps its own
+lockfile. Do not create a root Cargo workspace.
 
 The approved target remains one CPU-only converter container with embedded
 SQLite, one bounded in-process worker, and a host-local `/data` dataset. Caddy

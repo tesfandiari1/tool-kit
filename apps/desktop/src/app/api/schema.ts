@@ -184,24 +184,26 @@ export interface components {
             /** @constant */
             durability: "persistent";
             /**
-             * @description What this deployment can convert, not what the contract knows. The image types need the Apple Vision engine, which ships only with macOS 26 and later, so a deployment without it advertises the other 18 and refuses an image upload with 409 `source_format_unavailable`. Read this list rather than assuming the whole enum.
+             * @description What this deployment can convert, not what the contract knows. The image types need the Apple Vision engine and the audio types the Apple speech engine, both of which ship only with macOS 26 and later, so a deployment without them advertises the other 18 and refuses those uploads with 409 `source_format_unavailable`. Read this list rather than assuming the whole enum.
              *
-             *     Table order, and the image types are the tail, so the short list is the long one's prefix.
+             *     Table order: the 18 document types first, then the image types, then the audio and video ones.
              */
-            inputFormats: ("application/pdf" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/msword" | "application/vnd.openxmlformats-officedocument.presentationml.presentation" | "application/vnd.ms-powerpoint" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" | "application/vnd.ms-excel" | "application/epub+zip" | "application/vnd.oasis.opendocument.text" | "application/vnd.oasis.opendocument.spreadsheet" | "application/vnd.oasis.opendocument.presentation" | "application/rtf" | "text/csv" | "application/vnd.ms-word.document.macroEnabled.12" | "application/vnd.ms-excel.sheet.macroEnabled.12" | "application/vnd.ms-powerpoint.presentation.macroEnabled.12" | "application/vnd.openxmlformats-officedocument.presentationml.slideshow" | "application/vnd.ms-powerpoint.slideshow.macroEnabled.12" | "image/png" | "image/jpeg" | "image/webp" | "image/tiff" | "image/gif" | "image/bmp")[];
+            inputFormats: ("application/pdf" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/msword" | "application/vnd.openxmlformats-officedocument.presentationml.presentation" | "application/vnd.ms-powerpoint" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" | "application/vnd.ms-excel" | "application/epub+zip" | "application/vnd.oasis.opendocument.text" | "application/vnd.oasis.opendocument.spreadsheet" | "application/vnd.oasis.opendocument.presentation" | "application/rtf" | "text/csv" | "application/vnd.ms-word.document.macroEnabled.12" | "application/vnd.ms-excel.sheet.macroEnabled.12" | "application/vnd.ms-powerpoint.presentation.macroEnabled.12" | "application/vnd.openxmlformats-officedocument.presentationml.slideshow" | "application/vnd.ms-powerpoint.slideshow.macroEnabled.12" | "image/png" | "image/jpeg" | "image/webp" | "image/tiff" | "image/gif" | "image/bmp" | "audio/wav" | "audio/mp4" | "video/mp4" | "video/quicktime" | "audio/mpeg" | "audio/flac")[];
             outputFormats: string[];
             profiles: {
                 name: components["schemas"]["ConversionProfile"];
                 available: boolean;
             }[];
-            /** @description The engines running in this process, pdf-inspector then anydoc. apple-vision is third and present only where it initialized; its version is the host's macOS product version, because Vision ships with the OS and has no version of its own. */
+            /** @description The engines running in this process, pdf-inspector then anydoc. apple-vision and local-audio follow, each present only where it initialized. apple-vision's version is the host's macOS product version, because Vision ships with the OS and has no version of its own; local-audio's is that version plus the speaker model package it was built against, `<macOS>+fluidaudio-<version>`. */
             engines: {
                 /** @enum {string} */
-                name: "pdf-inspector" | "anydoc" | "apple-vision";
+                name: "pdf-inspector" | "anydoc" | "apple-vision" | "local-audio";
                 version: string;
             }[];
             limits: {
+                /** @description The ceiling for every source except audio, which is bounded by maxAudioUploadBytes. */
                 maxUploadBytes: number;
+                maxAudioUploadBytes: number;
                 maxOutputBytes: number;
                 maxActiveJobs: number;
                 maxConcurrentUploads: number;
@@ -230,6 +232,12 @@ export interface components {
              *     Read only by the local image OCR engine and ignored by every other route.
              */
             customWords?: string;
+            /**
+             * @description How many people speak in the recording. Omit the part and the diarizer guesses, which the transcript says in its first line. A value outside 1 to 20, or one that is not an integer, is 422 `invalid_speaker_count`.
+             *
+             *     Read only by the local audio engine and ignored by every other route.
+             */
+            speakerCount?: number;
         };
         /** @enum {string} */
         ConversionProfile: "standard" | "local_only" | "best_quality";
@@ -283,13 +291,13 @@ export interface components {
             source: components["schemas"]["ManifestArtifact"];
             engine: {
                 /** @enum {string} */
-                name: "pdf-inspector" | "anydoc" | "apple-vision";
+                name: "pdf-inspector" | "anydoc" | "apple-vision" | "local-audio";
                 version: string;
                 features: string[];
             };
             route: components["schemas"]["Route"];
-            /** @description Engine diagnostics. Inspection when engine.name is pdf-inspector, AnyDocDiagnostics when it is anydoc, VisionDiagnostics when it is apple-vision. */
-            document: components["schemas"]["Inspection"] | components["schemas"]["AnyDocDiagnostics"] | components["schemas"]["VisionDiagnostics"];
+            /** @description Engine diagnostics. Inspection when engine.name is pdf-inspector, AnyDocDiagnostics when it is anydoc, VisionDiagnostics when it is apple-vision, AudioDiagnostics when it is local-audio. */
+            document: components["schemas"]["Inspection"] | components["schemas"]["AnyDocDiagnostics"] | components["schemas"]["VisionDiagnostics"] | components["schemas"]["AudioDiagnostics"];
             warnings: components["schemas"]["Warning"][];
             output: components["schemas"]["ManifestArtifact"];
             /** Format: date-time */
@@ -318,9 +326,9 @@ export interface components {
         };
         Route: {
             /** @enum {string} */
-            kind: "local_pdf" | "local_anydoc" | "local_vision";
+            kind: "local_pdf" | "local_anydoc" | "local_vision" | "local_audio";
             /**
-             * @description Why the conversion routed the way it did, in decision order. native_text_pdf, structured_document, recognized_image_text, and incomplete_local_text are the policy's own codes. The rest are the reason an engine gave for producing no Markdown, which always ends the job needs_remote.
+             * @description Why the conversion routed the way it did, in decision order. native_text_pdf, structured_document, recognized_image_text, and transcribed_audio are the policy's own codes, one per engine that published. The rest are the reason an engine gave for producing no Markdown, which always ends the job needs_remote.
              *
              *     Open vocabulary, deliberately not an enum: the remote route adds codes, and a closed enum would make that a breaking change for every generated client. Render an unknown code verbatim.
              */
@@ -338,6 +346,14 @@ export interface components {
         };
         VisionDiagnostics: {
             processingTimeMs: number;
+        };
+        /** @description Content-free measurements of one transcription: durations, the speaker count the diarizer settled on and whether it guessed it, never words. */
+        AudioDiagnostics: {
+            processingTimeMs: number;
+            audioSeconds: number;
+            speakersFound: number;
+            speakerCountGuessed: boolean;
+            locale: string;
         };
         Sha256: string;
         ErrorEnvelope: {

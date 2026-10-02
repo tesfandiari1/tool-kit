@@ -46,12 +46,14 @@ apps/converter/data/
 # Rust (crate gitignores already cover /target/ in each crate)
 /target/
 
-# Sidecar staging. build-sidecars.sh writes both, and every file in them is
-# derived: three Mach-O binaries from cargo and swiftc, the bcmaps and the two
-# licences from the pdf-inspector crate source. Roughly 19 MB that a clean
-# checkout rebuilds in one command.
+# Sidecar staging. build-sidecars.sh writes all three, and every file in them
+# is derived: four Mach-O binaries from cargo, swiftc and SwiftPM, the bcmaps
+# and licences from the pdf-inspector crate source, and the diarizer models
+# fetched from Hugging Face. Roughly 55 MB that a clean checkout rebuilds in
+# one command.
 /apps/desktop/src-tauri/binaries/
 /apps/desktop/src-tauri/resources/pdf-inspector/
+/apps/desktop/src-tauri/resources/fluidaudio/
 
 # Python bytecode (the icon generator is the only .py in the tree)
 __pycache__/

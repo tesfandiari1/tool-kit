@@ -1,4 +1,5 @@
-//! Apple Vision engine: OCRs one image through the Swift worker.
+//! Apple Vision engine: OCRs one image, or a scanned PDF page by page, through
+//! the Swift worker.
 //!
 //! Isolated in a child process on the `pdf_inspector.rs` shape, for the same
 //! reason: the decoders that read the bytes are not ours. The worker is macOS
@@ -77,6 +78,15 @@ impl VisionEngine {
 
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    /// The same engine and permit with one more second per page, for a
+    /// scanned PDF the worker reads a page at a time.
+    pub fn with_page_budget(&self, pages: u32) -> Self {
+        Self {
+            timeout: self.timeout + Duration::from_secs(pages.into()),
+            ..self.clone()
+        }
     }
 
     pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, EngineFailure> {

@@ -120,6 +120,7 @@ async fn conversion_service_compatibility_live() {
         &conversion_service::OcrOptions {
             language_correction: true,
             custom_words: Vec::new(),
+            speaker_count: None,
         },
         &idempotency_key,
     )

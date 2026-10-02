@@ -75,6 +75,8 @@ pub struct Settings {
     pub language_correction: bool,
     /// Words local OCR should prefer, sent to the backend one per line.
     pub custom_words: Vec<String>,
+    /// How many people speak in the recordings. Blank lets the diarizer guess.
+    pub speaker_count: Option<u32>,
     /// Leave a file alone when the history says it already has a result.
     pub skip_already_done: bool,
     /// Last SplitPane layout, percentages keyed by pane id (`start` / `end`).
@@ -109,6 +111,7 @@ impl Default for Settings {
             conversion_profile: ConversionProfile::Standard,
             language_correction: true,
             custom_words: Vec::new(),
+            speaker_count: None,
             skip_already_done: true,
             split_layout: None,
             expanded_width: None,
@@ -185,6 +188,7 @@ mod tests {
         assert_eq!(value["conversionProfile"], "standard");
         assert_eq!(value["languageCorrection"], true);
         assert_eq!(value["customWords"], serde_json::json!([]));
+        assert_eq!(value["speakerCount"], serde_json::Value::Null);
         assert!(value.get("backendToken").is_none());
     }
 
@@ -284,5 +288,29 @@ mod tests {
         // Absent fields arrive as on and empty, the backend's own defaults.
         assert!(settings.language_correction);
         assert!(settings.custom_words.is_empty());
+    }
+
+    /// Blank means the diarizer guesses, which is what an older file must load
+    /// as rather than pinning a count nobody chose.
+    #[test]
+    fn settings_from_before_the_speaker_count_leave_it_unset() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "outputDir": "/tmp/output",
+                "jobType": "transcribe"
+            }"#,
+        )
+        .expect("settings written before the speaker count should deserialize");
+
+        assert_eq!(settings.speaker_count, None);
+        assert_eq!(Settings::default().speaker_count, None);
+    }
+
+    #[test]
+    fn a_chosen_speaker_count_round_trips() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"speakerCount": 2}"#).expect("a speaker count should parse");
+
+        assert_eq!(settings.speaker_count, Some(2));
     }
 }
