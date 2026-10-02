@@ -33,8 +33,16 @@ printf 'Built %s/tool-kit-audio-worker\n' "${OUT}"
 
 # apps/converter/tests/audio_worker.rs spawns the worker against these models
 # and skips every test without them, and nothing else stages them here.
+# Re-fetch when the set was fetched for another FluidAudio version, the
+# same check build-sidecars.sh makes. A stale set fails the worker at load.
 MODELS="${DIR}/models/speaker-diarization-coreml"
-if [ ! -d "${MODELS}" ]; then
-  "${OUT}/tool-kit-audio-worker" --fetch diarizer "${MODELS}"
-  printf 'Fetched %s\n' "${MODELS}"
+WANT="$("${OUT}/tool-kit-audio-worker" --version | sed -n 's/.*fluidaudio-\([^[:space:]]*\).*/\1/p')"
+HAVE="$(sed -n 's/.*"fluidAudioVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "${MODELS}/manifest.json" 2>/dev/null || true)"
+if [ -z "${WANT}" ] || [ "${HAVE}" != "${WANT}" ]; then
+  rm -rf "${MODELS}.staging"
+  "${OUT}/tool-kit-audio-worker" --fetch diarizer "${MODELS}.staging"
+  rm -rf "${MODELS}"
+  mv "${MODELS}.staging" "${MODELS}"
+  printf 'Fetched %s for FluidAudio %s\n' "${MODELS}" "${WANT}"
 fi
