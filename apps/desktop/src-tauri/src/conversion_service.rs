@@ -34,13 +34,6 @@ pub(crate) struct ConversionCapabilities {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ConversionRoute {
-    pub(crate) kind: String,
-    pub(crate) reason_codes: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct ConversionFailure {
     pub(crate) code: String,
     pub(crate) message: String,
@@ -51,7 +44,6 @@ pub(crate) struct ConversionFailure {
 pub(crate) struct ConversionJob {
     pub(crate) id: String,
     pub(crate) status: String,
-    pub(crate) route: Option<ConversionRoute>,
     #[serde(default)]
     pub(crate) warnings: Vec<String>,
     pub(crate) failure: Option<ConversionFailure>,
@@ -780,9 +772,6 @@ mod tests {
             .unwrap();
         assert_eq!(parsed.status, "paused_by_future_backend");
         assert_eq!(parsed.warnings, ["still safe"]);
-        let route = parsed.route.unwrap();
-        assert_eq!(route.kind, "future_engine");
-        assert_eq!(route.reason_codes, ["future_reason"]);
         let request = String::from_utf8(poll.request.await.unwrap()).unwrap();
         assert!(request.starts_with(&format!("GET /api/v1/conversions/{UUID} HTTP/1.1\r\n")));
         poll.task.await.unwrap();
@@ -889,7 +878,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(job.id, UUID);
-        assert_eq!(job.route.unwrap().reason_codes, ["pdf_supported"]);
         let request = String::from_utf8_lossy(&server.request.await.unwrap()).into_owned();
         assert!(request
             .to_ascii_lowercase()

@@ -543,21 +543,22 @@ enum BackendAction {
     Pending(&'static str),
     Succeeded,
     Failed(String),
-    NeedsRemote,
 }
 
 /// An allowlist: a status a newer backend adds stays pending, not terminal.
-fn backend_action(view: &ConversionJob) -> BackendAction {
+fn backend_action(view: &ConversionJob, job_type: JobType) -> BackendAction {
     match view.status.as_str() {
         "succeeded" => BackendAction::Succeeded,
         "failed" => {
             let message = view.failure.as_ref().map_or_else(
                 || "Conversion failed without details".to_string(),
-                |failure| format!("{}: {}", failure.code, failure.message),
+                |failure| {
+                    gave_up_message(job_type, &failure.code)
+                        .unwrap_or_else(|| format!("{}: {}", failure.code, failure.message))
+                },
             );
             BackendAction::Failed(message)
         }
-        "needs_remote" => BackendAction::NeedsRemote,
         "queued" => BackendAction::Pending("Queued by conversion service…"),
         "converting_local" => BackendAction::Pending("Converting locally…"),
         "finalizing" => BackendAction::Pending("Finalizing…"),
@@ -565,24 +566,24 @@ fn backend_action(view: &ConversionJob) -> BackendAction {
     }
 }
 
-/// A `needs_remote` view carries one engine reason code. Name it in plain words.
-fn local_only_failure(view: &ConversionJob) -> String {
-    let code = view
-        .route
-        .as_ref()
-        .and_then(|route| route.reason_codes.first())
-        .map_or("", String::as_str);
+/// An engine that gave up fails with its reason as the code. Name it in plain
+/// words, since nothing leaves the Mac to try again.
+fn gave_up_message(job_type: JobType, code: &str) -> Option<String> {
     let reason = match code {
-        "" => return "This file could not be converted on this Mac.".into(),
         "mixed_pdf" => "some pages are scanned images",
         "image_based_pdf" | "scanned_pdf" => "every page is a scanned image",
         "ocr_required" => "the text layer is missing or unreadable",
         "garbled_text" => "the text layer is garbled",
         "local_quality_failed" => "no readable text was found",
         "output_too_large" => "the result was too large",
-        other => other,
+        _ => return None,
     };
-    format!("This file could not be converted on this Mac because {reason}.")
+    Some(match job_type {
+        JobType::Transcribe => "This recording could not be transcribed on this Mac.".into(),
+        JobType::Convert => {
+            format!("This file could not be converted on this Mac because {reason}.")
+        }
+    })
 }
 
 async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
@@ -726,7 +727,7 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         if !apply_backend_view(&app, id, generation, &view) {
             return;
         }
-        match backend_action(&view) {
+        match backend_action(&view, job.job_type) {
             BackendAction::Succeeded => {
                 if !set_status(&app, id, generation, "processing", "Saving Markdown…") {
                     return;
@@ -751,18 +752,6 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                 return;
             }
             BackendAction::Failed(error) => {
-                fail(&app, id, generation, &error);
-                return;
-            }
-            // Nothing leaves the Mac, so the service's refusal is the answer.
-            BackendAction::NeedsRemote => {
-                let error = match job.job_type {
-                    // The service never sends this for audio.
-                    JobType::Transcribe => {
-                        "This recording could not be transcribed on this Mac.".to_string()
-                    }
-                    JobType::Convert => local_only_failure(&view),
-                };
                 fail(&app, id, generation, &error);
                 return;
             }
@@ -1024,34 +1013,39 @@ mod backend_tests {
         ConversionJob {
             id: "11111111-1111-4111-8111-111111111111".into(),
             status: status.into(),
-            route: None,
             warnings: Vec::new(),
             failure: None,
         }
     }
 
     #[test]
-    fn local_only_failure_names_the_reason() {
-        let mut needs_remote = view("needs_remote");
-        needs_remote.route = Some(conversion_service::ConversionRoute {
-            kind: "local_pdf".into(),
-            reason_codes: vec!["mixed_pdf".into()],
+    fn an_engine_that_gave_up_fails_in_plain_words() {
+        let mut gave_up = view("failed");
+        gave_up.failure = Some(ConversionFailure {
+            code: "mixed_pdf".into(),
+            message: "The PDF has scanned pages".into(),
         });
         assert_eq!(
-            local_only_failure(&needs_remote),
-            "This file could not be converted on this Mac because some pages are scanned images."
+            backend_action(&gave_up, JobType::Convert),
+            BackendAction::Failed(
+                "This file could not be converted on this Mac because some pages are scanned images."
+                    .into()
+            )
+        );
+        assert_eq!(
+            backend_action(&gave_up, JobType::Transcribe),
+            BackendAction::Failed("This recording could not be transcribed on this Mac.".into())
         );
     }
 
     #[test]
     fn only_known_backend_terminal_statuses_are_terminal() {
-        assert_eq!(backend_action(&view("succeeded")), BackendAction::Succeeded);
         assert_eq!(
-            backend_action(&view("needs_remote")),
-            BackendAction::NeedsRemote
+            backend_action(&view("succeeded"), JobType::Convert),
+            BackendAction::Succeeded
         );
         assert!(matches!(
-            backend_action(&view("paused_by_future_backend")),
+            backend_action(&view("paused_by_future_backend"), JobType::Convert),
             BackendAction::Pending("Processing…")
         ));
 
@@ -1061,7 +1055,7 @@ mod backend_tests {
             message: "Document cannot be converted".into(),
         });
         assert_eq!(
-            backend_action(&failed),
+            backend_action(&failed, JobType::Convert),
             BackendAction::Failed("bad_document: Document cannot be converted".into())
         );
     }
