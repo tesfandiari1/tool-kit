@@ -261,7 +261,6 @@ async fn unwritable_data_root_fails_startup_instead_of_serving() {
         log_filter: "tool_kit_converter=info".to_owned(),
         token_file,
         data_dir: data_dir.clone(),
-        scratch_parent: data_dir.clone(),
         pdf_worker_path: env!("CARGO_BIN_EXE_tool-kit-pdf-worker").into(),
         pdf_bcmaps_dir: None,
         vision_worker_path: None,

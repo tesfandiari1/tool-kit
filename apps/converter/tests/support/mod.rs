@@ -481,7 +481,6 @@ impl TestHarness {
             log_filter: "tool_kit_converter=info".to_owned(),
             token_file: self.workspace.path().join("bootstrap-token"),
             data_dir: self.data_dir.clone(),
-            scratch_parent: self.data_dir.clone(),
             pdf_worker_path: self.worker_path.clone(),
             pdf_bcmaps_dir: None,
             vision_worker_path: self.options.vision_worker_path.clone(),
