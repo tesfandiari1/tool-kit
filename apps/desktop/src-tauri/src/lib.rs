@@ -1334,7 +1334,7 @@ pub fn run() {
             create_project,
             list_project_files,
             changed_project_dirs,
-            conversion_service::service_request
+            conversion_service::conversion_capabilities
         ])
         .setup(|app| {
             // Opened once. A database that cannot open degrades to no history.

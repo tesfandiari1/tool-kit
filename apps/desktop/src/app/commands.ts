@@ -14,7 +14,6 @@ import type {
   Settings,
   WorkspaceInfo,
 } from "./types";
-import type { ServiceRequestPayload, ServiceResponsePayload } from "./api/transport";
 
 /// Typed IPC boundary. `@/platform/host` covers dialogs, window, drag-drop.
 export const commands = {
@@ -73,10 +72,9 @@ export const commands = {
   quitApp: async (): Promise<void> => {
     await invoke("quit_app");
   },
-  /// Only `@/app/api/transport` calls this. It refuses Markdown artifacts, so
-  /// a large result never crosses IPC.
-  serviceRequest: (request: ServiceRequestPayload) =>
-    invoke<ServiceResponsePayload>("service_request", { request }),
+  /// The webview's one question for the conversion service.
+  capabilities: () =>
+    invoke<{ acceptingJobs: boolean; inputFormats: string[] }>("conversion_capabilities"),
   onJobUpdated: (handler: (job: Job) => void) => listen<Job>("job-updated", (e) => {
     handler(e.payload);
   }),

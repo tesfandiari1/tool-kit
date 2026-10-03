@@ -4,7 +4,6 @@ import { Button, Meta, Segmented, Sheet, SplitPane, StatusDot, Toast } from "@ui
 import { basename, fmtElapsed } from "@/app/format";
 import { barStatus, runCounter } from "./barStatus";
 import { autoOpenTarget, newlyDone, resultDirs, terminalIds } from "./runOutcome";
-import { conversionClient } from "@/app/api";
 import { commands } from "@/app/commands";
 import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
 import type {
@@ -282,13 +281,9 @@ export default function App() {
     const probe = { cancelled: false };
     const ask = async () => {
       try {
-        const { data } = await conversionClient.GET("/api/v1/capabilities");
-        if (!data) throw new Error("Conversion service capabilities were unavailable");
+        const { acceptingJobs } = await commands.capabilities();
         if (probe.cancelled) return true;
-        setCapabilities({
-          state: "ready",
-          acceptingJobs: data.data.conversion.acceptingJobs,
-        });
+        setCapabilities({ state: "ready", acceptingJobs });
         return true;
       } catch (e) {
         // The run hint has nothing to say but the host's own reason.
