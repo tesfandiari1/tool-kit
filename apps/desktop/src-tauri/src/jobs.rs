@@ -4,30 +4,14 @@
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Semaphore;
 
 use crate::conversion_service::{self, ConversionFailure, ConversionJob};
-use crate::providers::{self, PollResult, ProviderKind};
-use crate::{backend_host, history, secrets, settings};
-
-/// One client for every provider request in the process. A `Client` owns the
-/// connection pool, so one per job means a TLS handshake per file. No global
-/// timeout: each request sets its own (see `providers::*_TIMEOUT`).
-fn provider_client() -> reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new())
-        })
-        .clone()
-}
+use crate::{backend_host, history, settings};
 
 /// How patient the first poll of a recovered conversion is: 12s covers a
 /// sidecar still opening its database.
@@ -38,26 +22,6 @@ const RESUME_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const BACKEND_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const BACKEND_MAX_POLLS: u32 = 720;
 const BACKEND_MAX_CONSECUTIVE_ERRORS: u32 = 12;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BackendPhase {
-    SubmitOrPoll,
-    DatalabFallback,
-}
-
-/// A remote fallback already started for this file. The provider is recorded
-/// before the request is sent, so no request id means it may be billed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FallbackContext {
-    /// `datalab` or `datalab_pipeline`. A resume polls the endpoint the request
-    /// went to, not whatever Settings say now.
-    pub(crate) provider: String,
-    pub(crate) request_id: Option<String>,
-    pub(crate) check_url: Option<String>,
-}
-
-const DATALAB_PROVIDER: &str = "datalab";
-const DATALAB_PIPELINE_PROVIDER: &str = "datalab_pipeline";
 
 #[derive(Clone, Debug)]
 pub(crate) struct BackendContext {
@@ -72,8 +36,6 @@ pub(crate) struct BackendContext {
     /// The OCR options this submission belongs to. Reading Settings at submit
     /// time resubmits a stored key under a changed fingerprint, which 409s.
     pub(crate) ocr: conversion_service::OcrOptions,
-    phase: BackendPhase,
-    fallback: Option<FallbackContext>,
     recovery_blocker: Option<String>,
 }
 
@@ -93,17 +55,8 @@ impl BackendContext {
             backend_job_id,
             profile,
             ocr,
-            phase: BackendPhase::SubmitOrPoll,
-            fallback: None,
             recovery_blocker: None,
         }
-    }
-
-    /// Resume a fallback the ledger recorded, rather than paying twice.
-    pub(crate) fn resuming_fallback(mut self, fallback: FallbackContext) -> Self {
-        self.phase = BackendPhase::DatalabFallback;
-        self.fallback = Some(fallback);
-        self
     }
 }
 
@@ -132,18 +85,32 @@ impl JobType {
         }
     }
 
-    pub fn provider(&self) -> ProviderKind {
-        match self {
-            JobType::Convert => ProviderKind::Datalab,
-            JobType::Transcribe => ProviderKind::RevAi,
-        }
-    }
-
+    /// Only what the bundled service converts locally: `SOURCE_FORMATS` in
+    /// apps/converter/src/conversion/model.rs, row for row.
     pub fn accepts(&self, ext: &str) -> bool {
         match self {
             JobType::Convert => matches!(
                 ext,
                 "pdf"
+                    | "docx"
+                    | "doc"
+                    | "pptx"
+                    | "ppt"
+                    | "xlsx"
+                    | "xls"
+                    | "epub"
+                    | "odt"
+                    | "ods"
+                    | "odp"
+                    | "rtf"
+                    | "csv"
+                    | "docm"
+                    | "xlsm"
+                    | "pptm"
+                    | "ppsx"
+                    | "ppsm"
+                    | "pps"
+                    | "pot"
                     | "png"
                     | "jpg"
                     | "jpeg"
@@ -152,37 +119,8 @@ impl JobType {
                     | "tif"
                     | "gif"
                     | "bmp"
-                    | "docx"
-                    | "doc"
-                    | "pptx"
-                    | "ppt"
-                    | "xlsx"
-                    | "xls"
-                    | "html"
-                    | "htm"
-                    | "epub"
             ),
-            JobType::Transcribe => matches!(
-                ext,
-                "mp3"
-                    | "mp4"
-                    | "wav"
-                    | "m4a"
-                    | "flac"
-                    | "ogg"
-                    | "oga"
-                    | "aac"
-                    | "mov"
-                    | "avi"
-                    | "mkv"
-                    | "webm"
-                    | "wmv"
-                    | "mpeg"
-                    | "mpg"
-                    | "opus"
-                    | "amr"
-                    | "3gp"
-            ),
+            JobType::Transcribe => matches!(ext, "mp3" | "mp4" | "wav" | "m4a" | "flac" | "mov"),
         }
     }
 }
@@ -195,7 +133,6 @@ pub struct Job {
     pub source_path: String,
     pub output_dir: String,
     pub job_type: JobType,
-    pub service: String,
     pub status: String, // queued | working | processing | done | failed
     pub progress_note: String,
     pub output_path: Option<String>,
@@ -224,7 +161,6 @@ impl Job {
             source_path,
             output_dir,
             job_type,
-            service: job_type.provider().label().to_string(),
             status: "queued".into(),
             progress_note: "Queued".into(),
             output_path: None,
@@ -251,11 +187,6 @@ impl Job {
         backend: BackendContext,
     ) -> Self {
         let mut job = Self::new(id, source_path, output_dir, job_type);
-        job.service = match job_type {
-            JobType::Convert => "Conversion service",
-            JobType::Transcribe => "Local transcription",
-        }
-        .into();
         job.backend = Some(backend);
         job
     }
@@ -274,10 +205,8 @@ pub struct JobManager {
     counter: AtomicU64,
     sem: Arc<Semaphore>,
     /// Bumped by every new run and by Stop. A spawned task captures it and
-    /// aborts once it stops matching, so a retired run stops spending.
+    /// aborts once it stops matching, so a retired run stops.
     generation: AtomicU64,
-    /// Settings snapshot at run start, so a mid-run change splits no run.
-    run_config: Mutex<settings::Settings>,
 }
 
 /// Holds the jobs lock through the caller's side effects and emit, so
@@ -311,7 +240,6 @@ impl Default for JobManager {
             counter: AtomicU64::new(0),
             sem: Arc::new(Semaphore::new(4)), // up to 4 files in flight at once
             generation: AtomicU64::new(0),
-            run_config: Mutex::new(settings::Settings::default()),
         }
     }
 }
@@ -378,66 +306,25 @@ impl JobManager {
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
-    pub fn set_run_config(&self, cfg: settings::Settings) {
-        *self.run_config.lock().unwrap() = cfg;
-    }
-    pub fn run_config(&self) -> settings::Settings {
-        self.run_config.lock().unwrap().clone()
-    }
 }
 
 /// What "the same output" means when deciding whether a file is already done.
-/// The pipeline id is folded in: it changes what Convert produces.
-pub fn output_format_for(jt: JobType, cfg: &settings::Settings) -> String {
+/// Frozen once rows exist: `markdown` is what Convert filed before the service.
+pub fn output_format_for(jt: JobType) -> &'static str {
     match jt {
-        JobType::Transcribe => "text".to_string(),
-        JobType::Convert => match cfg
-            .datalab_pipeline_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(pid) => format!("{}@{pid}", cfg.datalab_format),
-            None => cfg.datalab_format.clone(),
-        },
+        JobType::Transcribe => "text",
+        JobType::Convert => "markdown",
     }
 }
 
-/// The extension a finished result carries. Read by both writers and by the
-/// tree's pairing rule, so a third copy would let them disagree. Not
-/// `output_format_for`: an extension has no room for a pipeline id.
-pub fn output_extension_for(jt: JobType, cfg: &settings::Settings) -> &'static str {
+/// Every extension a finished result may carry, which is what the tree's
+/// pairing rule has to ask. The service writes Markdown for both jobs, and an
+/// older build's `.txt` transcript stays paired so it never runs again.
+pub fn result_extensions_for(jt: JobType) -> &'static [&'static str] {
     match jt {
-        JobType::Transcribe => "txt",
-        JobType::Convert => match cfg.datalab_format.as_str() {
-            "html" => "html",
-            "json" | "chunks" => "json",
-            _ => "md",
-        },
+        JobType::Transcribe => &["md", "txt"],
+        JobType::Convert => &["md"],
     }
-}
-
-/// Every extension a finished result may carry on the route in force, which is
-/// what the tree's pairing rule has to ask. The Backend route writes Markdown
-/// whatever the format or the job says, and only Convert's Datalab fallback
-/// writes the chosen format, so pairing on the format alone never matches a
-/// service result. Transcribe's Direct `.txt` stays paired for older runs.
-pub fn result_extensions_for(jt: JobType, cfg: &settings::Settings) -> Vec<&'static str> {
-    // Route-independent: both are transcripts of the same source, and dropping
-    // `.md` on a route flip unpairs every local transcript and re-bills it.
-    if jt == JobType::Transcribe {
-        return vec!["md", "txt"];
-    }
-    let chosen = output_extension_for(jt, cfg);
-    if cfg.conversion_route == settings::ConversionRoute::Backend {
-        // Markdown first: the service writes it, the fallback is the odd one.
-        let mut both = vec!["md"];
-        if chosen != "md" {
-            both.push(chosen);
-        }
-        return both;
-    }
-    vec![chosen]
 }
 
 fn emit(app: &AppHandle, job: Job) {
@@ -450,13 +337,9 @@ fn log_history(app: &AppHandle, job: &Job, status: &str, error: Option<&str>) {
     if error == Some("Stopped") {
         return;
     }
-    let cfg = app.state::<JobManager>().run_config();
-    let output_format = match job.backend.as_ref().map(|backend| backend.phase) {
-        Some(BackendPhase::SubmitOrPoll) => "backend:markdown".to_string(),
-        Some(BackendPhase::DatalabFallback) => {
-            format!("backend_fallback:{}", output_format_for(job.job_type, &cfg))
-        }
-        None => output_format_for(job.job_type, &cfg),
+    let output_format = match job.backend {
+        Some(_) => "backend:markdown",
+        None => output_format_for(job.job_type),
     };
     history::record(
         app,
@@ -465,7 +348,7 @@ fn log_history(app: &AppHandle, job: &Job, status: &str, error: Option<&str>) {
             source_path: &job.source_path,
             output_path: job.output_path.as_deref(),
             job_type: job.job_type.id(),
-            output_format: &output_format,
+            output_format,
             status,
             error,
         },
@@ -638,7 +521,7 @@ fn write_output(
         .map_err(|e| format!("Could not write {}: {e}", candidate.display()))
 }
 
-/// Satisfy a job from a result an earlier run produced, rather than paying for
+/// Satisfy a job from a result an earlier run produced, rather than converting
 /// it again. Reached when the history holds a still-valid result for this file,
 /// job and format in another folder. Returns whether the copy succeeded: a
 /// failure lands on the job row, and Retry then runs it for real.
@@ -711,7 +594,7 @@ fn local_only_failure(view: &ConversionJob) -> String {
         .and_then(|route| route.reason_codes.first())
         .map_or("", String::as_str);
     let reason = match code {
-        "" => return "Local-only conversion could not finish locally. Choose Standard to allow Datalab fallback.".into(),
+        "" => return "This file could not be converted on this Mac.".into(),
         "mixed_pdf" => "some pages are scanned images",
         "image_based_pdf" | "scanned_pdf" => "every page is a scanned image",
         "ocr_required" => "the text layer is missing or unreadable",
@@ -720,7 +603,7 @@ fn local_only_failure(view: &ConversionJob) -> String {
         "output_too_large" => "the result was too large",
         other => other,
     };
-    format!("Local-only conversion could not finish because {reason}. Choose Standard to allow Datalab fallback.")
+    format!("This file could not be converted on this Mac because {reason}.")
 }
 
 /// The origin one request goes to, resolved at the moment of the request. The
@@ -767,11 +650,6 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
             generation,
             "The source changed after this conversion was queued; stop it before starting a new conversion",
         );
-        return;
-    }
-
-    if backend.phase == BackendPhase::DatalabFallback {
-        run_datalab_fallback(&app, id, generation, &job).await;
         return;
     }
 
@@ -893,35 +771,16 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                 fail(&app, id, generation, &error);
                 return;
             }
+            // Nothing leaves the Mac, so the service's refusal is the answer.
             BackendAction::NeedsRemote => {
-                // The service never sends this for audio. The guard is what
-                // keeps a recording away from Datalab if it ever does.
-                if job.job_type == JobType::Transcribe {
-                    fail(
-                        &app,
-                        id,
-                        generation,
-                        "Local transcription could not finish. Switch the route to Direct to use Rev.ai.",
-                    );
-                    return;
-                }
-                if backend.profile == settings::ConversionProfile::LocalOnly {
-                    fail(&app, id, generation, &local_only_failure(&view));
-                    return;
-                }
-                if app
-                    .state::<JobManager>()
-                    .update_if_generation(id, generation, |current| {
-                        current.service = "Datalab fallback".into();
-                        if let Some(context) = &mut current.backend {
-                            context.phase = BackendPhase::DatalabFallback;
-                        }
-                    })
-                    .is_none()
-                {
-                    return;
-                }
-                run_datalab_fallback(&app, id, generation, &job).await;
+                let error = match job.job_type {
+                    // The service never sends this for audio.
+                    JobType::Transcribe => {
+                        "This recording could not be transcribed on this Mac.".to_string()
+                    }
+                    JobType::Convert => local_only_failure(&view),
+                };
+                fail(&app, id, generation, &error);
                 return;
             }
             BackendAction::Pending(note) => {
@@ -973,262 +832,6 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
     }
 }
 
-async fn run_datalab_fallback(app: &AppHandle, id: u64, generation: u64, original: &Job) {
-    let stale = |app: &AppHandle| app.state::<JobManager>().generation() != generation;
-    if stale(app) {
-        return;
-    }
-    let Some(backend) = original.backend.clone() else {
-        return;
-    };
-    // A recorded provider with no request id means the process died between
-    // the ledger write and the outcome. Datalab cannot be asked whether it took
-    // the upload, so a resubmit risks a second charge.
-    if let Some(fallback) = &backend.fallback {
-        if fallback.request_id.is_none() {
-            history::delete_in_flight(app, &backend.idempotency_key);
-            fail(
-                app,
-                id,
-                generation,
-                "A Datalab fallback for this file was interrupted and may already have been \
-                 charged. Convert it again only if the earlier attempt produced nothing.",
-            );
-            return;
-        }
-    }
-    let api_key = match secrets::get_key("datalab") {
-        Some(key) if !key.trim().is_empty() => key,
-        _ => {
-            fail_backend_retryable(
-                app,
-                id,
-                generation,
-                "Datalab fallback is required. Add its API key in Settings, then retry.",
-            );
-            return;
-        }
-    };
-    let cfg = app.state::<JobManager>().run_config();
-    let client = provider_client();
-    let pipeline = cfg
-        .datalab_pipeline_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    // A resumed request is polled the way it was submitted, whatever Settings
-    // say about the pipeline id now.
-    let via_pipeline = match backend.fallback.as_ref() {
-        Some(fallback) => fallback.provider == DATALAB_PIPELINE_PROVIDER,
-        None => pipeline.is_some(),
-    };
-    let provider = if via_pipeline {
-        DATALAB_PIPELINE_PROVIDER
-    } else {
-        DATALAB_PROVIDER
-    };
-
-    if stale(app) {
-        return;
-    }
-    if !set_status(
-        app,
-        id,
-        generation,
-        "working",
-        "Uploading to Datalab fallback…",
-    ) {
-        return;
-    }
-    // Resume an accepted request instead of buying a second one.
-    let resumed = backend
-        .fallback
-        .as_ref()
-        .and_then(|fallback| fallback.request_id.clone());
-    let submitted = match resumed {
-        Some(remote_id) => providers::Submitted {
-            check_url: backend
-                .fallback
-                .as_ref()
-                .and_then(|fallback| fallback.check_url.clone()),
-            remote_id,
-        },
-        None => {
-            // Two writes before any billable request: the ledger survives a
-            // crash, the in-memory context survives a Retry. In-memory first,
-            // so a retired run leaves no ledger row for a submit never sent.
-            if app
-                .state::<JobManager>()
-                .update_if_generation(id, generation, |current| {
-                    if let Some(context) = &mut current.backend {
-                        context.fallback = Some(FallbackContext {
-                            provider: provider.to_owned(),
-                            request_id: None,
-                            check_url: None,
-                        });
-                    }
-                })
-                .is_none()
-            {
-                return;
-            }
-            if !history::begin_fallback(app, &backend.idempotency_key, provider) {
-                // Nothing was sent, so drop the claim. Left set, every later
-                // Retry meets the uncertainty guard.
-                app.state::<JobManager>()
-                    .update_if_generation(id, generation, |current| {
-                        if let Some(context) = &mut current.backend {
-                            context.fallback = None;
-                        }
-                    });
-                fail(
-                    app,
-                    id,
-                    generation,
-                    "Cannot record the Datalab fallback before sending it, so it will not be \
-                     sent. Retry once the conversion history is writable.",
-                );
-                return;
-            }
-            let result = providers::datalab_submit_any(
-                &client,
-                &api_key,
-                pipeline,
-                &original.source_path,
-                &cfg.datalab_format,
-                cfg.datalab_high_accuracy,
-            )
-            .await;
-            if stale(app) {
-                return;
-            }
-            match result {
-                Ok(value) => value,
-                // Datalab answered and refused, so the claim above is a claim
-                // on nothing. Drop both halves, or Retry meets the guard.
-                Err(providers::SubmitError::Refused(error)) => {
-                    app.state::<JobManager>()
-                        .update_if_generation(id, generation, |current| {
-                            if let Some(context) = &mut current.backend {
-                                context.fallback = None;
-                            }
-                        });
-                    history::clear_fallback(app, &backend.idempotency_key);
-                    fail_backend_retryable(app, id, generation, error.as_str());
-                    return;
-                }
-                // No answer, so the upload may have landed with no id to poll.
-                // The claim stands and the row says so.
-                Err(providers::SubmitError::Uncertain(error)) => {
-                    fail(
-                        app,
-                        id,
-                        generation,
-                        &format!(
-                            "{error}. The upload may already have been charged. Convert this \
-                             file again only if that attempt produced nothing."
-                        ),
-                    );
-                    return;
-                }
-            }
-        }
-    };
-    let check_url = submitted.datalab_check_url();
-    history::attach_fallback_request(
-        app,
-        &backend.idempotency_key,
-        &submitted.remote_id,
-        &check_url,
-    );
-    if app
-        .state::<JobManager>()
-        .update_if_generation(id, generation, |current| {
-            if let Some(context) = &mut current.backend {
-                context.fallback = Some(FallbackContext {
-                    provider: provider.to_owned(),
-                    request_id: Some(submitted.remote_id.clone()),
-                    check_url: Some(check_url.clone()),
-                });
-            }
-        })
-        .is_none()
-    {
-        return;
-    }
-    if !set_status(
-        app,
-        id,
-        generation,
-        "processing",
-        "Processing with Datalab fallback…",
-    ) {
-        return;
-    }
-
-    let mut attempts = 0u32;
-    let mut consecutive_errors = 0u32;
-    let text = loop {
-        attempts += 1;
-        if attempts > BACKEND_MAX_POLLS {
-            fail_backend_retryable(
-                app,
-                id,
-                generation,
-                "Timed out waiting for Datalab fallback",
-            );
-            return;
-        }
-        tokio::time::sleep(BACKEND_POLL_INTERVAL).await;
-        if stale(app) {
-            return;
-        }
-        let result = providers::datalab_poll_any(
-            &client,
-            &api_key,
-            via_pipeline,
-            &submitted.remote_id,
-            &check_url,
-            &cfg.datalab_format,
-        )
-        .await;
-        if stale(app) {
-            return;
-        }
-        match result {
-            Ok(PollResult::Done(text)) => break text,
-            // `Failed` is terminal. Filing it as retryable leaves a ledger row
-            // that resurrects on every launch, and no History entry.
-            Ok(PollResult::Failed(error)) => {
-                fail(app, id, generation, &error);
-                return;
-            }
-            Ok(PollResult::Pending) => consecutive_errors = 0,
-            Err(error) => {
-                consecutive_errors += 1;
-                if consecutive_errors >= BACKEND_MAX_CONSECUTIVE_ERRORS {
-                    fail_backend_retryable(
-                        app,
-                        id,
-                        generation,
-                        &format!("Lost contact with Datalab fallback: {error}"),
-                    );
-                    return;
-                }
-            }
-        }
-    };
-
-    let extension = output_extension_for(JobType::Convert, &cfg);
-    if stale(app) {
-        return;
-    }
-    match write_output(&original.output_dir, &original.file_name, extension, &text) {
-        Ok(path) => finish(app, id, generation, path),
-        Err(error) => fail_backend_retryable(app, id, generation, &error),
-    }
-}
-
 /// Point a context at the service running now, and clear the recovery blocker
 /// the last launch left. Nothing else clears it, so Retry re-fails all session.
 fn refresh_for_retry(context: &mut BackendContext, origin: Result<&str, String>) {
@@ -1246,7 +849,7 @@ fn refresh_for_retry(context: &mut BackendContext, origin: Result<&str, String>)
 /// resubmit loses the job.
 pub fn restore_in_flight(app: &AppHandle, id: u64) {
     let manager = app.state::<JobManager>();
-    // Retry-all runs this over every failed row, so direct jobs leave here.
+    // Retry-all runs this over every failed row, so copies leave here.
     if manager.get(id).is_none_or(|job| job.backend.is_none()) {
         return;
     }
@@ -1284,237 +887,36 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
     ) {
         return;
     }
-    for step in ledger_replay(&backend) {
-        match step {
-            LedgerReplay::AttachBackendJob(job_id) => {
-                history::attach_backend_job(app, &backend.idempotency_key, &job_id);
-            }
-            LedgerReplay::BeginFallback(provider) => {
-                history::begin_fallback(app, &backend.idempotency_key, &provider);
-            }
-            LedgerReplay::AttachFallbackRequest {
-                request_id,
-                check_url,
-            } => {
-                history::attach_fallback_request(
-                    app,
-                    &backend.idempotency_key,
-                    &request_id,
-                    &check_url,
-                );
-            }
-        }
-    }
-}
-
-/// One ledger write needed to rebuild the remote state Stop deleted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LedgerReplay {
-    AttachBackendJob(String),
-    BeginFallback(String),
-    AttachFallbackRequest {
-        request_id: String,
-        check_url: String,
-    },
-}
-
-/// The writes that put a rebuilt in-flight row back where the deleted one was.
-/// `upsert_in_flight` inserts a bare row, so without this replay Stop, Retry
-/// then a crash resubmits a request Datalab already billed. Pure, so a unit
-/// test reaches it without an app handle.
-fn ledger_replay(backend: &BackendContext) -> Vec<LedgerReplay> {
-    let mut steps = Vec::new();
+    // Stop deleted the row, so put back the backend job it had reached.
     if let Some(job_id) = &backend.backend_job_id {
-        steps.push(LedgerReplay::AttachBackendJob(job_id.clone()));
+        history::attach_backend_job(app, &backend.idempotency_key, job_id);
     }
-    if let Some(fallback) = &backend.fallback {
-        // The provider goes back even with no request id: an uncertain
-        // fallback must stay uncertain.
-        steps.push(LedgerReplay::BeginFallback(fallback.provider.clone()));
-        if let (Some(request_id), Some(check_url)) = (&fallback.request_id, &fallback.check_url) {
-            steps.push(LedgerReplay::AttachFallbackRequest {
-                request_id: request_id.clone(),
-                check_url: check_url.clone(),
-            });
-        }
-    }
-    steps
 }
 
 /// Spawn the full lifecycle for one job. If the manager has moved past
-/// `generation`, the task exits without spending money.
+/// `generation`, the task exits without touching the row.
 pub fn run_job(app: AppHandle, id: u64, generation: u64) {
     tauri::async_runtime::spawn(async move {
-        let stale = |app: &AppHandle| app.state::<JobManager>().generation() != generation;
-
-        let job = match app.state::<JobManager>().get(id) {
-            Some(j) => j,
-            None => return,
-        };
-        if job.backend.is_some() {
-            run_backend_job(app, id, generation, job).await;
-            return;
-        }
-        let provider = job.job_type.provider();
-
-        let api_key = match secrets::get_key(provider.key_name()) {
-            Some(k) if !k.is_empty() => k,
-            _ => {
-                fail(
-                    &app,
-                    id,
-                    generation,
-                    &format!(
-                        "No API key set for {}. Add it in Settings.",
-                        provider.label()
-                    ),
-                );
-                return;
-            }
-        };
-
-        let sem = app.state::<JobManager>().semaphore();
-        let _permit = sem.acquire_owned().await;
-        // Waiting for a permit can take minutes, so the run may be long gone.
-        if stale(&app) {
-            return;
-        }
-
-        // Guarded: plain `update` drops the jobs lock before the emit, so a
-        // Stop in that window ships a stale "queued" row and `running` sticks.
-        let manager = app.state::<JobManager>();
-        let Some(updated) = manager.update_if_generation(id, generation, |current| {
-            current.started_at = Some(now_secs());
-        }) else {
+        let Some(job) = app.state::<JobManager>().get(id) else {
             return;
         };
-        updated.emit(&app);
-
-        // The run snapshot, so a mid-run Settings change splits no run.
-        let cfg = app.state::<JobManager>().run_config();
-        let client = provider_client();
-
-        if !set_status(&app, id, generation, "working", "Uploading…") {
+        // Only a copy of an earlier result has no backend, and Retry cannot
+        // redo a copy whose source it never kept.
+        if job.backend.is_none() {
+            fail(
+                &app,
+                id,
+                generation,
+                "Copying the earlier result failed. Run this file again.",
+            );
             return;
         }
-        let datalab_format = cfg.datalab_format.clone();
-        let pipeline = cfg
-            .datalab_pipeline_id
-            .clone()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-
-        let submitted = match job.job_type {
-            JobType::Convert => {
-                let res = providers::datalab_submit_any(
-                    &client,
-                    &api_key,
-                    pipeline.as_deref(),
-                    &job.source_path,
-                    &datalab_format,
-                    cfg.datalab_high_accuracy,
-                )
-                .await;
-                match res {
-                    Ok(s) => s,
-                    Err(e) => {
-                        if !stale(&app) {
-                            fail(&app, id, generation, e.message());
-                        }
-                        return;
-                    }
-                }
-            }
-            JobType::Transcribe => {
-                match providers::revai_submit(&client, &api_key, &job.source_path).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        if !stale(&app) {
-                            fail(&app, id, generation, &e);
-                        }
-                        return;
-                    }
-                }
-            }
-        };
-
-        // A submit runs for up to half an hour, so Stop lands inside one. An
-        // unguarded write here puts "processing" on a stopped row that no task
-        // will ever finish, and `running` sticks on. Same for the two arms
-        // above: a stopped job must not be relabelled with a network error.
-        if stale(&app) {
-            return;
-        }
-        if !set_status(&app, id, generation, "processing", "Processing…") {
-            return;
-        }
-        let convert_check_url = submitted.datalab_check_url();
-
-        let mut attempt: u32 = 0;
-        // A blip is fine, an endless stream should fail rather than burn 60min.
-        let mut consecutive_errors: u32 = 0;
-        let text = loop {
-            attempt += 1;
-            if attempt > BACKEND_MAX_POLLS {
-                fail(&app, id, generation, "Timed out waiting for the result.");
-                return;
-            }
-            tokio::time::sleep(BACKEND_POLL_INTERVAL).await;
-            if stale(&app) {
-                return;
-            }
-            let poll = match job.job_type {
-                JobType::Convert => {
-                    providers::datalab_poll_any(
-                        &client,
-                        &api_key,
-                        pipeline.is_some(),
-                        &submitted.remote_id,
-                        &convert_check_url,
-                        &datalab_format,
-                    )
-                    .await
-                }
-                JobType::Transcribe => {
-                    providers::revai_poll(&client, &api_key, &submitted.remote_id).await
-                }
-            };
-            match poll {
-                Ok(PollResult::Done(t)) => break t,
-                Ok(PollResult::Failed(e)) => {
-                    fail(&app, id, generation, &e);
-                    return;
-                }
-                Ok(PollResult::Pending) => {
-                    consecutive_errors = 0;
-                    continue;
-                }
-                Err(e) => {
-                    consecutive_errors += 1;
-                    if consecutive_errors >= BACKEND_MAX_CONSECUTIVE_ERRORS {
-                        fail(
-                            &app,
-                            id,
-                            generation,
-                            &format!("Lost contact while waiting for the result: {e}"),
-                        );
-                        return;
-                    }
-                    continue;
-                }
-            }
-        };
-
-        let ext = output_extension_for(job.job_type, &cfg);
-        if stale(&app) {
-            return;
-        }
-        match write_output(&job.output_dir, &job.file_name, ext, &text) {
-            Ok(path) => finish(&app, id, generation, path),
-            Err(e) => fail(&app, id, generation, &e),
-        }
+        run_backend_job(app, id, generation, job).await;
     });
 }
+
+const REMOTE_REMOVED: &str =
+    "Remote conversion was removed. Run this file again to convert it locally.";
 
 /// `live` is the origin the resumed requests go to, not what the row records:
 /// in Sidecar mode the ledger holds an alias, and an alias is not a URL.
@@ -1522,6 +924,11 @@ fn validate_recovery_entry(
     entry: &history::InFlightEntry,
     live: &str,
 ) -> Result<settings::ConversionProfile, String> {
+    // An older build sent this file out. That route is gone, and polling it
+    // would be the request this build exists not to make.
+    if entry.fallback_provider.is_some() {
+        return Err(REMOTE_REMOVED.into());
+    }
     conversion_service::validate_base_url(live)
         .map_err(|error| format!("Cannot recover conversion: {error}"))?;
     if let Some(job_id) = entry.backend_job_id.as_deref() {
@@ -1562,12 +969,10 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
     };
 
     let manager = app.state::<JobManager>();
-    let config = settings::load(&app);
     let Ok(deployment) = backend_host::deployment(&app) else {
         return;
     };
     let configured_origin = backend_host::ledger_origin(&deployment).to_string();
-    manager.set_run_config(config);
     let generation = manager.generation();
     for entry in entries {
         let validation = validate_recovery_entry(&entry, &live_origin).and_then(|profile| {
@@ -1583,17 +988,9 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
         let profile = validation
             .as_ref()
             .copied()
-            .unwrap_or(settings::ConversionProfile::Standard);
+            .unwrap_or(settings::ConversionProfile::LocalOnly);
         let recovery_error = validation.err();
         let durable_key = entry.idempotency_key.clone();
-        let resumed_fallback = entry
-            .fallback_provider
-            .clone()
-            .map(|provider| FallbackContext {
-                provider,
-                request_id: entry.fallback_request_id.clone(),
-                check_url: entry.fallback_check_url.clone(),
-            });
         let mut context = BackendContext::new(
             // The live origin, never the recorded alias `endpoint_url` refuses.
             live_origin.clone(),
@@ -1607,9 +1004,6 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
                 entry.speaker_count,
             ),
         );
-        if let Some(fallback) = resumed_fallback {
-            context = context.resuming_fallback(fallback);
-        }
         context.recovery_blocker.clone_from(&recovery_error);
         let id = manager.next_id();
         let job_type = JobType::from_id(&entry.job_type).unwrap_or(JobType::Convert);
@@ -1620,7 +1014,12 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
 
         if let Some(error) = recovery_error {
             history::delete_in_flight(&app, &durable_key);
-            fail_backend_retryable(&app, id, generation, &error);
+            // Retry would replay the job that needed the removed route.
+            if error == REMOTE_REMOVED {
+                fail(&app, id, generation, &error);
+            } else {
+                fail_backend_retryable(&app, id, generation, &error);
+            }
         } else {
             run_job(app.clone(), id, generation);
         }
@@ -1642,8 +1041,6 @@ mod backend_tests {
             idempotency_key: "22222222-2222-4222-8222-222222222222".into(),
             backend_job_id: None,
             fallback_provider: None,
-            fallback_request_id: None,
-            fallback_check_url: None,
             conversion_profile: "standard".into(),
             job_type: "convert".into(),
             ocr_language_correction: true,
@@ -1652,17 +1049,6 @@ mod backend_tests {
             source_mtime: 1,
             created_at: 1,
         }
-    }
-
-    fn context(job_id: Option<&str>) -> BackendContext {
-        BackendContext::new(
-            "http://127.0.0.1:8080".into(),
-            "11111111-1111-4111-8111-111111111111".into(),
-            "22222222-2222-4222-8222-222222222222".into(),
-            job_id.map(str::to_owned),
-            settings::ConversionProfile::Standard,
-            conversion_service::OcrOptions::default(),
-        )
     }
 
     fn view(status: &str) -> ConversionJob {
@@ -1684,7 +1070,7 @@ mod backend_tests {
         });
         assert_eq!(
             local_only_failure(&needs_remote),
-            "Local-only conversion could not finish because some pages are scanned images. Choose Standard to allow Datalab fallback."
+            "This file could not be converted on this Mac because some pages are scanned images."
         );
     }
 
@@ -1708,78 +1094,6 @@ mod backend_tests {
         assert_eq!(
             backend_action(&failed),
             BackendAction::Failed("bad_document: Document cannot be converted".into())
-        );
-    }
-
-    /// A submit whose outcome is unknown leaves the provider recorded with no
-    /// request id. Both the ledger and the in-memory context carry that, so a
-    /// restart and a same-process Retry both refuse to resubmit.
-    #[test]
-    fn a_rebuilt_ledger_row_replays_the_remote_state_stop_deleted() {
-        // An accepted fallback replays provider and request, so a restart
-        // resumes polling rather than paying.
-        assert_eq!(
-            ledger_replay(&context(None).resuming_fallback(FallbackContext {
-                provider: DATALAB_PROVIDER.to_owned(),
-                request_id: Some("req-1".to_owned()),
-                check_url: Some("https://example.test/1".to_owned()),
-            })),
-            vec![
-                LedgerReplay::BeginFallback(DATALAB_PROVIDER.to_owned()),
-                LedgerReplay::AttachFallbackRequest {
-                    request_id: "req-1".to_owned(),
-                    check_url: "https://example.test/1".to_owned(),
-                },
-            ],
-        );
-
-        // An uncertain fallback replays the provider alone, or it reads as
-        // never started.
-        assert_eq!(
-            ledger_replay(&context(None).resuming_fallback(FallbackContext {
-                provider: DATALAB_PROVIDER.to_owned(),
-                request_id: None,
-                check_url: None,
-            })),
-            vec![LedgerReplay::BeginFallback(DATALAB_PROVIDER.to_owned())],
-        );
-
-        // No fallback, but a known backend job still has to come back.
-        assert_eq!(
-            ledger_replay(&context(Some("job-9"))),
-            vec![LedgerReplay::AttachBackendJob("job-9".to_owned())],
-        );
-
-        // A plain submit has nothing to replay beyond the base row.
-        assert!(ledger_replay(&context(None)).is_empty());
-    }
-
-    /// The ledger alone leaves Retry able to pay again with no restart.
-    #[test]
-    fn an_uncertain_fallback_is_visible_to_both_restart_and_retry() {
-        let uncertain = FallbackContext {
-            provider: DATALAB_PROVIDER.to_owned(),
-            request_id: None,
-            check_url: None,
-        };
-        let accepted = FallbackContext {
-            provider: DATALAB_PROVIDER.to_owned(),
-            request_id: Some("req-1".to_owned()),
-            check_url: Some("https://example.test/1".to_owned()),
-        };
-
-        let resumed = context(None).resuming_fallback(uncertain.clone());
-        assert_eq!(resumed.phase, BackendPhase::DatalabFallback);
-        assert_eq!(resumed.fallback, Some(uncertain));
-
-        // The recorded provider decides which endpoint a resume polls.
-        let pipeline_resume = context(None).resuming_fallback(FallbackContext {
-            provider: DATALAB_PIPELINE_PROVIDER.to_owned(),
-            ..accepted
-        });
-        assert_eq!(
-            pipeline_resume.fallback.unwrap().provider,
-            DATALAB_PIPELINE_PROVIDER
         );
     }
 
@@ -1878,48 +1192,37 @@ mod backend_tests {
         assert!(serialized.get("outputText").is_none());
     }
 
-    /// The service writes `.md` for a transcript too, so pairing on `.txt`
-    /// alone would leave every backend transcript looking unconverted.
+    /// The service writes `.md`, and an older build's `.txt` transcript must
+    /// stay paired or its recording reads as unconverted.
     #[test]
-    fn a_backend_transcript_pairs_on_markdown_and_on_the_direct_text() {
-        let mut cfg = settings::Settings::default();
-
-        assert_eq!(
-            result_extensions_for(JobType::Transcribe, &cfg),
-            ["md", "txt"]
-        );
-        assert_eq!(output_extension_for(JobType::Transcribe, &cfg), "txt");
-
-        // A route flip must not unpair a transcript already on disk.
-        cfg.conversion_route = settings::ConversionRoute::Direct;
-        assert_eq!(
-            result_extensions_for(JobType::Transcribe, &cfg),
-            ["md", "txt"]
-        );
+    fn a_transcript_pairs_on_markdown_and_on_the_older_text() {
+        assert_eq!(result_extensions_for(JobType::Transcribe), ["md", "txt"]);
     }
 
+    /// `accepts` copies the converter's table by hand. A row added there and
+    /// missed here converts on Run while the tree calls the file unconvertible.
     #[test]
-    fn a_backend_job_is_labelled_by_the_job_it_runs() {
-        let job = |jt| {
-            Job::new_backend(
-                1,
-                "/tmp/interview.m4a".into(),
-                "/tmp".into(),
-                jt,
-                context(None),
-            )
-        };
-
-        assert_eq!(job(JobType::Convert).service, "Conversion service");
-        assert_eq!(job(JobType::Transcribe).service, "Local transcription");
-        assert_eq!(job(JobType::Transcribe).job_type, JobType::Transcribe);
+    fn every_converter_format_belongs_to_exactly_one_job() {
+        let table = include_str!("../../../converter/src/conversion/model.rs");
+        let extensions: Vec<&str> = table
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("extension: \""))
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(extensions.len() >= 34, "{extensions:?}");
+        for ext in extensions {
+            assert!(
+                JobType::Convert.accepts(ext) != JobType::Transcribe.accepts(ext),
+                "{ext}"
+            );
+        }
     }
 
     /// The OCR options are in the replay fingerprint, so reading Settings 409s.
     #[test]
     fn a_recovered_context_carries_the_recorded_ocr_options() {
         let recorded =
-            conversion_service::OcrOptions::from_wire(false, "Uniwise\nDatalab", Some(2));
+            conversion_service::OcrOptions::from_wire(false, "Uniwise\nTool-Kit", Some(2));
         let context = BackendContext::new(
             "http://127.0.0.1:9123".into(),
             "22222222-2222-4222-8222-222222222222".into(),
@@ -1933,8 +1236,8 @@ mod backend_tests {
         let now = settings::Settings::default();
         assert!(now.language_correction && now.custom_words.is_empty());
         assert!(!context.ocr.language_correction);
-        assert_eq!(context.ocr.custom_words, ["Uniwise", "Datalab"]);
-        assert_eq!(context.ocr.custom_words_wire(), "Uniwise\nDatalab");
+        assert_eq!(context.ocr.custom_words, ["Uniwise", "Tool-Kit"]);
+        assert_eq!(context.ocr.custom_words_wire(), "Uniwise\nTool-Kit");
     }
 
     #[test]
@@ -1978,6 +1281,13 @@ mod backend_tests {
             .unwrap_err()
             .contains("unknown profile"));
         entry.conversion_profile = "standard".into();
+        // A row an older build sent out fails before anything is asked.
+        entry.fallback_provider = Some("datalab".into());
+        assert_eq!(
+            validate_recovery_entry(&entry, live),
+            Err(REMOTE_REMOVED.into())
+        );
+        entry.fallback_provider = None;
         std::fs::remove_file(&source).unwrap();
         assert!(validate_recovery_entry(&entry, live)
             .unwrap_err()

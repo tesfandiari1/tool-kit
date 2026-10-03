@@ -8,7 +8,6 @@ function job(id: number, status: Status, outputPath: string | null = `/out/${Str
     fileName: `${String(id)}.pdf`,
     sourcePath: `/in/${String(id)}.pdf`,
     jobType: "convert",
-    service: "datalab",
     status,
     progressNote: "",
     route: null,
@@ -73,7 +72,7 @@ describe("autoOpenTarget", () => {
 
   it("opens the survivor of a stopped run", () => {
     // Stop rewrites every unfinished row to failed, so one finished file out
-    // of two is still one result the user paid for and can read.
+    // of two is still one result the user can read.
     expect(autoOpenTarget(new Set(), [job(1, "done"), job(2, "failed")])?.id).toBe(1);
   });
 

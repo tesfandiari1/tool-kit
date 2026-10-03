@@ -2,12 +2,8 @@
 
 export type JobId = "convert" | "transcribe";
 export type Status = "queued" | "working" | "processing" | "done" | "failed";
-export type SecretId = "datalab" | "revai" | "backend";
-export type ConversionRoute = "direct" | "backend";
-export type ConversionProfile = "standard" | "local_only";
+export type SecretId = "backend";
 export type ReuseDisposition = "pending" | "already_here" | "reusable";
-/// First run's one conversion question. See `domains/onboarding/conversionMode`.
-export type OnboardingConversionMode = "local" | "cloud";
 /// What the end pane holds. Settings is a sheet, not a fourth member.
 export type View = "library" | "run" | "history";
 
@@ -103,7 +99,7 @@ export interface Scan {
   /// so switching job needs no re-scan and autodetect sees no new signal.
   alreadyHereConvert: number;
   alreadyHereTranscribe: number;
-  /// Result in another folder: copied rather than bought again.
+  /// Result in another folder: copied rather than converted again.
   reusableConvert: number;
   reusableTranscribe: number;
   convertFiles: ScannedConversionFile[];
@@ -132,7 +128,6 @@ export interface Job {
   fileName: string;
   sourcePath: string;
   jobType: JobId;
-  service: string;
   status: Status;
   progressNote: string;
   /// Backend route identifiers are service-owned data, not a closed frontend enum.
@@ -151,11 +146,6 @@ export interface Settings {
   inputs: string[];
   outputDir: string | null;
   jobType: JobId;
-  datalabFormat: string;
-  datalabPipelineId: string | null;
-  datalabHighAccuracy: boolean;
-  conversionRoute: ConversionRoute;
-  conversionProfile: ConversionProfile;
   languageCorrection: boolean;
   /// Words local OCR should prefer when it is unsure.
   customWords: string[];
@@ -192,11 +182,6 @@ export const DEFAULT_SETTINGS: Settings = {
   inputs: [],
   outputDir: null,
   jobType: "convert",
-  datalabFormat: "markdown",
-  datalabPipelineId: null,
-  datalabHighAccuracy: true,
-  conversionRoute: "backend",
-  conversionProfile: "standard",
   languageCorrection: true,
   customWords: [],
   speakerCount: null,
@@ -213,7 +198,7 @@ export const DEFAULT_SETTINGS: Settings = {
 export const ACTIVE: Status[] = ["queued", "working", "processing"];
 
 /// The newest job for a source, never the first. A file converted twice carries
-/// two rows, and the stale `done` leaves Convert enabled for one more charge.
+/// two rows, and the stale `done` leaves Convert enabled for one more run.
 /// Ids come from an `AtomicU64`, so the highest is live.
 export function latestJobFor(jobs: Job[], sourcePath: string): Job | null {
   let latest: Job | null = null;
@@ -222,7 +207,7 @@ export function latestJobFor(jobs: Job[], sourcePath: string): Job | null {
   }
   return latest;
 }
-/// Above this many files, confirm before spending.
+/// Above this many failed files, confirm before retrying them all.
 export const BIG_RUN = 25;
 /// Rows per history read.
 export const HISTORY_LIMIT = 400;
@@ -245,11 +230,9 @@ export type ConvertBlockReason =
   | "not_convertible"
   | "run_in_progress"
   | "backend_unavailable"
-  | "backend_not_accepting"
-  | "local_only_requires_remote"
-  | "missing_key";
+  | "backend_not_accepting";
 
-/// The host's verdict. The route plan, the key checks and the reuse rule all
+/// The host's verdict. The route plan, the token check and the reuse rule all
 /// live in Rust.
 export interface ConvertOneOutcome {
   kind: "queued" | "copied" | "blocked";
@@ -261,7 +244,7 @@ export interface ConvertOneOutcome {
 }
 
 export interface RunResult {
-  /// Sent to the provider, the only ones that cost anything.
+  /// Sent to the conversion service.
   count: number;
   /// Left alone: the result is already in the output folder.
   skipped: number;

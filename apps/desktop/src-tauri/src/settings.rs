@@ -5,26 +5,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConversionRoute {
-    /// Datalab, over the network, one request per file.
-    Direct,
-    /// The conversion service, which ships inside the app.
-    ///
-    /// The default, because a fresh install should convert without an API key
-    /// and without sending a document anywhere.
-    ///
-    /// A settings.json that predates the route names none, so this default moves
-    /// it. That file has no `workspace_path` either, so onboarding asks first.
-    #[default]
-    Backend,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// The profile a submission names. Every new one is `LocalOnly`. `Standard`
+/// stays for ledger rows an older build wrote: the service folds the profile
+/// into its replay key, so a recovered row resubmits what it recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversionProfile {
-    #[default]
     Standard,
     LocalOnly,
 }
@@ -58,20 +43,8 @@ pub struct Settings {
     pub output_dir: Option<String>,
     /// Last selected job: "convert" | "transcribe".
     pub job_type: String,
-    /// Datalab output format: "markdown" | "html" | "json".
-    pub datalab_format: String,
-    /// Optional Datalab pipeline id (pl_...). Blank uses the /convert endpoint.
-    pub datalab_pipeline_id: Option<String>,
-    /// High-accuracy Convert: re-OCR every page and run an LLM pass.
-    pub datalab_high_accuracy: bool,
-    /// Route selection. Routing stays per-file, and unsupported formats go to
-    /// Datalab.
-    pub conversion_route: ConversionRoute,
-    /// Backend routing profile. `best_quality` is unavailable until the backend
-    /// implements it rather than returning 409.
-    pub conversion_profile: ConversionProfile,
     /// Whether local OCR corrects what it recognizes. Read only by the image
-    /// engine, so it changes nothing on the direct route.
+    /// engine.
     pub language_correction: bool,
     /// Words local OCR should prefer, sent to the backend one per line.
     pub custom_words: Vec<String>,
@@ -107,11 +80,6 @@ impl Default for Settings {
             inputs: Vec::new(),
             output_dir: None,
             job_type: "convert".into(),
-            datalab_format: "markdown".into(),
-            datalab_pipeline_id: None,
-            datalab_high_accuracy: true,
-            conversion_route: ConversionRoute::Backend,
-            conversion_profile: ConversionProfile::Standard,
             language_correction: true,
             custom_words: Vec::new(),
             speaker_count: None,
@@ -155,15 +123,7 @@ pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConversionProfile, ConversionRoute, Settings};
-
-    #[test]
-    fn defaults_convert_through_the_service_in_the_bundle() {
-        let settings = Settings::default();
-
-        assert_eq!(settings.conversion_route, ConversionRoute::Backend);
-        assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
-    }
+    use super::Settings;
 
     /// `backend_url` is gone: `backend_host::Deployment` carries the Manual
     /// origin. Ignored, not rejected, because `load()` resets on a parse
@@ -187,9 +147,7 @@ mod tests {
     fn backend_settings_serialize_for_the_webview_without_a_token() {
         let value = serde_json::to_value(Settings::default()).expect("settings should serialize");
 
-        assert_eq!(value["conversionRoute"], "backend");
         assert!(value.get("backendUrl").is_none());
-        assert_eq!(value["conversionProfile"], "standard");
         assert_eq!(value["languageCorrection"], true);
         assert_eq!(value["customWords"], serde_json::json!([]));
         assert_eq!(value["speakerCount"], serde_json::Value::Null);
@@ -197,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_from_before_m6_keep_existing_values_and_gain_backend_defaults() {
+    fn settings_from_before_m6_keep_existing_values_and_ignore_the_remote_keys() {
         let settings: Settings = serde_json::from_str(
             r#"{
                 "inputs": ["/tmp/source.pdf"],
@@ -213,14 +171,8 @@ mod tests {
 
         assert_eq!(settings.inputs, ["/tmp/source.pdf"]);
         assert_eq!(settings.output_dir.as_deref(), Some("/tmp/output"));
-        assert_eq!(settings.datalab_format, "html");
-        assert_eq!(settings.datalab_pipeline_id.as_deref(), Some("pl_existing"));
-        assert!(!settings.datalab_high_accuracy);
+        // The remote provider's keys are ignored, not rejected.
         assert!(!settings.skip_already_done);
-        // The route this file never named now defaults to the bundled service.
-        // Safe: the same file has no workspace_path, so onboarding asks first.
-        assert_eq!(settings.conversion_route, ConversionRoute::Backend);
-        assert_eq!(settings.conversion_profile, ConversionProfile::Standard);
         // A file written before `zoom` existed must load at 100%, not at 0.0.
         assert_eq!(settings.zoom, 1.0);
         // Same rule for the workspace: an existing install owns none yet.
@@ -272,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_from_before_the_ocr_options_keep_the_backend_route_and_gain_defaults() {
+    fn settings_from_before_the_ocr_options_gain_defaults() {
         let settings: Settings = serde_json::from_str(
             r#"{
                 "inputs": ["/tmp/scan.png"],
@@ -286,8 +238,6 @@ mod tests {
         .expect("settings written before the OCR options should deserialize");
 
         assert_eq!(settings.inputs, ["/tmp/scan.png"]);
-        assert_eq!(settings.conversion_route, ConversionRoute::Backend);
-        assert_eq!(settings.conversion_profile, ConversionProfile::LocalOnly);
         assert_eq!(settings.zoom, 1.1);
         // Absent fields arrive as on and empty, the backend's own defaults.
         assert!(settings.language_correction);

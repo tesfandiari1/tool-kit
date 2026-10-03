@@ -1008,7 +1008,7 @@ mod tests {
                         "clientRunId": UUID,
                         "profile": "standard",
                         "languageCorrection": false,
-                        "customWords": "Uniwise\nDatalab"
+                        "customWords": "Uniwise\nTool-Kit"
                     })
                     .to_string(),
                 ),
@@ -1034,7 +1034,7 @@ mod tests {
         assert!(request.contains("name=\"languageCorrection\""));
         assert!(request.contains("false"));
         assert!(request.contains("name=\"customWords\""));
-        assert!(request.contains("Uniwise\nDatalab"));
+        assert!(request.contains("Uniwise\nTool-Kit"));
         server.task.await.unwrap();
     }
 
@@ -1176,7 +1176,7 @@ mod tests {
             "standard",
             &OcrOptions {
                 language_correction: false,
-                custom_words: vec!["Datalab".into(), "Rev.ai".into()],
+                custom_words: vec!["Uniwise".into(), "Tool-Kit".into()],
                 speaker_count: Some(2),
             },
             "stable-replay-key",
@@ -1191,7 +1191,7 @@ mod tests {
             .contains("idempotency-key: stable-replay-key\r\n"));
         // The list reaches the wire as one part, one word per line.
         assert!(request.contains("name=\"languageCorrection\"\r\n\r\nfalse"));
-        assert!(request.contains("name=\"customWords\"\r\n\r\nDatalab\nRev.ai"));
+        assert!(request.contains("name=\"customWords\"\r\n\r\nUniwise\nTool-Kit"));
         assert!(request.contains("name=\"speakerCount\"\r\n\r\n2"));
         server.task.await.unwrap();
     }

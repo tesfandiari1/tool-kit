@@ -269,15 +269,15 @@ export function Gallery() {
               <Stack gap={4}>
                 {/* Label and hint wrap the input in a Field on their own. */}
                 <Input
-                  label="Pipeline ID"
-                  placeholder="pl_…"
-                  defaultValue="pl_7f2a91"
-                  hint="A pl_ id sends Convert through that pipeline instead."
+                  label="Custom words"
+                  placeholder="Comma separated"
+                  defaultValue="Uniwise, Tool-Kit"
+                  hint="Words local OCR should prefer when it is unsure."
                 />
                 <Input
-                  label="API key"
+                  label="Backend token"
                   placeholder="Required"
-                  error="Datalab rejected this key."
+                  error="The service rejected this token."
                 />
                 <Select
                   label="Output format"
@@ -470,7 +470,7 @@ export function Gallery() {
               <Toast>Output folder set to ~/Deals/Acme.</Toast>
             </div>
             <div className="gal__toasthost">
-              <Toast tone="danger">Datalab rejected this key.</Toast>
+              <Toast tone="danger">The service rejected this token.</Toast>
             </div>
           </div>
         </Section>
@@ -554,7 +554,7 @@ function SheetSpecimen() {
       >
         <div className="gal__sheetbody">
           <Stack gap={4}>
-            <Input label="Datalab key" placeholder="••••••••" />
+            <Input label="Backend token" placeholder="••••••••" />
             <Select
               label="Output format"
               defaultValue="markdown"

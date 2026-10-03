@@ -35,7 +35,7 @@ export function useWindowFocusClass() {
 }
 
 /// Closing hides the window rather than quit, so the tray keeps working, and
-/// it asks first mid-run because a file already sent is paid for. The handler
+/// it asks first mid-run because quitting stops the conversions. The handler
 /// registers once and reads the counts through refs, or a 200-file run churns
 /// the subscription.
 export function useCloseConfirm(running: boolean, activeCount: number, dirtyCount: number) {

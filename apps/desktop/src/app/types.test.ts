@@ -7,7 +7,6 @@ function job(id: number, sourcePath: string, status: Status): Job {
     fileName: sourcePath,
     sourcePath,
     jobType: "convert",
-    service: "Datalab",
     status,
     progressNote: "",
     route: null,

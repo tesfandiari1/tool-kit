@@ -1,4 +1,4 @@
-import type { ConversionProfile, ConversionRoute, JobId, Scan } from "@/app/types";
+import type { JobId, Scan } from "@/app/types";
 
 /// The job a selection implies, with the selection it answers. `answered` is
 /// the point: the scan round-trips through an empty result on every unrelated
@@ -15,8 +15,8 @@ export function autodetectJob(
   return { selection, jobType: scan.transcribe > scan.convert ? "transcribe" : "convert" };
 }
 
-/// What a selection costs, testable without mounting the app: wrong here
-/// either over-bills or silently skips work.
+/// What a selection runs, testable without mounting the app: wrong here
+/// either repeats or silently skips work.
 export interface RunPlan {
   skipping: number;
   copying: number;
@@ -68,77 +68,4 @@ export function runButtonLabel(verb: string, toRun: number, copying: number): st
   if (toRun > 0) return `${verb} ${toRun} file${toRun > 1 ? "s" : ""}`;
   if (copying > 0) return `Copy ${copying} result${copying > 1 ? "s" : ""}`;
   return "Run";
-}
-
-export function largeRunConfirmation({
-  totalFiles,
-  provider,
-  backendFiles,
-  directFiles,
-  highAccuracy,
-  profile,
-  jobType,
-}: {
-  totalFiles: number;
-  provider: string;
-  backendFiles: number;
-  directFiles: number;
-  highAccuracy: boolean;
-  profile: ConversionProfile;
-  jobType: JobId;
-}): string {
-  // The service fails a recording it cannot finish. It never sends it to Rev.ai.
-  const neverFallsBack = jobType === "transcribe" && profile !== "local_only";
-  const accuracy =
-    highAccuracy && directFiles > 0
-      ? ", with high-accuracy convert on (slower, more credits per page)"
-      : "";
-
-  if (backendFiles === 0) {
-    return `This will send ${totalFiles} files to ${provider}${accuracy}.\n\nEach file uses ${provider} credits.`;
-  }
-  if (directFiles === 0) {
-    const fallbackAccuracy = highAccuracy
-      ? " with high-accuracy convert on (slower, more credits per page)"
-      : "";
-    const cost =
-      profile === "local_only"
-        ? `Local only forbids ${provider} fallback, so no ${provider} credits are planned.`
-        : neverFallsBack
-          ? `Transcription never falls back to ${provider}, so no ${provider} credits are planned.`
-          : `Files that require remote fallback may also use ${provider} credits${fallbackAccuracy}.`;
-    return `This will send ${totalFiles} files to your conversion backend.\n\n${cost}`;
-  }
-  const fallback =
-    profile === "local_only"
-      ? ` Backend files cannot fall back to ${provider} under Local only.`
-      : neverFallsBack
-        ? ""
-        : ` Backend files may also use ${provider} credits if remote fallback is required.`;
-  return (
-    `This will send ${backendFiles} files to your conversion backend and ${directFiles} files to ${provider}${accuracy}.` +
-    `\n\nThe ${directFiles} files routed directly to ${provider} use provider credits.${fallback}`
-  );
-}
-
-/// Transcribe follows `conversion_route` too, so the header names the local
-/// service on the Backend route rather than a provider the run never calls.
-export function runServiceDescription({
-  description,
-  provider,
-  conversionRoute,
-  profile,
-}: {
-  description: string;
-  provider: string;
-  conversionRoute: ConversionRoute;
-  profile: ConversionProfile;
-}): string {
-  if (conversionRoute === "direct") {
-    return `${description}, via ${provider}`;
-  }
-  if (profile === "local_only") {
-    return `${description}, via your conversion backend only`;
-  }
-  return `${description}, via your conversion backend with ${provider} fallback where required`;
 }

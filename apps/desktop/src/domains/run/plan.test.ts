@@ -1,12 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  autodetectJob,
-  canStartRun,
-  largeRunConfirmation,
-  planRun,
-  runButtonLabel,
-  runServiceDescription,
-} from "./plan";
+import { autodetectJob, canStartRun, planRun, runButtonLabel } from "./plan";
 import { EMPTY_SCAN } from "@/app/types";
 
 const scan = {
@@ -119,7 +112,7 @@ describe("canStartRun", () => {
     starting: false,
   };
 
-  it("allows a billable run and a copy-only run", () => {
+  it("allows a conversion run and a copy-only run", () => {
     expect(canStartRun(ready)).toBe(true);
     expect(canStartRun({ ...ready, toRun: 0, copying: 2 })).toBe(true);
   });
@@ -134,136 +127,10 @@ describe("canStartRun", () => {
 });
 
 describe("runButtonLabel", () => {
-  it("names the billable work, then copies, and never claims a no-op is a run", () => {
+  it("names the work, then copies, and never claims a no-op is a run", () => {
     expect(runButtonLabel("Convert", 1, 0)).toBe("Convert 1 file");
     expect(runButtonLabel("Convert", 3, 2)).toBe("Convert 3 files");
     expect(runButtonLabel("Convert", 0, 2)).toBe("Copy 2 results");
     expect(runButtonLabel("Convert", 0, 0)).toBe("Run");
-  });
-});
-
-describe("largeRunConfirmation", () => {
-  it("names provider credits for direct batches", () => {
-    expect(
-      largeRunConfirmation({
-        totalFiles: 25,
-        provider: "Datalab",
-        backendFiles: 0,
-        directFiles: 25,
-        highAccuracy: true,
-        profile: "standard",
-        jobType: "convert",
-      }),
-    ).toBe(
-      "This will send 25 files to Datalab, with high-accuracy convert on (slower, more credits per page).\n\nEach file uses Datalab credits.",
-    );
-  });
-
-  it("warns that standard backend-only batches may still use remote fallback credits", () => {
-    expect(
-      largeRunConfirmation({
-        totalFiles: 25,
-        provider: "Datalab",
-        backendFiles: 25,
-        directFiles: 0,
-        highAccuracy: true,
-        profile: "standard",
-        jobType: "convert",
-      }),
-    ).toBe(
-      "This will send 25 files to your conversion backend.\n\nFiles that require remote fallback may also use Datalab credits with high-accuracy convert on (slower, more credits per page).",
-    );
-  });
-
-  it("states direct cost and possible fallback cost for a mixed standard batch", () => {
-    expect(
-      largeRunConfirmation({
-        totalFiles: 25,
-        provider: "Datalab",
-        backendFiles: 18,
-        directFiles: 7,
-        highAccuracy: false,
-        profile: "standard",
-        jobType: "convert",
-      }),
-    ).toBe(
-      "This will send 18 files to your conversion backend and 7 files to Datalab.\n\nThe 7 files routed directly to Datalab use provider credits. Backend files may also use Datalab credits if remote fallback is required.",
-    );
-  });
-
-  it("promises no fallback credits only under Local only", () => {
-    expect(
-      largeRunConfirmation({
-        totalFiles: 25,
-        provider: "Datalab",
-        backendFiles: 25,
-        directFiles: 0,
-        highAccuracy: true,
-        profile: "local_only",
-        jobType: "convert",
-      }),
-    ).toBe(
-      "This will send 25 files to your conversion backend.\n\nLocal only forbids Datalab fallback, so no Datalab credits are planned.",
-    );
-  });
-});
-
-describe("largeRunConfirmation for transcription", () => {
-  /// A recording the service cannot finish fails. Rev.ai is never its fallback.
-  it("plans no Rev.ai credits for recordings sent to the backend", () => {
-    const confirm = (backendFiles: number, directFiles: number) =>
-      largeRunConfirmation({
-        totalFiles: backendFiles + directFiles,
-        provider: "Rev.ai",
-        backendFiles,
-        directFiles,
-        highAccuracy: false,
-        profile: "standard",
-        jobType: "transcribe",
-      });
-    expect(confirm(25, 0)).toBe(
-      "This will send 25 files to your conversion backend.\n\nTranscription never falls back to Rev.ai, so no Rev.ai credits are planned.",
-    );
-    expect(confirm(18, 7)).toBe(
-      "This will send 18 files to your conversion backend and 7 files to Rev.ai.\n\nThe 7 files routed directly to Rev.ai use provider credits.",
-    );
-  });
-});
-
-describe("runServiceDescription", () => {
-  const describe = (jobType: "convert" | "transcribe", route: "direct" | "backend", profile: "standard" | "local_only") =>
-    runServiceDescription({
-      description: jobType === "convert" ? "Extract structured text" : "Transcribe audio",
-      provider: jobType === "convert" ? "Datalab" : "Rev.ai",
-      conversionRoute: route,
-      profile,
-    });
-
-  it("keeps direct conversion and transcription on their named provider", () => {
-    expect(describe("convert", "direct", "standard")).toBe(
-      "Extract structured text, via Datalab",
-    );
-    expect(describe("transcribe", "direct", "standard")).toBe(
-      "Transcribe audio, via Rev.ai",
-    );
-  });
-
-  /// Local-only forbids Rev.ai outright, so naming it in the header is a lie.
-  it("names the local service for a backend transcription", () => {
-    expect(describe("transcribe", "backend", "local_only")).toBe(
-      "Transcribe audio, via your conversion backend only",
-    );
-    expect(describe("transcribe", "backend", "standard")).toBe(
-      "Transcribe audio, via your conversion backend with Rev.ai fallback where required",
-    );
-  });
-
-  it("names fallback policy for backend conversion", () => {
-    expect(describe("convert", "backend", "standard")).toBe(
-      "Extract structured text, via your conversion backend with Datalab fallback where required",
-    );
-    expect(describe("convert", "backend", "local_only")).toBe(
-      "Extract structured text, via your conversion backend only",
-    );
   });
 });

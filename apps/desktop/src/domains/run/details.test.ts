@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { jobDetailItems, jobDetailText } from "./details";
 
 describe("jobDetailItems", () => {
-  it("returns no details for a direct job without backend metadata", () => {
+  it("returns no details for a job without backend metadata", () => {
     expect(
       jobDetailItems({ route: null, reasonCodes: [], warnings: [], failure: null, error: null }),
     ).toEqual([]);

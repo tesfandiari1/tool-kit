@@ -10,7 +10,6 @@ import { ACTIVE, BIG_RUN, DEFAULT_SETTINGS, EMPTY_SCAN } from "@/app/types";
 import type {
   FileRow,
   Job,
-  OnboardingConversionMode,
   ProjectSummary,
   Scan,
   SecretStatus,
@@ -20,21 +19,15 @@ import type {
 } from "@/app/types";
 import { LibraryPane } from "@/domains/library/LibraryPane";
 import { OnboardingGate } from "@/domains/onboarding/OnboardingGate";
-import { conversionPatch } from "@/domains/onboarding/conversionMode";
 import { RunView } from "@/domains/run/RunView";
 import { JOBS } from "@/domains/run/jobs";
 import {
   autodetectJob,
   canStartRun,
-  largeRunConfirmation,
   planRun,
   runButtonLabel,
 } from "@/domains/run/plan";
-import {
-  missingConversionCredentials,
-  planConversionRoutes,
-  type ConversionCapabilities,
-} from "@/domains/run/routes";
+import { planConversionRoutes, type ConversionCapabilities } from "@/domains/run/routes";
 import { HistoryPanel } from "@/domains/history/HistoryPanel";
 import { SettingsPanel } from "@/domains/settings/SettingsPanel";
 import { DocumentPane } from "@/domains/thread/DocumentPane";
@@ -91,7 +84,7 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   /// The catch-all's folder. Null until `ensure_workspace` answers.
   const [catchAllPath, setCatchAllPath] = useState<string | null>(null);
-  const [secrets, setSecrets] = useState<SecretStatus>({ datalab: false, revai: false, backend: false });
+  const [secrets, setSecrets] = useState<SecretStatus>({ backend: false });
   /// Starts true: a backend token field shown by mistake breaks the session.
   const [appOwnsBackend, setAppOwnsBackend] = useState(true);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -99,7 +92,7 @@ export default function App() {
     key: "",
     value: EMPTY_SCAN,
   });
-  const [capabilities, setCapabilities] = useState<ConversionCapabilities>({ state: "idle" });
+  const [capabilities, setCapabilities] = useState<ConversionCapabilities>({ state: "loading" });
   const [now, setNow] = useState(() => Date.now());
   const [view, setView] = useState<View>("library");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -139,11 +132,7 @@ export default function App() {
 
   const scanKey = JSON.stringify([
     settings.inputs,
-    settings.datalabFormat,
-    settings.datalabPipelineId,
     settings.outputDir,
-    // The route decides which extensions `scan_inputs` counts.
-    settings.conversionRoute,
     // The active project is where a run writes, which the scan judges "already
     // here" against.
     settings.activeProjectPath,
@@ -153,7 +142,7 @@ export default function App() {
     runsFinished,
   ]);
   const scanCurrent = scanResult.key === scanKey;
-  /// Counts zero while the scan is re-asked, or Run over-bills. Nodes stay.
+  /// Counts zero while the scan is re-asked, or Run over-counts. Nodes stay.
   const scan = scanCurrent ? scanResult.value : { ...EMPTY_SCAN, nodes: scanResult.value.nodes };
   const job = useMemo(() => JOBS.find((j) => j.id === settings.jobType) ?? JOBS[0], [settings.jobType]);
   const inputCount = settings.jobType === "transcribe" ? scan.transcribe : scan.convert;
@@ -297,20 +286,10 @@ export default function App() {
     };
   }, [scanKey, settings.inputs]);
 
-  // Behind the pending save, so the route is on disk before the probe runs.
   useEffect(() => {
-    if (settings.conversionRoute !== "backend") {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset external probe state when its route is disabled
-      setCapabilities({ state: "idle" });
-      return;
-    }
-
     const probe = { cancelled: false, ready: false };
-    const pendingSave = settingsSave.current;
-    setCapabilities({ state: "loading" });
     const ask = async () => {
       try {
-        await pendingSave;
         const { data } = await conversionClient.GET("/api/v1/capabilities");
         if (!data) throw new Error("Conversion service capabilities were unavailable");
         // The sidecar mints its token after the mount read, so the first
@@ -340,7 +319,7 @@ export default function App() {
       probe.cancelled = true;
       window.clearInterval(retry);
     };
-  }, [settings.conversionRoute]);
+  }, []);
 
 
   /// Stable: the tree's fetch effects depend on it.
@@ -356,9 +335,9 @@ export default function App() {
     projects,
     expandedPaths: settings.expandedPaths,
     onExpandedChange: setExpandedPaths,
-    /// A finished run, plus the two settings the host's pairing rule reads, or
-    /// the tree calls a converted file unconverted until its folder moves.
-    refreshKey: `${runsFinished}:${settings.datalabFormat}:${settings.conversionRoute}`,
+    /// A finished run, or the tree calls a converted file unconverted until
+    /// its folder moves.
+    refreshKey: String(runsFinished),
     showToast,
   });
 
@@ -374,14 +353,13 @@ export default function App() {
   }, [tree.listings, tree.selected]);
 
   /// First run's answer in one write: two would let a crash between them leave
-  /// a workspace with no route.
+  /// a workspace with no project.
   const completeOnboarding = useCallback(
-    (workspace: WorkspaceInfo, mode: OnboardingConversionMode) => {
+    (workspace: WorkspaceInfo) => {
       persist({
         workspacePath: workspace.workspacePath,
         // A drop needs somewhere to land before anyone picks a project.
         activeProjectPath: workspace.catchAllPath,
-        ...conversionPatch(mode),
       });
       setCatchAllPath(workspace.catchAllPath);
       // Grow here, or the library paints a frame at the gate's size. The flag
@@ -483,7 +461,7 @@ export default function App() {
         return;
       }
       if (out.kind === "copied") {
-        showToast(out.message ?? "Copied a result from an earlier run — no charge");
+        showToast(out.message ?? "Copied a result from an earlier run");
         // A copy finishes inside the command, so no job runs and the
         // run-finished effect never fires. Refresh the tree so the row pairs.
         setRunsFinished((n) => n + 1);
@@ -827,8 +805,8 @@ export default function App() {
     );
   }
 
-  // Skip, copy, billable work, and files resent as numbered copies. The
-  // button promises the billable number alone.
+  // Skip, copy, conversions, and files resent as numbered copies. The
+  // button promises the conversion count alone.
   const skipAlreadyDone = settings.skipAlreadyDone;
   const { skipping, copying, toRun, colliding } = planRun(
     settings.jobType,
@@ -837,17 +815,14 @@ export default function App() {
     skipAlreadyDone,
   );
 
-  /// The job in force, both of them routed the same way: Transcribe on the
-  /// Backend route runs in the sidecar and spends nothing, so it must not
-  /// demand a Rev.ai key and its refusals belong in the preflight too.
+  /// The job in force: both run in the local service, so its refusals belong
+  /// in the preflight.
   const conversionPlan = planConversionRoutes({
     files: settings.jobType === "convert" ? scan.convertFiles : scan.transcribeFiles,
-    route: settings.conversionRoute,
-    profile: settings.conversionProfile,
     capabilities,
     skipAlreadyDone,
   });
-  const missingCredentials = missingConversionCredentials(settings.jobType, conversionPlan, secrets);
+  const missingToken = conversionPlan.backend.length > 0 && !secrets.backend;
   /// For naming and revealing the destination, never for deciding it. Keep it
   /// in step with `output_dir_for`, which settles that.
   const destination =
@@ -861,8 +836,7 @@ export default function App() {
         : null;
 
   const routeBlocked = conversionPlan.blocked.length > 0;
-  const preflightReady =
-    scanCurrent && !routeBlocked && missingCredentials.length === 0;
+  const preflightReady = scanCurrent && !routeBlocked && !missingToken;
   const canRun = canStartRun({
     hasInputs: settings.inputs.length > 0,
     hasOutput: destination !== null,
@@ -877,25 +851,6 @@ export default function App() {
     // `running` stays false until the first event lands, so without this a
     // double-click fires two runs.
     if (starting || !canRun) return;
-    // A large batch spends the moment it starts, and Stop is too late.
-    if (toRun >= BIG_RUN) {
-      const backendFiles = conversionPlan.backend.length;
-      const directFiles = conversionPlan.direct.length;
-      const go = await confirm(
-        largeRunConfirmation({
-          totalFiles: toRun,
-          provider: job.service,
-          backendFiles,
-          directFiles,
-          highAccuracy:
-            settings.jobType === "convert" && settings.datalabHighAccuracy,
-          profile: settings.conversionProfile,
-          jobType: settings.jobType,
-        }),
-        { title: `${job.verb} ${toRun} files?`, kind: "warning", okLabel: `${job.verb} all`, cancelLabel: "Cancel" }
-      );
-      if (!go) return;
-    }
     if (destination === null) return;
     setStarting(true);
     // Cleared before the invoke, so this run's events land on a clean list.
@@ -908,13 +863,13 @@ export default function App() {
       const res = await commands.runPipeline(settings.inputs, settings.jobType);
       if (res.copied > 0) {
         showToast(
-          `Copied ${res.copied} result${res.copied > 1 ? "s" : ""} from an earlier run — no charge`
+          `Copied ${res.copied} result${res.copied > 1 ? "s" : ""} from an earlier run`
         );
       } else if (res.skipped > 0) {
         showToast(`Skipped ${res.skipped} file${res.skipped > 1 ? "s" : ""} already done`);
       }
       autoClear.current = true;
-      // Copies finish inside `run_pipeline`, so a run with nothing billable
+      // Copies finish inside `run_pipeline`, so a run with nothing to convert
       // never makes `running` true.
       if (res.count === 0) {
         setRunsFinished((n) => n + 1);
@@ -939,14 +894,14 @@ export default function App() {
     }
   };
 
-  /// The second door that spends. Stop turns a cancelled batch into failed
-  /// rows, so one click here can re-bill all of it.
+  /// Stop turns a cancelled batch into failed rows, so one click here can run
+  /// all of it again.
   const retryFailed = async () => {
     const failed = jobs.filter((j) => j.status === "failed");
     if (failed.length === 0) return;
     if (failed.length >= BIG_RUN) {
       const go = await confirm(
-        `This will run ${String(failed.length)} files again, including anything Stop cancelled.\n\nEach one is billed like a new conversion.`,
+        `This will run ${String(failed.length)} files again, including anything Stop cancelled.`,
         {
           title: `Retry ${String(failed.length)} files?`,
           kind: "warning",
@@ -989,7 +944,7 @@ export default function App() {
     showToast(copied ? "Copied to clipboard" : "Copy failed", copied ? "info" : "danger");
   };
 
-  // The button never overstates the cost: a run of copies alone is free.
+  // The button never overstates the work: a run of copies alone converts nothing.
   const runLabel = runButtonLabel(job.verb, toRun, copying);
 
   // A selection matching no job needs the formats named, not a count of zero.
@@ -1012,25 +967,16 @@ export default function App() {
     if (reason === "capabilities_pending") {
       hint = "Checking conversion service capabilities…";
     } else if (reason === "backend_unavailable") {
-      // Carry the host's own reason. Settings is still the remedy: the route
-      // switch sends these files direct to Datalab.
+      // Carry the host's own reason.
       const detail = capabilities.state === "unavailable" ? capabilities.message : undefined;
       hint = detail ?? `Conversion service unavailable for ${count} file${count > 1 ? "s" : ""}`;
-      hintOpensSettings = true;
     } else if (reason === "backend_not_accepting") {
       hint = `Conversion service is not accepting jobs for ${count} file${count > 1 ? "s" : ""} right now`;
-      hintOpensSettings = true;
     } else {
-      hint = `${count} file${count > 1 ? "s need" : " needs"} ${job.service}, but Local only forbids remote fallback — choose Standard or remove ${count > 1 ? "them" : "it"}`;
-      hintOpensSettings = true;
+      hint = `${count} file${count > 1 ? "s" : ""} cannot be converted on this Mac — remove ${count > 1 ? "them" : "it"}`;
     }
-  } else if (missingCredentials.length > 0) {
-    const labels = missingCredentials.map((secret) => {
-      if (secret === "datalab") return "Datalab key";
-      if (secret === "backend") return "backend token";
-      return "Rev.ai key";
-    });
-    hint = `Add your ${labels.join(" and ")} in Settings`;
+  } else if (missingToken) {
+    hint = "Add your backend token in Settings";
     hintOpensSettings = true;
   } else if (toRun === 0 && copying === 0 && skipping > 0) {
     hint = `All ${skipping} already have a result beside them — turn off “Skip files already done” in Settings to run them again`;
@@ -1045,7 +991,7 @@ export default function App() {
     hint !== null &&
     (hintOpensSettings || hint === "Choose an output folder for the results");
 
-  // What the run does besides the billable work.
+  // What the run does besides converting.
   const noteParts: string[] = [];
   if (skipping > 0) noteParts.push(`${skipping} already done`);
   // Skip-off re-runs still refuse to clobber: `write_output` numbers the file.
@@ -1055,9 +1001,6 @@ export default function App() {
     );
   }
   if (copying > 0 && toRun > 0) noteParts.push(`${copying} copied from an earlier run`);
-  if (settings.conversionRoute === "backend" && conversionPlan.direct.length > 0) {
-    noteParts.push(`${conversionPlan.direct.length} routed direct to ${job.service}`);
-  }
   const note = noteParts.length > 0 ? noteParts.join(" · ") : null;
 
   const settingsPanel = (
@@ -1140,7 +1083,7 @@ export default function App() {
         selected={selectedRow}
         tree={tree}
         jobs={jobs}
-        /* The card follows the selection while it is up, or its Convert bills
+        /* The card follows the selection while it is up, or its Convert runs
            the file the user stopped looking at. It never raises the card. */
         onSelect={(row) => {
           showPreview((cur) => (cur === null ? null : row));

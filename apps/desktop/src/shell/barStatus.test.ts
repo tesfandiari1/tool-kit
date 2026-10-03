@@ -8,7 +8,6 @@ function job(status: Status, startedAt: number | null = null): Job {
     fileName: "a.pdf",
     sourcePath: "/a.pdf",
     jobType: "convert",
-    service: "datalab",
     status,
     progressNote: "",
     route: null,

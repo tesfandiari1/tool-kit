@@ -11,7 +11,6 @@ use std::time::UNIX_EPOCH;
 use serde::Serialize;
 
 use crate::jobs::{self, JobType};
-use crate::settings::Settings;
 
 /// How many entries one listing carries before a "N more" row.
 pub const MAX_ENTRIES: usize = 500;
@@ -126,7 +125,7 @@ pub fn modified(workspace: &Path, rel: &str) -> Option<u64> {
 }
 
 /// List one directory level under the workspace, refusing a `rel` that escapes.
-pub fn list(workspace: &Path, rel: &str, cfg: &Settings) -> Result<DirListing, ListError> {
+pub fn list(workspace: &Path, rel: &str) -> Result<DirListing, ListError> {
     // A path that escapes names no folder here, so it is as gone as a deleted.
     let dir = resolve(workspace, rel).map_err(ListError::gone)?;
     let dir_meta = std::fs::metadata(&dir).map_err(|e| ListError::from_io(&e))?;
@@ -140,7 +139,7 @@ pub fn list(workspace: &Path, rel: &str, cfg: &Settings) -> Result<DirListing, L
     let mut raws = read_level(&dir, at_project_root)?;
     raws.sort_by(|a, b| natural_cmp(&a.name, &b.name).then_with(|| a.name.cmp(&b.name)));
 
-    let paired = pair_results(&raws, cfg);
+    let paired = pair_results(&raws);
     let mut entries = Vec::with_capacity(raws.len());
     for (index, raw) in raws.iter().enumerate() {
         if paired.claimed[index] {
@@ -184,7 +183,7 @@ pub fn list(workspace: &Path, rel: &str, cfg: &Settings) -> Result<DirListing, L
 /// The result sitting beside the file at `rel`. Runs the listing and the
 /// pairing the tree runs, so a move cannot carry a different set and split the
 /// pair the user is looking at.
-pub fn paired_result(workspace: &Path, rel: &str, cfg: &Settings) -> Option<PathBuf> {
+pub fn paired_result(workspace: &Path, rel: &str) -> Option<PathBuf> {
     let source = resolve(workspace, rel).ok()?;
     let dir = source.parent()?;
     let name = source.file_name()?.to_str()?;
@@ -193,7 +192,7 @@ pub fn paired_result(workspace: &Path, rel: &str, cfg: &Settings) -> Option<Path
     let at_project_root = Path::new(rel).components().count() == 2;
     let raws = read_level(dir, at_project_root).ok()?;
     let index = raws.iter().position(|raw| raw.name == name)?;
-    pair_results(&raws, cfg).of[index].map(|hit| raws[hit].path.clone())
+    pair_results(&raws).of[index].map(|hit| raws[hit].path.clone())
 }
 
 /// Whether the document pane can read this file: a text extension under the
@@ -265,7 +264,7 @@ struct Pairing {
 /// costs a visible Convert button rather than a silent skip.
 const PAIR_GRACE_MS: u64 = 2_000;
 
-fn pair_results(raws: &[Raw], cfg: &Settings) -> Pairing {
+fn pair_results(raws: &[Raw]) -> Pairing {
     // Every file that could be a result, keyed by the stem and extension a
     // conversion would produce. `numbered` re-keys `deck (1).md` under `deck`.
     let mut exact: HashMap<(String, String), Vec<usize>> = HashMap::new();
@@ -294,7 +293,7 @@ fn pair_results(raws: &[Raw], cfg: &Settings) -> Pairing {
     };
     // Documents claim first. `lecture.mp4` sorts ahead of `lecture.pdf`, and
     // both pair with `lecture.md`, so name order hands the recording the
-    // document's result and the tree offers a paid Convert again. A recording
+    // document's result and the tree offers Convert again. A recording
     // left unpaired still meets the history check in `convert_one`.
     let mut sources: Vec<(usize, JobType)> = raws
         .iter()
@@ -307,10 +306,9 @@ fn pair_results(raws: &[Raw], cfg: &Settings) -> Pairing {
     for (index, jt) in sources {
         let raw = &raws[index];
         let stem = stem_of(&raw.name).to_lowercase();
-        // Every extension this route can write: the service writes `.md`
-        // whatever the format says, so the format alone reads as unconverted.
-        let keys: Vec<(String, String)> = jobs::result_extensions_for(jt, cfg)
-            .into_iter()
+        // Every extension a result of this job may carry.
+        let keys: Vec<(String, String)> = jobs::result_extensions_for(jt)
+            .iter()
             .map(|ext| (stem.clone(), ext.to_string()))
             .collect();
         // The plain name a first conversion writes beats a numbered one.
@@ -438,22 +436,6 @@ fn lower(c: char) -> char {
 mod tests {
     use super::*;
 
-    /// The shipped route: the conversion service, which writes Markdown.
-    fn settings(format: &str) -> Settings {
-        Settings {
-            datalab_format: format.into(),
-            ..Settings::default()
-        }
-    }
-
-    /// Datalab over the network, which writes the chosen format alone.
-    fn direct(format: &str) -> Settings {
-        Settings {
-            conversion_route: crate::settings::ConversionRoute::Direct,
-            ..settings(format)
-        }
-    }
-
     /// Build a workspace holding one project folder with `files` in it.
     fn project(dir: &tempfile::TempDir, files: &[&str]) -> PathBuf {
         let root = dir.path().join("ws");
@@ -483,16 +465,14 @@ mod tests {
     fn the_result_a_move_carries_is_the_one_the_row_draws() {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["deck.pdf", "deck.md", "lonely.pdf"]);
-        let cfg = settings("markdown");
-
         assert_eq!(
-            paired_result(&root, "Inbox/deck.pdf", &cfg),
+            paired_result(&root, "Inbox/deck.pdf"),
             Some(root.join("Inbox/deck.md")),
         );
-        assert_eq!(paired_result(&root, "Inbox/lonely.pdf", &cfg), None);
-        assert_eq!(paired_result(&root, "Inbox/gone.pdf", &cfg), None);
+        assert_eq!(paired_result(&root, "Inbox/lonely.pdf"), None);
+        assert_eq!(paired_result(&root, "Inbox/gone.pdf"), None);
         // Same answer the listing gives, which is the whole point of reusing it.
-        let listing = list(&root, "Inbox", &cfg).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
         assert_eq!(
             row(&listing, "deck.pdf").result_path.as_deref(),
             Some(root.join("Inbox/deck.md").to_string_lossy().as_ref()),
@@ -506,10 +486,7 @@ mod tests {
         let root = project(&dir, &["deck.pdf", "deck.md"]);
         age(&root.join("Inbox/deck.md"), 7 * 24 * 60 * 60);
 
-        assert_eq!(
-            paired_result(&root, "Inbox/deck.pdf", &settings("markdown")),
-            None
-        );
+        assert_eq!(paired_result(&root, "Inbox/deck.pdf"), None);
     }
 
     #[test]
@@ -517,7 +494,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["img10.pdf", "img2.pdf", "IMG1.pdf"]);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert_eq!(names(&listing), ["IMG1.pdf", "img2.pdf", "img10.pdf"]);
     }
@@ -540,7 +517,7 @@ mod tests {
         // A note the user wrote last week, and a deck dropped in today.
         age(&root.join("Inbox/deck.md"), 7 * 24 * 60 * 60);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         // Two rows: the note is its own file, the deck still needs converting.
         assert_eq!(names(&listing), ["deck.md", "deck.pdf"]);
@@ -556,7 +533,7 @@ mod tests {
         // Settings promises this runs again.
         age(&root.join("Inbox/deck.md"), 60);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert_eq!(row(&listing, "deck.pdf").result_name, None);
     }
@@ -569,7 +546,7 @@ mod tests {
         // a moment early. The grace absorbs that.
         age(&root.join("Inbox/deck.md"), 1);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert_eq!(names(&listing), ["deck.pdf"]);
         assert_eq!(
@@ -583,7 +560,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["deck.pdf", "deck.md"]);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert_eq!(names(&listing), ["deck.pdf"]);
         assert_eq!(
@@ -594,13 +571,13 @@ mod tests {
     }
 
     /// `lecture.mp4` sorts first, and both sources pair with `lecture.md`. The
-    /// recording must not take it, or the PDF is offered a paid Convert again.
+    /// recording must not take it, or the PDF is offered Convert again.
     #[test]
     fn a_document_claims_a_shared_stem_result_before_a_recording() {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["lecture.mp4", "lecture.pdf", "lecture.md"]);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert_eq!(
             row(&listing, "lecture.pdf").result_name.as_deref(),
@@ -609,79 +586,12 @@ mod tests {
         assert_eq!(row(&listing, "lecture.mp4").result_name, None);
     }
 
-    /// The output format decides the extension, so one folder pairs differently
-    /// under `html`. Reading only `.md` offers to convert a finished file.
-    #[test]
-    fn the_output_format_decides_which_sibling_counts_as_the_result() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = project(&dir, &["deck.pdf", "deck.html"]);
-
-        let markdown = list(&root, "Inbox", &settings("markdown")).unwrap();
-        assert_eq!(row(&markdown, "deck.pdf").result_name, None);
-        assert_eq!(markdown.pending, 2);
-
-        let html = list(&root, "Inbox", &settings("html")).unwrap();
-        assert_eq!(names(&html), ["deck.pdf"]);
-        assert_eq!(
-            row(&html, "deck.pdf").result_name.as_deref(),
-            Some("deck.html")
-        );
-    }
-
-    /// The service writes Markdown whatever the format says, so a file it
-    /// converted reads as converted under every format. Pairing on the format
-    /// alone leaves the row offering Convert, and every press spends.
-    #[test]
-    fn a_service_result_pairs_under_a_format_the_service_never_writes() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = project(&dir, &["deck.pdf", "deck.md"]);
-
-        let listing = list(&root, "Inbox", &settings("html")).unwrap();
-
-        assert_eq!(names(&listing), ["deck.pdf"]);
-        assert_eq!(
-            row(&listing, "deck.pdf").result_name.as_deref(),
-            Some("deck.md")
-        );
-        assert_eq!(listing.pending, 0);
-    }
-
-    /// The Datalab fallback under the same route writes the chosen format, so
-    /// both answers pair.
-    #[test]
-    fn a_fallback_result_in_the_chosen_format_pairs_on_the_same_route() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = project(&dir, &["deck.pdf", "deck.html"]);
-
-        let listing = list(&root, "Inbox", &settings("html")).unwrap();
-
-        assert_eq!(names(&listing), ["deck.pdf"]);
-        assert_eq!(
-            row(&listing, "deck.pdf").result_name.as_deref(),
-            Some("deck.html")
-        );
-    }
-
-    /// Direct is one writer and it writes the chosen format, so a stray `.md`
-    /// beside the source is not this run's result.
-    #[test]
-    fn the_direct_route_pairs_on_the_chosen_format_alone() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = project(&dir, &["deck.pdf", "deck.md"]);
-
-        let listing = list(&root, "Inbox", &direct("html")).unwrap();
-
-        assert_eq!(names(&listing), ["deck.md", "deck.pdf"]);
-        assert_eq!(row(&listing, "deck.pdf").result_name, None);
-        assert_eq!(listing.pending, 1);
-    }
-
     #[test]
     fn a_numbered_result_still_pairs_with_its_source() {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["deck.pdf", "deck (1).md"]);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert_eq!(names(&listing), ["deck.pdf"]);
         assert_eq!(
@@ -696,7 +606,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["deck.pdf", "deck.docx", "deck.md"]);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert_eq!(names(&listing), ["deck.docx", "deck.pdf"]);
         assert_eq!(
@@ -712,7 +622,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &[".DS_Store", "project.json", "notes.md"]);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert_eq!(names(&listing), ["notes.md"]);
     }
@@ -722,7 +632,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["notes.md"]);
 
-        let err = list(&root, "Inbox/../..", &settings("markdown")).unwrap_err();
+        let err = list(&root, "Inbox/../..").unwrap_err();
 
         assert!(
             err.message.contains("outside the workspace"),
@@ -738,22 +648,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["deck.pdf"]);
 
-        assert!(
-            list(&root, "Inbox/gone", &settings("markdown"))
-                .unwrap_err()
-                .gone
-        );
-        assert!(
-            list(&root, "Inbox/deck.pdf", &settings("markdown"))
-                .unwrap_err()
-                .gone
-        );
+        assert!(list(&root, "Inbox/gone").unwrap_err().gone);
+        assert!(list(&root, "Inbox/deck.pdf").unwrap_err().gone);
 
         let denied = root.join("Inbox/locked");
         std::fs::create_dir_all(&denied).unwrap();
         std::fs::set_permissions(&denied, std::os::unix::fs::PermissionsExt::from_mode(0o000))
             .unwrap();
-        let err = list(&root, "Inbox/locked", &settings("markdown")).unwrap_err();
+        let err = list(&root, "Inbox/locked").unwrap_err();
         std::fs::set_permissions(&denied, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         assert!(!err.gone, "a folder we cannot read is still there: {err:?}");
@@ -767,7 +669,7 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
         std::os::unix::fs::symlink(&target, root.join("Inbox/link")).unwrap();
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert!(!row(&listing, "link").is_dir);
     }
@@ -779,7 +681,7 @@ mod tests {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let root = project(&dir, &refs);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert_eq!(listing.entries.len(), MAX_ENTRIES);
         assert_eq!(listing.truncated, 100);
@@ -791,7 +693,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["notes.md", "deck.pdf"]);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert!(row(&listing, "notes.md").openable);
         assert!(!row(&listing, "deck.pdf").openable);
@@ -801,19 +703,12 @@ mod tests {
     }
 
     #[test]
-    fn a_markdown_result_opens_and_an_html_one_does_not() {
+    fn a_markdown_result_opens() {
         let dir = tempfile::tempdir().unwrap();
-        let root = project(&dir, &["deck.pdf", "deck.md", "slides.pdf", "slides.html"]);
+        let root = project(&dir, &["deck.pdf", "deck.md"]);
 
-        let markdown = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let markdown = list(&root, "Inbox").unwrap();
         assert!(row(&markdown, "deck.pdf").result_openable);
-
-        let html = list(&root, "Inbox", &settings("html")).unwrap();
-        assert!(!row(&html, "slides.pdf").result_openable);
-        assert_eq!(
-            row(&html, "slides.pdf").result_name.as_deref(),
-            Some("slides.html")
-        );
     }
 
     #[test]
@@ -821,7 +716,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["call.m4a", "call.txt"]);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert_eq!(names(&listing), ["call.m4a"]);
         assert_eq!(row(&listing, "call.m4a").job.as_deref(), Some("transcribe"));
@@ -839,7 +734,7 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("project.json"), b"{}").unwrap();
 
-        let listing = list(&root, "Inbox/data", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox/data").unwrap();
 
         assert_eq!(names(&listing), ["project.json"]);
     }
@@ -851,7 +746,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = project(&dir, &["deck.pdf"]);
 
-        let listing = list(&root, "Inbox", &settings("markdown")).unwrap();
+        let listing = list(&root, "Inbox").unwrap();
 
         assert_eq!(modified(&root, "Inbox"), Some(listing.modified_ms));
     }

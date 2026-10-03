@@ -88,13 +88,9 @@ pub struct InFlightEntry {
     pub idempotency_key: String,
     /// `None` until the backend accepts or replays the submission.
     pub backend_job_id: Option<String>,
-    /// `Some` once a remote fallback started. Written before the submit, so an
-    /// unknown outcome is still visible.
+    /// `Some` once an older build sent this file to a remote fallback, which
+    /// recovery refuses to resume.
     pub fallback_provider: Option<String>,
-    /// `Some` only once the provider accepted. A provider with this `None` may
-    /// already have been billed.
-    pub fallback_request_id: Option<String>,
-    pub fallback_check_url: Option<String>,
     pub conversion_profile: String,
     /// `JobType::id`, so recovery rebuilds the job it was, not a conversion.
     pub job_type: String,
@@ -379,8 +375,7 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
     let mut stmt = conn.prepare(
         "SELECT source_path, file_name, output_dir, backend_url,
                 client_run_id, idempotency_key, backend_job_id,
-                fallback_provider, fallback_request_id, fallback_check_url,
-                conversion_profile, job_type, ocr_language_correction,
+                fallback_provider, conversion_profile, job_type, ocr_language_correction,
                 ocr_custom_words, speaker_count, source_mtime, created_at
            FROM inflight_conversions
           ORDER BY created_at ASC, idempotency_key ASC",
@@ -395,75 +390,16 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
             idempotency_key: row.get(5)?,
             backend_job_id: row.get(6)?,
             fallback_provider: row.get(7)?,
-            fallback_request_id: row.get(8)?,
-            fallback_check_url: row.get(9)?,
-            conversion_profile: row.get(10)?,
-            job_type: row.get(11)?,
-            ocr_language_correction: row.get(12)?,
-            ocr_custom_words: row.get(13)?,
-            speaker_count: row.get(14)?,
-            source_mtime: row.get(15)?,
-            created_at: row.get(16)?,
+            conversion_profile: row.get(8)?,
+            job_type: row.get(9)?,
+            ocr_language_correction: row.get(10)?,
+            ocr_custom_words: row.get(11)?,
+            speaker_count: row.get(12)?,
+            source_mtime: row.get(13)?,
+            created_at: row.get(14)?,
         })
     })?;
     rows.collect()
-}
-
-/// Record that a remote fallback is about to start, before the request goes
-/// out. A provider with no request id may already have been billed, so
-/// recovery must never resubmit it.
-pub fn begin_fallback(app: &AppHandle, idempotency_key: &str, provider: &str) -> bool {
-    if idempotency_key.trim().is_empty() || provider.trim().is_empty() {
-        return false;
-    }
-    with_db(app, |conn| {
-        Ok(conn.execute(
-            "UPDATE inflight_conversions
-                SET fallback_provider = ?2
-              WHERE idempotency_key = ?1",
-            rusqlite::params![idempotency_key, provider],
-        )? == 1)
-    })
-    .unwrap_or(false)
-}
-
-/// Attach the accepted remote request so a restart resumes polling it.
-pub fn attach_fallback_request(
-    app: &AppHandle,
-    idempotency_key: &str,
-    request_id: &str,
-    check_url: &str,
-) -> bool {
-    if idempotency_key.trim().is_empty() || request_id.trim().is_empty() {
-        return false;
-    }
-    with_db(app, |conn| {
-        Ok(conn.execute(
-            "UPDATE inflight_conversions
-                SET fallback_request_id = ?2, fallback_check_url = ?3
-              WHERE idempotency_key = ?1
-                AND (fallback_request_id IS NULL OR fallback_request_id = ?2)",
-            rusqlite::params![idempotency_key, request_id, check_url],
-        )? == 1)
-    })
-    .unwrap_or(false)
-}
-
-/// Forget a fallback Datalab refused. Only for a submit that got an answer.
-pub fn clear_fallback(app: &AppHandle, idempotency_key: &str) -> bool {
-    if idempotency_key.trim().is_empty() {
-        return false;
-    }
-    with_db(app, |conn| {
-        Ok(conn.execute(
-            "UPDATE inflight_conversions
-                SET fallback_provider = NULL, fallback_request_id = NULL,
-                    fallback_check_url = NULL
-              WHERE idempotency_key = ?1",
-            rusqlite::params![idempotency_key],
-        )? == 1)
-    })
-    .unwrap_or(false)
 }
 
 /// Delete one terminal or stopped conversion by its stable key. Unknown keys
@@ -647,9 +583,8 @@ fn reuse_map(
     job_type: &str,
     output_format: &str,
 ) -> HashMap<String, String> {
-    // A transcript is one result on either route. The service files its own
-    // as `backend:markdown`, and Direct asks for `text`, so a route switch
-    // would buy the same recording from Rev.ai again.
+    // A transcript is one result whoever wrote it. The service files its own
+    // as `backend:markdown`, and an older build's direct route filed `text`.
     let mut stmt = match conn.prepare(
         "SELECT output_path, source_mtime FROM history
           WHERE source_path = ?1 AND job_type = ?2
@@ -660,7 +595,7 @@ fn reuse_map(
     ) {
         Ok(s) => s,
         Err(e) => {
-            // Logged, or a broken query reads as "nothing done" and bills again.
+            // Logged, or a broken query reads as "nothing done" and runs again.
             eprintln!("[tool-kit] history reuse query failed: {e}");
             return HashMap::new();
         }
@@ -818,7 +753,7 @@ mod tests {
     }
 
     /// Moving a file must cost nothing. `reuse_map` checks both paths, so a
-    /// move that updated neither bills the next run.
+    /// move that updated neither re-runs the file.
     #[test]
     fn a_moved_file_and_its_result_are_still_reusable_where_they_landed() {
         let dir = tempfile::tempdir().unwrap();
@@ -1067,7 +1002,7 @@ mod tests {
             conversion_profile: "standard",
             job_type: "convert",
             ocr_language_correction: false,
-            ocr_custom_words: "Uniwise\nDatalab",
+            ocr_custom_words: "Uniwise\nTool-Kit",
             speaker_count: Some(2),
         };
 
@@ -1084,7 +1019,7 @@ mod tests {
         // The OCR options are part of the replay fingerprint, so they survive
         // the restart recovery reads them across.
         assert!(!before_attach[0].ocr_language_correction);
-        assert_eq!(before_attach[0].ocr_custom_words, "Uniwise\nDatalab");
+        assert_eq!(before_attach[0].ocr_custom_words, "Uniwise\nTool-Kit");
         assert!(before_attach[0].created_at > 0);
 
         let backend_job_id = "33333333-3333-4333-8333-333333333333";
@@ -1355,8 +1290,8 @@ mod tests {
         assert_eq!(reuse_map(&conn, &[src], "convert", "markdown").len(), 1);
     }
 
-    /// A local transcript must stop Direct from billing Rev.ai for it again,
-    /// while a service Markdown result never stands in for a Datalab one.
+    /// A transcript counts whoever wrote it, while a service Markdown result
+    /// never stands in for a Convert key.
     #[test]
     fn a_transcript_counts_as_done_on_either_route() {
         let conn = db();
@@ -1381,7 +1316,7 @@ mod tests {
         assert_eq!(
             reuse_map(&conn, std::slice::from_ref(&src), "transcribe", "text").len(),
             1,
-            "a local transcript is done for Direct"
+            "a local transcript is done"
         );
         assert!(
             reuse_map(&conn, &[src], "convert", "markdown").is_empty(),
@@ -1471,7 +1406,7 @@ mod tests {
     }
 
     /// Where the result sits decides: the chosen folder means nothing to do,
-    /// anywhere else means copy rather than pay twice.
+    /// anywhere else means copy rather than convert twice.
     #[test]
     fn a_result_counts_as_here_only_in_its_own_folder() {
         let (_src, out) = pair("folder-match");
@@ -1484,66 +1419,6 @@ mod tests {
         assert!(!is_in_dir(&out_s, &std::env::temp_dir().to_string_lossy()));
         // A subfolder of the result's folder is a different destination.
         assert!(!is_in_dir(&out_s, &format!("{dir}/nested")));
-    }
-
-    /// Written before the request, so an interrupted submit is recoverable.
-    #[test]
-    fn a_fallback_is_recorded_before_its_request_is_accepted() {
-        let conn = db();
-        let (src, _out) = pair("fallback-ledger");
-        let source_path = fs::canonicalize(&src)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let output_dir = src.parent().unwrap().to_string_lossy().into_owned();
-        let key = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-        upsert_in_flight_row(
-            &conn,
-            &NewInFlight {
-                source_path: &source_path,
-                file_name: "report.pdf",
-                output_dir: &output_dir,
-                backend_url: "http://127.0.0.1:8080",
-                client_run_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-                idempotency_key: key,
-                conversion_profile: "standard",
-                job_type: "convert",
-                ocr_language_correction: true,
-                ocr_custom_words: "",
-                speaker_count: None,
-            },
-        )
-        .unwrap();
-
-        let row = |conn: &Connection| select_in_flight(conn).unwrap().remove(0);
-        assert_eq!(row(&conn).fallback_provider, None);
-
-        conn.execute(
-            "UPDATE inflight_conversions SET fallback_provider = 'datalab'
-              WHERE idempotency_key = ?1",
-            [key],
-        )
-        .unwrap();
-        let started = row(&conn);
-        assert_eq!(started.fallback_provider.as_deref(), Some("datalab"));
-        assert_eq!(
-            started.fallback_request_id, None,
-            "a provider with no request id is the uncertain state recovery must refuse to resubmit"
-        );
-
-        conn.execute(
-            "UPDATE inflight_conversions
-                SET fallback_request_id = 'req-1', fallback_check_url = 'https://example.test/1'
-              WHERE idempotency_key = ?1",
-            [key],
-        )
-        .unwrap();
-        let accepted = row(&conn);
-        assert_eq!(accepted.fallback_request_id.as_deref(), Some("req-1"));
-        assert_eq!(
-            accepted.fallback_check_url.as_deref(),
-            Some("https://example.test/1")
-        );
     }
 
     #[test]

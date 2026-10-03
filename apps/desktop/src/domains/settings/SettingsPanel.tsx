@@ -6,7 +6,6 @@ import {
   Input,
   Meta,
   Segmented,
-  Select,
   Stack,
   Switch,
 } from "@ui";
@@ -14,16 +13,14 @@ import { commands } from "@/app/commands";
 import { type SecretId, type SecretStatus, type Settings } from "@/app/types";
 
 /// Session state: reopening on last week's tab is a worse default.
-type Group = "conversion" | "providers" | "runs" | "advanced";
+type Group = "conversion" | "runs";
 
 const GROUPS: { value: Group; label: string }[] = [
   { value: "conversion", label: "Conversion" },
-  { value: "providers", label: "Providers" },
   { value: "runs", label: "Runs" },
-  { value: "advanced", label: "Advanced" },
 ];
 
-/// Four bands behind one nav. A plain column, never `FlowLayout`, whose scroll
+/// Two bands behind one nav. A plain column, never `FlowLayout`, whose scroll
 /// region cannot resolve a height inside a sheet body that already scrolls.
 export function SettingsPanel({
   settings,
@@ -44,12 +41,6 @@ export function SettingsPanel({
 }) {
   const [group, setGroup] = useState<Group>("conversion");
 
-  /// Only Datalab reads the format, the pipeline id and high accuracy, and
-  /// local-only never reaches it. See `domains/run/routes.ts`.
-  const datalabReachable =
-    settings.conversionRoute === "direct" || settings.conversionProfile === "standard";
-  const groups = datalabReachable ? GROUPS : GROUPS.filter((g) => g.value !== "advanced");
-
   /// Reports whether the write landed, so a refused key stays in the field.
   const saveKey = async (provider: SecretId, value: string) => {
     try {
@@ -68,7 +59,7 @@ export function SettingsPanel({
       {/* Sticky, so the sheet body stays the one scroll container. */}
       <div className="settings__nav">
         <Segmented
-          options={groups}
+          options={GROUPS}
           value={group}
           onChange={setGroup}
           label="Settings section"
@@ -79,74 +70,26 @@ export function SettingsPanel({
       <div className="settings__body">
         {group === "conversion" && (
           <Stack gap={3}>
-            <Select
-              label="Conversion route"
-              hint="Direct keeps today's Datalab path. Backend routes each supported file through the local conversion service."
-              value={settings.conversionRoute}
+            <Switch
+              label="OCR language correction"
+              hint="Lets local OCR correct what it reads against a dictionary. Turn it off for part numbers, codes, and names it keeps rewriting."
+              checked={settings.languageCorrection}
               onChange={(e) => {
-                onPersist({ conversionRoute: e.target.value === "backend" ? "backend" : "direct" });
+                onPersist({ languageCorrection: e.target.checked });
               }}
-              options={[
-                { value: "direct", label: "Direct provider" },
-                { value: "backend", label: "Conversion backend" },
-              ]}
             />
-
-            {settings.conversionRoute === "backend" && (
-              <Stack gap={3} className="settings-nest">
-                <Select
-                  label="Conversion profile"
-                  hint="Standard may use the configured fallback. Local only keeps document bytes on this machine."
-                  value={settings.conversionProfile}
-                  onChange={(e) => {
-                    onPersist({
-                      conversionProfile: e.target.value === "local_only" ? "local_only" : "standard",
-                    });
-                  }}
-                  options={[
-                    { value: "standard", label: "Standard" },
-                    { value: "local_only", label: "Local only" },
-                  ]}
-                />
-                <Switch
-                  label="OCR language correction"
-                  hint="Lets local OCR correct what it reads against a dictionary. Turn it off for part numbers, codes, and names it keeps rewriting."
-                  checked={settings.languageCorrection}
-                  onChange={(e) => {
-                    onPersist({ languageCorrection: e.target.checked });
-                  }}
-                />
-                <CustomWordsField
-                  value={settings.customWords}
-                  onCommit={(customWords) => {
-                    onPersist({ customWords });
-                  }}
-                  onToast={onToast}
-                />
-                <SpeakerCountField
-                  value={settings.speakerCount}
-                  onCommit={(speakerCount) => {
-                    onPersist({ speakerCount });
-                  }}
-                />
-              </Stack>
-            )}
-          </Stack>
-        )}
-
-        {group === "providers" && (
-          <Stack gap={3}>
-            <KeyField
-              label="Datalab"
-              hint="X-API-Key"
-              saved={secrets.datalab}
-              onSave={(v) => saveKey("datalab", v)}
+            <CustomWordsField
+              value={settings.customWords}
+              onCommit={(customWords) => {
+                onPersist({ customWords });
+              }}
+              onToast={onToast}
             />
-            <KeyField
-              label="Rev.ai"
-              hint="Access token"
-              saved={secrets.revai}
-              onSave={(v) => saveKey("revai", v)}
+            <SpeakerCountField
+              value={settings.speakerCount}
+              onCommit={(speakerCount) => {
+                onPersist({ speakerCount });
+              }}
             />
             {!appOwnsBackend && (
               <KeyField
@@ -163,7 +106,7 @@ export function SettingsPanel({
           <Stack gap={3}>
             <Switch
               label="Skip files already done"
-              hint="Leaves a file alone when its result is still on disk. Edit the file, delete the result, or switch output format and it runs again."
+              hint="Leaves a file alone when its result is still on disk. Edit the file or delete the result and it runs again."
               checked={settings.skipAlreadyDone}
               onChange={(e) => {
                 onPersist({ skipAlreadyDone: e.target.checked });
@@ -179,76 +122,10 @@ export function SettingsPanel({
                 }}
               />
             )}
-            {datalabReachable && (
-              <Switch
-                label="High-accuracy convert"
-                hint="Re-OCRs every page and runs an LLM pass. Best for scans and tables, and slower for more credits."
-                checked={settings.datalabHighAccuracy}
-                onChange={(e) => {
-                  onPersist({ datalabHighAccuracy: e.target.checked });
-                }}
-              />
-            )}
-          </Stack>
-        )}
-
-        {group === "advanced" && (
-          <Stack gap={3}>
-            <Select
-              label="Convert output format"
-              /* The backend writes Markdown whatever this says, so the label
-                 has to admit the format is Datalab's alone. */
-              hint="Applies to files Datalab converts. The conversion backend always writes Markdown."
-              value={settings.datalabFormat}
-              onChange={(e) => {
-                onPersist({ datalabFormat: e.target.value });
-              }}
-              options={[
-                { value: "markdown", label: "Markdown (.md)" },
-                { value: "html", label: "HTML (.html)" },
-                { value: "json", label: "JSON (.json)" },
-              ]}
-            />
-            <PipelineField
-              value={settings.datalabPipelineId}
-              onCommit={(datalabPipelineId) => {
-                onPersist({ datalabPipelineId });
-              }}
-            />
           </Stack>
         )}
       </div>
     </div>
-  );
-}
-
-/// Committed on blur or Enter, never per keystroke: the pipeline id is folded
-/// into the history key, so every prefix would re-scan the whole selection.
-function PipelineField({
-  value,
-  onCommit,
-}: {
-  value: string | null;
-  onCommit: (value: string | null) => void;
-}) {
-  const [draft, setDraft] = useState(value ?? "");
-  const commit = () => {
-    onCommit(draft.trim() || null);
-  };
-  return (
-    <Input
-      label="Datalab pipeline ID (optional)"
-      type="text"
-      value={draft}
-      placeholder="pl_… blank uses the standard convert API"
-      onChange={(e) => {
-        setDraft(e.target.value);
-      }}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") commit();
-      }}
-    />
   );
 }
 

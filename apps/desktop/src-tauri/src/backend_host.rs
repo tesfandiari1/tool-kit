@@ -361,6 +361,14 @@ fn parse_override(raw: &str) -> Result<Deployment, String> {
     if !origin.starts_with("http://") && !origin.starts_with("https://") {
         return Err(format!("names {origin}, which is not an http url"));
     }
+    // Documents never leave this Mac, so a Manual backend is a loopback one.
+    let host = reqwest::Url::parse(&origin).ok();
+    if !matches!(
+        host.as_ref().and_then(reqwest::Url::host_str),
+        Some("localhost" | "127.0.0.1" | "[::1]")
+    ) {
+        return Err(format!("names {origin}, which is not on this Mac"));
+    }
     Ok(Deployment::Manual { origin })
 }
 
@@ -1184,8 +1192,8 @@ mod tests {
     #[test]
     fn a_trailing_slash_does_not_make_a_second_origin() {
         assert_eq!(
-            parse_override(r#"{"url": "  http://backend.internal:8080/  "}"#),
-            parse_override(r#"{"url": "http://backend.internal:8080"}"#)
+            parse_override(r#"{"url": "  http://127.0.0.1:8080/  "}"#),
+            parse_override(r#"{"url": "http://127.0.0.1:8080"}"#)
         );
     }
 
@@ -1198,6 +1206,8 @@ mod tests {
             (r#"{"url": "   "}"#, "names no url"),
             (r#"{"url": "127.0.0.1:8080"}"#, "not an http url"),
             (r#"{"url": "file:///etc/passwd"}"#, "not an http url"),
+            (r#"{"url": "https://backend.internal:8080"}"#, "not on this Mac"),
+            (r#"{"url": "http://127.0.0.1.example.com"}"#, "not on this Mac"),
             (r#"{"origin": "http://127.0.0.1:8080"}"#, "is not readable"),
             (r#"{"url": 8080}"#, "is not readable"),
             ("not json at all", "is not readable"),

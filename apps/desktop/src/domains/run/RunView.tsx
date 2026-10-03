@@ -33,13 +33,12 @@ import { basename, fmtElapsed } from "@/app/format";
 import { FlowLayout } from "@/shell/FlowLayout";
 import { jobDetailItems, jobDetailText } from "./details";
 import { JOBS, type JobDef } from "./jobs";
-import { runServiceDescription } from "./plan";
 
 /// Five job statuses onto three library tones. `@ui` knows neither.
 function toneFor(status: Job["status"]) {
   if (status === "done") return "pass" as const;
   if (status === "failed") return "fault" as const;
-  // Queued waits for a permit: the live colour would claim a provider is spending.
+  // Queued waits for a permit: the live colour would claim it is converting.
   if (status === "queued") return "queued" as const;
   return "live" as const;
 }
@@ -148,12 +147,7 @@ export function RunView({
             />
             {/* Closer to the control above it than that is to Run (rule 4). */}
             <Text size="xs" tone="faint" className="run-desc">
-              {runServiceDescription({
-                description: job.desc,
-                provider: job.service,
-                conversionRoute: settings.conversionRoute,
-                profile: settings.conversionProfile,
-              })}
+              {`${job.desc}, on this Mac`}
             </Text>
           </Stack>
           <Row gap={2} align="stretch" className="job-run">

@@ -42,7 +42,7 @@ export function ProjectTree({
   activeProjectPath: string | null;
   tree: ProjectTreeState;
   /// Matched onto files by `sourcePath`. Without them a failed conversion is
-  /// invisible, and the only visible remedy bills again.
+  /// invisible, and the only visible remedy runs it again.
   jobs: Job[];
   /// Null on a project root, which is a branch rather than a file.
   onSelect: (row: FileRow | null) => void;
@@ -84,7 +84,7 @@ export function ProjectTree({
     const job = latestJobFor(jobs, row.path);
     const Glyph = fileGlyph(row.ext, row.isDir);
     /// Empty holds the slot rather than fall through to Convert, which would
-    /// offer to bill for a file that already converted.
+    /// offer to convert a file that already converted.
     const kind = row.resultName === null ? "" : resultKindOf(row.resultName);
 
     return (

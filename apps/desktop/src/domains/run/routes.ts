@@ -1,31 +1,7 @@
-import { basename } from "@/app/format";
-import type {
-  ConversionProfile,
-  ConversionRoute,
-  JobId,
-  ScannedConversionFile,
-  SecretId,
-  SecretStatus,
-} from "@/app/types";
-
-/// No local Format variant exists for these, so they route to Datalab even if
-/// a service advertises them. Images are not here: Vision is macOS 26 and up.
-/// Must stay identical to `PERMANENT_DIRECT_FORMATS` in `lib.rs`.
-const PERMANENT_DIRECT_EXTENSIONS = new Set(["html", "htm"]);
-
-/// Every recording the audio engine can take. Read only while the service
-/// cannot answer. Must stay identical to `LOCAL_AUDIO_MEDIA_TYPES` in `lib.rs`.
-const LOCAL_AUDIO_MEDIA_TYPES = new Set([
-  "audio/wav",
-  "audio/mp4",
-  "video/mp4",
-  "video/quicktime",
-  "audio/mpeg",
-  "audio/flac",
-]);
+import type { ScannedConversionFile } from "@/app/types";
 
 export type ConversionCapabilities =
-  | { state: "idle" | "loading" }
+  | { state: "loading" }
   /// The host's own reason: nothing in Settings moves the service.
   | { state: "unavailable"; message?: string }
   | { state: "ready"; acceptingJobs: boolean; inputFormats: readonly string[] };
@@ -34,7 +10,7 @@ export type RouteBlockReason =
   | "capabilities_pending"
   | "backend_unavailable"
   | "backend_not_accepting"
-  | "local_only_requires_remote";
+  | "not_supported";
 
 export interface BlockedConversionFile {
   file: ScannedConversionFile;
@@ -42,35 +18,23 @@ export interface BlockedConversionFile {
 }
 
 export interface ConversionRoutePlan {
-  direct: ScannedConversionFile[];
   backend: ScannedConversionFile[];
   blocked: BlockedConversionFile[];
-  needsDatalabKey: boolean;
-  needsBackendToken: boolean;
 }
 
 interface PlanConversionRoutesOptions {
   files: readonly ScannedConversionFile[];
-  route: ConversionRoute;
-  profile: ConversionProfile;
   capabilities: ConversionCapabilities;
   skipAlreadyDone: boolean;
 }
 
+/// Every file goes to the local service or nowhere: nothing leaves the Mac.
 export function planConversionRoutes({
   files,
-  route,
-  profile,
   capabilities,
   skipAlreadyDone,
 }: PlanConversionRoutesOptions): ConversionRoutePlan {
-  const plan: ConversionRoutePlan = {
-    direct: [],
-    backend: [],
-    blocked: [],
-    needsDatalabKey: false,
-    needsBackendToken: false,
-  };
+  const plan: ConversionRoutePlan = { backend: [], blocked: [] };
   const supported =
     capabilities.state === "ready"
       ? new Set(capabilities.inputFormats.map(normalizeMediaType))
@@ -78,25 +42,6 @@ export function planConversionRoutes({
 
   for (const file of files) {
     if (skipAlreadyDone && file.reuse !== "pending") continue;
-
-    if (route === "direct") {
-      plan.direct.push(file);
-      continue;
-    }
-
-    // A recording only Rev.ai takes cannot wait on a service that is down.
-    // `plan_backend_conversion_files` applies the same rule.
-    if (
-      isPermanentDirect(file.sourcePath) ||
-      (capabilities.state === "unavailable" && isRevAiOnly(file.mediaType))
-    ) {
-      if (profile === "local_only") {
-        plan.blocked.push({ file, reason: "local_only_requires_remote" });
-      } else {
-        plan.direct.push(file);
-      }
-      continue;
-    }
 
     if (capabilities.state === "unavailable") {
       plan.blocked.push({ file, reason: "backend_unavailable" });
@@ -108,11 +53,7 @@ export function planConversionRoutes({
     }
 
     if (!supported?.has(normalizeMediaType(file.mediaType))) {
-      if (profile === "local_only") {
-        plan.blocked.push({ file, reason: "local_only_requires_remote" });
-      } else {
-        plan.direct.push(file);
-      }
+      plan.blocked.push({ file, reason: "not_supported" });
       continue;
     }
 
@@ -123,41 +64,9 @@ export function planConversionRoutes({
     plan.backend.push(file);
   }
 
-  plan.needsDatalabKey = plan.direct.length > 0;
-  plan.needsBackendToken = plan.backend.length > 0;
   return plan;
-}
-
-/// The keys the plan in force actually spends. `needsDatalabKey` is the direct
-/// provider, which is Rev.ai for Transcribe: a run routed to the sidecar needs
-/// neither, and demanding one disables the button for local transcription.
-export function missingConversionCredentials(
-  jobType: JobId,
-  plan: Pick<ConversionRoutePlan, "needsDatalabKey" | "needsBackendToken">,
-  secrets: SecretStatus,
-): SecretId[] {
-  const direct: SecretId = jobType === "transcribe" ? "revai" : "datalab";
-  const missing: SecretId[] = [];
-  if (plan.needsDatalabKey && !secrets[direct]) missing.push(direct);
-  if (plan.needsBackendToken && !secrets.backend) missing.push("backend");
-  return missing;
 }
 
 function normalizeMediaType(mediaType: string): string {
   return mediaType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-}
-
-function isRevAiOnly(mediaType: string): boolean {
-  const media = normalizeMediaType(mediaType);
-  return (
-    (media.startsWith("audio/") || media.startsWith("video/")) &&
-    !LOCAL_AUDIO_MEDIA_TYPES.has(media)
-  );
-}
-
-function isPermanentDirect(sourcePath: string): boolean {
-  const fileName = basename(sourcePath);
-  const dot = fileName.lastIndexOf(".");
-  if (dot < 0) return false;
-  return PERMANENT_DIRECT_EXTENSIONS.has(fileName.slice(dot + 1).toLowerCase());
 }

@@ -325,10 +325,6 @@
     padding: var(--s4);
     scrollbar-gutter: stable;
   }
-  /* Revealed fields belong to the choice above them: one step closer. */
-  .settings-nest {
-    padding-top: var(--s1);
-  }
   /* A native input's intrinsic min-width pushes Save and Remove off the row. */
   .settings-key {
     display: grid;
