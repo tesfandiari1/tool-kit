@@ -25,8 +25,6 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
-use crate::secrets;
-
 /// Sits beside the app binary in `Contents/MacOS` and in `target/debug` alike,
 /// because tauri-bundler strips the `-{target}` suffix when it copies.
 const CONVERTER_BIN: &str = "tool-kit-converter";
@@ -88,7 +86,7 @@ struct Inner {
     /// The write end of the child's stdin, parked here so a stop can close it.
     stdin: Option<ChildStdin>,
     /// One token per app launch, reused across restarts.
-    minted: bool,
+    token: Option<String>,
     supervising: bool,
     /// Set by the first `Running` of the launch. Recovery builds one row per
     /// ledger entry, so running it again after a restart doubles them.
@@ -197,17 +195,15 @@ impl BackendHost {
         self.lock().state = state;
     }
 
-    /// Mint the token once per launch and put it where both sides read it. The
-    /// keychain write goes first, through `secrets::set_key`, the only write
-    /// that drops the process memo of an earlier `None`.
+    /// Mint the token once per launch: the child reads the file, the host
+    /// keeps it in memory.
     fn ensure_token(&self, layout: &Layout) -> Result<(), String> {
-        if self.lock().minted {
+        if self.lock().token.is_some() {
             return Ok(());
         }
         let token = mint_token();
-        secrets::set_key("backend", &token)?;
         write_token_file(&layout.token_file, &token)?;
-        self.lock().minted = true;
+        self.lock().token = Some(token);
         Ok(())
     }
 }
@@ -310,10 +306,10 @@ pub(crate) fn backend_origin(app: &AppHandle) -> Result<String, String> {
 }
 
 /// The bearer token `ensure_token` minted for this launch.
-pub(crate) fn backend_token(_app: &AppHandle) -> Result<String, String> {
-    // Minted at the top of the launch, so an empty slot means "not yet".
-    secrets::get_key("backend")
-        .filter(|value| !value.trim().is_empty())
+pub(crate) fn backend_token(app: &AppHandle) -> Result<String, String> {
+    // Minted at the top of the launch, so none yet means "not yet".
+    host(app)
+        .and_then(|host| host.lock().token.clone())
         .ok_or_else(|| STARTING.to_string())
 }
 
@@ -1019,6 +1015,27 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(std::fs::read_to_string(&path).expect("token"), token);
+    }
+
+    /// The host sends the token the child reads, and a restart keeps it.
+    #[test]
+    fn the_host_keeps_the_token_it_wrote_for_the_child() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let layout = Layout {
+            token_file: dir.path().join("converter.token"),
+            ..layout()
+        };
+        let host = BackendHost::new();
+
+        host.ensure_token(&layout).expect("first mint");
+        let token = host.lock().token.clone().expect("token kept in memory");
+        host.ensure_token(&layout).expect("restart");
+
+        assert_eq!(host.lock().token.as_deref(), Some(token.as_str()));
+        assert_eq!(
+            std::fs::read_to_string(&layout.token_file).expect("token file"),
+            token
+        );
     }
 
     /// The unlink can lose the race, and a symlink back before the open must not

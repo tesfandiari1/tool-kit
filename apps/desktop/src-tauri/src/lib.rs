@@ -2,7 +2,6 @@ mod backend_host;
 mod conversion_service;
 mod history;
 mod jobs;
-mod secrets;
 mod settings;
 mod tree;
 mod workspace;
