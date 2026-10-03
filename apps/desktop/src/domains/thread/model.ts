@@ -2,10 +2,7 @@
 /// what stops the same result opening twice from two doors.
 export interface OpenDoc {
   id: string;
-  title: string;
-  subtitle: string | null;
   text: string;
-  revealPath: string | null;
   save: SaveState;
   /// Offered back on save, so an outside edit is refused, not clobbered.
   mtimeMs: number;

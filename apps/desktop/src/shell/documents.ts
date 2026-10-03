@@ -1,4 +1,3 @@
-import { basename } from "@/app/format";
 import type { OpenDoc } from "@/domains/thread/model";
 
 /// The open documents and the active one. Correct only together: an active id
@@ -27,7 +26,7 @@ export function removeDoc(docs: OpenDoc[], activeId: string | null, id: string):
   return { docs: rest, activeId: rest[Math.min(at, rest.length - 1)].id };
 }
 
-/// Follow a file the host moved: every field is the path taken at open time,
+/// Follow a file the host moved: `id` is the path taken at open time,
 /// so a stale tab goes on saving to the folder the file left.
 export function renameDoc(
   docs: OpenDoc[],
@@ -39,7 +38,7 @@ export function renameDoc(
   return {
     activeId: activeId === from ? to : activeId,
     docs: docs.map((d) =>
-      d.id === from ? { ...d, id: to, title: basename(to), subtitle: to, revealPath: to } : d,
+      d.id === from ? { ...d, id: to } : d,
     ),
   };
 }

@@ -1198,8 +1198,7 @@ export default function App() {
             });
           }}
           onReveal={(doc) => {
-            const path = doc.revealPath;
-            if (path) void call(() => commands.revealPath(path));
+            void call(() => commands.revealPath(doc.id));
           }}
         />
         )
