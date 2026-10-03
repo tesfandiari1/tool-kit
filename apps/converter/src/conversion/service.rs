@@ -43,7 +43,7 @@ use super::{
         now, servable_media_types, source_format_by_media_type, EngineAvailability,
         LocalEngineKind, ManifestEngine, ManifestRoute, ManifestSource,
     },
-    policy::{self, LocalResult, PolicyDecision, RouteKind},
+    policy::{self, ReasonCode},
     ArtifactKind, ArtifactRecord, ArtifactView, ConversionManifest, ConversionProfile, JobView,
     SourceMetadata,
 };
@@ -591,7 +591,7 @@ impl ConversionService {
                                 name: VISION_ENGINE_NAME.to_owned(),
                                 version: engine.version().to_owned(),
                             },
-                            route: RouteKind::LocalVision.as_str().to_owned(),
+                            route: LocalEngineKind::Vision.route_str().to_owned(),
                         });
                         Ok(converted)
                     }
@@ -615,77 +615,36 @@ impl ConversionService {
             None => conversion,
         };
 
-        // Everything below this line is the routing policy's call, not the
-        // engine's. The engine reports what it measured; `policy::decide` says
-        // whether that is publishable under this profile.
-        let route = if relabel.is_some() {
-            RouteKind::LocalVision
+        // The engine that wrote the Markdown names the reason code.
+        let engine_kind = if relabel.is_some() {
+            LocalEngineKind::Vision
         } else {
-            route_for(source_format.engine)
+            source_format.engine
         };
-        let (analysis, local_result, published_bytes) = match conversion {
+        match conversion {
             Ok(EngineOutcome::Converted {
                 analysis,
                 byte_length,
                 sha256,
             }) => {
-                let signals = analysis.quality;
-                (
+                self.finalize_success(
+                    job,
+                    paths,
                     analysis,
-                    LocalResult::Converted(signals),
-                    Some((byte_length, sha256)),
+                    engine_kind.reason(),
+                    (byte_length, sha256),
+                    relabel,
                 )
+                .await?;
             }
+            // The engine gave up, so any staged Markdown is discarded with the
+            // attempt.
             Ok(EngineOutcome::NeedsRemote {
                 analysis,
                 reason_code,
-            }) => (analysis, LocalResult::GaveUp(reason_code), None),
-            Ok(EngineOutcome::Rejected { rejection }) => {
-                self.finish_failure(
-                    job_id,
-                    attempt_id,
-                    FailureStage::ConvertingLocal,
-                    rejection.code,
-                    rejection.message,
-                    true,
-                )
-                .await?;
-                return Ok(());
-            }
-            Err(EngineFailure::Interrupted) => {
-                tracing::info!(
-                    %job_id,
-                    %attempt_id,
-                    %request_id,
-                    "conversion interrupted for shutdown; preserving recoverable state"
-                );
-                return Ok(());
-            }
-            Err(failure) => {
-                self.finish_failure(
-                    job_id,
-                    attempt_id,
-                    FailureStage::ConvertingLocal,
-                    failure.code(),
-                    failure.message(),
-                    true,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-
-        let decision = policy::decide(job.profile, route, local_result);
-        match (&decision, published_bytes) {
-            (PolicyDecision::Publish { .. }, Some(markdown)) => {
-                self.finalize_success(job, paths, analysis, decision, markdown, relabel)
-                    .await?;
-            }
-            // The policy refused to publish output the engine did produce, so
-            // the staged Markdown is discarded with the attempt.
-            (PolicyDecision::NeedsRemote { reason_code }, _) => {
-                let reason = reason_code.as_str().to_owned();
-                let analysis = local_analysis(&analysis, &decision);
+            }) => {
+                let reason = ReasonCode::Engine(reason_code).as_str().to_owned();
+                let analysis = local_analysis(&analysis, vec![reason.clone()], Vec::new());
                 self.repository
                     .finish_needs_remote(
                         job_id,
@@ -707,25 +666,32 @@ impl ConversionService {
                     "conversion attempt completed"
                 );
             }
-            // A `Publish` decision with no bytes cannot happen: only the
-            // `Converted` arm produces one, and it always carries them. Kept
-            // as a closed failure rather than a panic, and logged, because an
-            // impossible state that reaches production silently is worse than
-            // the branch. Deleting it would mean threading byte counts through
-            // `policy::decide`, which is pure on purpose.
-            (PolicyDecision::Publish { .. }, None) => {
-                tracing::error!(
-                    %job_id,
-                    %attempt_id,
-                    %request_id,
-                    "publish decision carried no staged bytes"
-                );
+            Ok(EngineOutcome::Rejected { rejection }) => {
                 self.finish_failure(
                     job_id,
                     attempt_id,
                     FailureStage::ConvertingLocal,
-                    EngineFailure::Protocol.code(),
-                    EngineFailure::Protocol.message(),
+                    rejection.code,
+                    rejection.message,
+                    true,
+                )
+                .await?;
+            }
+            Err(EngineFailure::Interrupted) => {
+                tracing::info!(
+                    %job_id,
+                    %attempt_id,
+                    %request_id,
+                    "conversion interrupted for shutdown; preserving recoverable state"
+                );
+            }
+            Err(failure) => {
+                self.finish_failure(
+                    job_id,
+                    attempt_id,
+                    FailureStage::ConvertingLocal,
+                    failure.code(),
+                    failure.message(),
                     true,
                 )
                 .await?;
@@ -770,7 +736,7 @@ impl ConversionService {
         job: StoredConversion,
         paths: AttemptPaths,
         engine_analysis: EngineAnalysis,
-        decision: PolicyDecision,
+        reason: ReasonCode,
         // The staged Markdown's size and digest, as the engine measured them.
         markdown: (u64, String),
         // The engine that wrote the Markdown, when it is not the one claimed.
@@ -780,7 +746,9 @@ impl ConversionService {
         let job_id = job.id;
         let attempt_id = job.active_attempt.id;
         let request_id = job.origin_request_id.clone();
-        let analysis = local_analysis(&engine_analysis, &decision);
+        let reason_codes = vec![reason.as_str().to_owned()];
+        let warnings = policy::warnings(engine_analysis.quality);
+        let analysis = local_analysis(&engine_analysis, reason_codes.clone(), warnings.clone());
         let finalizing = self
             .repository
             .mark_finalizing(job_id, attempt_id, analysis, relabel.as_ref())
@@ -822,10 +790,10 @@ impl ConversionService {
             },
             route: ManifestRoute {
                 kind: route,
-                reason_codes: decision.reason_strings(),
+                reason_codes,
             },
             document: engine_analysis.diagnostics,
-            warnings: decision.warning_strings(),
+            warnings,
             output: ManifestSource {
                 media_type: MARKDOWN_MEDIA_TYPE.to_owned(),
                 byte_length: markdown_bytes,
@@ -1309,7 +1277,7 @@ fn local_start(
     };
     Some(LocalStart {
         engine,
-        route: route_for(format.engine).as_str().to_owned(),
+        route: format.engine.route_str().to_owned(),
     })
 }
 
@@ -1321,23 +1289,16 @@ fn scanned_page_count(analysis: &EngineAnalysis, spliced: bool) -> Option<u32> {
         .then_some(inspection.page_count)
 }
 
-/// The one place the engine-to-route rule lives. Both the manifest and the
-/// stored attempt row read it, so they cannot label the same job differently.
-fn route_for(engine: LocalEngineKind) -> RouteKind {
-    match engine {
-        LocalEngineKind::Pdf => RouteKind::LocalPdf,
-        LocalEngineKind::AnyDoc => RouteKind::LocalAnyDoc,
-        LocalEngineKind::Vision => RouteKind::LocalVision,
-        LocalEngineKind::Audio => RouteKind::LocalAudio,
-    }
-}
-
-fn local_analysis(analysis: &EngineAnalysis, decision: &PolicyDecision) -> LocalAnalysis {
+fn local_analysis(
+    analysis: &EngineAnalysis,
+    reason_codes: Vec<String>,
+    warnings: Vec<String>,
+) -> LocalAnalysis {
     LocalAnalysis {
         classification: analysis.classification,
         inspection: analysis.diagnostics.clone(),
-        reason_codes: decision.reason_strings(),
-        warnings: decision.warning_strings(),
+        reason_codes,
+        warnings,
     }
 }
 
