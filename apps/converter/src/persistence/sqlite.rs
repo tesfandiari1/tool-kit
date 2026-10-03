@@ -11,6 +11,7 @@ use sqlx::{
 };
 use thiserror::Error;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use tool_kit_worker_protocol::is_lowercase_sha256;
 use uuid::Uuid;
 
 use super::model::{
@@ -1475,12 +1476,7 @@ fn validate_new_conversion(input: &NewConversion) -> Result<(), RepositoryError>
 }
 
 fn validate_sha256(value: &str, message: &'static str) -> Result<(), RepositoryError> {
-    if value.len() != 64
-        || !value
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-    {
+    if !is_lowercase_sha256(value) {
         return Err(RepositoryError::InvalidInput(message));
     }
     Ok(())

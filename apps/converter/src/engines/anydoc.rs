@@ -23,7 +23,7 @@ use tool_kit_worker_protocol::anydoc::{
     ANYDOC_PICTURES_DIRECTORY, ANYDOC_REPORT_FILE,
 };
 
-use super::child::{self, is_lowercase_sha256, wait_for_child};
+use super::child::{self, wait_for_child};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
@@ -81,7 +81,7 @@ impl AnyDocEngine {
             byte_length,
             sha256,
         } = source;
-        if byte_length == 0 || !is_lowercase_sha256(&sha256) {
+        if byte_length == 0 {
             return Err(EngineFailure::Protocol);
         }
 

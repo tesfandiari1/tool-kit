@@ -15,9 +15,7 @@ use std::{
 
 use tokio::{fs, process::Command, sync::watch};
 
-use super::child::{
-    self, is_dotted_number, is_lowercase_sha256, wait_for_child, WorkerStartupError,
-};
+use super::child::{self, is_dotted_number, wait_for_child, WorkerStartupError};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
@@ -34,7 +32,6 @@ use crate::{
 };
 
 const WORKER_LABEL: &str = "Vision";
-const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 /// One runner serves every engine, so one scan may hold it 10 minutes at most.
 const MAX_SCAN_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -118,7 +115,7 @@ impl VisionEngine {
             byte_length,
             sha256,
         } = source;
-        if byte_length == 0 || !is_lowercase_sha256(&sha256) {
+        if byte_length == 0 {
             return Err(EngineFailure::Protocol);
         }
         let source = file.into_std().await;
@@ -228,20 +225,14 @@ impl VisionEngine {
 /// is a fixed prefix plus that version, so the check is prefix equality plus a
 /// dotted-number tail rather than the byte equality a pinned engine allows.
 fn verify_worker_identity(path: &Path) -> Result<String, WorkerStartupError> {
-    let output = child::worker_identity_line(path, WORKER_LABEL, WORKER_IDENTITY_TIMEOUT)?;
-    let mismatch = || WorkerStartupError::WorkerIdentityMismatch {
-        worker: WORKER_LABEL,
-        path: path.to_owned(),
-    };
-    let line = std::str::from_utf8(&output).map_err(|_| mismatch())?;
-    let version = line
-        .strip_prefix(VISION_WORKER_IDENTITY_PREFIX)
-        .and_then(|tail| tail.strip_suffix('\n'))
-        .ok_or_else(mismatch)?;
-    if !is_dotted_number(version) {
-        return Err(mismatch());
+    let version = child::identity_version(path, WORKER_LABEL, VISION_WORKER_IDENTITY_PREFIX)?;
+    if !is_dotted_number(&version) {
+        return Err(WorkerStartupError::WorkerIdentityMismatch {
+            worker: WORKER_LABEL,
+            path: path.to_owned(),
+        });
     }
-    Ok(version.to_owned())
+    Ok(version)
 }
 
 fn analysis(

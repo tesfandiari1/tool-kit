@@ -22,9 +22,7 @@ use tokio::{
     sync::watch,
 };
 
-use super::child::{
-    self, is_dotted_number, is_lowercase_sha256, wait_for_child, WorkerStartupError,
-};
+use super::child::{self, is_dotted_number, wait_for_child, WorkerStartupError};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
@@ -40,7 +38,6 @@ use crate::{
 };
 
 const WORKER_LABEL: &str = "Audio";
-const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a failed worker's stderr gets to reach EOF after it exits.
 const STDERR_DRAIN: Duration = Duration::from_secs(1);
 /// The worker runs both stages on every job, so the report says so on a
@@ -138,7 +135,7 @@ impl AudioEngine {
             byte_length,
             sha256,
         } = source;
-        if byte_length == 0 || !is_lowercase_sha256(&sha256) {
+        if byte_length == 0 {
             return Err(EngineFailure::Protocol);
         }
         let source = file.into_std().await;
@@ -274,21 +271,17 @@ async fn last_line(stderr: impl AsyncRead + Unpin) -> Option<String> {
 /// `+fluidaudio-`, and the pinned package version. Both halves move with the
 /// host and the build, so the check is a shape check, not byte equality.
 fn verify_worker_identity(path: &Path) -> Result<String, WorkerStartupError> {
-    let output = child::worker_identity_line(path, WORKER_LABEL, WORKER_IDENTITY_TIMEOUT)?;
-    let mismatch = || WorkerStartupError::WorkerIdentityMismatch {
-        worker: WORKER_LABEL,
-        path: path.to_owned(),
-    };
-    let line = std::str::from_utf8(&output).map_err(|_| mismatch())?;
-    let version = line
-        .strip_prefix(AUDIO_WORKER_IDENTITY_PREFIX)
-        .and_then(|tail| tail.strip_suffix('\n'))
-        .ok_or_else(mismatch)?;
-    let (os, fluid_audio) = version.split_once("+fluidaudio-").ok_or_else(mismatch)?;
-    if !is_dotted_number(os) || !is_dotted_number(fluid_audio) {
-        return Err(mismatch());
+    let version = child::identity_version(path, WORKER_LABEL, AUDIO_WORKER_IDENTITY_PREFIX)?;
+    let valid = version
+        .split_once("+fluidaudio-")
+        .is_some_and(|(os, fluid_audio)| is_dotted_number(os) && is_dotted_number(fluid_audio));
+    if !valid {
+        return Err(WorkerStartupError::WorkerIdentityMismatch {
+            worker: WORKER_LABEL,
+            path: path.to_owned(),
+        });
     }
-    Ok(version.to_owned())
+    Ok(version)
 }
 
 fn analysis(elapsed: Duration, detail: AudioDetail) -> Result<EngineAnalysis, EngineFailure> {

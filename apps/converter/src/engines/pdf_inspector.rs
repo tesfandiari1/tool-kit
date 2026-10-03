@@ -8,7 +8,7 @@ use std::{
 use thiserror::Error;
 use tokio::{fs, process::Command, sync::watch};
 
-use super::child::{self, is_lowercase_sha256, wait_for_child, WorkerStartupError};
+use super::child::{self, wait_for_child, WorkerStartupError};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
@@ -87,7 +87,7 @@ impl PdfInspectorEngine {
             byte_length,
             sha256,
         } = source;
-        if byte_length == 0 || !is_lowercase_sha256(&sha256) {
+        if byte_length == 0 {
             return Err(EngineFailure::Protocol);
         }
         let source = file.into_std().await;
@@ -556,7 +556,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn conversion_rejects_noncanonical_source_digest_before_spawn() {
+    async fn conversion_rejects_an_empty_source_before_spawn() {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("worker");
         write_worker(
@@ -565,7 +565,7 @@ mod tests {
         );
         let paths = paths(directory.path());
         let mut source = source(&paths.source, b"source").await;
-        source.sha256 = "A".repeat(64);
+        source.byte_length = 0;
 
         let engine =
             PdfInspectorEngine::initialize(worker, None, Duration::from_secs(2), 1024, 1).unwrap();
