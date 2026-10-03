@@ -12,10 +12,15 @@ Tool-Kit is a Tauri 2 + React/TypeScript **macOS-only** desktop app. Drop files
 and folders, hit Run: the job comes from the drop, the output folder defaults
 beside the input.
 
-| Job | Service | In → Out |
+| Job | Engine | In → Out |
 |---|---|---|
-| Convert | Datalab (`/api/v1/convert`, or a pinned pipeline) | PDF / DOCX / images / … → markdown |
-| Transcribe | Local worker (SpeechAnalyzer + FluidAudio, Neural Engine). Rev.ai on the Direct route, and on the backend route for a recording the local worker cannot take (`ogg`, `aac`, `mkv`, …) | audio / video → transcript (`.md` locally, `.txt` from Rev.ai) |
+| Convert | Local converter: pdf-inspector, AnyDoc, Vision OCR | PDF / DOCX / PPTX / XLSX / images / … → markdown |
+| Transcribe | Local worker (SpeechAnalyzer + FluidAudio, Neural Engine) | wav, m4a, mp3, flac, mp4, mov → `.md` transcript |
+
+**Local only.** Tool-Kit converts sensitive documents, so no file content
+leaves the Mac. Datalab and Rev.ai were removed on 2026-10-03. Model downloads
+are the only network use. A format no local engine takes is refused, never
+sent out.
 
 The bundle builds `app` + `dmg` only, and the four spawned sidecars plus the
 loopback converter rule out the Mac App Store.
@@ -106,21 +111,6 @@ All under `~/Library/Application Support/dev.esfandiari.toolkit/`.
   and the pages that need OCR.
 - `pnpm trace:failures [N]` joins the two databases for each failed run.
 
-### Live API smoke tests
-
-`apps/desktop/src-tauri/src/live_smoke.rs` hits the real endpoints. They are
-`#[ignore]`d, spend credits and read keys from the environment. Samples land in
-`/tmp/toolkit-test/` (`TEST_PDF` / `TEST_AUDIO` override).
-
-```bash
-# both; keys may come from .env.local: note REV_AI_API_KEY must be exported as REVAI_API_KEY
-DATALAB_API_KEY=… REVAI_API_KEY=… \
-  cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib live_smoke -- --ignored --nocapture
-
-# a single test
-… cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib live_smoke::datalab_convert_live -- --ignored --nocapture
-```
-
 ### Release / signing / notarization (macOS)
 
 ```bash
@@ -201,8 +191,7 @@ Rust crate in `src-tauri/`), `apps/converter/` is the conversion service,
 `crates/worker-protocol/` is shared by both, `workers/vision/` and
 `workers/audio/` are the macOS Swift workers.
 
-**One queue, pluggable providers**, because the services share one shape. The
-UI reduces to inputs → output folder → `JobType` → Run.
+**One queue, one local service.** The to inputs → output folder → `JobType` → Run.
 
 **The backend does everything.** Network calls, secrets and file IO are in
 Rust, and the webview holds no business logic.
@@ -225,7 +214,8 @@ stops it on exit. Manual needs `backend-override.json` beside `settings.json`,
 which only `pnpm backend:docker` writes (`pnpm backend:sidecar`, `pnpm
 backend:where`). Read origin and token through `backend_host::backend_origin`
 and `backend_host::backend_token` alone, and never fall back to Sidecar on a
-malformed override.
+malformed override. `parse_override` refuses any host but `localhost`,
+`127.0.0.1` or `[::1]`, because a Manual origin receives every upload.
 
 **The sidecar advertises 30 media types against Docker's 18**, because
 `workers/vision/` and `workers/audio/` are Swift and cannot ship in the Linux
@@ -233,15 +223,8 @@ image, so images and recordings convert locally in Sidecar mode only.
 
 ### Rust (`apps/desktop/src-tauri/src/`)
 
-- **`providers.rs`**: the integration layer and main extension point, both
-  services `submit → poll → fetch`. `send_retrying()` retries **only failures
-  that prove the server never started work** (429/502/503/504/529, connect
-  errors), only `SubmitError::Refused` may clear a billing claim, and
-  `terminal_poll_error()` runs before any poll parse so a 401/404 fails the job
-  rather than reading as pending.
-  - **`Err` retries, `PollResult::Failed` kills the job**, and the result fetch
-    treats 5xx and 429 as transient like the poll: that work is paid for.
-- **`jobs.rs`**: `JobType` maps a job to its provider and extensions.
+- **`jobs.rs`**: `JobType::accepts` lists the extensions the sidecar converts,
+  and a test pins it to the converter's `SOURCE_FORMATS`.
   `JobManager` is the queue, capped at **4 concurrent jobs**, emitting
   `job-updated` on every change, snapshotting Settings into `run_config` at run
   start, and writing with `create_new` so a colliding write fails the job. The
@@ -256,13 +239,12 @@ image, so images and recordings convert locally in Sidecar mode only.
   exists, and the mtime is unchanged.
   - **Never do the same work twice**, and **ask per file, never per route**. A
     result in the output folder means nothing happens, one elsewhere is copied,
-    the rest go to the provider. Backend rows file under `backend:markdown` or
-    `backend_fallback:{format}`, which a Convert lookup never matches. A
-    Transcribe lookup also matches `backend:markdown`, so a transcript counts
-    as done on either route and a route switch never bills Rev.ai again.
+    the rest go to the service. A Transcribe lookup matches `backend:markdown`
+    and the old Rev.ai `text` rows, so an old `.txt` transcript still counts as
+    done.
 - **`secrets.rs`**: keys in the **data protection keychain**, service
-  `dev.esfandiari.toolkit`, group `92MA44797J.dev.esfandiari.toolkit`, accounts
-  `datalab`/`revai`/`backend`. They never reach the webview or disk, and `set_key`
+  `dev.esfandiari.toolkit`, group `92MA44797J.dev.esfandiari.toolkit`, account
+  `backend` (the sidecar token). They never reach the webview or disk, and `set_key`
   alone drops the memo.
 - **`settings.rs`**: non-secret config as JSON. **`#[serde(default)]` is
   load-bearing**: without it a new field fails every existing parse, `load()`
@@ -297,13 +279,9 @@ image, so images and recordings convert locally in Sidecar mode only.
     answers a refusal as a verdict (`kind`, `reason`, `message`, and `path`
     for a copy).
 
-### Adding a provider / job
+### Adding an engine
 
-Add a `JobType` variant and a `ProviderKind`, implement submit/poll in
-`providers.rs`, and extend `JobType::accepts` plus the `Scan` struct in
-`lib.rs`. The UI, queue, events and output handling are reused unchanged.
-
-A local engine goes into the converter instead: a `crates/worker-protocol`
+A local engine goes into the converter: a `crates/worker-protocol`
 module, a `workers/` binary, an `engines/*.rs` on the Vision shape, and a
 `SOURCE_FORMATS` row per container. `docs/AUDIO_EPIC.md` records the audio one
 end to end.
@@ -476,8 +454,11 @@ self-hosted: two OFL families plus DaVinci, licensed.
   mark, never from `icon.png`.
 - **The global shortcut is ⌥⌘V**, not ⌘⇧V: that one is macOS "Paste and Match
   Style", and registering it hijacks that chord system-wide.
-- **Datalab pipeline mode**: a `pl_…` id in Settings switches Convert to
-  `/api/v1/pipelines/{id}/run`, then polls and fetches the last step.
+- **AnyDoc runs in `tool-kit-pdf-worker --anydoc`, never in the converter.**
+  The macOS 27 allocator keeps freed pages, and one 1.3 MB DOCX left the
+  long-lived converter at 258 MiB. The worker exits and returns all of it. Bump
+  `WORKER_PROTOCOL_VERSION` whenever the worker's arguments change, or a stale
+  worker passes startup and fails every DOCX.
 - **Pinned toolchain.** TypeScript stays on 6.x (7.0 has no compiler API and
   `typescript-eslint` crashes). `tsconfig.json` must not set `baseUrl`.
   `security-framework` needs the non-default `OSX_10_15` feature, which gates

@@ -4,17 +4,17 @@ Where the product stands, what is broken, and what someone still intends to
 build. CLAUDE.md owns the architecture contract and is not repeated here.
 Closed work is in [`archive/`](archive/README.md).
 
-**Last updated:** 2026-10-02
+**Last updated:** 2026-10-03
 
 ## Current state
 
 | Item | Value |
 | --- | --- |
-| Branch tip | `main`, not pushed. Sprint 1, local PDF OCR, image descriptions, the 2026-10-01 upgrades, the 2026-10-02 code-review fixes (`44867b9` to `aaea300`) the 2026-10-02 PDF splice (`87d482b`) and the 4 GiB audio ceiling (`41eddf6`) are committed |
+| Branch tip | `main`, not pushed. Sprint 1, local PDF OCR, image descriptions, the 2026-10-01 upgrades, the 2026-10-02 code-review fixes (`44867b9` to `aaea300`) the 2026-10-02 PDF splice (`87d482b`), the 4 GiB audio ceiling (`41eddf6`) and no-copy drops (`b1f36be`) are committed |
 | OpenAPI contract | 0.5.0 (`contract/http/openapi.yaml`). The converter crate moves with it |
 | Desktop version | 1.0.0 (`package.json`, `Cargo.toml`, `tauri.conf.json`) |
-| Installed bundle | Stale: `/Applications/Tool-Kit.app` was built 2026-10-01 23:32. A signed build of `41eddf6` sits in `apps/desktop/src-tauri/target/release/bundle/macos/` and passes `verify-release.sh` apart from the parked Keychain section. Copying it into `/Applications` is a manual step |
-| Backend | M0 to M4 complete. M5 unbuilt. M7 cancelled |
+| Installed bundle | Stale: `/Applications/Tool-Kit.app` is a signed build of `d9a0cb5`, installed 2026-10-03. It predates no-copy drops, the AnyDoc worker and the local-only removal |
+| Backend | M0 to M4 complete. M5 and M7 cancelled |
 | Desktop | M6 landed. Gate open on CVR-067 and CVR-081 |
 | Service | Sidecar inside the `.app`, loopback only. Docker needs a `backend-override.json` that only `pnpm backend:docker` writes |
 | Container smoke | `20260819T161851Z`, image `sha256:4a0cbdd0…`. It predates the worker-protocol refactor in `d4f83eb`, so re-run it before closing converter work |
@@ -24,10 +24,20 @@ section by design. CLAUDE.md says what restores it.
 
 Behaviour that is a decision, not an accident:
 
-- Convert and Transcribe default to the sidecar route. Direct is Datalab for
-  Convert and Rev.ai for Transcribe.
-- `local_only` refuses anything that needs Datalab. `standard` falls back and
-  spends credits.
+- Local only (2026-10-03). Tool-Kit converts sensitive documents, so no file
+  content leaves the Mac. Datalab, Rev.ai, the Direct route and the Standard
+  profile are gone. The desktop always sends `local_only`, and a Manual backend
+  must be loopback. A format no local engine takes is refused. Users lost HTML
+  conversion and the recordings AVFoundation cannot read (ogg, aac, mkv, webm,
+  avi, …).
+- AnyDoc parses in `tool-kit-pdf-worker --anydoc`, not in the converter
+  (2026-10-03). On a 1.3 MB DOCX the converter's footprint went from a 576 MiB
+  peak and 258 MiB afterwards to 7.7 MiB both. Output is byte-identical on 39
+  of 40 cases. The worker protocol is now 3.
+- A drop is never copied. The source stays where it is and only its result
+  lands in the active project, with a dropped folder's shape kept. The
+  `moveDroppedFiles` setting (off by default) renames the drop into the project
+  instead.
 - A backend job persists its run id, idempotency key, origin, source mtime and
   profile before submission. Restart recovery replays against the recorded
   origin.
@@ -35,6 +45,10 @@ Behaviour that is a decision, not an accident:
 ## Known issues
 
 - The tray left-click fix in Tauri 2.12 is unverified by hand on macOS 27.
+- No-copy drops (`b1f36be`) are unverified by hand: drop a folder with the move
+  setting off and on, and check where sources and results land. Moving from
+  another disk is refused, not supported. Copies left by older imports stay in
+  the library until someone removes them.
 - The PDF splice (`87d482b`) records a mixed PDF's classification as
   `image_based`, because the Vision engine reports every conversion that way.
 - A crash between migration 0006's `COMMIT` and sqlx's bookkeeping row makes
@@ -79,27 +93,26 @@ One low item left from the verify pass over the 2026-09-12 fix:
   Sprint 2 (Parakeet tier through a Settings model list) and the next epic
   (front matter and structure for AI readers) are in
   [`AUDIO_EPIC.md`](AUDIO_EPIC.md).
-- **M5, Datalab fallback inside the converter.** No code since August. Port the
-  retry and transient-versus-terminal rules from
-  `apps/desktop/src-tauri/src/providers.rs` verbatim.
-- **Provenance-aware history reuse.** `jobs::output_format_for` yields a plain
-  Datalab format, so a Convert result filed under `backend:markdown` never
-  matches and every backend-converted document re-runs. It costs time, never
-  correctness. Transcripts already match on either route. On 2026-10-02
+- **Convert result reuse.** A Convert lookup never matches its own
+  `backend:markdown` rows, so every converted document re-runs locally. The
+  scan's `alreadyHereConvert` and `reusableConvert` counts are always 0 until
+  this lands. It costs time, never
+  correctness. Transcripts already match. On 2026-10-02
   `history.db` held 96 converted sources and none ran twice.
-- **The M6 gate.** CVR-067 waits on M5. CVR-081 wants direct-path baselines over
-  about ten files against the backend path before any cutover.
+- **The M6 gate.** CVR-067 waited on M5, now cancelled. Close it with the
+  local-only decision.
 
 Deferred, nobody scheduled:
 
-- **M8, evaluation and cutover.** `conversion_route` already defaults to
-  `Backend`. A rollback exercise and release evidence remain.
+- **M8, evaluation and cutover.** Moot: there is no other route to cut over
+  from.
 - **CVR-043, routing calibration.** Needs a signal that separates a blank page
   from a scan. `confidence` is not one.
 - **CVR-080, freeze the labeled corpus.** Once the M4 fixtures stop changing.
 - **CVR-039, skip the source re-read and hash at parse.** Measure first.
 
-Cancelled: **M7, remote deployment over a tailnet**, 2026-08-19, unstarted.
+Cancelled: **M5, Datalab fallback in the converter**, 2026-10-03, by the
+local-only decision. **M7, remote deployment over a tailnet**, 2026-08-19, unstarted.
 [`north-star.md`](north-star.md) made the product one local workspace on one
 Mac. The plan is in [`archive/M7_EXECUTION.md`](archive/M7_EXECUTION.md).
 
