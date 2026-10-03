@@ -162,10 +162,6 @@ pub fn get_key(name: &str) -> Option<String> {
     memoized(name, || read(name))
 }
 
-pub fn has_key(name: &str) -> bool {
-    get_key(name).map(|v| !v.is_empty()).unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

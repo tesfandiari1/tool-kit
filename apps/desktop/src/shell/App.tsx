@@ -12,7 +12,6 @@ import type {
   Job,
   ProjectSummary,
   Scan,
-  SecretStatus,
   Settings,
   View,
   WorkspaceInfo,
@@ -88,9 +87,6 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   /// The catch-all's folder. Null until `ensure_workspace` answers.
   const [catchAllPath, setCatchAllPath] = useState<string | null>(null);
-  const [secrets, setSecrets] = useState<SecretStatus>({ backend: false });
-  /// Starts true: a backend token field shown by mistake breaks the session.
-  const [appOwnsBackend, setAppOwnsBackend] = useState(true);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [scanResult, setScanResult] = useState<{ key: string; value: Scan }>({
     key: "",
@@ -195,20 +191,13 @@ export default function App() {
 
   useEffect(() => {
     void (async () => {
-      const [s, k, j, owns] = await Promise.all([
-        commands.getSettings(),
-        commands.secretStatus(),
-        commands.listJobs(),
-        commands.appOwnsBackend(),
-      ]);
+      const [s, j] = await Promise.all([commands.getSettings(), commands.listJobs()]);
       // A key the stored settings.json predates arrives `undefined`, not
       // `null`, so an absent workspacePath would read as already set up.
       const merged = { ...DEFAULT_SETTINGS, ...s };
       settingsRef.current = merged;
       setSettings(merged);
-      setSecrets(k);
       setJobs(j);
-      setAppOwnsBackend(owns);
       setLoaded(true);
     })();
   }, []);
@@ -290,21 +279,16 @@ export default function App() {
   }, [scanKey, settings.inputs]);
 
   useEffect(() => {
-    const probe = { cancelled: false, ready: false };
+    const probe = { cancelled: false };
     const ask = async () => {
       try {
         const { data } = await conversionClient.GET("/api/v1/capabilities");
         if (!data) throw new Error("Conversion service capabilities were unavailable");
-        // The sidecar mints its token after the mount read, so the first
-        // answer re-reads the keys.
-        const keys = probe.ready ? null : await commands.secretStatus().catch(() => null);
         if (probe.cancelled) return true;
-        probe.ready = true;
         setCapabilities({
           state: "ready",
           acceptingJobs: data.data.conversion.acceptingJobs,
         });
-        if (keys) setSecrets(keys);
         return true;
       } catch (e) {
         // The run hint has nothing to say but the host's own reason.
@@ -812,7 +796,6 @@ export default function App() {
       : capabilities.acceptingJobs
         ? null
         : "not_accepting";
-  const missingToken = toRun > 0 && !secrets.backend;
   /// For naming and revealing the destination, never for deciding it. Keep it
   /// in step with `output_dir_for`, which settles that.
   const destination =
@@ -824,7 +807,7 @@ export default function App() {
       : null;
 
   const routeBlocked = serviceBlocked !== null && toRun > 0;
-  const preflightReady = scanCurrent && !routeBlocked && !missingToken;
+  const preflightReady = scanCurrent && !routeBlocked;
   const canRun = canStartRun({
     hasInputs: settings.inputs.length > 0,
     hasOutput: destination !== null,
@@ -960,9 +943,6 @@ export default function App() {
     } else {
       hint = `Conversion service is not accepting jobs for ${count} file${count > 1 ? "s" : ""} right now`;
     }
-  } else if (missingToken) {
-    hint = "Add your backend token in Settings";
-    hintOpensSettings = true;
   } else if (toRun === 0 && copying === 0 && skipping > 0) {
     hint = `All ${skipping} already have a result beside them — turn off “Skip files already done” in Settings to run them again`;
     hintOpensSettings = true;
@@ -983,10 +963,7 @@ export default function App() {
   const settingsPanel = (
     <SettingsPanel
       settings={settings}
-      secrets={secrets}
-      appOwnsBackend={appOwnsBackend}
       onPersist={persist}
-      onSecrets={setSecrets}
       onToast={showToast}
     />
   );

@@ -1,16 +1,6 @@
-import { useId, useState } from "react";
-import {
-  Badge,
-  Button,
-  Field,
-  Input,
-  Meta,
-  Segmented,
-  Stack,
-  Switch,
-} from "@ui";
-import { commands } from "@/app/commands";
-import { type SecretId, type SecretStatus, type Settings } from "@/app/types";
+import { useState } from "react";
+import { Input, Meta, Segmented, Stack, Switch } from "@ui";
+import { type Settings } from "@/app/types";
 
 /// Session state: reopening on last week's tab is a worse default.
 type Group = "conversion" | "runs";
@@ -24,35 +14,14 @@ const GROUPS: { value: Group; label: string }[] = [
 /// region cannot resolve a height inside a sheet body that already scrolls.
 export function SettingsPanel({
   settings,
-  secrets,
-  appOwnsBackend,
   onPersist,
-  onSecrets,
   onToast,
 }: {
   settings: Settings;
-  secrets: SecretStatus;
-  /// The app mints the service's token per launch, and one typed here would
-  /// 401 every conversion until the next one. The field is not offered.
-  appOwnsBackend: boolean;
   onPersist: (patch: Partial<Settings>) => void;
-  onSecrets: (s: SecretStatus) => void;
   onToast: (msg: string) => void;
 }) {
   const [group, setGroup] = useState<Group>("conversion");
-
-  /// Reports whether the write landed, so a refused key stays in the field.
-  const saveKey = async (provider: SecretId, value: string) => {
-    try {
-      await commands.setSecret(provider, value);
-      onSecrets(await commands.secretStatus());
-      onToast(value ? "Key saved" : "Key cleared");
-      return true;
-    } catch (e) {
-      onToast(String(e));
-      return false;
-    }
-  };
 
   return (
     <div className="settings">
@@ -91,14 +60,6 @@ export function SettingsPanel({
                 onPersist({ speakerCount });
               }}
             />
-            {!appOwnsBackend && (
-              <KeyField
-                label="Backend token"
-                hint="Bearer token"
-                saved={secrets.backend}
-                onSave={(v) => saveKey("backend", v)}
-              />
-            )}
           </Stack>
         )}
 
@@ -252,74 +213,5 @@ function SpeakerCountField({
         if (e.key === "Enter") commit(e.currentTarget.validity.badInput);
       }}
     />
-  );
-}
-
-function KeyField({
-  label,
-  hint,
-  saved,
-  onSave,
-}: {
-  label: string;
-  hint: string;
-  saved: boolean;
-  onSave: (value: string) => Promise<boolean>;
-}) {
-  const [typed, setTyped] = useState(false);
-  const inputId = useId();
-
-  const commit = () => {
-    const input = document.getElementById(inputId);
-    if (!(input instanceof HTMLInputElement)) return;
-    // Clear only once the write lands, or a rejected save loses the key.
-    void onSave(input.value.trim()).then((ok) => {
-      if (!ok) return;
-      input.value = "";
-      setTyped(false);
-    });
-  };
-
-  return (
-    <Field
-      htmlFor={inputId}
-      label={
-        <>
-          {label} {saved && <Badge tone="success">saved</Badge>}
-        </>
-      }
-    >
-      <div className="settings-key">
-        <Input
-          id={inputId}
-          type="password"
-          placeholder={saved ? "••••••••••••  stored in Keychain" : hint}
-          onChange={(e) => {
-            setTyped(e.target.value.trim().length > 0);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && typed) commit();
-          }}
-        />
-        <div className="settings-key__actions">
-          {/* Saving nothing deletes the stored key, and the masked
-              placeholder makes that look like a no-op. */}
-          <Button disabled={!typed} onClick={commit}>
-            Save
-          </Button>
-          {saved && !typed && (
-            <Button
-              variant="ghost"
-              onClick={() => {
-                void onSave("");
-              }}
-              title={`Remove the ${label} key`}
-            >
-              Remove
-            </Button>
-          )}
-        </div>
-      </div>
-    </Field>
   );
 }

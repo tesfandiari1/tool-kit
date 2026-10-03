@@ -109,7 +109,7 @@ for sidecar in tool-kit-converter tool-kit-pdf-worker tool-kit-vision-worker too
   BIN="${APP}/Contents/MacOS/${sidecar}"
   [ -f "$BIN" ] || fail "Contents/MacOS/${sidecar} is missing. The app spawns the
      conversion service by name beside its own executable, so this bundle has no
-     local backend at all: every Convert job fails on any machine without Docker.
+     local backend at all: every Convert job fails.
      Run pnpm sidecars, then build again."
   [ -x "$BIN" ] || fail "Contents/MacOS/${sidecar} is not executable, so the spawn
      dies with permission denied and the local backend never binds a port"

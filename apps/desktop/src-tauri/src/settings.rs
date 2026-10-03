@@ -122,9 +122,8 @@ pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
 mod tests {
     use super::Settings;
 
-    /// `backend_url` is gone: `backend_host::Deployment` carries the Manual
-    /// origin. Ignored, not rejected, because `load()` resets on a parse
-    /// failure and every install that used it still has the key.
+    /// `backend_url` is gone. Ignored, not rejected, because `load()` resets on
+    /// a parse failure and every install that used it still has the key.
     #[test]
     fn a_settings_file_naming_the_removed_backend_url_still_loads() {
         let settings: Settings = serde_json::from_str(

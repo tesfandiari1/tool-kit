@@ -859,9 +859,6 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
     let Some(backend) = job.backend else {
         return;
     };
-    let Ok(deployment) = backend_host::deployment(app) else {
-        return;
-    };
     let ocr_custom_words = backend.ocr.custom_words_wire();
     if !history::upsert_in_flight(
         app,
@@ -869,7 +866,7 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
             source_path: &job.source_path,
             file_name: &job.file_name,
             output_dir: &job.output_dir,
-            backend_url: backend_host::ledger_origin(&deployment),
+            backend_url: backend_host::SIDECAR_ALIAS,
             client_run_id: &backend.client_run_id,
             idempotency_key: &backend.idempotency_key,
             conversion_profile: backend.profile.id(),
@@ -913,7 +910,7 @@ const REMOTE_REMOVED: &str =
     "Remote conversion was removed. Run this file again to convert it locally.";
 
 /// `live` is the origin the resumed requests go to, not what the row records:
-/// in Sidecar mode the ledger holds an alias, and an alias is not a URL.
+/// the ledger holds an alias, and an alias is not a URL.
 fn validate_recovery_entry(
     entry: &history::InFlightEntry,
     live: &str,
@@ -939,16 +936,15 @@ fn validate_recovery_entry(
         .ok_or_else(|| "Cannot recover conversion with an unknown profile".into())
 }
 
-/// The keychain holds one backend token, so it fits a recovered row only while
-/// the configured origin still matches the row's. Both sides go through
-/// `backend_host::ledger_origin`, so in Sidecar mode both are the alias.
-fn recovery_origin_still_configured(entry: &history::InFlightEntry, configured: &str) -> bool {
-    entry.backend_url.trim_end_matches('/') == configured.trim_end_matches('/')
+/// The sidecar holds only rows recorded under its alias. A URL is a row an
+/// older build sent to a Docker service, which this token never reaches.
+fn recorded_by_the_sidecar(entry: &history::InFlightEntry) -> bool {
+    entry.backend_url == backend_host::SIDECAR_ALIAS
 }
 
 /// Recreate durable backend rows after startup. Invalid origins and changed
-/// sources stay visible and stopped, with their durable rows removed. In
-/// Sidecar mode this runs on the first service that answers.
+/// sources stay visible and stopped, with their durable rows removed. This
+/// runs on the first service that answers.
 pub(crate) fn recover_in_flight(app: AppHandle) {
     let Some(entries) = history::list_in_flight(&app) else {
         return;
@@ -963,14 +959,10 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
     };
 
     let manager = app.state::<JobManager>();
-    let Ok(deployment) = backend_host::deployment(&app) else {
-        return;
-    };
-    let configured_origin = backend_host::ledger_origin(&deployment).to_string();
     let generation = manager.generation();
     for entry in entries {
         let validation = validate_recovery_entry(&entry, &live_origin).and_then(|profile| {
-            if recovery_origin_still_configured(&entry, &configured_origin) {
+            if recorded_by_the_sidecar(&entry) {
                 Ok(profile)
             } else {
                 Err(
@@ -1247,15 +1239,6 @@ mod backend_tests {
         entry.source_mtime = source_mtime;
         let live = "http://127.0.0.1:8080";
         assert!(validate_recovery_entry(&entry, live).is_ok());
-        // One slot, one token: a replaced origin must not get the new one.
-        assert!(recovery_origin_still_configured(
-            &entry,
-            "http://127.0.0.1:8080/"
-        ));
-        assert!(!recovery_origin_still_configured(
-            &entry,
-            "http://other.host:8080"
-        ));
 
         entry.backend_job_id = Some("not-a-uuid".into());
         assert!(validate_recovery_entry(&entry, live)
@@ -1280,38 +1263,16 @@ mod backend_tests {
             .contains("source changed or is missing"));
     }
 
-    /// A different port every launch, so comparing live URLs abandons every row.
+    /// A different port every launch, so the ledger records the alias. A row an
+    /// older build sent to a Docker service names a URL the sidecar never saw.
     #[test]
-    fn a_sidecar_row_survives_the_port_the_next_launch_is_given() {
-        // A property of the type now. An arm reaching for a live URL fails here.
-        let recorded = backend_host::ledger_origin(&backend_host::Deployment::Sidecar);
-        assert_eq!(recorded, backend_host::SIDECAR_ALIAS);
-        let entry = ledger_entry(recorded);
-
-        let now = backend_host::ledger_origin(&backend_host::Deployment::Sidecar);
-
-        assert!(recovery_origin_still_configured(&entry, now));
-    }
-
-    /// Manual mode names the service, so a row bound to one the user moved away
-    /// from must not be handed the current token.
-    #[test]
-    fn a_manual_row_still_refuses_a_service_the_user_replaced() {
-        let manual = |url: &str| backend_host::Deployment::Manual {
-            origin: url.to_string(),
-        };
-        let entry = ledger_entry(backend_host::ledger_origin(&manual(
-            "http://127.0.0.1:8080",
+    fn only_a_row_recorded_under_the_alias_is_the_sidecar_s() {
+        assert!(recorded_by_the_sidecar(&ledger_entry(
+            backend_host::SIDECAR_ALIAS
         )));
-
-        assert!(recovery_origin_still_configured(
-            &entry,
-            backend_host::ledger_origin(&manual("http://127.0.0.1:8080/"))
-        ));
-        assert!(!recovery_origin_still_configured(
-            &entry,
-            backend_host::ledger_origin(&manual("http://other.host:8080"))
-        ));
+        assert!(!recorded_by_the_sidecar(&ledger_entry(
+            "http://127.0.0.1:8080"
+        )));
     }
 
     /// The alias names the service without locating it, so recovery validates

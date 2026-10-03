@@ -2,7 +2,6 @@
 
 export type JobId = "convert" | "transcribe";
 export type Status = "queued" | "working" | "processing" | "done" | "failed";
-export type SecretId = "backend";
 /// What the end pane holds. Settings is a sheet, not a fourth member.
 export type View = "library" | "run" | "history";
 
@@ -159,8 +158,6 @@ export interface MoveOutcome {
   staged: string[];
   failed: string[];
 }
-
-export type SecretStatus = Record<SecretId, boolean>;
 
 export const DEFAULT_SETTINGS: Settings = {
   workspacePath: null,
