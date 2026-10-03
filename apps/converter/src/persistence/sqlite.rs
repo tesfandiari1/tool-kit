@@ -14,10 +14,11 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
 use super::model::{
-    ArtifactKind, AttemptState, CommitOperation, ConversionState, CreateOutcome, EngineRecord,
-    FailedResult, FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult, NewArtifact,
-    NewConversion, Profile, RecoveryCandidate, RequeueOutcome, StoredArtifact, StoredAttempt,
-    StoredConversion, StoredFailure, StoredSource, SuccessfulArtifacts,
+    ArtifactKind, AttemptState, CommitOperation, ConversionState, CreateOutcome,
+    DocumentClassification, EngineRecord, FailedResult, FailureStage, LocalAnalysis, LocalStart,
+    NeedsRemoteResult, NewArtifact, NewConversion, RecoveryCandidate, RequeueOutcome,
+    StoredArtifact, StoredAttempt, StoredConversion, StoredFailure, StoredSource,
+    SuccessfulArtifacts,
 };
 
 pub const DATABASE_FILENAME: &str = "converter.sqlite";
@@ -142,7 +143,7 @@ impl SqliteRepository {
         .bind(AUTH_SCOPE)
         .bind(&input.idempotency_key_sha256)
         .bind(&input.request_fingerprint)
-        .bind(input.profile.as_str())
+        .bind(input.profile)
         .bind(&input.source.relative_path)
         .bind(&input.source.media_type)
         .bind(source_byte_length)
@@ -716,7 +717,7 @@ impl SqliteRepository {
         .bind(&updated_at)
         .bind(&conversion_id_text)
         .bind(&expected_attempt_id_text)
-        .bind(active.attempt_state.as_str())
+        .bind(active.attempt_state)
         .bind(i64::from(active.attempt_number))
         .bind(i64::from(active.recovery_count))
         .execute(&mut *transaction)
@@ -750,7 +751,7 @@ impl SqliteRepository {
         .bind(&conversion_id_text)
         .bind(AUTH_SCOPE)
         .bind(&expected_attempt_id_text)
-        .bind(recoverable_state.as_str())
+        .bind(recoverable_state)
         .execute(&mut *transaction)
         .await?;
         require_one_transition_row(requeued.rows_affected(), "conversions.status")?;
@@ -870,7 +871,7 @@ impl SqliteRepository {
 
 #[derive(Debug)]
 struct EncodedLocalAnalysis {
-    classification: &'static str,
+    classification: DocumentClassification,
     inspection_json: String,
     reason_codes_json: String,
     warnings_json: String,
@@ -936,7 +937,7 @@ async fn fail_rows(
     .bind(&updated_at)
     .bind(&conversion_id)
     .bind(&attempt_id)
-    .bind(expected.attempt_state().as_str())
+    .bind(expected.attempt_state())
     .execute(&mut **transaction)
     .await?;
     require_one_transition_row(attempt.rows_affected(), "attempts.state")?;
@@ -954,7 +955,7 @@ async fn fail_rows(
     .bind(&conversion_id)
     .bind(AUTH_SCOPE)
     .bind(&attempt_id)
-    .bind(expected.conversion_state().as_str())
+    .bind(expected.conversion_state())
     .execute(&mut **transaction)
     .await?;
     require_one_transition_row(conversion.rows_affected(), "conversions.status")?;
@@ -1074,13 +1075,10 @@ async fn load_active_attempt_header(
         });
     }
 
-    let conversion_state = ConversionState::from_database(&row.try_get::<String, _>("status")?)
-        .ok_or(RepositoryError::CorruptData("conversions.status"))?;
-    let attempt_state = AttemptState::from_database(
-        &row.try_get::<Option<String>, _>("attempt_state")?
-            .ok_or(RepositoryError::CorruptData("attempts.state"))?,
-    )
-    .ok_or(RepositoryError::CorruptData("attempts.state"))?;
+    let conversion_state: ConversionState = row.try_get("status")?;
+    let attempt_state = row
+        .try_get::<Option<AttemptState>, _>("attempt_state")?
+        .ok_or(RepositoryError::CorruptData("attempts.state"))?;
     let attempt_number = nonnegative_u32(
         row.try_get::<Option<i64>, _>("attempt_number")?
             .ok_or(RepositoryError::CorruptData("attempts.attempt_number"))?,
@@ -1130,7 +1128,7 @@ async fn update_attempt_analysis(
                  fallback_reason = ?6, updated_at = ?7, finished_at = ?7
              WHERE conversion_id = ?8 AND id = ?9 AND state = ?10",
         )
-        .bind(target_state.as_str())
+        .bind(target_state)
         .bind(analysis.classification)
         .bind(&analysis.inspection_json)
         .bind(&analysis.reason_codes_json)
@@ -1139,7 +1137,7 @@ async fn update_attempt_analysis(
         .bind(updated_at)
         .bind(&conversion_id)
         .bind(&attempt_id)
-        .bind(expected_state.as_str())
+        .bind(expected_state)
         .execute(&mut **transaction)
         .await?
     } else {
@@ -1149,7 +1147,7 @@ async fn update_attempt_analysis(
                  reason_codes_json = ?4, warnings_json = ?5, updated_at = ?6
              WHERE conversion_id = ?7 AND id = ?8 AND state = ?9",
         )
-        .bind(target_state.as_str())
+        .bind(target_state)
         .bind(analysis.classification)
         .bind(&analysis.inspection_json)
         .bind(&analysis.reason_codes_json)
@@ -1157,7 +1155,7 @@ async fn update_attempt_analysis(
         .bind(updated_at)
         .bind(&conversion_id)
         .bind(&attempt_id)
-        .bind(expected_state.as_str())
+        .bind(expected_state)
         .execute(&mut **transaction)
         .await?
     };
@@ -1180,14 +1178,14 @@ async fn update_conversion_analysis(
          WHERE id = ?5 AND auth_scope = ?6 AND active_attempt_id = ?7
            AND status = ?8",
     )
-    .bind(target_state.as_str())
+    .bind(target_state)
     .bind(&analysis.reason_codes_json)
     .bind(&analysis.warnings_json)
     .bind(updated_at)
     .bind(conversion_id.hyphenated().to_string())
     .bind(AUTH_SCOPE)
     .bind(attempt_id.hyphenated().to_string())
-    .bind(expected_state.as_str())
+    .bind(expected_state)
     .execute(&mut **transaction)
     .await?;
     require_one_transition_row(result.rows_affected(), "conversions.status")
@@ -1261,7 +1259,7 @@ fn encode_local_analysis(
     let warnings_json =
         encode_string_array(&analysis.warnings, 0, 1_024, 65_536, "warnings are invalid")?;
     Ok(EncodedLocalAnalysis {
-        classification: analysis.classification.as_str(),
+        classification: analysis.classification,
         inspection_json,
         reason_codes_json,
         warnings_json,
@@ -1511,10 +1509,8 @@ fn decode_conversion(row: &SqliteRow) -> Result<StoredConversion, RepositoryErro
     Ok(StoredConversion {
         id: parse_uuid(row.try_get("conversion_id")?, "conversions.id")?,
         client_run_id: parse_uuid(row.try_get("client_run_id")?, "conversions.client_run_id")?,
-        profile: Profile::from_database(&row.try_get::<String, _>("profile")?)
-            .ok_or(RepositoryError::CorruptData("conversions.profile"))?,
-        state: ConversionState::from_database(&row.try_get::<String, _>("conversion_state")?)
-            .ok_or(RepositoryError::CorruptData("conversions.status"))?,
+        profile: row.try_get("profile")?,
+        state: row.try_get("conversion_state")?,
         source: StoredSource {
             relative_path: row.try_get("source_relative_path")?,
             media_type: row.try_get("source_media_type")?,
@@ -1528,8 +1524,7 @@ fn decode_conversion(row: &SqliteRow) -> Result<StoredConversion, RepositoryErro
             id: parse_uuid(row.try_get("attempt_id")?, "attempts.id")?,
             number: nonnegative_u32(row.try_get("attempt_number")?, "attempts.attempt_number")?,
             queue_sequence: row.try_get("queue_seq")?,
-            state: AttemptState::from_database(&row.try_get::<String, _>("attempt_state")?)
-                .ok_or(RepositoryError::CorruptData("attempts.state"))?,
+            state: row.try_get("attempt_state")?,
             recovery_count: nonnegative_u32(
                 row.try_get("recovery_count")?,
                 "attempts.recovery_count",
@@ -1579,8 +1574,7 @@ fn decode_conversion(row: &SqliteRow) -> Result<StoredConversion, RepositoryErro
 fn decode_artifact(row: &SqliteRow) -> Result<StoredArtifact, RepositoryError> {
     Ok(StoredArtifact {
         attempt_id: parse_uuid(row.try_get("attempt_id")?, "artifacts.attempt_id")?,
-        kind: ArtifactKind::from_database(&row.try_get::<String, _>("kind")?)
-            .ok_or(RepositoryError::CorruptData("artifacts.kind"))?,
+        kind: row.try_get("kind")?,
         relative_path: row.try_get("relative_path")?,
         media_type: row.try_get("media_type")?,
         byte_length: positive_u64(row.try_get("byte_length")?, "artifacts.byte_length")?,
