@@ -25,10 +25,6 @@ const BACKEND_MAX_CONSECUTIVE_ERRORS: u32 = 12;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BackendContext {
-    /// The origin this job was queued against, a stand-in for the instant the
-    /// host cannot answer. Every request resolves the live one through
-    /// `request_origin`, because the sidecar's port moves on a restart.
-    pub(crate) backend_url: String,
     pub(crate) client_run_id: String,
     pub(crate) idempotency_key: String,
     pub(crate) backend_job_id: Option<String>,
@@ -41,7 +37,6 @@ pub(crate) struct BackendContext {
 
 impl BackendContext {
     pub(crate) fn new(
-        backend_url: String,
         client_run_id: String,
         idempotency_key: String,
         backend_job_id: Option<String>,
@@ -49,7 +44,6 @@ impl BackendContext {
         ocr: conversion_service::OcrOptions,
     ) -> Self {
         Self {
-            backend_url,
             client_run_id,
             idempotency_key,
             backend_job_id,
@@ -606,13 +600,6 @@ fn local_only_failure(view: &ConversionJob) -> String {
     format!("This file could not be converted on this Mac because {reason}.")
 }
 
-/// The origin one request goes to, resolved at the moment of the request. The
-/// kernel hands the sidecar a new port at every restart, so a queued origin is
-/// refused once the child relaunches. `held` covers only the mid-restart gap.
-fn request_origin(live: Result<String, String>, held: &str) -> String {
-    live.unwrap_or_else(|_| held.to_string())
-}
-
 async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
     let stale = |app: &AppHandle| app.state::<JobManager>().generation() != generation;
     let Some(backend) = job.backend.clone() else {
@@ -669,9 +656,13 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         // refused connection must not fail work it has already done.
         let mut attempts = 0u32;
         loop {
-            let origin = request_origin(backend_host::backend_origin(&app), &backend.backend_url);
-            let result =
-                conversion_service::poll_conversion(&origin, &token, &backend_job_id).await;
+            // Read per request: the sidecar gets a new port at every restart.
+            let result = match backend_host::backend_origin(&app) {
+                Ok(origin) => {
+                    conversion_service::poll_conversion(&origin, &token, &backend_job_id).await
+                }
+                Err(error) => Err(error),
+            };
             if stale(&app) {
                 return;
             }
@@ -700,17 +691,21 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         ) {
             return;
         }
-        let origin = request_origin(backend_host::backend_origin(&app), &backend.backend_url);
-        let result = conversion_service::submit_conversion(
-            &origin,
-            &token,
-            &job.source_path,
-            &backend.client_run_id,
-            backend.profile.id(),
-            &backend.ocr,
-            &backend.idempotency_key,
-        )
-        .await;
+        let result = match backend_host::backend_origin(&app) {
+            Ok(origin) => {
+                conversion_service::submit_conversion(
+                    &origin,
+                    &token,
+                    &job.source_path,
+                    &backend.client_run_id,
+                    backend.profile.id(),
+                    &backend.ocr,
+                    &backend.idempotency_key,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         if stale(&app) {
             return;
         }
@@ -751,16 +746,19 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                 if !set_status(&app, id, generation, "processing", "Saving Markdown…") {
                     return;
                 }
-                let origin =
-                    request_origin(backend_host::backend_origin(&app), &backend.backend_url);
-                let output = conversion_service::download_markdown(
-                    &origin,
-                    &token,
-                    &view.id,
-                    &job.output_dir,
-                    &job.file_name,
-                )
-                .await;
+                let output = match backend_host::backend_origin(&app) {
+                    Ok(origin) => {
+                        conversion_service::download_markdown(
+                            &origin,
+                            &token,
+                            &view.id,
+                            &job.output_dir,
+                            &job.file_name,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
                 match output {
                     Ok(path) => finish(&app, id, generation, path),
                     Err(error) => fail_backend_retryable(&app, id, generation, &error),
@@ -806,8 +804,10 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         }
         // `poll_conversion` refuses an answer about any other id, so the view
         // always names this job.
-        let origin = request_origin(backend_host::backend_origin(&app), &backend.backend_url);
-        let result = conversion_service::poll_conversion(&origin, &token, &view.id).await;
+        let result = match backend_host::backend_origin(&app) {
+            Ok(origin) => conversion_service::poll_conversion(&origin, &token, &view.id).await,
+            Err(error) => Err(error),
+        };
         if stale(&app) {
             return;
         }
@@ -832,16 +832,10 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
     }
 }
 
-/// Point a context at the service running now, and clear the recovery blocker
-/// the last launch left. Nothing else clears it, so Retry re-fails all session.
+/// Clear the recovery blocker the last launch left once the service answers.
+/// Nothing else clears it, so Retry re-fails all session.
 fn refresh_for_retry(context: &mut BackendContext, origin: Result<&str, String>) {
-    match origin {
-        Ok(origin) => {
-            context.backend_url = origin.to_string();
-            context.recovery_blocker = None;
-        }
-        Err(error) => context.recovery_blocker = Some(error),
-    }
+    context.recovery_blocker = origin.err();
 }
 
 /// Re-persist a backend job's durable row before a retry. Stop deletes the
@@ -992,8 +986,6 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
         let recovery_error = validation.err();
         let durable_key = entry.idempotency_key.clone();
         let mut context = BackendContext::new(
-            // The live origin, never the recorded alias `endpoint_url` refuses.
-            live_origin.clone(),
             entry.client_run_id,
             entry.idempotency_key,
             entry.backend_job_id,
@@ -1162,9 +1154,8 @@ mod backend_tests {
     }
 
     #[test]
-    fn recovery_context_keeps_original_url_and_stable_keys_off_ipc() {
+    fn recovery_context_keeps_stable_keys_off_ipc() {
         let context = BackendContext::new(
-            "http://127.0.0.1:9123".into(),
             "22222222-2222-4222-8222-222222222222".into(),
             "33333333-3333-4333-8333-333333333333".into(),
             Some("44444444-4444-4444-8444-444444444444".into()),
@@ -1179,10 +1170,6 @@ mod backend_tests {
             context.clone(),
         );
 
-        assert_eq!(
-            job.backend.as_ref().unwrap().backend_url,
-            "http://127.0.0.1:9123"
-        );
         assert_eq!(
             job.backend.as_ref().unwrap().idempotency_key,
             context.idempotency_key
@@ -1224,7 +1211,6 @@ mod backend_tests {
         let recorded =
             conversion_service::OcrOptions::from_wire(false, "Uniwise\nTool-Kit", Some(2));
         let context = BackendContext::new(
-            "http://127.0.0.1:9123".into(),
             "22222222-2222-4222-8222-222222222222".into(),
             "33333333-3333-4333-8333-333333333333".into(),
             None,
@@ -1344,30 +1330,8 @@ mod backend_tests {
     }
 
     #[test]
-    fn a_request_follows_the_service_to_the_port_it_restarted_on() {
-        // A job queued against the old port has to follow the restart.
-        assert_eq!(
-            request_origin(
-                Ok("http://127.0.0.1:64707".into()),
-                "http://127.0.0.1:51001"
-            ),
-            "http://127.0.0.1:64707"
-        );
-
-        // Mid-restart there is no port, so the queued origin stands.
-        assert_eq!(
-            request_origin(
-                Err("The conversion service is starting.".into()),
-                "http://127.0.0.1:51001"
-            ),
-            "http://127.0.0.1:51001"
-        );
-    }
-
-    #[test]
-    fn a_retry_drops_the_verdict_the_last_launch_left_and_follows_the_new_port() {
+    fn a_retry_drops_the_verdict_the_last_launch_left() {
         let mut context = BackendContext::new(
-            "http://127.0.0.1:51001".into(),
             "11111111-1111-4111-8111-111111111111".into(),
             "22222222-2222-4222-8222-222222222222".into(),
             None,
@@ -1380,7 +1344,6 @@ mod backend_tests {
 
         // Nothing else clears this, so without it Retry re-fails all session.
         assert_eq!(context.recovery_blocker, None);
-        assert_eq!(context.backend_url, "http://127.0.0.1:64707");
 
         // A service that is not up replaces the verdict rather than retrying.
         refresh_for_retry(
@@ -1391,6 +1354,5 @@ mod backend_tests {
             context.recovery_blocker.as_deref(),
             Some("The conversion service is starting.")
         );
-        assert_eq!(context.backend_url, "http://127.0.0.1:64707");
     }
 }

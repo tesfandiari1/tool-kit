@@ -601,8 +601,6 @@ async fn run_pipeline(
     // Read once. In Sidecar mode the origin is this launch's own port.
     let origin = backend_host::backend_origin(&app);
     let mut files = plan_backend_conversion_files(&inputs, &origin, jt).await?;
-    // Empty only when the plan sends nothing to the service.
-    let backend_origin = origin.unwrap_or_default();
     if files.is_empty() {
         return Err(format!("No {} files in your selection", jt.id()));
     }
@@ -709,7 +707,6 @@ async fn run_pipeline(
             output_dir,
             jt,
             jobs::BackendContext::new(
-                backend_origin.clone(),
                 client_run_id.clone(),
                 idempotency_key,
                 None,
@@ -1006,7 +1003,6 @@ async fn convert_one(
             "Nothing here converts this file.",
         ));
     }
-    let backend_origin = origin.unwrap_or_default();
     // Through the accessor: Sidecar mode mints this token itself.
     if let Err(error) = backend_host::backend_token(&app) {
         return Ok(ConvertOneOutcome::blocked("backend_unavailable", error));
@@ -1082,7 +1078,6 @@ async fn convert_one(
         output_dir,
         jt,
         jobs::BackendContext::new(
-            backend_origin,
             client_run_id,
             idempotency_key,
             None,
@@ -1854,7 +1849,6 @@ mod scan_tests {
             "/tmp".into(),
             JobType::Convert,
             jobs::BackendContext::new(
-                "http://127.0.0.1:8080".into(),
                 "11111111-1111-4111-8111-111111111111".into(),
                 "22222222-2222-4222-8222-222222222222".into(),
                 None,
