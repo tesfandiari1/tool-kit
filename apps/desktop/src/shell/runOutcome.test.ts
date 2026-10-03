@@ -10,8 +10,6 @@ function job(id: number, status: Status, outputPath: string | null = `/out/${Str
     jobType: "convert",
     status,
     progressNote: "",
-    route: null,
-    reasonCodes: [],
     warnings: [],
     failure: null,
     outputPath: status === "done" ? outputPath : null,

@@ -116,9 +116,6 @@ export interface Job {
   jobType: JobId;
   status: Status;
   progressNote: string;
-  /// Backend route identifiers are service-owned data, not a closed frontend enum.
-  route: string | null;
-  reasonCodes: string[];
   warnings: string[];
   failure: { code: string; message: string } | null;
   outputPath: string | null;

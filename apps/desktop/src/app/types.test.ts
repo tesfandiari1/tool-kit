@@ -9,8 +9,6 @@ function job(id: number, sourcePath: string, status: Status): Job {
     jobType: "convert",
     status,
     progressNote: "",
-    route: null,
-    reasonCodes: [],
     warnings: [],
     failure: null,
     outputPath: null,

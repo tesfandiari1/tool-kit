@@ -132,8 +132,6 @@ pub struct Job {
     pub output_path: Option<String>,
     pub error: Option<String>,
     /// Stringly typed, so a new backend value cannot break an older desktop.
-    pub route: Option<String>,
-    pub reason_codes: Vec<String>,
     pub warnings: Vec<String>,
     pub failure: Option<ConversionFailure>,
     /// When this job left the queue, so the elapsed timer excludes the wait.
@@ -159,8 +157,6 @@ impl Job {
             progress_note: "Queued".into(),
             output_path: None,
             error: None,
-            route: None,
-            reason_codes: Vec::new(),
             warnings: Vec::new(),
             failure: None,
             started_at: None,
@@ -373,21 +369,10 @@ fn set_status(app: &AppHandle, id: u64, generation: u64, status: &str, note: &st
 /// Same emit rule as `set_status`: the poll repeats one view until it moves.
 fn apply_backend_view(app: &AppHandle, id: u64, generation: u64, view: &ConversionJob) -> bool {
     let manager = app.state::<JobManager>();
-    let kind = view.route.as_ref().map(|route| route.kind.clone());
-    let reason_codes = view
-        .route
-        .as_ref()
-        .map(|route| route.reason_codes.clone())
-        .unwrap_or_default();
     let mut changed = false;
     let Some(updated) = manager.update_if_generation(id, generation, |job| {
-        changed = job.route != kind
-            || job.reason_codes != reason_codes
-            || job.warnings != view.warnings
-            || job.failure != view.failure;
+        changed = job.warnings != view.warnings || job.failure != view.failure;
         if changed {
-            job.route = kind;
-            job.reason_codes = reason_codes;
             job.warnings = view.warnings.clone();
             job.failure = view.failure.clone();
         }

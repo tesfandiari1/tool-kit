@@ -10,8 +10,6 @@ function job(status: Status, startedAt: number | null = null): Job {
     jobType: "convert",
     status,
     progressNote: "",
-    route: null,
-    reasonCodes: [],
     warnings: [],
     failure: null,
     outputPath: null,
