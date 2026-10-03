@@ -2340,18 +2340,18 @@ async fn worker_timeout_and_crash_fail_only_the_job() {
 #[tokio::test]
 async fn malformed_or_untrusted_worker_outputs_never_publish() {
     const INSPECTION: &str = r#""inspection":{"pdfType":"text_based","confidence":1.0,"pageCount":1,"pagesNeedingOcr":[],"ocrReasonsByPage":[],"hasEncodingIssues":false,"isComplex":false,"pagesWithTables":[],"pagesWithColumns":[],"processingTimeMs":1}"#;
-    let wrong_identity = r#"printf '%s' '{"protocolVersion":2,"engine":{"name":"pdf-inspector","version":"0.0.0","features":[]},"outcome":{"kind":"rejected","code":"invalid_pdf"}}' > "$1/worker-report.json"
+    let wrong_identity = r#"printf '%s' '{"protocolVersion":3,"engine":{"name":"pdf-inspector","version":"0.0.0","features":[]},"outcome":{"kind":"rejected","code":"invalid_pdf"}}' > "$1/worker-report.json"
 "#;
     let bad_hash = format!(
-        "printf X > \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.25.2\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$1/worker-report.json\"\n",
+        "printf X > \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":3,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.25.2\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$1/worker-report.json\"\n",
         "0".repeat(64)
     );
     let symlink = format!(
-        "ln -s /etc/passwd \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.25.2\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$1/worker-report.json\"\n",
+        "ln -s /etc/passwd \"$1/result.md\"\nprintf '%s' '{{\"protocolVersion\":3,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.25.2\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"{}\"}}}}}}' > \"$1/worker-report.json\"\n",
         "0".repeat(64)
     );
     let extra_file = format!(
-        "printf X > \"$1/result.md\"\nprintf extra > \"$1/unexpected.bin\"\nprintf '%s' '{{\"protocolVersion\":2,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.25.2\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015\"}}}}}}' > \"$1/worker-report.json\"\n"
+        "printf X > \"$1/result.md\"\nprintf extra > \"$1/unexpected.bin\"\nprintf '%s' '{{\"protocolVersion\":3,\"engine\":{{\"name\":\"pdf-inspector\",\"version\":\"1.25.2\",\"features\":[]}},\"outcome\":{{\"kind\":\"converted\",{INSPECTION},\"artifact\":{{\"relativePath\":\"result.md\",\"byteLength\":1,\"sha256\":\"4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015\"}}}}}}' > \"$1/worker-report.json\"\n"
     );
     let cases = [
         (

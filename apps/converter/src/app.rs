@@ -64,13 +64,11 @@ impl AppState {
             }
         });
 
-        // AnyDoc runs in-process: pure Rust, typed errors, internal resource
-        // limits, and `catch_unwind` at the adapter. Parser concurrency one.
-        // The hard timeout reuses the worker timeout: an in-process call
-        // cannot be killed, so a hang fails the job and leaves a detached
-        // blocking task bounded by AnyDoc's internal limits. A working Vision
-        // worker also describes DOCX and PPTX pictures.
+        // AnyDoc parses in the PDF worker binary, under the PDF timeout and
+        // concurrency one. A working Vision worker also describes DOCX and
+        // PPTX pictures.
         let anydoc_engine = AnyDocEngine::new(
+            settings.pdf_worker_path.clone(),
             settings.limits.max_output_bytes,
             settings.limits.pdf_timeout,
             vision_engine
@@ -113,8 +111,7 @@ impl AppState {
             vision_engine,
             audio_engine,
             settings.limits.max_output_bytes,
-            // A parse that outlives its own hard timeout keeps the permit while
-            // it detaches. Give the next claim one more timeout to wait, then
+            // Give the next claim one more timeout to wait for a permit, then
             // exit so startup recovery requeues instead of the runner freezing.
             settings.limits.pdf_timeout,
         );

@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const WORKER_PROTOCOL_VERSION: u32 = 2;
+pub const WORKER_PROTOCOL_VERSION: u32 = 3;
 pub const PDF_ENGINE_NAME: &str = "pdf-inspector";
 pub const PDF_INSPECTOR_VERSION: &str = "1.25.2";
 pub const WORKER_REPORT_FILE: &str = "worker-report.json";

@@ -192,7 +192,7 @@ impl TestHarness {
         let mut harness = Self::new();
         let worker_path = harness.workspace.path().join("fake-worker");
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'tool-kit-pdf-worker protocol=2 pdf-inspector=1.25.2'\n  exit 0\nfi\ncat >/dev/null\n{}",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'tool-kit-pdf-worker protocol=3 pdf-inspector=1.25.2'\n  exit 0\nfi\ncat >/dev/null\n{}",
             script.strip_prefix("#!/bin/sh\n").unwrap_or(script)
         );
         std::fs::write(&worker_path, script).unwrap();

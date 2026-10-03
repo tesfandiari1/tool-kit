@@ -10,6 +10,7 @@
 //! serde is the only dependency, and it stays that way. Every worker binary
 //! links this crate, so anything added here is linked into all of them.
 
+pub mod anydoc;
 pub mod audio;
 pub mod pdf;
 pub mod vision;

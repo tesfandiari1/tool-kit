@@ -31,7 +31,7 @@ pub(crate) struct SourceFormat {
 impl SourceFormat {
     /// Whether the engine that converts this format came up in this process.
     /// Only the spawned Swift workers can be absent normally: a broken PDF
-    /// worker fails startup, and AnyDoc runs in-process.
+    /// worker fails startup, and AnyDoc runs in that same worker.
     pub(crate) fn is_servable(&self, available: EngineAvailability) -> bool {
         match self.engine {
             LocalEngineKind::Pdf | LocalEngineKind::AnyDoc => true,

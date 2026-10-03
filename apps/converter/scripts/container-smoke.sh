@@ -145,7 +145,7 @@ YAML
 cat > "${RUN_DIR}/stub/hold-worker.sh" <<'STUB'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo 'tool-kit-pdf-worker protocol=2 pdf-inspector=1.25.2'
+  echo 'tool-kit-pdf-worker protocol=3 pdf-inspector=1.25.2'
   exit 0
 fi
 exec /bin/sleep 3600

@@ -445,9 +445,9 @@ impl ConversionService {
             },
         };
 
-        // A timed-out AnyDoc parse detaches still holding its permit, so this
-        // wait is not always short. Unbounded and cancellation-blind, it froze
-        // the single runner for every engine and outlasted graceful shutdown.
+        // A long conversion holds its engine's permit, so this wait is not
+        // always short. Unbounded and cancellation-blind, it froze the single
+        // runner for every engine and outlasted graceful shutdown.
         let acquire = async {
             match source_format.engine {
                 LocalEngineKind::Pdf => self.pdf_engine.acquire().await,

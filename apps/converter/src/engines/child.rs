@@ -156,12 +156,14 @@ pub(crate) fn is_dotted_number(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || byte == b'.')
 }
 
-async fn hash_and_check_content(path: &Path) -> Result<(String, bool), EngineFailure> {
+pub(crate) async fn hash_and_check_content(path: &Path) -> Result<(String, bool), EngineFailure> {
     let mut file = fs::File::open(path)
         .await
         .map_err(|_| EngineFailure::Protocol)?;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    // On the heap: an array here sits inside every engine future that awaits
+    // this, and overflowed a debug test thread's stack.
+    let mut buffer = vec![0_u8; 64 * 1024];
     let mut has_content = false;
     loop {
         let count = file
