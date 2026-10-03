@@ -33,14 +33,12 @@ impl ConversionProfile {
 
 /// `#[serde(default)]` on the struct is load-bearing: without it an older
 /// settings.json fails to parse, and `load()` falls back to defaults, wiping the
-/// user's output folder and job.
+/// user's workspace and job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     /// Selected inputs: individual files and/or folders to scan.
     pub inputs: Vec<String>,
-    /// Folder where finished outputs are written.
-    pub output_dir: Option<String>,
     /// Last selected job: "convert" | "transcribe".
     pub job_type: String,
     /// Whether local OCR corrects what it recognizes. Read only by the image
@@ -66,8 +64,8 @@ pub struct Settings {
     /// Finder strands none. A `Vec`, never an `Option<Vec>`: the frontend
     /// spreads this over its defaults, where an explicit `null` would win.
     pub expanded_paths: Vec<String>,
-    /// The project a drop is filed into, workspace-relative. This, not
-    /// `output_dir`, is where a run writes whenever a workspace is bound.
+    /// The project a drop is filed into, workspace-relative, and where a run
+    /// writes.
     pub active_project_path: Option<String>,
     /// Move a drop into the active project instead of leaving it where it is.
     /// Never a copy: the result is the only new file.
@@ -78,7 +76,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             inputs: Vec::new(),
-            output_dir: None,
             job_type: "convert".into(),
             language_correction: true,
             custom_words: Vec::new(),
@@ -112,7 +109,7 @@ pub fn load(app: &AppHandle) -> Settings {
 
 /// Written to a temp file and renamed in. `fs::write` truncates first, so a
 /// crash leaves a half-file, and `load()` answers that by resetting the user's
-/// output folder and job.
+/// workspace and job.
 pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let path = settings_path(app)?;
     let bytes = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
@@ -139,7 +136,6 @@ mod tests {
         )
         .expect("settings written before the field was removed should deserialize");
 
-        assert_eq!(settings.output_dir.as_deref(), Some("/tmp/output"));
         assert_eq!(settings.job_type, "transcribe");
     }
 
@@ -170,7 +166,6 @@ mod tests {
         .expect("pre-M6 settings should deserialize");
 
         assert_eq!(settings.inputs, ["/tmp/source.pdf"]);
-        assert_eq!(settings.output_dir.as_deref(), Some("/tmp/output"));
         // The remote provider's keys are ignored, not rejected.
         assert!(!settings.skip_already_done);
         // A file written before `zoom` existed must load at 100%, not at 0.0.
@@ -193,7 +188,6 @@ mod tests {
         .expect("settings written before the tree should deserialize");
 
         assert!(settings.expanded_paths.is_empty());
-        assert_eq!(settings.output_dir.as_deref(), Some("/tmp/output"));
         assert_eq!(settings.workspace_path.as_deref(), Some("/tmp/workspace"));
     }
 
@@ -211,7 +205,6 @@ mod tests {
         )
         .expect("a retired key should be ignored, not rejected");
 
-        assert_eq!(settings.output_dir.as_deref(), Some("/tmp/output"));
         assert_eq!(settings.workspace_path.as_deref(), Some("/tmp/workspace"));
     }
 

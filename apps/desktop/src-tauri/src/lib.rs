@@ -349,8 +349,6 @@ struct Scan {
     reusable_transcribe: usize,
     /// Files skipped because they are already text.
     already_text: usize,
-    /// The folder to default the output to: the dropped folder, or a shared one.
-    suggested_output: Option<String>,
     /// The selection as the drop well draws it, one node per dropped path.
     nodes: Vec<InputNode>,
 }
@@ -446,33 +444,23 @@ async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String
         convert: convert.len(),
         transcribe: transcribe.len(),
         already_text: count_matching(&inputs, ALREADY_TEXT),
-        suggested_output: suggested_output_dir(&inputs),
         nodes: describe_inputs(&inputs),
     })
 }
 
-/// Where a run writes, and the only answer to that question. The scan judges
-/// "already in this folder" against it, so a second answer would report one
-/// folder and write to another. `output_dir` is the workspace-less case alone.
+/// Where a run writes, and the only answer to that question: the active
+/// project. The scan judges "already in this folder" against it, so a second
+/// answer would report one folder and write to another.
 fn output_dir_for(cfg: &Settings) -> Option<String> {
-    if let (Some(workspace), Some(project)) = (&cfg.workspace_path, &cfg.active_project_path) {
-        // The tree's own check, so a hand-edited settings.json cannot escape.
-        if let Ok(dir) = tree::resolve(Path::new(workspace), project) {
-            // Never the legacy folder: it sits where the tree sees nothing.
-            return dir.is_dir().then(|| dir.to_string_lossy().into_owned());
-        }
-    }
-    cfg.output_dir.clone()
+    let workspace = cfg.workspace_path.as_ref()?;
+    let project = cfg.active_project_path.as_ref()?;
+    // The tree's own check, so a hand-edited settings.json cannot escape.
+    let dir = tree::resolve(Path::new(workspace), project).ok()?;
+    dir.is_dir().then(|| dir.to_string_lossy().into_owned())
 }
 
-/// Why a run has nowhere to write. A bound project means no folder picker.
-fn no_destination_message(cfg: &Settings) -> String {
-    if cfg.workspace_path.is_some() && cfg.active_project_path.is_some() {
-        "That project folder is not there any more. Pick another project.".into()
-    } else {
-        "Choose an output folder first".into()
-    }
-}
+/// Why a run has nowhere to write.
+const NO_DESTINATION: &str = "That project folder is not there any more. Pick another project.";
 
 /// Where **this file's** result goes. Beside the source inside the workspace,
 /// which keeps the tree's pairing rule true. Outside it, the one destination,
@@ -484,11 +472,6 @@ fn output_dir_for_source(source: &Path, inputs: &[String], cfg: &Settings) -> Op
         }
     }
     let filing = output_dir_for(cfg)?;
-    // Into a project only. Without one the folder defaults to the dropped
-    // folder itself, and mirroring would nest it inside itself.
-    if cfg.workspace_path.is_none() || cfg.active_project_path.is_none() {
-        return Some(filing);
-    }
     let dropped = inputs
         .iter()
         .map(Path::new)
@@ -567,25 +550,6 @@ fn count_matching(inputs: &[String], exts: &[&str]) -> usize {
     collect_files_where(inputs, &has_ext).len()
 }
 
-/// Where results land by default: alongside the input, when the inputs agree.
-fn suggested_output_dir(inputs: &[String]) -> Option<String> {
-    let mut candidate: Option<std::path::PathBuf> = None;
-    for input in inputs {
-        let path = Path::new(input);
-        let dir = if path.is_dir() {
-            path.to_path_buf()
-        } else {
-            path.parent()?.to_path_buf()
-        };
-        match &candidate {
-            None => candidate = Some(dir),
-            Some(existing) if *existing == dir => {}
-            Some(_) => return None,
-        }
-    }
-    candidate.map(|p| p.to_string_lossy().to_string())
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunResult {
@@ -627,9 +591,9 @@ async fn run_pipeline(
     let cfg = settings::load(&app);
     // Derived here, not passed in, so the counts and the writes name one folder.
     // Only a guard that a destination exists: each result goes beside its source.
-    let filing_dir = output_dir_for(&cfg).ok_or_else(|| no_destination_message(&cfg))?;
+    let filing_dir = output_dir_for(&cfg).ok_or(NO_DESTINATION)?;
     if !Path::new(&filing_dir).is_dir() {
-        return Err(no_destination_message(&cfg));
+        return Err(NO_DESTINATION.into());
     }
     let output_dir_of = |source: &Path| -> String {
         output_dir_for_source(source, &inputs, &cfg).unwrap_or_else(|| filing_dir.clone())
@@ -1567,8 +1531,6 @@ mod scan_tests {
         let cfg = Settings {
             workspace_path: Some(root.to_string_lossy().into_owned()),
             active_project_path: Some("Acme".into()),
-            // Left over from before the library existed. Never read again.
-            output_dir: Some("/Users/someone/Desktop".into()),
             ..Settings::default()
         };
 
@@ -1586,7 +1548,6 @@ mod scan_tests {
         let cfg = Settings {
             workspace_path: Some(root.to_string_lossy().into_owned()),
             active_project_path: Some("Acme".into()),
-            output_dir: Some("/Users/someone/Desktop".into()),
             ..Settings::default()
         };
 
@@ -1607,7 +1568,6 @@ mod scan_tests {
         let cfg = Settings {
             workspace_path: Some(root.to_string_lossy().into_owned()),
             active_project_path: Some("Acme".into()),
-            output_dir: Some("/Users/someone/Desktop".into()),
             ..Settings::default()
         };
 
@@ -1649,13 +1609,8 @@ mod scan_tests {
     }
 
     #[test]
-    fn without_a_workspace_the_chosen_folder_still_wins() {
-        let cfg = Settings {
-            output_dir: Some("/Users/someone/Desktop".into()),
-            ..Settings::default()
-        };
-
-        assert_eq!(output_dir_for(&cfg), Some("/Users/someone/Desktop".into()));
+    fn without_a_workspace_a_run_has_nowhere_to_write() {
+        assert_eq!(output_dir_for(&Settings::default()), None);
     }
 
     #[test]
@@ -1664,12 +1619,10 @@ mod scan_tests {
         let cfg = Settings {
             workspace_path: Some(root.to_string_lossy().into_owned()),
             active_project_path: Some("../elsewhere".into()),
-            output_dir: Some("/Users/someone/Desktop".into()),
             ..Settings::default()
         };
 
-        // Falls back rather than writing outside the workspace.
-        assert_eq!(output_dir_for(&cfg), Some("/Users/someone/Desktop".into()));
+        assert_eq!(output_dir_for(&cfg), None);
     }
 
     #[test]
@@ -1678,29 +1631,10 @@ mod scan_tests {
         let cfg = Settings {
             workspace_path: Some(root.to_string_lossy().into_owned()),
             active_project_path: Some("Deleted".into()),
-            output_dir: None,
             ..Settings::default()
         };
 
         assert_eq!(output_dir_for(&cfg), None);
-    }
-
-    /// A pre-library `outputDir` writes the run where the tree cannot see it.
-    #[test]
-    fn a_project_folder_that_is_gone_refuses_rather_than_using_the_legacy_folder() {
-        let root = tree("outdir-missing-legacy", &["Inbox/keep.md"]);
-        let cfg = Settings {
-            workspace_path: Some(root.to_string_lossy().into_owned()),
-            active_project_path: Some("Deleted".into()),
-            output_dir: Some("/Users/someone/Desktop".into()),
-            ..Settings::default()
-        };
-
-        assert_eq!(output_dir_for(&cfg), None);
-        assert_eq!(
-            no_destination_message(&cfg),
-            "That project folder is not there any more. Pick another project."
-        );
     }
 
     fn names(v: &[std::path::PathBuf]) -> Vec<String> {
@@ -1932,34 +1866,6 @@ mod scan_tests {
             backend_inflight_keys(&[copy, backend]),
             ["22222222-2222-4222-8222-222222222222"]
         );
-    }
-
-    #[test]
-    fn suggested_output_is_the_shared_parent_and_none_when_mixed() {
-        let root = tree("suggest", &["one/a.pdf", "one/b.pdf", "two/c.pdf"]);
-        let one = root.join("one");
-        let same = vec![
-            one.join("a.pdf").to_string_lossy().to_string(),
-            one.join("b.pdf").to_string_lossy().to_string(),
-        ];
-        assert_eq!(
-            suggested_output_dir(&same),
-            Some(one.to_string_lossy().to_string())
-        );
-
-        // A dropped folder is its own answer.
-        let folder = vec![one.to_string_lossy().to_string()];
-        assert_eq!(
-            suggested_output_dir(&folder),
-            Some(one.to_string_lossy().to_string())
-        );
-
-        // Two different parents: don't guess.
-        let mixed = vec![
-            one.join("a.pdf").to_string_lossy().to_string(),
-            root.join("two/c.pdf").to_string_lossy().to_string(),
-        ];
-        assert_eq!(suggested_output_dir(&mixed), None);
     }
 }
 

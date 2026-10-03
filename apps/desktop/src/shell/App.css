@@ -278,30 +278,6 @@
     color: var(--text-body);
   }
 
-  /* --- Folder picker ------------------------------------------------------ */
-  /* A hit target inside a Panel, not a second control chrome. */
-  .folder-hit {
-    display: flex;
-    align-items: center;
-    /* Hover answers with surface, never colour. The padding undoes the negative
-       margin exactly, so the content does not move. */
-    min-height: 40px;
-    margin: 0 calc(-1 * var(--s2));
-    padding: 0 var(--s2);
-    border: 0;
-    background: none;
-    color: inherit;
-    text-align: left;
-    transition: background var(--dur-fast) var(--ease);
-  }
-  .folder-hit:hover {
-    background: var(--surface-lift);
-  }
-  .folder-hit svg {
-    color: var(--text-mute);
-    flex-shrink: 0;
-  }
-
   /* --- Settings ----------------------------------------------------------- */
   /* Padding lives on the scrollport, so the gutter sits beside the fields.
      --s4 between groups, --s3 between fields, --s2 inside a control. */
@@ -686,7 +662,6 @@
     .workspace {
       animation: none;
     }
-    .folder-hit,
     .ui-well.is-dropping,
     .job-actions {
       transition: none;

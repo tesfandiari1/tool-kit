@@ -94,7 +94,6 @@ export interface Scan {
   /// Transcripts in another folder: copied rather than transcribed again.
   reusableTranscribe: number;
   alreadyText: number;
-  suggestedOutput: string | null;
   nodes: InputNode[];
 }
 
@@ -132,7 +131,6 @@ export interface Settings {
   /// The workspace folder. Null means first run.
   workspacePath: string | null;
   inputs: string[];
-  outputDir: string | null;
   jobType: JobId;
   languageCorrection: boolean;
   /// Words local OCR should prefer when it is unsure.
@@ -150,8 +148,7 @@ export interface Settings {
   /// Never null: this object is spread over `DEFAULT_SETTINGS`, where an
   /// explicit null would win.
   expandedPaths: string[];
-  /// Where a drop is filed and a run writes, workspace-relative. This, not
-  /// `outputDir`, once a workspace is bound.
+  /// Where a drop is filed and a run writes, workspace-relative.
   activeProjectPath: string | null;
   /// Move a drop into the active project instead of leaving it where it is.
   moveDroppedFiles: boolean;
@@ -168,7 +165,6 @@ export type SecretStatus = Record<SecretId, boolean>;
 export const DEFAULT_SETTINGS: Settings = {
   workspacePath: null,
   inputs: [],
-  outputDir: null,
   jobType: "convert",
   languageCorrection: true,
   customWords: [],
@@ -205,7 +201,6 @@ export const EMPTY_SCAN: Scan = {
   alreadyHereTranscribe: 0,
   reusableTranscribe: 0,
   alreadyText: 0,
-  suggestedOutput: null,
   nodes: [],
 };
 
