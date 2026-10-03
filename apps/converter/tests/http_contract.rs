@@ -21,12 +21,9 @@ use uuid::Uuid;
 
 use support::{
     assert_server_request_id, audio_tools, clean_pdf, count_job_directories, count_named_files,
-    json_body, multipart_body, multipart_body_with_duplicate_profile,
-    multipart_body_with_media_type, multipart_body_with_speaker_counts,
-    multipart_body_without_source, pdf_with_content, slow_multipart_prefix,
-    slow_multipart_prefix_opening, streaming_body, test_app, test_app_with_max_jobs,
-    test_app_with_output_limit, test_app_with_poll_interval, test_app_with_upload_limits,
-    test_app_with_worker_script, TestHarness, TOKEN,
+    json_body, multipart, multipart_body, pdf_with_content, slow_multipart_prefix, streaming_body,
+    test_app, test_app_with_max_jobs, test_app_with_output_limit, test_app_with_poll_interval,
+    test_app_with_upload_limits, test_app_with_worker_script, TestHarness, TOKEN,
 };
 
 #[tokio::test]
@@ -514,12 +511,16 @@ async fn clean_pdf_completes_and_idempotency_replays_the_job() {
 async fn docx_completes_through_anydoc_and_replays() {
     let app = test_app().await;
     let docx = include_bytes!("fixtures/anydoc/text.docx").as_slice();
-    let body = multipart_body_with_media_type(
-        Uuid::new_v4(),
-        "standard",
-        docx,
-        "notes.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    let body = multipart(
+        &[
+            ("clientRunId", &Uuid::new_v4().to_string()),
+            ("profile", "standard"),
+        ],
+        Some((
+            docx,
+            "notes.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )),
     );
 
     let response = app.submit(body.clone(), "anydoc-docx-1", TOKEN).await;
@@ -683,12 +684,12 @@ async fn every_advertised_anydoc_family_converts() {
             "ppt",
         ),
     ] {
-        let body = multipart_body_with_media_type(
-            Uuid::new_v4(),
-            "standard",
-            fixture,
-            filename,
-            media_type,
+        let body = multipart(
+            &[
+                ("clientRunId", &Uuid::new_v4().to_string()),
+                ("profile", "standard"),
+            ],
+            Some((fixture, filename, media_type)),
         );
         let response = app
             .submit(body, &format!("anydoc-family-{filename}"), TOKEN)
@@ -796,12 +797,12 @@ async fn broken_and_hostile_anydoc_inputs_fail_closed_without_artifacts() {
             "invalid_document",
         ),
     ] {
-        let body = multipart_body_with_media_type(
-            Uuid::new_v4(),
-            "standard",
-            fixture,
-            filename,
-            media_type,
+        let body = multipart(
+            &[
+                ("clientRunId", &Uuid::new_v4().to_string()),
+                ("profile", "standard"),
+            ],
+            Some((fixture, filename, media_type)),
         );
         let response = app
             .submit(body, &format!("anydoc-broken-{filename}"), TOKEN)
@@ -842,12 +843,16 @@ async fn a_cross_family_mislabelled_container_fails_before_conversion() {
     // corruption code for a merely misnamed file. It must fail as an invalid
     // document instead, and before any parsing happens.
     let app = test_app().await;
-    let body = multipart_body_with_media_type(
-        Uuid::new_v4(),
-        "standard",
-        include_bytes!("fixtures/anydoc/sheet.xlsx").as_slice(),
-        "actually-a-sheet.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    let body = multipart(
+        &[
+            ("clientRunId", &Uuid::new_v4().to_string()),
+            ("profile", "standard"),
+        ],
+        Some((
+            include_bytes!("fixtures/anydoc/sheet.xlsx").as_slice(),
+            "actually-a-sheet.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )),
     );
     let response = app.submit(body, "anydoc-mislabelled-1", TOKEN).await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -874,12 +879,16 @@ async fn a_cross_family_mislabelled_container_fails_before_conversion() {
 async fn anydoc_output_ceiling_fails_closed() {
     let app = test_app_with_output_limit(64).await;
     let docx = include_bytes!("fixtures/anydoc/text.docx").as_slice();
-    let body = multipart_body_with_media_type(
-        Uuid::new_v4(),
-        "standard",
-        docx,
-        "notes.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    let body = multipart(
+        &[
+            ("clientRunId", &Uuid::new_v4().to_string()),
+            ("profile", "standard"),
+        ],
+        Some((
+            docx,
+            "notes.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )),
     );
     let response = app.submit(body, "anydoc-ceiling-1", TOKEN).await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -903,48 +912,48 @@ async fn anydoc_upload_boundaries_enforce_extension_media_type_and_magic() {
     let docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
     for (body, key, status, code) in [
         (
-            multipart_body_with_media_type(
-                Uuid::new_v4(),
-                "standard",
-                &clean_pdf(),
-                "notes.docx",
-                docx_mime,
+            multipart(
+                &[
+                    ("clientRunId", &Uuid::new_v4().to_string()),
+                    ("profile", "standard"),
+                ],
+                Some((&clean_pdf(), "notes.docx", docx_mime)),
             ),
             "pdf-content-docx-extension",
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "invalid_source_signature",
         ),
         (
-            multipart_body_with_media_type(
-                Uuid::new_v4(),
-                "standard",
-                docx,
-                "notes.docx",
-                "application/msword",
+            multipart(
+                &[
+                    ("clientRunId", &Uuid::new_v4().to_string()),
+                    ("profile", "standard"),
+                ],
+                Some((docx, "notes.docx", "application/msword")),
             ),
             "mismatched-media-type",
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "invalid_source_media_type",
         ),
         (
-            multipart_body_with_media_type(
-                Uuid::new_v4(),
-                "standard",
-                docx,
-                "notes.md",
-                "text/markdown",
+            multipart(
+                &[
+                    ("clientRunId", &Uuid::new_v4().to_string()),
+                    ("profile", "standard"),
+                ],
+                Some((docx, "notes.md", "text/markdown")),
             ),
             "unsupported-extension",
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "unsupported_source_extension",
         ),
         (
-            multipart_body_with_media_type(
-                Uuid::new_v4(),
-                "standard",
-                docx,
-                "notes.docx",
-                docx_mime,
+            multipart(
+                &[
+                    ("clientRunId", &Uuid::new_v4().to_string()),
+                    ("profile", "standard"),
+                ],
+                Some((docx, "notes.docx", docx_mime)),
             ),
             "docx-accepted",
             StatusCode::ACCEPTED,
@@ -967,12 +976,16 @@ async fn a_succeeded_anydoc_job_survives_restart_without_wedging_startup() {
     // startup - the whole service refused to boot, not just that one job.
     let harness = TestHarness::new();
     let docx = include_bytes!("fixtures/anydoc/text.docx").as_slice();
-    let body = multipart_body_with_media_type(
-        Uuid::new_v4(),
-        "standard",
-        docx,
-        "notes.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    let body = multipart(
+        &[
+            ("clientRunId", &Uuid::new_v4().to_string()),
+            ("profile", "standard"),
+        ],
+        Some((
+            docx,
+            "notes.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )),
     );
     let first = harness.app().await;
 
@@ -1512,12 +1525,12 @@ async fn audio_is_unadvertised_and_refused_without_the_worker() {
 
     let response = app
         .submit(
-            multipart_body_with_media_type(
-                Uuid::new_v4(),
-                "standard",
-                TWO_SPEAKERS_WAV,
-                "two-speakers.wav",
-                "audio/wav",
+            multipart(
+                &[
+                    ("clientRunId", &Uuid::new_v4().to_string()),
+                    ("profile", "standard"),
+                ],
+                Some((TWO_SPEAKERS_WAV, "two-speakers.wav", "audio/wav")),
             ),
             "audio-absent-1",
             TOKEN,
@@ -1561,12 +1574,13 @@ async fn a_two_speaker_recording_transcribes_end_to_end() {
 
     let response = app
         .submit(
-            multipart_body_with_speaker_counts(
-                Uuid::new_v4(),
-                TWO_SPEAKERS_WAV,
-                "two-speakers.wav",
-                "audio/wav",
-                &["2"],
+            multipart(
+                &[
+                    ("clientRunId", &Uuid::new_v4().to_string()),
+                    ("profile", "standard"),
+                    ("speakerCount", "2"),
+                ],
+                Some((TWO_SPEAKERS_WAV, "two-speakers.wav", "audio/wav")),
             ),
             "audio-transcript-1",
             TOKEN,
@@ -1639,12 +1653,12 @@ async fn a_recording_with_no_speech_fails_rather_than_asking_for_a_remote() {
 
     let response = app
         .submit(
-            multipart_body_with_media_type(
-                Uuid::new_v4(),
-                "standard",
-                SILENCE_WAV,
-                "silence.wav",
-                "audio/wav",
+            multipart(
+                &[
+                    ("clientRunId", &Uuid::new_v4().to_string()),
+                    ("profile", "standard"),
+                ],
+                Some((SILENCE_WAV, "silence.wav", "audio/wav")),
             ),
             "audio-silence-1",
             TOKEN,
@@ -1675,13 +1689,13 @@ async fn speaker_count_is_validated_and_part_of_the_request_identity() {
             "duplicate_multipart_field",
         ),
     ] {
-        let body = multipart_body_with_speaker_counts(
-            Uuid::new_v4(),
-            &pdf,
-            "fixture.pdf",
-            "application/pdf",
-            counts,
-        );
+        let client_run_id = Uuid::new_v4().to_string();
+        let mut fields = vec![
+            ("clientRunId", client_run_id.as_str()),
+            ("profile", "standard"),
+        ];
+        fields.extend(counts.iter().map(|count| ("speakerCount", *count)));
+        let body = multipart(&fields, Some((&pdf, "fixture.pdf", "application/pdf")));
         let response = app.submit(body, key, TOKEN).await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{key}");
         assert_eq!(json_body(response).await["error"]["code"], code, "{key}");
@@ -1691,24 +1705,26 @@ async fn speaker_count_is_validated_and_part_of_the_request_identity() {
     // Same key, same bytes, a different count is a different request, so it
     // must conflict rather than replay the first job's transcript settings.
     let client_run_id = Uuid::new_v4();
-    let two = multipart_body_with_speaker_counts(
-        client_run_id,
-        &pdf,
-        "fixture.pdf",
-        "application/pdf",
-        &["2"],
+    let two = multipart(
+        &[
+            ("clientRunId", &client_run_id.to_string()),
+            ("profile", "standard"),
+            ("speakerCount", "2"),
+        ],
+        Some((&pdf, "fixture.pdf", "application/pdf")),
     );
     let response = app.submit(two.clone(), "speakers-identity", TOKEN).await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let replay = app.submit(two, "speakers-identity", TOKEN).await;
     assert_eq!(replay.headers()["idempotency-replayed"], "true");
 
-    let three = multipart_body_with_speaker_counts(
-        client_run_id,
-        &pdf,
-        "fixture.pdf",
-        "application/pdf",
-        &["3"],
+    let three = multipart(
+        &[
+            ("clientRunId", &client_run_id.to_string()),
+            ("profile", "standard"),
+            ("speakerCount", "3"),
+        ],
+        Some((&pdf, "fixture.pdf", "application/pdf")),
     );
     let conflict = app.submit(three, "speakers-identity", TOKEN).await;
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
@@ -1733,12 +1749,12 @@ async fn the_audio_ceiling_bounds_recordings_without_touching_documents() {
 
     let response = app
         .submit(
-            multipart_body_with_media_type(
-                Uuid::new_v4(),
-                "standard",
-                TWO_SPEAKERS_WAV,
-                "two-speakers.wav",
-                "audio/wav",
+            multipart(
+                &[
+                    ("clientRunId", &Uuid::new_v4().to_string()),
+                    ("profile", "standard"),
+                ],
+                Some((TWO_SPEAKERS_WAV, "two-speakers.wav", "audio/wav")),
             ),
             "audio-ceiling-1",
             TOKEN,
@@ -1775,12 +1791,16 @@ async fn invalid_submission_fields_are_rejected_without_creating_jobs() {
 
     // A real PNG, well formed and advertised by the contract. Only the missing
     // engine refuses it, and it must refuse before anything is staged.
-    let no_engine = multipart_body_with_media_type(
-        Uuid::new_v4(),
-        "standard",
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
-        "fixture.png",
-        "image/png",
+    let no_engine = multipart(
+        &[
+            ("clientRunId", &Uuid::new_v4().to_string()),
+            ("profile", "standard"),
+        ],
+        Some((
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
+            "fixture.png",
+            "image/png",
+        )),
     );
     let response = app.submit(no_engine, "vision-1", TOKEN).await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -1810,6 +1830,10 @@ async fn invalid_submission_fields_are_rejected_without_creating_jobs() {
 async fn multipart_boundaries_enforce_fields_media_type_extension_and_size() {
     let app = test_app().await;
     let pdf = clean_pdf();
+    // The second profile follows the source, so it is refused after staging.
+    let mut duplicate_profile = multipart_body(Uuid::new_v4(), "standard", &pdf, "fixture.pdf");
+    duplicate_profile.truncate(duplicate_profile.len() - b"--tool-kit-boundary--\r\n".len());
+    duplicate_profile.extend(multipart(&[("profile", "local_only")], None));
     for (body, key, status, code) in [
         (
             multipart_body(Uuid::new_v4(), "standard", &pdf, "fixture.txt"),
@@ -1818,25 +1842,31 @@ async fn multipart_boundaries_enforce_fields_media_type_extension_and_size() {
             "unsupported_source_extension",
         ),
         (
-            multipart_body_with_media_type(
-                Uuid::new_v4(),
-                "standard",
-                &pdf,
-                "fixture.pdf",
-                "application/octet-stream",
+            multipart(
+                &[
+                    ("clientRunId", &Uuid::new_v4().to_string()),
+                    ("profile", "standard"),
+                ],
+                Some((&pdf, "fixture.pdf", "application/octet-stream")),
             ),
             "wrong-media-type",
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "invalid_source_media_type",
         ),
         (
-            multipart_body_with_duplicate_profile(Uuid::new_v4(), &pdf),
+            duplicate_profile,
             "duplicate-profile",
             StatusCode::UNPROCESSABLE_ENTITY,
             "duplicate_multipart_field",
         ),
         (
-            multipart_body_without_source(Uuid::new_v4(), "standard"),
+            multipart(
+                &[
+                    ("clientRunId", &Uuid::new_v4().to_string()),
+                    ("profile", "standard"),
+                ],
+                None,
+            ),
             "missing-source",
             StatusCode::UNPROCESSABLE_ENTITY,
             "missing_source",
@@ -1884,7 +1914,7 @@ async fn a_body_with_no_container_signature_is_refused_before_the_upload_ends() 
     // Enough bytes to fill the signature window, and no end to the body: the
     // service must answer off the prefix rather than stream a gigabyte first.
     writer
-        .write_all(&slow_multipart_prefix_opening(
+        .write_all(&slow_multipart_prefix(
             Uuid::new_v4(),
             b"PK\x03\x04not-a-pdf",
         ))
@@ -1909,7 +1939,7 @@ async fn concurrent_slow_uploads_receive_immediate_backpressure_and_cleanup() {
     let app = test_app_with_upload_limits(1024 * 1024, 1).await;
     let (mut writer, reader) = tokio::io::duplex(4096);
     writer
-        .write_all(&slow_multipart_prefix(Uuid::new_v4()))
+        .write_all(&slow_multipart_prefix(Uuid::new_v4(), b"%PDF-1.4\n"))
         .await
         .unwrap();
     let request = Request::builder()

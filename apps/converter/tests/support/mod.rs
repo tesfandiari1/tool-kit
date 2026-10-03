@@ -2,9 +2,11 @@
 #![allow(dead_code)]
 
 use std::{
+    fs::{self, File},
     io::Write as _,
     net::SocketAddr,
     path::{Path, PathBuf},
+    process::{Command, ExitStatus, Stdio},
     sync::Arc,
     time::Duration,
 };
@@ -15,6 +17,7 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqliteConnectOptions, Connection, Row, SqliteConnection};
@@ -30,7 +33,12 @@ use tool_kit_converter::{
         hash_idempotency_key, CreateOutcome, NewConversion, NewSource, Profile, SqliteRepository,
         DATABASE_FILENAME,
     },
-    router, AppState,
+    router,
+    worker_protocol::{
+        WORKER_EXPECTED_SOURCE_BYTES_ENV, WORKER_EXPECTED_SOURCE_SHA256_ENV,
+        WORKER_MAX_OUTPUT_BYTES_ENV, WORKER_REPORT_FILE,
+    },
+    AppState,
 };
 
 pub(crate) mod corpus;
@@ -716,106 +724,47 @@ pub(crate) fn multipart_body(
     source: &[u8],
     filename: &str,
 ) -> Vec<u8> {
-    multipart_body_with_media_type(client_run_id, profile, source, filename, "application/pdf")
+    multipart(
+        &[
+            ("clientRunId", &client_run_id.to_string()),
+            ("profile", profile),
+        ],
+        Some((source, filename, "application/pdf")),
+    )
 }
 
-pub(crate) fn multipart_body_with_media_type(
-    client_run_id: Uuid,
-    profile: &str,
-    source: &[u8],
-    filename: &str,
-    media_type: &str,
-) -> Vec<u8> {
+/// `fields` in order, then the `source` part as (bytes, filename, media type).
+/// Values are written verbatim, so a test can repeat a part or send one the
+/// parser must refuse.
+pub(crate) fn multipart(fields: &[(&str, &str)], source: Option<(&[u8], &str, &str)>) -> Vec<u8> {
     let boundary = "tool-kit-boundary";
     let mut body = Vec::new();
-    write!(
-        body,
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"clientRunId\"\r\n\r\n{client_run_id}\r\n"
-    )
-    .unwrap();
-    write!(
-        body,
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\n{profile}\r\n"
-    )
-    .unwrap();
-    write!(
-        body,
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"source\"; filename=\"{filename}\"\r\nContent-Type: {media_type}\r\n\r\n"
-    )
-    .unwrap();
-    body.extend_from_slice(source);
-    write!(body, "\r\n--{boundary}--\r\n").unwrap();
-    body
-}
-
-/// `speaker_counts` are raw part values written verbatim, so a test can send
-/// one the parser must refuse, or send the part twice.
-pub(crate) fn multipart_body_with_speaker_counts(
-    client_run_id: Uuid,
-    source: &[u8],
-    filename: &str,
-    media_type: &str,
-    speaker_counts: &[&str],
-) -> Vec<u8> {
-    let boundary = "tool-kit-boundary";
-    let mut body = Vec::new();
-    write!(
-        body,
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"clientRunId\"\r\n\r\n{client_run_id}\r\n"
-    )
-    .unwrap();
-    write!(
-        body,
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\nstandard\r\n"
-    )
-    .unwrap();
-    for count in speaker_counts {
+    for (name, value) in fields {
         write!(
             body,
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"speakerCount\"\r\n\r\n{count}\r\n"
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
         )
         .unwrap();
     }
-    write!(
-        body,
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"source\"; filename=\"{filename}\"\r\nContent-Type: {media_type}\r\n\r\n"
-    )
-    .unwrap();
-    body.extend_from_slice(source);
-    write!(body, "\r\n--{boundary}--\r\n").unwrap();
+    if let Some((bytes, filename, media_type)) = source {
+        write!(
+            body,
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"source\"; filename=\"{filename}\"\r\nContent-Type: {media_type}\r\n\r\n"
+        )
+        .unwrap();
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    write!(body, "--{boundary}--\r\n").unwrap();
     body
 }
 
-pub(crate) fn multipart_body_with_duplicate_profile(client_run_id: Uuid, source: &[u8]) -> Vec<u8> {
-    let mut body = multipart_body(client_run_id, "standard", source, "fixture.pdf");
-    let closing = b"--tool-kit-boundary--\r\n";
-    body.truncate(body.len() - closing.len());
-    body.extend_from_slice(
-        b"--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\nlocal_only\r\n--tool-kit-boundary--\r\n",
-    );
-    body
-}
-
-pub(crate) fn multipart_body_without_source(client_run_id: Uuid, profile: &str) -> Vec<u8> {
-    format!(
-        "--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"clientRunId\"\r\n\r\n{client_run_id}\r\n--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\n{profile}\r\n--tool-kit-boundary--\r\n"
-    )
-    .into_bytes()
-}
-
-pub(crate) fn slow_multipart_prefix(client_run_id: Uuid) -> Vec<u8> {
-    slow_multipart_prefix_opening(client_run_id, b"%PDF-1.4\n")
-}
-
-/// The same prefix with the source part's first bytes chosen by the caller,
-/// so a test can open a still-running upload with content that can never be
-/// admitted.
-pub(crate) fn slow_multipart_prefix_opening(client_run_id: Uuid, opening: &[u8]) -> Vec<u8> {
-    let mut prefix = format!(
-        "--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"clientRunId\"\r\n\r\n{client_run_id}\r\n--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\nstandard\r\n--tool-kit-boundary\r\nContent-Disposition: form-data; name=\"source\"; filename=\"slow.pdf\"\r\nContent-Type: application/pdf\r\n\r\n"
-    )
-    .into_bytes();
-    prefix.extend_from_slice(opening);
+/// A standard PDF upload cut off inside the source part, which opens with
+/// `opening`, so a test can hold the upload open or open it with content that
+/// can never be admitted.
+pub(crate) fn slow_multipart_prefix(client_run_id: Uuid, opening: &[u8]) -> Vec<u8> {
+    let mut prefix = multipart_body(client_run_id, "standard", opening, "slow.pdf");
+    prefix.truncate(prefix.len() - b"\r\n--tool-kit-boundary--\r\n".len());
     prefix
 }
 
@@ -857,40 +806,80 @@ pub(crate) fn clean_pdf() -> Vec<u8> {
 }
 
 pub(crate) fn pdf_with_content(content: &[u8]) -> Vec<u8> {
-    let objects = [
+    corpus::assemble(&[
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_vec(),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
-        format!(
-            "<< /Length {} >>\nstream\n{}endstream",
-            content.len(),
-            String::from_utf8_lossy(content)
-        )
-        .into_bytes(),
-    ];
-    let mut pdf = b"%PDF-1.4\n".to_vec();
-    let mut offsets = Vec::new();
-    for (index, object) in objects.iter().enumerate() {
-        offsets.push(pdf.len());
-        writeln!(pdf, "{} 0 obj", index + 1).unwrap();
-        pdf.extend_from_slice(object);
-        pdf.extend_from_slice(b"\nendobj\n");
-    }
-    let xref = pdf.len();
-    write!(pdf, "xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).unwrap();
-    for offset in offsets {
-        writeln!(pdf, "{offset:010} 00000 n ").unwrap();
-    }
-    write!(
-        pdf,
-        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-        objects.len() + 1
-    )
-    .unwrap();
-    pdf
+        corpus::helvetica(),
+        corpus::stream_object("", content),
+    ])
 }
 
 pub(crate) fn streaming_body(reader: tokio::io::DuplexStream) -> Body {
     Body::from_stream(ReaderStream::new(reader))
+}
+
+/// The worker reports Foundation's three components; `sw_vers` drops a
+/// trailing zero, so pad before comparing.
+pub(crate) fn macos_product_version() -> String {
+    let output = Command::new("/usr/bin/sw_vers")
+        .arg("-productVersion")
+        .output()
+        .unwrap();
+    let printed = String::from_utf8(output.stdout).unwrap();
+    let mut parts: Vec<&str> = printed.trim().split('.').collect();
+    while parts.len() < 3 {
+        parts.push("0");
+    }
+    parts.join(".")
+}
+
+pub(crate) struct Run {
+    pub(crate) staging: PathBuf,
+    pub(crate) status: ExitStatus,
+}
+
+/// Spawns a Swift worker exactly as the engines spawn theirs: the staging
+/// directory as argv[1], the attempt directory as the cwd, a cleared
+/// environment, the source on stdin, and both output streams on /dev/null.
+/// Every worker test runs through it, so the cleared environment is what every
+/// assertion is made under. A `settings` entry replaces the base environment,
+/// which is how a wrong byte count or a low ceiling gets in.
+pub(crate) fn run_worker(
+    worker: &Path,
+    root: &Path,
+    source: &Path,
+    sha256: &str,
+    settings: &[(&str, &str)],
+) -> Run {
+    let attempt = root.join("attempt");
+    let staging = attempt.join("publication.staging");
+    fs::create_dir_all(&staging).unwrap();
+    let byte_length = fs::metadata(source).unwrap().len();
+
+    let mut command = Command::new(worker);
+    command
+        .arg(&staging)
+        .current_dir(&attempt)
+        .env_clear()
+        .env(WORKER_MAX_OUTPUT_BYTES_ENV, (1024 * 1024).to_string())
+        .env(WORKER_EXPECTED_SOURCE_BYTES_ENV, byte_length.to_string())
+        .env(WORKER_EXPECTED_SOURCE_SHA256_ENV, sha256)
+        .stdin(Stdio::from(File::open(source).unwrap()))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (name, value) in settings {
+        command.env(name, value);
+    }
+    let status = command.status().unwrap();
+    Run { staging, status }
+}
+
+pub(crate) fn digest(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+pub(crate) fn read_report<T: DeserializeOwned>(staging: &Path) -> T {
+    let encoded = fs::read(staging.join(WORKER_REPORT_FILE)).unwrap();
+    serde_json::from_slice(&encoded).unwrap()
 }

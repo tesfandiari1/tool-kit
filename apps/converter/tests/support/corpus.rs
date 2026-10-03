@@ -270,7 +270,7 @@ fn page_text(index: usize) -> Vec<u8> {
     content
 }
 
-fn helvetica() -> Vec<u8> {
+pub(crate) fn helvetica() -> Vec<u8> {
     b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec()
 }
 
@@ -302,7 +302,7 @@ fn image_object() -> Vec<u8> {
     )
 }
 
-fn stream_object(dictionary: &str, data: &[u8]) -> Vec<u8> {
+pub(crate) fn stream_object(dictionary: &str, data: &[u8]) -> Vec<u8> {
     let mut object = format!("<< {dictionary} /Length {} >>\nstream\n", data.len()).into_bytes();
     object.extend_from_slice(data);
     object.extend_from_slice(b"\nendstream");
