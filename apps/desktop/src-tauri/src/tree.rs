@@ -1,8 +1,8 @@
 //! One directory level of the library, read straight from disk.
 //!
-//! Disk is authoritative and `.toolkit/index.db` is a rebuildable index, so the
-//! tree never asks the database what a folder holds. No Tauri types here, so
-//! the pairing rule, the sort and the escape check are unit-testable.
+//! Disk is authoritative, so the tree never asks a database what a folder
+//! holds. No Tauri types here, so the pairing rule, the sort and the escape
+//! check are unit-testable.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
