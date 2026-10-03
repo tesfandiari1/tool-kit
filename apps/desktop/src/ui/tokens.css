@@ -67,11 +67,6 @@
   --btn-secondary-hover-bg: light-dark(var(--ink), var(--bone));
   --btn-secondary-hover-fg: light-dark(var(--bone), var(--ink));
 
-  --btn-inverse-border: light-dark(var(--bone), var(--ink));
-  --btn-inverse-fg: light-dark(var(--bone), var(--ink));
-  --btn-inverse-hover-bg: light-dark(var(--bone), var(--ink));
-  --btn-inverse-hover-fg: light-dark(var(--ink), var(--bone));
-
   /* Invented: the toast is a dark bar in both themes, and on ink it needs a
      lifted step or it vanishes into the page. */
   --toast-bg: light-dark(var(--ink), var(--ink-lift));

@@ -27,7 +27,6 @@ import {
   planRun,
   runButtonLabel,
 } from "@/domains/run/plan";
-import { planConversionRoutes, type ConversionCapabilities } from "@/domains/run/routes";
 import { HistoryPanel } from "@/domains/history/HistoryPanel";
 import { SettingsPanel } from "@/domains/settings/SettingsPanel";
 import { DocumentPane } from "@/domains/thread/DocumentPane";
@@ -38,7 +37,6 @@ import {
   confirm,
   copyToClipboard,
   onWindowResized,
-  pickDirectory,
   pickFiles,
   pickFolders,
   resizeWindow,
@@ -66,6 +64,12 @@ const VIEW_ITEMS = [
 ] satisfies { value: View; label: string }[];
 
 const CAPABILITY_PROBE_INTERVAL_MS = 15_000;
+
+type ConversionCapabilities =
+  | { state: "loading" }
+  /// The host's own reason: nothing in Settings moves the service.
+  | { state: "unavailable"; message?: string }
+  | { state: "ready"; acceptingJobs: boolean };
 
 /// A live drag reports every frame, and each write is a settings save.
 const RESIZE_SETTLE_MS = 400;
@@ -132,7 +136,6 @@ export default function App() {
 
   const scanKey = JSON.stringify([
     settings.inputs,
-    settings.outputDir,
     // The active project is where a run writes, which the scan judges "already
     // here" against.
     settings.activeProjectPath,
@@ -248,7 +251,7 @@ export default function App() {
         if (!live) return;
         setProjects(p);
         // Adopt the catch-all when the bound destination is gone, or the run
-        // falls back to whatever absolute `outputDir` it last held.
+        // has nowhere to write.
         const current = settingsRef.current.activeProjectPath;
         const stillThere = p.some((project) => project.path === current);
         if (!stillThere && p.length > 0) {
@@ -266,7 +269,7 @@ export default function App() {
     };
   }, [libraryMode, workspacePath, runsFinished, showToast, openPath, persist]);
 
-  // The counts drive the run label, the autodetect and the output folder, and
+  // The counts drive the run label and the autodetect, and
   // "already done" is format-specific.
   useEffect(() => {
     if (settings.inputs.length === 0) {
@@ -300,7 +303,6 @@ export default function App() {
         setCapabilities({
           state: "ready",
           acceptingJobs: data.data.conversion.acceptingJobs,
-          inputFormats: data.data.conversion.inputFormats,
         });
         if (keys) setSecrets(keys);
         return true;
@@ -396,17 +398,9 @@ export default function App() {
     });
     if (!detected) return;
     answered.current = detected.selection;
-    // Read outputDir from the ref, so defaulting it cannot retrigger this.
-    applySettings({
-      ...current,
-      jobType: detected.jobType,
-      // Only without a workspace: with one, the active project decides.
-      outputDir:
-        current.workspacePath === null
-          ? (current.outputDir ?? scan.suggestedOutput)
-          : current.outputDir,
-    });
-  }, [applySettings, scan.convert, scan.transcribe, scan.suggestedOutput]);
+    // Read from the ref, so the write cannot retrigger this.
+    applySettings({ ...current, jobType: detected.jobType });
+  }, [applySettings, scan.convert, scan.transcribe]);
 
   const mutateInputs = useCallback((fn: (cur: string[]) => string[]) => {
     const current = settingsRef.current;
@@ -544,11 +538,6 @@ export default function App() {
 
   const addFolders = async () => {
     await stageDrop(await pickFolders());
-  };
-
-  const pickOutput = async () => {
-    const dir = await pickDirectory();
-    if (dir) persist({ outputDir: dir });
   };
 
   /// One setting for both a drop and a run, so they cannot name two folders.
@@ -815,14 +804,15 @@ export default function App() {
     skipAlreadyDone,
   );
 
-  /// The job in force: both run in the local service, so its refusals belong
-  /// in the preflight.
-  const conversionPlan = planConversionRoutes({
-    files: settings.jobType === "convert" ? scan.convertFiles : scan.transcribeFiles,
-    capabilities,
-    skipAlreadyDone,
-  });
-  const missingToken = conversionPlan.backend.length > 0 && !secrets.backend;
+  /// Both jobs run in the local service, so its state belongs in the
+  /// preflight. The scan already dropped what the service cannot take.
+  const serviceBlocked =
+    capabilities.state !== "ready"
+      ? capabilities.state
+      : capabilities.acceptingJobs
+        ? null
+        : "not_accepting";
+  const missingToken = toRun > 0 && !secrets.backend;
   /// For naming and revealing the destination, never for deciding it. Keep it
   /// in step with `output_dir_for`, which settles that.
   const destination =
@@ -831,11 +821,9 @@ export default function App() {
           rel: settings.activeProjectPath,
           path: `${workspacePath}/${settings.activeProjectPath}`,
         }
-      : settings.outputDir !== null
-        ? { rel: null, path: settings.outputDir }
-        : null;
+      : null;
 
-  const routeBlocked = conversionPlan.blocked.length > 0;
+  const routeBlocked = serviceBlocked !== null && toRun > 0;
   const preflightReady = scanCurrent && !routeBlocked && !missingToken;
   const canRun = canStartRun({
     hasInputs: settings.inputs.length > 0,
@@ -962,18 +950,15 @@ export default function App() {
       hint = "Nothing to do here. Convert takes PDF, Office and image files; Transcribe takes audio and video.";
     }
   } else if (routeBlocked) {
-    const reason = conversionPlan.blocked[0]?.reason;
-    const count = conversionPlan.blocked.length;
-    if (reason === "capabilities_pending") {
+    const count = toRun;
+    if (serviceBlocked === "loading") {
       hint = "Checking conversion service capabilities…";
-    } else if (reason === "backend_unavailable") {
+    } else if (serviceBlocked === "unavailable") {
       // Carry the host's own reason.
       const detail = capabilities.state === "unavailable" ? capabilities.message : undefined;
       hint = detail ?? `Conversion service unavailable for ${count} file${count > 1 ? "s" : ""}`;
-    } else if (reason === "backend_not_accepting") {
-      hint = `Conversion service is not accepting jobs for ${count} file${count > 1 ? "s" : ""} right now`;
     } else {
-      hint = `${count} file${count > 1 ? "s" : ""} cannot be converted on this Mac — remove ${count > 1 ? "them" : "it"}`;
+      hint = `Conversion service is not accepting jobs for ${count} file${count > 1 ? "s" : ""} right now`;
     }
   } else if (missingToken) {
     hint = "Add your backend token in Settings";
@@ -981,15 +966,7 @@ export default function App() {
   } else if (toRun === 0 && copying === 0 && skipping > 0) {
     hint = `All ${skipping} already have a result beside them — turn off “Skip files already done” in Settings to run them again`;
     hintOpensSettings = true;
-  } else if (settings.inputs.length > 0 && destination === null) {
-    // Last in the chain: the branches above are more actionable.
-    hint = "Choose an output folder for the results";
   }
-
-  /// The link colour promises a press, so only the hints `onHint` acts on get it.
-  const hintActionable =
-    hint !== null &&
-    (hintOpensSettings || hint === "Choose an output folder for the results");
 
   // What the run does besides converting.
   const noteParts: string[] = [];
@@ -1037,14 +1014,13 @@ export default function App() {
       canRun={canRun}
       runLabel={runLabel}
       hint={hint}
-      hintActionable={hintActionable}
+      hintActionable={hintOpensSettings}
       note={note}
       job={job}
       selectedId={activeId}
       persist={persist}
       onAddFiles={() => void importFiles()}
       onAddFolders={() => void addFolders()}
-      onPickOutput={() => void pickOutput()}
       onPickProject={pickProject}
       onRemoveInput={(p) => mutateInputs((cur) => cur.filter((x) => x !== p))}
       onClearInputs={() => mutateInputs(() => [])}
@@ -1066,7 +1042,6 @@ export default function App() {
       onRetryJob={(id) => void retryJob(id)}
       onHint={() => {
         if (hintOpensSettings) setSettingsOpen(true);
-        else if (destination === null) void pickOutput();
       }}
     />
   );
@@ -1223,8 +1198,7 @@ export default function App() {
             });
           }}
           onReveal={(doc) => {
-            const path = doc.revealPath;
-            if (path) void call(() => commands.revealPath(path));
+            void call(() => commands.revealPath(doc.id));
           }}
         />
         )

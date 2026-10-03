@@ -14,3 +14,24 @@ pub mod anydoc;
 pub mod audio;
 pub mod pdf;
 pub mod vision;
+
+/// A SHA-256 digest as every party here writes it: 64 lowercase hex digits.
+pub fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_lowercase_sha256;
+
+    #[test]
+    fn only_64_lowercase_hex_digits_are_a_digest() {
+        assert!(is_lowercase_sha256(&"0f".repeat(32)));
+        assert!(!is_lowercase_sha256(&"0F".repeat(32)));
+        assert!(!is_lowercase_sha256(&"0f".repeat(31)));
+        assert!(!is_lowercase_sha256(&"0g".repeat(32)));
+    }
+}

@@ -1,9 +1,0 @@
-html{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
-body{margin:0;background:var(--surface-page);color:var(--text-body);font-family:var(--font-body);font-weight:var(--weight-body);font-size:var(--text-body-md);line-height:var(--leading-body)}
-::selection{background:var(--selection);color:var(--ink)}
-a{color:var(--link);text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px;transition:color var(--dur) var(--ease)}
-a:hover{color:var(--link-hover)}
-h1,h2,h3{font-family:var(--font-display);font-weight:400;line-height:var(--leading-display);letter-spacing:var(--track-display);margin:0}
-h4,h5,h6{font-family:var(--font-subhead);font-weight:var(--weight-subhead);line-height:var(--leading-subhead);margin:0}
-p{margin:0}
-:focus-visible{outline:1px solid var(--focus-ring);outline-offset:3px}

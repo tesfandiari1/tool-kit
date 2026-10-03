@@ -68,9 +68,6 @@ Open decisions from the 2026-10-02 code review, one per owner call:
 - The DOCX and PPTX picture-marking pass runs even when Foundation Models is
   off, because the Vision handshake carries no availability signal.
   Recommended: leave it until profiling shows the extra parse matters.
-- `LOCAL_AUDIO_MEDIA_TYPES` exists in three copies (converter `model.rs`,
-  desktop `lib.rs`, `routes.ts`). The desktop reads it only during an outage,
-  so a stale copy can only fail to unblock a run. Recommended: keep the copies.
 
 One low item left from the verify pass over the 2026-09-12 fix:
 
@@ -95,9 +92,7 @@ One low item left from the verify pass over the 2026-09-12 fix:
   [`AUDIO_EPIC.md`](AUDIO_EPIC.md).
 - **Convert result reuse.** A Convert lookup never matches its own
   `backend:markdown` rows, so every converted document re-runs locally. The
-  scan's `alreadyHereConvert` and `reusableConvert` counts are always 0 until
-  this lands. It costs time, never
-  correctness. Transcripts already match. On 2026-10-02
+  scan counts reuse for Transcribe only. It costs time, never correctness. Transcripts already match. On 2026-10-02
   `history.db` held 96 converted sources and none ran twice.
 - **The M6 gate.** CVR-067 waited on M5, now cancelled. Close it with the
   local-only decision.
@@ -123,7 +118,6 @@ pnpm check               # tsc --noEmit, eslint, vitest        (fast inner loop)
 pnpm verify              # check, build, desktop clippy and Rust tests
 pnpm verify:backend      # lint:api, converter clippy and tests
 pnpm verify:all          # both of the above
-pnpm verify:local-corpus # routing_policy plus the AnyDoc sweep, no container
 pnpm verify:container    # built image, graceful and SIGKILL restart smokes
 pnpm lint:api            # Spectral over the contract   (also in verify:backend)
 pnpm verify:api-drift    # schema.ts still matches the contract
@@ -153,7 +147,7 @@ nothing, because the RustSec database moves.
 | `docs/STATUS.md` | This file. The single live status document |
 | `docs/north-star.md` | The local-first product target |
 | `docs/AUDIO_EPIC.md` | The local transcription epic: evidence, decisions, sprint 1 |
-| `docs/DESIGN_PORT.md` | Why the design system looks the way it does. Sources in `design/` |
+| `docs/DESIGN_PORT.md` | Why the design system looks the way it does |
 | `docs/archive/` | Everything closed, with a note on why |
 | `README.md` | How to run, test, and release |
 | `CLAUDE.md` | Desktop architecture contract and the gotcha list |

@@ -1,6 +1,7 @@
 //! Routing and quality policy (M4, CVR-041/042/044).
 //!
-//! One pure function over one table. No IO, no clock, no engine knowledge.
+//! Pure maps from an engine and its measurements to the published strings.
+//! No IO and no clock.
 //! Everything the policy reads is a measurement an engine reported, which is
 //! what CVR-041 means by "from real engine output": no filename heuristics, no
 //! page-count rules, no guessing from the media type.
@@ -8,28 +9,27 @@
 use crate::engines::QualitySignals;
 use crate::worker_protocol::FallbackReason;
 
-use super::ConversionProfile;
+use super::model::LocalEngineKind;
 
-/// Where a conversion's Markdown comes from.
-///
-/// Every route runs on this machine, and the shared prefix says so: the remote
-/// leg is a separate contract, not another variant here.
-#[expect(clippy::enum_variant_names)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RouteKind {
-    LocalPdf,
-    LocalAnyDoc,
-    LocalVision,
-    LocalAudio,
-}
-
-impl RouteKind {
-    pub(crate) fn as_str(self) -> &'static str {
+impl LocalEngineKind {
+    /// The route a job converted by this engine records. Every route runs on
+    /// this machine, and the shared prefix says so.
+    pub(crate) fn route_str(self) -> &'static str {
         match self {
-            Self::LocalPdf => "local_pdf",
-            Self::LocalAnyDoc => "local_anydoc",
-            Self::LocalVision => "local_vision",
-            Self::LocalAudio => "local_audio",
+            Self::Pdf => "local_pdf",
+            Self::AnyDoc => "local_anydoc",
+            Self::Vision => "local_vision",
+            Self::Audio => "local_audio",
+        }
+    }
+
+    /// The reason code a conversion this engine published carries.
+    pub(crate) fn reason(self) -> ReasonCode {
+        match self {
+            Self::Pdf => ReasonCode::NativeTextPdf,
+            Self::AnyDoc => ReasonCode::StructuredDocument,
+            Self::Vision => ReasonCode::RecognizedImageText,
+            Self::Audio => ReasonCode::TranscribedAudio,
         }
     }
 }
@@ -91,107 +91,22 @@ impl Warning {
     }
 }
 
-/// What the local engine came back with. The policy never sees an engine type.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum LocalResult {
-    /// Markdown exists on disk, with these measurements.
-    Converted(QualitySignals),
-    /// No Markdown. The engine named why.
-    GaveUp(FallbackReason),
-}
-
-/// What to do with the attempt.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum PolicyDecision {
-    /// Publish the local Markdown.
-    Publish {
-        reason_codes: Vec<ReasonCode>,
-        warnings: Vec<Warning>,
-    },
-    /// Do not publish. The job ends `needs_remote`, and whoever owns the remote
-    /// leg decides from there.
-    ///
-    /// One reason code, never zero, so the durable `fallback_reason` cannot be
-    /// written empty. Warnings ride with published bytes, and there are none.
-    NeedsRemote { reason_code: ReasonCode },
-}
-
-impl PolicyDecision {
-    pub(crate) fn reason_strings(&self) -> Vec<String> {
-        match self {
-            Self::Publish { reason_codes, .. } => reason_codes
-                .iter()
-                .map(|code| code.as_str().to_owned())
-                .collect(),
-            Self::NeedsRemote { reason_code } => vec![reason_code.as_str().to_owned()],
-        }
-    }
-
-    pub(crate) fn warning_strings(&self) -> Vec<String> {
-        match self {
-            Self::Publish { warnings, .. } => warnings
-                .iter()
-                .map(|warning| warning.as_str().to_owned())
-                .collect(),
-            Self::NeedsRemote { .. } => Vec::new(),
-        }
-    }
-}
-
-/// The whole policy.
+/// The warnings published Markdown carries. An engine that gave up publishes
+/// nothing, so it gets none.
 ///
-/// Read it as a table, top to bottom, first match wins:
-///
-/// | local result | decision |
-/// |---|---|
-/// | gave up | `needs_remote`, engine's reason, no warnings |
-/// | converted, some pages had no text | publish + `pages_without_extractable_text` |
-/// | converted, complex layout | publish + layout warnings |
-/// | converted | publish |
-///
-/// **Profile does not change any of this today**, and that is deliberate.
-///
-/// The obvious profile split would be "route a partly-textless document remote
-/// under `standard`". It is not implemented because the only signal for it,
-/// `QualitySignals::native_text_ratio`, is wrong in both directions: a report
-/// with a one-line cover page and no images reports 0.9 with nothing missing,
-/// and a page holding both text and a full-page scan reports 1.0 with the scan
-/// lost. Routing on it would bill Datalab for ordinary documents and still
-/// miss real losses. Warning is what the signal actually supports.
-///
-/// Getting the split back needs evidence the engine does not report yet:
-/// pages that reference an image XObject but yielded no text. That is a worker
-/// protocol change, not a policy change.
-///
-/// `best_quality` is likewise unrepresented. It means "always prefer remote",
-/// which needs a remote leg to exist, so the API rejects it until M5.
+/// **Profile changes none of this, on purpose.** The only signal for routing a
+/// partly-textless document remote, `QualitySignals::native_text_ratio`, is
+/// wrong in both directions: a report with a one-line cover page reports 0.9
+/// with nothing missing, and a page holding text and a full-page scan reports
+/// 1.0 with the scan lost. Warning is what the signal supports. Routing needs
+/// pages that reference an image XObject but yielded no text, which is a
+/// worker protocol change.
 ///
 /// **An engine that measures nothing publishes with no warning, on purpose.**
-/// AnyDoc cannot report completeness, and its own part-level "skip a broken
-/// piece and continue" recovery is silent, so a degraded AnyDoc conversion is
-/// indistinguishable from a clean one here. Warning on all 19 AnyDoc formats
-/// would attach a caveat to almost every non-PDF conversion and teach users to
-/// ignore warnings, which costs more than it buys. The honest statement is
-/// that `structured_document` claims a parser ran, not that the output is
-/// complete. Revisit if AnyDoc ever reports what it skipped.
-pub(crate) fn decide(
-    // Unused today, kept because M5's remote leg is the first thing that reads
-    // it. See the note above on why the obvious profile split is not here yet.
-    _profile: ConversionProfile,
-    route: RouteKind,
-    local: LocalResult,
-) -> PolicyDecision {
-    let signals = match local {
-        LocalResult::GaveUp(reason) => {
-            return PolicyDecision::NeedsRemote {
-                reason_code: ReasonCode::Engine(reason),
-            };
-        }
-        LocalResult::Converted(signals) => signals,
-    };
-
-    // Warnings only ever accompany published bytes, so they are built after
-    // every branch that publishes nothing.
+/// AnyDoc cannot report completeness, and its part-level recovery is silent.
+/// Warning on all 19 AnyDoc formats would teach users to ignore warnings, so
+/// `structured_document` claims a parser ran, not that the output is complete.
+pub(crate) fn warnings(signals: QualitySignals) -> Vec<String> {
     let mut warnings = Vec::new();
     if signals.has_pages_without_text() {
         warnings.push(Warning::PagesWithoutExtractableText);
@@ -202,20 +117,10 @@ pub(crate) fn decide(
     if signals.has_columns {
         warnings.push(Warning::MultiColumnLayout);
     }
-
-    PolicyDecision::Publish {
-        reason_codes: vec![converted_reason(route)],
-        warnings,
-    }
-}
-
-fn converted_reason(route: RouteKind) -> ReasonCode {
-    match route {
-        RouteKind::LocalPdf => ReasonCode::NativeTextPdf,
-        RouteKind::LocalAnyDoc => ReasonCode::StructuredDocument,
-        RouteKind::LocalVision => ReasonCode::RecognizedImageText,
-        RouteKind::LocalAudio => ReasonCode::TranscribedAudio,
-    }
+    warnings
+        .into_iter()
+        .map(|warning| warning.as_str().to_owned())
+        .collect()
 }
 
 #[cfg(test)]
@@ -230,34 +135,38 @@ mod tests {
         }
     }
 
-    fn strings(decision: &PolicyDecision) -> (Vec<String>, Vec<String>) {
-        (decision.reason_strings(), decision.warning_strings())
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn each_engine_records_its_own_route_and_reason() {
+        for (engine, route, reason) in [
+            (LocalEngineKind::Pdf, "local_pdf", "native_text_pdf"),
+            (
+                LocalEngineKind::AnyDoc,
+                "local_anydoc",
+                "structured_document",
+            ),
+            (
+                LocalEngineKind::Vision,
+                "local_vision",
+                "recognized_image_text",
+            ),
+            (LocalEngineKind::Audio, "local_audio", "transcribed_audio"),
+        ] {
+            assert_eq!(engine.route_str(), route);
+            assert_eq!(engine.reason().as_str(), reason);
+        }
     }
 
     #[test]
     fn a_fully_native_document_publishes_with_no_warnings() {
-        for profile in [
-            ConversionProfile::Standard,
-            ConversionProfile::LocalOnly,
-            ConversionProfile::BestQuality,
-        ] {
-            let decision = decide(
-                profile,
-                RouteKind::LocalPdf,
-                LocalResult::Converted(native()),
-            );
-            assert_eq!(
-                strings(&decision),
-                (vec!["native_text_pdf".to_owned()], Vec::new())
-            );
-            assert!(matches!(decision, PolicyDecision::Publish { .. }));
-        }
+        assert!(warnings(native()).is_empty());
     }
 
-    /// The defect this milestone exists for, and the correction the review
-    /// forced. A partly-textless document must never publish *silently*. It
-    /// must also never be routed remote on this signal alone, because the
-    /// signal fires on ordinary documents that lost nothing.
+    /// A partly-textless document must never publish *silently*. Nor may this
+    /// signal alone route it remote: it fires on documents that lost nothing.
     #[test]
     fn a_document_with_textless_pages_publishes_with_a_warning_not_a_bill() {
         for ratio in [0.9_f32, 0.8, 0.75, 0.6666667, 0.5] {
@@ -265,33 +174,16 @@ mod tests {
                 native_text_ratio: Some(ratio),
                 ..native()
             };
-            for profile in [
-                ConversionProfile::Standard,
-                ConversionProfile::LocalOnly,
-                ConversionProfile::BestQuality,
-            ] {
-                let decision = decide(
-                    profile,
-                    RouteKind::LocalPdf,
-                    LocalResult::Converted(signals),
-                );
-                let PolicyDecision::Publish { warnings, .. } = &decision else {
-                    panic!(
-                        "ratio {ratio} under {profile:?} must publish: a cover page and a scanned \
-                         page are indistinguishable here, so routing remote bills for documents \
-                         that lost nothing"
-                    );
-                };
-                assert!(
-                    warnings.contains(&Warning::PagesWithoutExtractableText),
-                    "publishing without the warning is the silent success CVR-045 forbids"
-                );
-            }
+            assert_eq!(
+                warnings(signals),
+                strings(&["pages_without_extractable_text"]),
+                "publishing without the warning is the silent success CVR-045 forbids"
+            );
         }
     }
 
     #[test]
-    fn an_engine_that_gave_up_always_needs_remote_and_keeps_its_reason() {
+    fn an_engine_that_gave_up_keeps_its_reason() {
         for reason in [
             FallbackReason::ScannedPdf,
             FallbackReason::ImageBasedPdf,
@@ -301,52 +193,28 @@ mod tests {
             FallbackReason::LocalQualityFailed,
             FallbackReason::OutputTooLarge,
         ] {
-            for profile in [ConversionProfile::Standard, ConversionProfile::LocalOnly] {
-                let decision = decide(profile, RouteKind::LocalPdf, LocalResult::GaveUp(reason));
-                assert_eq!(
-                    decision,
-                    PolicyDecision::NeedsRemote {
-                        reason_code: ReasonCode::Engine(reason),
-                    }
-                );
-            }
+            assert_eq!(ReasonCode::Engine(reason).as_str(), reason.as_str());
         }
     }
 
     #[test]
     fn layout_complexity_warns_without_changing_the_route() {
-        let decision = decide(
-            ConversionProfile::Standard,
-            RouteKind::LocalPdf,
-            LocalResult::Converted(QualitySignals {
-                has_tables: true,
-                has_columns: true,
-                ..native()
-            }),
-        );
+        let signals = QualitySignals {
+            has_tables: true,
+            has_columns: true,
+            ..native()
+        };
         assert_eq!(
-            strings(&decision),
-            (
-                vec!["native_text_pdf".to_owned()],
-                vec!["dense_tables".to_owned(), "multi_column_layout".to_owned()],
-            )
+            warnings(signals),
+            strings(&["dense_tables", "multi_column_layout"])
         );
-        assert!(matches!(decision, PolicyDecision::Publish { .. }));
     }
 
     /// AnyDoc measures nothing, so it must not be treated as having measured
     /// and found the document complete.
     #[test]
     fn an_unmeasured_engine_publishes_without_claiming_completeness() {
-        let decision = decide(
-            ConversionProfile::Standard,
-            RouteKind::LocalAnyDoc,
-            LocalResult::Converted(QualitySignals::unmeasured()),
-        );
-        assert_eq!(
-            strings(&decision),
-            (vec!["structured_document".to_owned()], Vec::new())
-        );
+        assert!(warnings(QualitySignals::unmeasured()).is_empty());
         assert!(!QualitySignals::unmeasured().has_pages_without_text());
     }
 
@@ -385,7 +253,7 @@ mod tests {
     /// Every string in it is checked against the code that produces it.
     #[test]
     fn the_eval_corpus_manifest_uses_only_strings_the_service_can_emit() {
-        use crate::conversion::JobStatus;
+        use crate::conversion::{ConversionProfile, JobStatus};
         use crate::engines::EngineFailure;
         use crate::worker_protocol::RejectionCode;
 
@@ -442,9 +310,9 @@ mod tests {
             ConversionProfile::BestQuality.as_str(),
         ];
         let routes = [
-            RouteKind::LocalPdf.as_str(),
-            RouteKind::LocalAnyDoc.as_str(),
-            RouteKind::LocalVision.as_str(),
+            LocalEngineKind::Pdf.route_str(),
+            LocalEngineKind::AnyDoc.route_str(),
+            LocalEngineKind::Vision.route_str(),
         ];
         let reasons = [
             ReasonCode::NativeTextPdf,

@@ -27,7 +27,7 @@ pub struct EngineAnalysis {
 ///
 /// An engine that cannot measure something reports `None`, and the policy reads
 /// that as "no claim made", never as "measured and fine". What it does with a
-/// missing claim is the policy's decision, recorded in `policy::decide`.
+/// missing claim is the policy's decision, recorded in `policy::warnings`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QualitySignals {
     /// Share of pages the engine counted as carrying extractable text,

@@ -1,13 +1,17 @@
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{value::Error as ValueError, IntoDeserializer},
+    Deserialize, Serialize,
+};
 use serde_json::Value;
 use uuid::Uuid;
 
-/// The serde strings are the HTTP contract; `as_str` is the database column.
-/// They are the same three words, which is why one enum carries both.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// The serde strings are the HTTP contract and the sqlx ones the database
+/// column. They are the same three words, which is why one enum carries both.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
 pub enum Profile {
     Standard,
     LocalOnly,
@@ -22,24 +26,19 @@ impl Profile {
             Self::BestQuality => "best_quality",
         }
     }
-
-    pub(crate) fn from_database(value: &str) -> Option<Self> {
-        [Self::Standard, Self::LocalOnly, Self::BestQuality]
-            .into_iter()
-            .find(|candidate| candidate.as_str() == value)
-    }
 }
 
 impl FromStr for Profile {
     type Err = ();
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::from_database(value).ok_or(())
+        Self::deserialize(IntoDeserializer::<ValueError>::into_deserializer(value)).map_err(|_| ())
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
 pub enum ConversionState {
     Queued,
     ConvertingLocal,
@@ -50,36 +49,13 @@ pub enum ConversionState {
 }
 
 impl ConversionState {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::ConvertingLocal => "converting_local",
-            Self::Finalizing => "finalizing",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::NeedsRemote => "needs_remote",
-        }
-    }
-
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Succeeded | Self::Failed | Self::NeedsRemote)
     }
-
-    pub(crate) fn from_database(value: &str) -> Option<Self> {
-        [
-            Self::Queued,
-            Self::ConvertingLocal,
-            Self::Finalizing,
-            Self::Succeeded,
-            Self::Failed,
-            Self::NeedsRemote,
-        ]
-        .into_iter()
-        .find(|candidate| candidate.as_str() == value)
-    }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type)]
+#[sqlx(rename_all = "snake_case")]
 pub enum AttemptState {
     Queued,
     ConvertingLocal,
@@ -90,36 +66,9 @@ pub enum AttemptState {
     Interrupted,
 }
 
-impl AttemptState {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::ConvertingLocal => "converting_local",
-            Self::Finalizing => "finalizing",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::NeedsRemote => "needs_remote",
-            Self::Interrupted => "interrupted",
-        }
-    }
-
-    pub(crate) fn from_database(value: &str) -> Option<Self> {
-        [
-            Self::Queued,
-            Self::ConvertingLocal,
-            Self::Finalizing,
-            Self::Succeeded,
-            Self::Failed,
-            Self::NeedsRemote,
-            Self::Interrupted,
-        ]
-        .into_iter()
-        .find(|candidate| candidate.as_str() == value)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
 pub enum ArtifactKind {
     Markdown,
     Manifest,
@@ -132,15 +81,11 @@ impl ArtifactKind {
             Self::Manifest => "manifest",
         }
     }
-
-    pub(crate) fn from_database(value: &str) -> Option<Self> {
-        [Self::Markdown, Self::Manifest]
-            .into_iter()
-            .find(|candidate| candidate.as_str() == value)
-    }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
 pub enum DocumentClassification {
     TextBased,
     Scanned,
@@ -154,32 +99,12 @@ pub enum DocumentClassification {
 }
 
 impl DocumentClassification {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::TextBased => "text_based",
-            Self::Scanned => "scanned",
-            Self::ImageBased => "image_based",
-            Self::Mixed => "mixed",
-            Self::StructuredDocument => "structured_document",
-            Self::Audio => "audio",
-        }
-    }
-
-    /// The inverse of `as_str`. Kept beside it on purpose: startup recovery
-    /// validates stored classifications, and a copy of this vocabulary living
-    /// in another module silently rejected `structured_document` and refused
-    /// to boot after any AnyDoc job succeeded.
+    /// Parses a stored classification. The one vocabulary is the derive above:
+    /// startup recovery validates stored classifications, and a copy of it in
+    /// another module once rejected `structured_document` and refused to boot
+    /// after any AnyDoc job succeeded.
     pub(crate) fn from_stored(value: &str) -> Option<Self> {
-        [
-            Self::TextBased,
-            Self::Scanned,
-            Self::ImageBased,
-            Self::Mixed,
-            Self::StructuredDocument,
-            Self::Audio,
-        ]
-        .into_iter()
-        .find(|candidate| candidate.as_str() == value)
+        Self::deserialize(IntoDeserializer::<ValueError>::into_deserializer(value)).ok()
     }
 }
 
@@ -387,4 +312,27 @@ pub struct StoredConversion {
     pub ocr_language_correction: bool,
     pub ocr_custom_words: String,
     pub speaker_count: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `as_str` is a hand copy of the `snake_case` rule serde and sqlx share.
+    #[test]
+    fn as_str_matches_the_derived_vocabulary() {
+        for profile in [Profile::Standard, Profile::LocalOnly, Profile::BestQuality] {
+            assert_eq!(serde_json::to_value(profile).unwrap(), profile.as_str());
+            assert_eq!(profile.as_str().parse::<Profile>(), Ok(profile));
+        }
+        for kind in [ArtifactKind::Markdown, ArtifactKind::Manifest] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), kind.as_str());
+        }
+        assert_eq!("scanned".parse::<Profile>(), Err(()));
+        assert_eq!(
+            DocumentClassification::from_stored("structured_document"),
+            Some(DocumentClassification::StructuredDocument)
+        );
+        assert_eq!(DocumentClassification::from_stored("Scanned"), None);
+    }
 }

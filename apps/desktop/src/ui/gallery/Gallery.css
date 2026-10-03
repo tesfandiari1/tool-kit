@@ -107,11 +107,6 @@
   background: var(--surface-page);
 }
 
-/* The one palette token outside tokens.css: `inverse` only reads on a dark
-   band, so the specimen brings the band with it. One line, because that is
-   what lint-tokens.sh exempts. */
-.gal__dark { background: var(--ink); padding: var(--s4); }
-
 /* Reviewed at the pane's floor, which is where a name truncates. */
 .gal__tree {
   max-width: 300px;

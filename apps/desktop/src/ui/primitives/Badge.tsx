@@ -2,7 +2,7 @@ import type { HTMLAttributes } from "react";
 import { cx } from "../cx";
 import "./Badge.css";
 
-export type Tone = "neutral" | "info" | "success" | "warning" | "danger";
+export type Tone = "neutral" | "success";
 
 export interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
   tone?: Tone;

@@ -7,7 +7,6 @@ const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8080";
 const DEFAULT_LOG_FILTER: &str = "tool_kit_converter=info";
 const DEFAULT_TOKEN_FILE: &str = "/run/secrets/bootstrap_token";
 const DEFAULT_DATA_DIR: &str = "/data";
-const DEFAULT_SCRATCH_PARENT: &str = "/tmp";
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: u64 = 50 * 1024 * 1024;
 const DEFAULT_MAX_JOBS: usize = 32;
@@ -36,7 +35,6 @@ pub struct Settings {
     pub log_filter: String,
     pub token_file: PathBuf,
     pub data_dir: PathBuf,
-    pub scratch_parent: PathBuf,
     pub pdf_worker_path: PathBuf,
     pub pdf_bcmaps_dir: Option<PathBuf>,
     /// `None` where the Vision worker does not ship, which is every host but
@@ -98,18 +96,12 @@ impl Settings {
             "TOOLKIT_CONVERTER_DATA_DIR",
             read_env_or_default("TOOLKIT_CONVERTER_DATA_DIR", DEFAULT_DATA_DIR)?,
         )?;
-        let scratch_parent = absolute_path(
-            "TOOLKIT_CONVERTER_SCRATCH_PARENT",
-            read_env_or_default("TOOLKIT_CONVERTER_SCRATCH_PARENT", DEFAULT_SCRATCH_PARENT)?,
-        )?;
         let pdf_worker_path = match read_optional_env("TOOLKIT_CONVERTER_PDF_WORKER_PATH")? {
             Some(path) => absolute_path("TOOLKIT_CONVERTER_PDF_WORKER_PATH", path)?,
             None => sibling_worker_path(PDF_WORKER_NAME)?,
         };
-        let vision_worker_path =
-            optional_worker_path("TOOLKIT_CONVERTER_VISION_WORKER_PATH", VISION_WORKER_NAME)?;
-        let audio_worker_path =
-            optional_worker_path("TOOLKIT_CONVERTER_AUDIO_WORKER_PATH", AUDIO_WORKER_NAME)?;
+        let vision_worker_path = present_sibling(VISION_WORKER_NAME)?;
+        let audio_worker_path = present_sibling(AUDIO_WORKER_NAME)?;
         let pdf_bcmaps_dir = read_optional_env("TOOLKIT_CONVERTER_PDF_BCMAPS_DIR")?
             .map(|path| absolute_path("TOOLKIT_CONVERTER_PDF_BCMAPS_DIR", path))
             .transpose()?;
@@ -122,31 +114,20 @@ impl Settings {
             log_filter,
             token_file,
             data_dir,
-            scratch_parent,
             pdf_worker_path,
             pdf_bcmaps_dir,
             vision_worker_path,
             audio_worker_path,
             audio_diarizer_dir,
             limits: Limits {
-                max_upload_bytes: read_bounded_u64(
-                    "TOOLKIT_CONVERTER_MAX_UPLOAD_BYTES",
-                    DEFAULT_MAX_UPLOAD_BYTES,
-                    1024,
-                    1024 * 1024 * 1024,
-                )?,
+                max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
                 max_audio_upload_bytes: read_bounded_u64(
                     "TOOLKIT_CONVERTER_MAX_AUDIO_UPLOAD_BYTES",
                     DEFAULT_MAX_AUDIO_UPLOAD_BYTES,
                     1024,
                     4 * 1024 * 1024 * 1024,
                 )?,
-                max_output_bytes: read_bounded_u64(
-                    "TOOLKIT_CONVERTER_MAX_OUTPUT_BYTES",
-                    DEFAULT_MAX_OUTPUT_BYTES,
-                    1024,
-                    2 * 1024 * 1024 * 1024,
-                )?,
+                max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
                 max_jobs: read_bounded_usize(
                     "TOOLKIT_CONVERTER_MAX_JOBS",
                     DEFAULT_MAX_JOBS,
@@ -178,30 +159,10 @@ impl Settings {
                     3600,
                 )?),
             },
-            pdf_threads: read_bounded_usize(
-                "TOOLKIT_CONVERTER_PDF_THREADS",
-                DEFAULT_PDF_THREADS,
-                1,
-                64,
-            )?,
-            database_busy_timeout: Duration::from_secs(read_bounded_u64(
-                "TOOLKIT_CONVERTER_DATABASE_BUSY_TIMEOUT_SECS",
-                DEFAULT_DATABASE_BUSY_TIMEOUT_SECS,
-                1,
-                60,
-            )?),
-            worker_poll_interval: Duration::from_secs(read_bounded_u64(
-                "TOOLKIT_CONVERTER_WORKER_POLL_INTERVAL_SECS",
-                DEFAULT_WORKER_POLL_INTERVAL_SECS,
-                1,
-                60,
-            )?),
-            recovery_limit: read_bounded_usize(
-                "TOOLKIT_CONVERTER_RECOVERY_LIMIT",
-                DEFAULT_RECOVERY_LIMIT,
-                0,
-                16,
-            )?,
+            pdf_threads: DEFAULT_PDF_THREADS,
+            database_busy_timeout: Duration::from_secs(DEFAULT_DATABASE_BUSY_TIMEOUT_SECS),
+            worker_poll_interval: Duration::from_secs(DEFAULT_WORKER_POLL_INTERVAL_SECS),
+            recovery_limit: DEFAULT_RECOVERY_LIMIT,
             shutdown_grace: Duration::from_secs(read_bounded_u64(
                 "TOOLKIT_CONVERTER_SHUTDOWN_GRACE_SECS",
                 DEFAULT_SHUTDOWN_GRACE_SECS,
@@ -218,20 +179,11 @@ impl Settings {
     }
 }
 
-/// A configured path is a promise, so it is kept whether or not the file is
-/// there and the engine reports what it finds. Only the implicit sibling probe
-/// is allowed to come back empty.
-fn optional_worker_path(
-    variable: &'static str,
-    name: &str,
-) -> Result<Option<PathBuf>, ConfigError> {
-    match read_optional_env(variable)? {
-        Some(path) => Ok(Some(absolute_path(variable, path)?)),
-        None => {
-            let sibling = sibling_worker_path(name)?;
-            Ok(sibling.try_exists().unwrap_or(false).then_some(sibling))
-        }
-    }
+/// A Swift worker beside this binary, or `None` where it does not ship. The
+/// engine is then simply absent.
+fn present_sibling(name: &str) -> Result<Option<PathBuf>, ConfigError> {
+    let sibling = sibling_worker_path(name)?;
+    Ok(sibling.try_exists().unwrap_or(false).then_some(sibling))
 }
 
 fn sibling_worker_path(name: &str) -> Result<PathBuf, ConfigError> {
@@ -380,7 +332,6 @@ mod tests {
     fn default_paths_are_absolute() {
         assert!(std::path::Path::new(super::DEFAULT_TOKEN_FILE).is_absolute());
         assert!(std::path::Path::new(super::DEFAULT_DATA_DIR).is_absolute());
-        assert!(std::path::Path::new(super::DEFAULT_SCRATCH_PARENT).is_absolute());
     }
 
     #[test]

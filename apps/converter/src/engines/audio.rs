@@ -19,12 +19,10 @@ use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncRead, BufReader},
     process::Command,
-    sync::{watch, OwnedSemaphorePermit, Semaphore},
+    sync::watch,
 };
 
-use super::child::{
-    self, is_dotted_number, is_lowercase_sha256, wait_for_child, WorkerStartupError,
-};
+use super::child::{self, is_dotted_number, wait_for_child, WorkerStartupError};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
 use crate::{
     artifacts::{AttemptPaths, ValidatedOpenFile},
@@ -40,7 +38,6 @@ use crate::{
 };
 
 const WORKER_LABEL: &str = "Audio";
-const WORKER_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a failed worker's stderr gets to reach EOF after it exits.
 const STDERR_DRAIN: Duration = Duration::from_secs(1);
 /// The worker runs both stages on every job, so the report says so on a
@@ -79,7 +76,6 @@ pub struct AudioEngine {
     version: Arc<str>,
     timeout: Duration,
     max_output_bytes: u64,
-    permits: Arc<Semaphore>,
 }
 
 impl AudioEngine {
@@ -116,7 +112,6 @@ impl AudioEngine {
             version: version.into(),
             timeout,
             max_output_bytes,
-            permits: Arc::new(Semaphore::new(1)),
         })
     }
 
@@ -124,15 +119,10 @@ impl AudioEngine {
         &self.version
     }
 
-    pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, EngineFailure> {
-        child::acquire(&self.permits).await
-    }
-
     pub async fn convert(
         &self,
         paths: &AttemptPaths,
         source: ValidatedOpenFile,
-        _permit: OwnedSemaphorePermit,
         cancellation: watch::Receiver<bool>,
         media_type: &str,
         speaker_count: Option<u32>,
@@ -145,7 +135,7 @@ impl AudioEngine {
             byte_length,
             sha256,
         } = source;
-        if byte_length == 0 || !is_lowercase_sha256(&sha256) {
+        if byte_length == 0 {
             return Err(EngineFailure::Protocol);
         }
         let source = file.into_std().await;
@@ -281,21 +271,17 @@ async fn last_line(stderr: impl AsyncRead + Unpin) -> Option<String> {
 /// `+fluidaudio-`, and the pinned package version. Both halves move with the
 /// host and the build, so the check is a shape check, not byte equality.
 fn verify_worker_identity(path: &Path) -> Result<String, WorkerStartupError> {
-    let output = child::worker_identity_line(path, WORKER_LABEL, WORKER_IDENTITY_TIMEOUT)?;
-    let mismatch = || WorkerStartupError::WorkerIdentityMismatch {
-        worker: WORKER_LABEL,
-        path: path.to_owned(),
-    };
-    let line = std::str::from_utf8(&output).map_err(|_| mismatch())?;
-    let version = line
-        .strip_prefix(AUDIO_WORKER_IDENTITY_PREFIX)
-        .and_then(|tail| tail.strip_suffix('\n'))
-        .ok_or_else(mismatch)?;
-    let (os, fluid_audio) = version.split_once("+fluidaudio-").ok_or_else(mismatch)?;
-    if !is_dotted_number(os) || !is_dotted_number(fluid_audio) {
-        return Err(mismatch());
+    let version = child::identity_version(path, WORKER_LABEL, AUDIO_WORKER_IDENTITY_PREFIX)?;
+    let valid = version
+        .split_once("+fluidaudio-")
+        .is_some_and(|(os, fluid_audio)| is_dotted_number(os) && is_dotted_number(fluid_audio));
+    if !valid {
+        return Err(WorkerStartupError::WorkerIdentityMismatch {
+            worker: WORKER_LABEL,
+            path: path.to_owned(),
+        });
     }
-    Ok(version.to_owned())
+    Ok(version)
 }
 
 fn analysis(elapsed: Duration, detail: AudioDetail) -> Result<EngineAnalysis, EngineFailure> {
@@ -538,10 +524,9 @@ mod tests {
 
         let engine =
             AudioEngine::initialize(worker, models, Duration::from_secs(10), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None)
             .await
             .unwrap();
         assert!(matches!(outcome, EngineOutcome::Converted { .. }));
@@ -601,10 +586,9 @@ mod tests {
 
         let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
         assert_eq!(engine.version(), IDENTITY);
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", Some(2))
+            .convert(&paths, source, cancellation, "audio/wav", Some(2))
             .await
             .unwrap();
 
@@ -649,10 +633,9 @@ mod tests {
 
             let engine =
                 AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
-            let permit = engine.acquire().await.unwrap();
             let (_cancel, cancellation) = watch::channel(false);
             let outcome = engine
-                .convert(&paths, source, permit, cancellation, "audio/wav", None)
+                .convert(&paths, source, cancellation, "audio/wav", None)
                 .await
                 .unwrap();
 
@@ -674,10 +657,9 @@ mod tests {
         let source = source(&paths.source, b"audio bytes").await;
 
         let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Crashed);
@@ -699,10 +681,9 @@ mod tests {
         let source = source(&paths.source, b"audio bytes").await;
 
         let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Protocol);
@@ -724,10 +705,9 @@ mod tests {
         let source = source(&paths.source, b"audio bytes").await;
 
         let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Protocol);
@@ -750,10 +730,9 @@ mod tests {
 
         let engine =
             AudioEngine::initialize(worker, models, Duration::from_millis(200), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Timeout);
@@ -785,17 +764,9 @@ mod tests {
             let engine =
                 AudioEngine::initialize(worker, models.clone(), Duration::from_secs(5), 1024)
                     .unwrap();
-            let permit = engine.acquire().await.unwrap();
             let (_cancel, cancellation) = watch::channel(false);
             engine
-                .convert(
-                    &paths,
-                    source,
-                    permit,
-                    cancellation,
-                    "audio/mpeg",
-                    speaker_count,
-                )
+                .convert(&paths, source, cancellation, "audio/mpeg", speaker_count)
                 .await
                 .unwrap();
 

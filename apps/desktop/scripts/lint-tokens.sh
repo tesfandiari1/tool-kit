@@ -2,9 +2,8 @@
 # Fails when a literal colour, shape or face reaches a component, or when a
 # token the swap deleted is still referenced. grep only, no dependency.
 #
-# Exempt: ui/tokens.css owns every literal, ui/fonts.css owns every
-# `font-family:` in an @font-face, and `.gal__dark` is the one palette token
-# outside tokens.css, so the gallery can show `inverse` over a dark band.
+# Exempt: ui/tokens.css owns every literal, and ui/fonts.css owns every
+# `font-family:` in an @font-face.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -30,8 +29,7 @@ scan() {
     --include='*.css' --include='*.ts' --include='*.tsx' \
     --exclude-dir=node_modules \
     | grep -v '^src/ui/tokens\.css:' \
-    | grep -v '^src/ui/fonts\.css:' \
-    | grep -v 'gal__dark'
+    | grep -v '^src/ui/fonts\.css:'
 }
 
 report "literal colours: use the role layer" \

@@ -8,7 +8,7 @@ mod tree;
 mod workspace;
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -302,27 +302,10 @@ async fn plan_backend_conversion_files(
     )
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScannedConversionFile {
-    source_path: String,
-    media_type: String,
-    reuse: ReuseDisposition,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ReuseDisposition {
-    Pending,
-    AlreadyHere,
-    Reusable,
-}
-
 #[derive(Default)]
 struct ReuseSummary {
     already_here: usize,
     reusable: usize,
-    by_source: HashMap<String, ReuseDisposition>,
 }
 
 /// How many matches a dropped folder lists before the well says "and N more".
@@ -360,20 +343,12 @@ struct Scan {
     /// Matching file count per job, so the UI can pick the job that fits.
     convert: usize,
     transcribe: usize,
-    /// Files whose result already sits in the chosen output folder. Per job.
-    already_here_convert: usize,
+    /// Transcripts already in the chosen output folder. Convert never reuses.
     already_here_transcribe: usize,
-    /// Files whose result exists in another folder. Copied, not converted again.
-    reusable_convert: usize,
+    /// Transcripts in another folder. Copied, not transcribed again.
     reusable_transcribe: usize,
-    /// Concrete Convert files with MIME and reuse. No file bytes cross IPC.
-    convert_files: Vec<ScannedConversionFile>,
-    /// The same for Transcribe.
-    transcribe_files: Vec<ScannedConversionFile>,
     /// Files skipped because they are already text.
     already_text: usize,
-    /// The folder to default the output to: the dropped folder, or a shared one.
-    suggested_output: Option<String>,
     /// The selection as the drop well draws it, one node per dropped path.
     nodes: Vec<InputNode>,
 }
@@ -462,47 +437,30 @@ async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String
     let convert = scan_files(&inputs, &origin, JobType::Convert).await;
     let transcribe = scan_files(&inputs, &origin, JobType::Transcribe).await;
     // `run_pipeline` reuses transcripts alone, so a Convert file never reads as done.
-    let convert_reuse = ReuseSummary::default();
     let transcribe_reuse = split_reusable(&app, &transcribe, &inputs, JobType::Transcribe, &cfg);
-    let convert_files = describe_conversion_files(&convert, &convert_reuse);
-    let transcribe_files = describe_conversion_files(&transcribe, &transcribe_reuse);
     Ok(Scan {
-        already_here_convert: convert_reuse.already_here,
         already_here_transcribe: transcribe_reuse.already_here,
-        reusable_convert: convert_reuse.reusable,
         reusable_transcribe: transcribe_reuse.reusable,
-        convert_files,
-        transcribe_files,
         convert: convert.len(),
         transcribe: transcribe.len(),
         already_text: count_matching(&inputs, ALREADY_TEXT),
-        suggested_output: suggested_output_dir(&inputs),
         nodes: describe_inputs(&inputs),
     })
 }
 
-/// Where a run writes, and the only answer to that question. The scan judges
-/// "already in this folder" against it, so a second answer would report one
-/// folder and write to another. `output_dir` is the workspace-less case alone.
+/// Where a run writes, and the only answer to that question: the active
+/// project. The scan judges "already in this folder" against it, so a second
+/// answer would report one folder and write to another.
 fn output_dir_for(cfg: &Settings) -> Option<String> {
-    if let (Some(workspace), Some(project)) = (&cfg.workspace_path, &cfg.active_project_path) {
-        // The tree's own check, so a hand-edited settings.json cannot escape.
-        if let Ok(dir) = tree::resolve(Path::new(workspace), project) {
-            // Never the legacy folder: it sits where the tree sees nothing.
-            return dir.is_dir().then(|| dir.to_string_lossy().into_owned());
-        }
-    }
-    cfg.output_dir.clone()
+    let workspace = cfg.workspace_path.as_ref()?;
+    let project = cfg.active_project_path.as_ref()?;
+    // The tree's own check, so a hand-edited settings.json cannot escape.
+    let dir = tree::resolve(Path::new(workspace), project).ok()?;
+    dir.is_dir().then(|| dir.to_string_lossy().into_owned())
 }
 
-/// Why a run has nowhere to write. A bound project means no folder picker.
-fn no_destination_message(cfg: &Settings) -> String {
-    if cfg.workspace_path.is_some() && cfg.active_project_path.is_some() {
-        "That project folder is not there any more. Pick another project.".into()
-    } else {
-        "Choose an output folder first".into()
-    }
-}
+/// Why a run has nowhere to write.
+const NO_DESTINATION: &str = "That project folder is not there any more. Pick another project.";
 
 /// Where **this file's** result goes. Beside the source inside the workspace,
 /// which keeps the tree's pairing rule true. Outside it, the one destination,
@@ -514,11 +472,6 @@ fn output_dir_for_source(source: &Path, inputs: &[String], cfg: &Settings) -> Op
         }
     }
     let filing = output_dir_for(cfg)?;
-    // Into a project only. Without one the folder defaults to the dropped
-    // folder itself, and mirroring would nest it inside itself.
-    if cfg.workspace_path.is_none() || cfg.active_project_path.is_none() {
-        return Some(filing);
-    }
     let dropped = inputs
         .iter()
         .map(Path::new)
@@ -564,41 +517,16 @@ fn split_reusable(
     let mut summary = ReuseSummary::default();
     for (source, output) in found {
         // Per source, not per run: a dropped folder keeps its shape.
-        let disposition = if output_dir_for_source(Path::new(&source), inputs, cfg)
+        if output_dir_for_source(Path::new(&source), inputs, cfg)
             .as_deref()
             .is_some_and(|dir| history::is_in_dir(&output, dir))
         {
             summary.already_here += 1;
-            ReuseDisposition::AlreadyHere
         } else {
             summary.reusable += 1;
-            ReuseDisposition::Reusable
-        };
-        summary.by_source.insert(source, disposition);
+        }
     }
     summary
-}
-
-fn describe_conversion_files(
-    files: &[std::path::PathBuf],
-    reuse: &ReuseSummary,
-) -> Vec<ScannedConversionFile> {
-    files
-        .iter()
-        .map(|path| {
-            let source_path = path.to_string_lossy().into_owned();
-            let media_type = media_type(path);
-            ScannedConversionFile {
-                reuse: reuse
-                    .by_source
-                    .get(&source_path)
-                    .copied()
-                    .unwrap_or(ReuseDisposition::Pending),
-                source_path,
-                media_type,
-            }
-        })
-        .collect()
 }
 
 /// Newest first. `query` filters on file name or folder. Empty means all.
@@ -620,25 +548,6 @@ fn count_matching(inputs: &[String], exts: &[&str]) -> usize {
             .is_some_and(|e| exts.contains(&e.to_lowercase().as_str()))
     };
     collect_files_where(inputs, &has_ext).len()
-}
-
-/// Where results land by default: alongside the input, when the inputs agree.
-fn suggested_output_dir(inputs: &[String]) -> Option<String> {
-    let mut candidate: Option<std::path::PathBuf> = None;
-    for input in inputs {
-        let path = Path::new(input);
-        let dir = if path.is_dir() {
-            path.to_path_buf()
-        } else {
-            path.parent()?.to_path_buf()
-        };
-        match &candidate {
-            None => candidate = Some(dir),
-            Some(existing) if *existing == dir => {}
-            Some(_) => return None,
-        }
-    }
-    candidate.map(|p| p.to_string_lossy().to_string())
 }
 
 #[derive(Serialize)]
@@ -682,9 +591,9 @@ async fn run_pipeline(
     let cfg = settings::load(&app);
     // Derived here, not passed in, so the counts and the writes name one folder.
     // Only a guard that a destination exists: each result goes beside its source.
-    let filing_dir = output_dir_for(&cfg).ok_or_else(|| no_destination_message(&cfg))?;
+    let filing_dir = output_dir_for(&cfg).ok_or(NO_DESTINATION)?;
     if !Path::new(&filing_dir).is_dir() {
-        return Err(no_destination_message(&cfg));
+        return Err(NO_DESTINATION.into());
     }
     let output_dir_of = |source: &Path| -> String {
         output_dir_for_source(source, &inputs, &cfg).unwrap_or_else(|| filing_dir.clone())
@@ -692,8 +601,6 @@ async fn run_pipeline(
     // Read once. In Sidecar mode the origin is this launch's own port.
     let origin = backend_host::backend_origin(&app);
     let mut files = plan_backend_conversion_files(&inputs, &origin, jt).await?;
-    // Empty only when the plan sends nothing to the service.
-    let backend_origin = origin.unwrap_or_default();
     if files.is_empty() {
         return Err(format!("No {} files in your selection", jt.id()));
     }
@@ -800,7 +707,6 @@ async fn run_pipeline(
             output_dir,
             jt,
             jobs::BackendContext::new(
-                backend_origin.clone(),
                 client_run_id.clone(),
                 idempotency_key,
                 None,
@@ -1097,7 +1003,6 @@ async fn convert_one(
             "Nothing here converts this file.",
         ));
     }
-    let backend_origin = origin.unwrap_or_default();
     // Through the accessor: Sidecar mode mints this token itself.
     if let Err(error) = backend_host::backend_token(&app) {
         return Ok(ConvertOneOutcome::blocked("backend_unavailable", error));
@@ -1173,7 +1078,6 @@ async fn convert_one(
         output_dir,
         jt,
         jobs::BackendContext::new(
-            backend_origin,
             client_run_id,
             idempotency_key,
             None,
@@ -1622,8 +1526,6 @@ mod scan_tests {
         let cfg = Settings {
             workspace_path: Some(root.to_string_lossy().into_owned()),
             active_project_path: Some("Acme".into()),
-            // Left over from before the library existed. Never read again.
-            output_dir: Some("/Users/someone/Desktop".into()),
             ..Settings::default()
         };
 
@@ -1641,7 +1543,6 @@ mod scan_tests {
         let cfg = Settings {
             workspace_path: Some(root.to_string_lossy().into_owned()),
             active_project_path: Some("Acme".into()),
-            output_dir: Some("/Users/someone/Desktop".into()),
             ..Settings::default()
         };
 
@@ -1662,7 +1563,6 @@ mod scan_tests {
         let cfg = Settings {
             workspace_path: Some(root.to_string_lossy().into_owned()),
             active_project_path: Some("Acme".into()),
-            output_dir: Some("/Users/someone/Desktop".into()),
             ..Settings::default()
         };
 
@@ -1704,13 +1604,8 @@ mod scan_tests {
     }
 
     #[test]
-    fn without_a_workspace_the_chosen_folder_still_wins() {
-        let cfg = Settings {
-            output_dir: Some("/Users/someone/Desktop".into()),
-            ..Settings::default()
-        };
-
-        assert_eq!(output_dir_for(&cfg), Some("/Users/someone/Desktop".into()));
+    fn without_a_workspace_a_run_has_nowhere_to_write() {
+        assert_eq!(output_dir_for(&Settings::default()), None);
     }
 
     #[test]
@@ -1719,12 +1614,10 @@ mod scan_tests {
         let cfg = Settings {
             workspace_path: Some(root.to_string_lossy().into_owned()),
             active_project_path: Some("../elsewhere".into()),
-            output_dir: Some("/Users/someone/Desktop".into()),
             ..Settings::default()
         };
 
-        // Falls back rather than writing outside the workspace.
-        assert_eq!(output_dir_for(&cfg), Some("/Users/someone/Desktop".into()));
+        assert_eq!(output_dir_for(&cfg), None);
     }
 
     #[test]
@@ -1733,29 +1626,10 @@ mod scan_tests {
         let cfg = Settings {
             workspace_path: Some(root.to_string_lossy().into_owned()),
             active_project_path: Some("Deleted".into()),
-            output_dir: None,
             ..Settings::default()
         };
 
         assert_eq!(output_dir_for(&cfg), None);
-    }
-
-    /// A pre-library `outputDir` writes the run where the tree cannot see it.
-    #[test]
-    fn a_project_folder_that_is_gone_refuses_rather_than_using_the_legacy_folder() {
-        let root = tree("outdir-missing-legacy", &["Inbox/keep.md"]);
-        let cfg = Settings {
-            workspace_path: Some(root.to_string_lossy().into_owned()),
-            active_project_path: Some("Deleted".into()),
-            output_dir: Some("/Users/someone/Desktop".into()),
-            ..Settings::default()
-        };
-
-        assert_eq!(output_dir_for(&cfg), None);
-        assert_eq!(
-            no_destination_message(&cfg),
-            "That project folder is not there any more. Pick another project."
-        );
     }
 
     fn names(v: &[std::path::PathBuf]) -> Vec<String> {
@@ -1975,7 +1849,6 @@ mod scan_tests {
             "/tmp".into(),
             JobType::Convert,
             jobs::BackendContext::new(
-                "http://127.0.0.1:8080".into(),
                 "11111111-1111-4111-8111-111111111111".into(),
                 "22222222-2222-4222-8222-222222222222".into(),
                 None,
@@ -1987,58 +1860,6 @@ mod scan_tests {
             backend_inflight_keys(&[copy, backend]),
             ["22222222-2222-4222-8222-222222222222"]
         );
-    }
-
-    #[test]
-    fn conversion_scan_metadata_reports_mime_and_reuse_per_file() {
-        let root = tree("route-metadata", &["report.pdf", "image.png"]);
-        let files = collect_input_files(&[root.to_string_lossy().to_string()], JobType::Convert);
-        let report = root.join("report.pdf").to_string_lossy().into_owned();
-        let reuse = ReuseSummary {
-            already_here: 1,
-            reusable: 0,
-            by_source: HashMap::from([(report.clone(), ReuseDisposition::AlreadyHere)]),
-        };
-
-        let scanned = describe_conversion_files(&files, &reuse);
-        let by_name = |name: &str| {
-            scanned
-                .iter()
-                .find(|file| file.source_path.ends_with(name))
-                .unwrap()
-        };
-        assert_eq!(by_name("report.pdf").media_type, "application/pdf");
-        assert_eq!(by_name("report.pdf").reuse, ReuseDisposition::AlreadyHere);
-        assert_eq!(by_name("image.png").media_type, "image/png");
-        assert_eq!(by_name("image.png").reuse, ReuseDisposition::Pending);
-    }
-
-    #[test]
-    fn suggested_output_is_the_shared_parent_and_none_when_mixed() {
-        let root = tree("suggest", &["one/a.pdf", "one/b.pdf", "two/c.pdf"]);
-        let one = root.join("one");
-        let same = vec![
-            one.join("a.pdf").to_string_lossy().to_string(),
-            one.join("b.pdf").to_string_lossy().to_string(),
-        ];
-        assert_eq!(
-            suggested_output_dir(&same),
-            Some(one.to_string_lossy().to_string())
-        );
-
-        // A dropped folder is its own answer.
-        let folder = vec![one.to_string_lossy().to_string()];
-        assert_eq!(
-            suggested_output_dir(&folder),
-            Some(one.to_string_lossy().to_string())
-        );
-
-        // Two different parents: don't guess.
-        let mixed = vec![
-            one.join("a.pdf").to_string_lossy().to_string(),
-            root.join("two/c.pdf").to_string_lossy().to_string(),
-        ];
-        assert_eq!(suggested_output_dir(&mixed), None);
     }
 }
 

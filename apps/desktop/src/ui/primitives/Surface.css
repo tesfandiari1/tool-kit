@@ -41,9 +41,4 @@
     margin: 0;
     align-self: stretch;
   }
-
-  .ui-divider--vertical {
-    border-top: 0;
-    border-left: 1px solid var(--rule);
-  }
 }

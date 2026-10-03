@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { commands } from "@/app/commands";
-import { basename } from "@/app/format";
 import type { FileRow } from "@/app/types";
 import { isDirty, type DocMode, type OpenDoc } from "@/domains/thread/model";
 import { confirm } from "@/platform/host";
@@ -48,11 +47,7 @@ export function useDocuments({
         const { text, mtimeMs } = await commands.readDocument(outputPath);
         const doc: OpenDoc = {
           id: outputPath,
-          // The tab names the result, not the file it came from.
-          title: basename(outputPath),
-          subtitle: outputPath,
           text,
-          revealPath: outputPath,
           save: "clean",
           mtimeMs,
         };

@@ -3,7 +3,7 @@ import { activateOrInsert, removeDoc, renameDoc } from "./documents";
 import type { OpenDoc } from "@/domains/thread/model";
 
 function doc(id: string, save: OpenDoc["save"] = "clean"): OpenDoc {
-  return { id, title: id, subtitle: id, text: "", revealPath: id, save, mtimeMs: 0 };
+  return { id, text: "", save, mtimeMs: 0 };
 }
 
 const a = doc("/out/a.md");
@@ -50,12 +50,7 @@ describe("removeDoc", () => {
 describe("renameDoc", () => {
   it("carries the open tab to the file's new path", () => {
     const moved = renameDoc([a, b], a.id, a.id, "/taxes/a.md");
-    expect(moved.docs[0]).toMatchObject({
-      id: "/taxes/a.md",
-      title: "a.md",
-      subtitle: "/taxes/a.md",
-      revealPath: "/taxes/a.md",
-    });
+    expect(moved.docs[0].id).toBe("/taxes/a.md");
     expect(moved.activeId).toBe("/taxes/a.md");
   });
 

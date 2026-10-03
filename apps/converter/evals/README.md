@@ -48,8 +48,8 @@ finding, not a manifest edit.
 
 Five PDF manifest rows cover native and layout cases for same-machine use:
 `native-text-1-page`, `native-text-10-pages`, `sparse-cover-page`,
-`dense-table`, `two-column-text`. Run them with `pnpm verify:local-corpus` from
-the repo root. Current milestone and corpus policy live in
+`dense-table`, `two-column-text`. `pnpm verify:backend` runs them
+through `cargo test`. Current milestone and corpus policy live in
 [`../../../docs/STATUS.md`](../../../docs/STATUS.md).
 
 ## Still to cover

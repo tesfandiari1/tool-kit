@@ -8,14 +8,15 @@
 //! spawn. A skip there is the honest answer; a failure would only say the
 //! platform is not macOS.
 
+mod support;
+
 use std::{
-    fs::{self, File},
+    fs,
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::{Command, Stdio},
 };
 
-use sha2::{Digest, Sha256};
-
+use support::{audio_tools, digest, macos_product_version, read_report, run_worker};
 use tool_kit_converter::audio_protocol::{
     AudioOutcome, AudioRejectionCode, AudioReport, AUDIO_ENGINE_NAME, AUDIO_MARKDOWN_FILE,
     AUDIO_WORKER_DIARIZER_DIR_ENV, AUDIO_WORKER_EXPECTED_SOURCE_BYTES_ENV,
@@ -23,8 +24,6 @@ use tool_kit_converter::audio_protocol::{
     AUDIO_WORKER_MAX_OUTPUT_BYTES_ENV, AUDIO_WORKER_MEDIA_TYPE_ENV, AUDIO_WORKER_PROTOCOL_VERSION,
     AUDIO_WORKER_REPORT_FILE, AUDIO_WORKER_SPEAKER_COUNT_ENV,
 };
-
-const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 
 struct Tools {
     worker: PathBuf,
@@ -34,21 +33,11 @@ struct Tools {
 }
 
 fn tools() -> Option<Tools> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    // The worker is not part of this crate, so this climbs out of
-    // apps/converter/ to the repo root to reach it. A wrong path here skips
-    // every test in the file silently, which is the same thing a missing
-    // binary means.
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workers/audio");
-    let worker = root.join("bin/tool-kit-audio-worker");
-    let diarizer = root.join("models/speaker-diarization-coreml");
-    if !worker.is_file() || !diarizer.is_dir() {
+    let Some((worker, diarizer)) = audio_tools() else {
         // Said out loud: a silent skip reads as a suite that asserted something.
         eprintln!("SKIPPED: run workers/audio/build.sh to stage the worker and its models");
         return None;
-    }
+    };
     Some(Tools {
         diarizer: diarizer.to_str().unwrap().to_string(),
         worker,
@@ -78,77 +67,6 @@ fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/audio")
         .join(name)
-}
-
-/// The worker reports Foundation's three components; `sw_vers` drops a
-/// trailing zero, so pad before comparing.
-fn macos_product_version() -> String {
-    let output = Command::new("/usr/bin/sw_vers")
-        .arg("-productVersion")
-        .output()
-        .unwrap();
-    let printed = String::from_utf8(output.stdout).unwrap();
-    let mut parts: Vec<&str> = printed.trim().split('.').collect();
-    while parts.len() < 3 {
-        parts.push("0");
-    }
-    parts.join(".")
-}
-
-struct Run {
-    staging: PathBuf,
-    status: ExitStatus,
-}
-
-/// Spawns the worker exactly as `engines::vision` spawns the Vision worker:
-/// the staging directory as argv[1], the attempt directory as the cwd, a
-/// cleared environment, the source on stdin, and both output streams on
-/// /dev/null. Every test runs through it, so the cleared environment is what
-/// every assertion below is made under. A `settings` entry replaces the base
-/// environment, which is how a wrong byte count or a low ceiling gets in.
-fn run_worker(
-    worker: &Path,
-    root: &Path,
-    source: &Path,
-    sha256: &str,
-    settings: &[(&str, &str)],
-) -> Run {
-    let attempt = root.join("attempt");
-    let staging = attempt.join("publication.staging");
-    fs::create_dir_all(&staging).unwrap();
-    let byte_length = fs::metadata(source).unwrap().len();
-
-    let mut command = Command::new(worker);
-    command
-        .arg(&staging)
-        .current_dir(&attempt)
-        .env_clear()
-        .env(
-            AUDIO_WORKER_MAX_OUTPUT_BYTES_ENV,
-            MAX_OUTPUT_BYTES.to_string(),
-        )
-        .env(
-            AUDIO_WORKER_EXPECTED_SOURCE_BYTES_ENV,
-            byte_length.to_string(),
-        )
-        .env(AUDIO_WORKER_EXPECTED_SOURCE_SHA256_ENV, sha256)
-        .stdin(Stdio::from(File::open(source).unwrap()))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    for (name, value) in settings {
-        command.env(name, value);
-    }
-    let status = command.status().unwrap();
-    Run { staging, status }
-}
-
-fn digest(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
-}
-
-fn read_report(staging: &Path) -> AudioReport {
-    let encoded = fs::read(staging.join(AUDIO_WORKER_REPORT_FILE)).unwrap();
-    serde_json::from_slice(&encoded).unwrap()
 }
 
 #[test]
@@ -201,7 +119,7 @@ fn two_speakers_with_the_count_pinned_transcribe_into_named_turns() {
     );
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let report = read_report(&run.staging);
+    let report = read_report::<AudioReport>(&run.staging);
     assert_eq!(report.protocol_version, AUDIO_WORKER_PROTOCOL_VERSION);
     assert_eq!(report.engine.name, AUDIO_ENGINE_NAME);
     assert!(report.engine.version.starts_with(&macos_product_version()));
@@ -249,7 +167,8 @@ fn a_run_with_no_speaker_count_says_the_count_was_guessed() {
     );
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let AudioOutcome::Converted { detail, .. } = read_report(&run.staging).outcome else {
+    let AudioOutcome::Converted { detail, .. } = read_report::<AudioReport>(&run.staging).outcome
+    else {
         panic!("a guessed count is still a transcript");
     };
     assert!(detail.speaker_count_guessed);
@@ -296,7 +215,9 @@ fn every_admitted_container_decodes_to_a_single_speaker_transcript() {
         );
 
         assert!(run.status.success(), "{name} exited {:?}", run.status);
-        let AudioOutcome::Converted { detail, .. } = read_report(&run.staging).outcome else {
+        let AudioOutcome::Converted { detail, .. } =
+            read_report::<AudioReport>(&run.staging).outcome
+        else {
             panic!("{name} carries the same speech every other container does");
         };
         assert_eq!(detail.speakers_found, 1, "{name}");
@@ -333,7 +254,8 @@ fn a_clip_the_diarizer_hears_no_speech_in_still_transcribes_as_one_speaker() {
     );
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let AudioOutcome::Converted { detail, .. } = read_report(&run.staging).outcome else {
+    let AudioOutcome::Converted { detail, .. } = read_report::<AudioReport>(&run.staging).outcome
+    else {
         panic!("the recogniser read words, so this is a transcript");
     };
     assert_eq!(detail.speakers_found, 1);
@@ -365,7 +287,7 @@ fn audio_holding_no_words_is_rejected_rather_than_converted_empty() {
     );
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let AudioOutcome::Rejected { code } = read_report(&run.staging).outcome else {
+    let AudioOutcome::Rejected { code } = read_report::<AudioReport>(&run.staging).outcome else {
         panic!("two seconds of silence is not a transcript");
     };
     assert_eq!(code, AudioRejectionCode::NoSpeechFound);
@@ -393,7 +315,7 @@ fn bytes_no_decoder_can_read_are_rejected_as_invalid_audio() {
     );
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let AudioOutcome::Rejected { code } = read_report(&run.staging).outcome else {
+    let AudioOutcome::Rejected { code } = read_report::<AudioReport>(&run.staging).outcome else {
         panic!("random bytes declared as WAV hold no audio track");
     };
     assert_eq!(code, AudioRejectionCode::InvalidAudio);
@@ -495,7 +417,7 @@ fn markdown_over_the_ceiling_is_rejected_and_nothing_is_published() {
     );
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let AudioOutcome::Rejected { code } = read_report(&run.staging).outcome else {
+    let AudioOutcome::Rejected { code } = read_report::<AudioReport>(&run.staging).outcome else {
         panic!("a sixteen byte ceiling cannot hold two speaker turns");
     };
     assert_eq!(code, AudioRejectionCode::OutputTooLarge);

@@ -233,8 +233,7 @@ image, so images and recordings convert locally in Sidecar mode only.
     bumped by each run and by Stop, and a late write over a stopped row leaves a
     job no task will finish.
 - **`history.rs`**: run history in SQLite (`history.db` beside `settings.json`),
-  owning every statement against it, while `workspace.rs` owns
-  `.toolkit/index.db`. **A storage error never fails a job.** A result is
+  owning every statement against it. **A storage error never fails a job.** A result is
   reusable only when source path, job and output format match, the output
   exists, and the mtime is unchanged.
   - **Never do the same work twice**, and **ask per file, never per route**. A
@@ -268,7 +267,7 @@ image, so images and recordings convert locally in Sidecar mode only.
   and a recorded URL breaks Retry across a relaunch.
 - **`lib.rs`**: the Tauri command surface plus `setup()` (tray, ⌥⌘V shortcut,
   the **Settings…** item). `run_pipeline` expands the selection, clears the
-  queue and spawns one job per match, refusing with `no_destination_message`
+  queue and spawns one job per match, refusing with `NO_DESTINATION`
   when `output_dir_for` answers `None`. **A drop is never copied**: the
   source stays where it is and only its result lands in the active project,
   a dropped folder's results keeping its shape. `move_dropped_files` renames
@@ -299,8 +298,8 @@ generate:api` writes `schema.ts` from the contract and `transport.ts` routes
 every request through one `service_request` command, so the host attaches the
 Keychain token.
 
-- **Autodetect depends on `scan.convert`, `scan.transcribe` and
-  `scan.suggestedOutput`**, never the whole `scan` object and never
+- **Autodetect depends on `scan.convert` and `scan.transcribe`**, never the
+  whole `scan` object and never
   `settings.jobType`, either of which re-fires on an unrelated refresh and undoes
   a manual job click.
 - **`runsFinished` is bumped once when a run ends.** A 200-file run emits

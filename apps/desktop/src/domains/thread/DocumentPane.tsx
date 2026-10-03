@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { CodeIcon, CopyIcon, EyeIcon, FolderOpenIcon, XIcon } from "@phosphor-icons/react";
 import { Button, cx, Path, Row, Segmented, Spacer, SourceEditor, StatusDot, Tabs, Text, Well } from "@ui";
-import { tildePath } from "@/app/format";
+import { basename, tildePath } from "@/app/format";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { isDirty, saveNote, saveTone, type DocMode, type OpenDoc } from "./model";
 
@@ -11,7 +11,6 @@ export function DocumentPane({
   docs,
   activeId,
   mode,
-  allowEdit = true,
   inspector,
   dragging = false,
   onPick,
@@ -25,8 +24,6 @@ export function DocumentPane({
   docs: OpenDoc[];
   activeId: string | null;
   mode: DocMode;
-  /// False when the host cannot write the file back.
-  allowEdit?: boolean;
   /// Layered over the document, which stays mounted: `.doc-body` is keyed on
   /// the document id, so unmounting loses the reader's scroll position.
   inspector?: ReactNode;
@@ -95,7 +92,7 @@ export function DocumentPane({
         label="Open documents"
         /* `isDirty`, not `save === "edited"`: a refused write still holds the
            edit in memory, and the tab must not look settled. */
-        items={docs.map((d) => ({ id: d.id, label: d.title, dirty: isDirty(d.save) }))}
+        items={docs.map((d) => ({ id: d.id, label: basename(d.id), dirty: isDirty(d.save) }))}
         value={doc.id}
         onChange={onSelect}
         onClose={onClose}
@@ -112,35 +109,33 @@ export function DocumentPane({
             <StatusDot tone={saveTone(doc.save)} label={note ?? undefined} />
             {/* One slot, and the note wins over the path. */}
             <div className="doc-id">
-              {note !== null || doc.subtitle === null ? (
-                <Text size="xs" tone={doc.save === "error" ? "fault" : "faint"} truncate title={note ?? undefined}>
+              {note !== null ? (
+                <Text size="xs" tone={doc.save === "error" ? "fault" : "faint"} truncate title={note}>
                   {note}
                 </Text>
               ) : (
-                <Path path={tildePath(doc.subtitle)} />
+                <Path path={tildePath(doc.id)} />
               )}
             </div>
             <Spacer />
-            {allowEdit && (
-              <Segmented
-                label="Document mode"
-                size="sm"
-                value={mode}
-                onChange={onModeChange}
-                options={[
-                  {
-                    value: "read" as const,
-                    label: "Read",
-                    icon: (on: boolean) => <EyeIcon weight={on ? "fill" : "regular"} />,
-                  },
-                  {
-                    value: "edit" as const,
-                    label: "Edit",
-                    icon: () => <CodeIcon />,
-                  },
-                ]}
-              />
-            )}
+            <Segmented
+              label="Document mode"
+              size="sm"
+              value={mode}
+              onChange={onModeChange}
+              options={[
+                {
+                  value: "read" as const,
+                  label: "Read",
+                  icon: (on: boolean) => <EyeIcon weight={on ? "fill" : "regular"} />,
+                },
+                {
+                  value: "edit" as const,
+                  label: "Edit",
+                  icon: () => <CodeIcon />,
+                },
+              ]}
+            />
             <Button
               variant="ghost"
               size="sm"
@@ -150,17 +145,15 @@ export function DocumentPane({
               aria-label="Copy"
               onClick={() => { onCopy(doc); }}
             />
-            {doc.revealPath && (
-              <Button
-                variant="ghost"
-                size="sm"
-                iconOnly
-                icon={<FolderOpenIcon />}
-                title="Show in Finder"
-                aria-label="Show in Finder"
-                onClick={() => { onReveal(doc); }}
-              />
-            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              iconOnly
+              icon={<FolderOpenIcon />}
+              title="Show in Finder"
+              aria-label="Show in Finder"
+              onClick={() => { onReveal(doc); }}
+            />
             <Button
               variant="ghost"
               size="sm"
@@ -194,7 +187,7 @@ export function DocumentPane({
           ) : (
             <SourceEditor
               value={doc.text}
-              label={`${doc.title} source`}
+              label={`${basename(doc.id)} source`}
               onChange={(text) => { onEdit(doc.id, text); }}
             />
           )}

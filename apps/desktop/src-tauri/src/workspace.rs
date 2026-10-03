@@ -1,7 +1,7 @@
 //! Workspace foundation: the one user-chosen folder the library lives in.
 //!
-//! A project's identity is its `project.json`, and `.toolkit/index.db` is only
-//! the fast lookup over those files, rebuilt by `rebuild_index` when gone.
+//! A project's identity is its `project.json`, and the list is a walk over
+//! those files.
 //!
 //! `.toolkit/workspace.json` is the one file that is not derived. Its absence
 //! means the folder moved or unmounted, and every entry point here errors.
@@ -9,7 +9,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
@@ -27,8 +26,6 @@ const LEGACY_CATCH_ALL_TITLE: &str = "Inbox";
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceInfo {
     pub workspace_path: String,
-    pub workspace_id: String,
-    pub catch_all_project_id: String,
     /// The catch-all's folder, workspace-relative. Where a drop is filed.
     pub catch_all_path: String,
     /// Set only when this call wrote the welcome file, which the host knows
@@ -42,7 +39,7 @@ pub struct WorkspaceInfo {
 pub struct ProjectSummary {
     pub id: String,
     pub title: String,
-    /// Relative to the workspace root, so moving it does not stale the index.
+    /// Relative to the workspace root.
     pub path: String,
     pub created_at: String,
 }
@@ -88,7 +85,7 @@ pub fn inspect_workspace_path(path: &str) -> bool {
         .is_file()
 }
 
-/// Create a workspace at `path`, or adopt one. A second call returns the same
+/// Create a workspace at `path`, or adopt one. A second call keeps the same
 /// ids.
 pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
     let root = Path::new(path);
@@ -109,16 +106,15 @@ pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
         meta
     };
 
-    let index = open_index(&toolkit.join("index.db"))?;
     // Before the mint below, never after. See LEGACY_CATCH_ALL_TITLE.
-    migrate_catch_all(root, &index)?;
+    migrate_catch_all(root)?;
 
     // Created at first run. An existing one is adopted by its project.json.
     let catch_all_dir = root.join(CATCH_ALL_TITLE);
     std::fs::create_dir_all(&catch_all_dir).map_err(|e| e.to_string())?;
     let catch_all_file = catch_all_dir.join("project.json");
-    let catch_all = if catch_all_file.is_file() {
-        read_json::<ProjectMeta>(&catch_all_file)?
+    if catch_all_file.is_file() {
+        read_json::<ProjectMeta>(&catch_all_file)?;
     } else {
         let meta = ProjectMeta {
             schema_version: 1,
@@ -127,8 +123,7 @@ pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
             created_at: iso_utc_now(),
         };
         write_json(&catch_all_file, &meta)?;
-        meta
-    };
+    }
 
     // The marker gates this, not the catch-all mint: a folder renamed in Finder
     // mints a fresh one, and gating there resurrects a file the user deleted.
@@ -148,23 +143,8 @@ pub fn setup_workspace(path: &str) -> Result<WorkspaceInfo, String> {
         let _ = write_json(&workspace_file, &workspace);
     }
 
-    index
-        .execute(
-            "INSERT OR IGNORE INTO projects (id, title, path, created_at) \
-             VALUES (?1, ?2, ?3, ?4)",
-            (
-                &catch_all.id,
-                &catch_all.title,
-                CATCH_ALL_TITLE,
-                &catch_all.created_at,
-            ),
-        )
-        .map_err(|e| e.to_string())?;
-
     Ok(WorkspaceInfo {
         workspace_path: path.to_string(),
-        workspace_id: workspace.id,
-        catch_all_project_id: catch_all.id,
         catch_all_path: CATCH_ALL_TITLE.to_string(),
         welcome_path,
     })
@@ -190,7 +170,7 @@ pub fn seeded_welcome(path: &str) -> Option<String> {
 /// Rename a pre-existing `Inbox` to the catch-all's current name, once.
 /// Identity is `project.json`, so the id, the date and every file survive.
 /// A folder the user retitled by hand is theirs, and is left alone.
-fn migrate_catch_all(root: &Path, index: &Connection) -> Result<(), String> {
+fn migrate_catch_all(root: &Path) -> Result<(), String> {
     let legacy = root.join(LEGACY_CATCH_ALL_TITLE);
     let current = root.join(CATCH_ALL_TITLE);
     if current.exists() || !legacy.join("project.json").is_file() {
@@ -204,14 +184,7 @@ fn migrate_catch_all(root: &Path, index: &Connection) -> Result<(), String> {
     meta.title = CATCH_ALL_TITLE.to_string();
     // The folder is already moved, and a failed write leaves a `Drop Box`
     // titled "Inbox" that the next launch skips.
-    write_json(&current.join("project.json"), &meta)?;
-    index
-        .execute(
-            "UPDATE projects SET title = ?1, path = ?2 WHERE id = ?3",
-            (CATCH_ALL_TITLE, CATCH_ALL_TITLE, &meta.id),
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    write_json(&current.join("project.json"), &meta)
 }
 
 /// Follow the folder rename through the two settings that name it.
@@ -244,7 +217,7 @@ pub fn migrate_settings(app: &AppHandle) {
     }
 }
 
-/// Creates a project folder under the workspace and registers it in the index.
+/// Creates a project folder and its `project.json` under the workspace.
 pub fn create_project(app: &AppHandle, title: &str) -> Result<ProjectSummary, String> {
     let workspace = settings::load(app)
         .workspace_path
@@ -254,14 +227,11 @@ pub fn create_project(app: &AppHandle, title: &str) -> Result<ProjectSummary, St
 
 fn create_project_at(workspace: &Path, title: &str) -> Result<ProjectSummary, String> {
     let folder = folder_name_for_title(title)?;
-    let toolkit = require_workspace(workspace)?;
+    require_workspace(workspace)?;
     let project_dir = workspace.join(&folder);
     if project_dir.exists() {
         return Err(format!("A project named “{folder}” already exists"));
     }
-    // Opened before anything lands on disk, or an index failure returns past
-    // the rollbacks below and the orphan folder blocks that name for good.
-    let index = open_index(&toolkit.join("index.db"))?;
     std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
 
     let meta = ProjectMeta {
@@ -273,14 +243,6 @@ fn create_project_at(workspace: &Path, title: &str) -> Result<ProjectSummary, St
     if let Err(e) = write_json(&project_dir.join("project.json"), &meta) {
         let _ = std::fs::remove_dir_all(&project_dir);
         return Err(e);
-    }
-
-    if let Err(e) = index.execute(
-        "INSERT INTO projects (id, title, path, created_at) VALUES (?1, ?2, ?3, ?4)",
-        (&meta.id, &meta.title, &folder, &meta.created_at),
-    ) {
-        let _ = std::fs::remove_dir_all(&project_dir);
-        return Err(e.to_string());
     }
 
     Ok(ProjectSummary {
@@ -319,8 +281,8 @@ fn folder_name_for_title(title: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-/// Every project in the workspace index, rebuilt first when the index is gone.
-/// A missing workspace folder is an error.
+/// Every project folder in the workspace, oldest first. A missing workspace
+/// folder is an error.
 pub fn list_projects(app: &AppHandle) -> Result<Vec<ProjectSummary>, String> {
     let workspace = settings::load(app)
         .workspace_path
@@ -329,26 +291,29 @@ pub fn list_projects(app: &AppHandle) -> Result<Vec<ProjectSummary>, String> {
 }
 
 fn list_projects_at(workspace: &Path) -> Result<Vec<ProjectSummary>, String> {
-    let toolkit = require_workspace(workspace)?;
-    let db_path = toolkit.join("index.db");
-    let missing = !db_path.is_file();
-    let conn = open_index(&db_path)?;
-    if missing {
-        rebuild_index(workspace, &conn)?;
+    require_workspace(workspace)?;
+    let mut projects = Vec::new();
+    for entry in std::fs::read_dir(workspace).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        // A hand-made folder carries no project.json, so it is skipped rather
+        // than failing the list.
+        let Ok(meta) = read_json::<ProjectMeta>(&entry.path().join("project.json")) else {
+            continue;
+        };
+        projects.push(ProjectSummary {
+            id: meta.id,
+            title: meta.title,
+            path: entry.file_name().to_string_lossy().into_owned(),
+            created_at: meta.created_at,
+        });
     }
-    let mut stmt = conn
-        .prepare("SELECT id, title, path, created_at FROM projects ORDER BY created_at, id")
-        .map_err(|e| e.to_string())?;
-    stmt.query_map([], |row| {
-        Ok(ProjectSummary {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            path: row.get(2)?,
-            created_at: row.get(3)?,
-        })
-    })
-    .and_then(Iterator::collect)
-    .map_err(|e| e.to_string())
+    projects.sort_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
+    // A folder duplicated in Finder carries the same id. One row per id.
+    projects.dedup_by(|a, b| a.id == b.id);
+    Ok(projects)
 }
 
 /// The workspace's `.toolkit` directory, or an error naming the missing folder.
@@ -362,49 +327,6 @@ fn require_workspace(workspace: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(toolkit)
-}
-
-/// Rebuild the index from the project folders themselves. A project's identity
-/// is its `project.json`, so every row is recoverable from disk.
-fn rebuild_index(workspace: &Path, index: &Connection) -> Result<(), String> {
-    for entry in std::fs::read_dir(workspace).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        if !entry.path().is_dir() {
-            continue;
-        }
-        // A hand-made folder carries no project.json, so it is skipped rather
-        // than failing the rebuild.
-        let Ok(meta) = read_json::<ProjectMeta>(&entry.path().join("project.json")) else {
-            continue;
-        };
-        index
-            .execute(
-                "INSERT OR IGNORE INTO projects (id, title, path, created_at) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                (
-                    &meta.id,
-                    &meta.title,
-                    &entry.file_name().to_string_lossy().into_owned(),
-                    &meta.created_at,
-                ),
-            )
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-fn open_index(path: &Path) -> Result<Connection, String> {
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS projects (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            path TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );",
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(conn)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
@@ -449,6 +371,12 @@ mod tests {
         dir.path().join("ws").to_string_lossy().into_owned()
     }
 
+    /// The `id` a marker or `project.json` holds.
+    fn id_in(file: &Path) -> String {
+        let meta: serde_json::Value = read_json(file).unwrap();
+        meta["id"].as_str().unwrap().to_string()
+    }
+
     #[test]
     fn the_suggestion_is_tool_kit_under_documents() {
         assert!(suggested_workspace_path().ends_with("Documents/Tool-Kit"));
@@ -466,31 +394,28 @@ mod tests {
     }
 
     #[test]
-    fn setup_creates_the_marker_catch_all_and_index() {
+    fn setup_creates_the_marker_and_catch_all() {
         let dir = tempfile::tempdir().unwrap();
         let path = workspace_path(&dir);
 
         let info = setup_workspace(&path).unwrap();
-        assert!(info.workspace_id.starts_with("w_"));
-        assert!(info.catch_all_project_id.starts_with("p_"));
         assert_eq!(info.catch_all_path, CATCH_ALL_TITLE);
         assert_eq!(info.workspace_path, path);
 
         let root = Path::new(&path);
         let marker: serde_json::Value = read_json(&root.join(".toolkit/workspace.json")).unwrap();
         assert_eq!(marker["schemaVersion"], 1);
-        assert_eq!(marker["id"].as_str().unwrap(), info.workspace_id);
+        assert!(marker["id"].as_str().unwrap().starts_with("w_"));
         let catch_all: serde_json::Value = read_json(&root.join("Drop Box/project.json")).unwrap();
-        assert_eq!(catch_all["id"].as_str().unwrap(), info.catch_all_project_id);
+        assert!(catch_all["id"].as_str().unwrap().starts_with("p_"));
         assert_eq!(catch_all["title"], "Drop Box");
         assert!(catch_all["createdAt"].as_str().unwrap().ends_with('Z'));
-        assert!(root.join(".toolkit/index.db").is_file());
 
         let projects = list_projects_at(root).unwrap();
         assert_eq!(
             projects,
             vec![ProjectSummary {
-                id: info.catch_all_project_id,
+                id: catch_all["id"].as_str().unwrap().to_string(),
                 title: "Drop Box".into(),
                 path: "Drop Box".into(),
                 created_at: catch_all["createdAt"].as_str().unwrap().to_string(),
@@ -503,30 +428,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = workspace_path(&dir);
 
-        let first = setup_workspace(&path).unwrap();
-        let second = setup_workspace(&path).unwrap();
-        assert_eq!(second.workspace_id, first.workspace_id);
-        assert_eq!(second.catch_all_project_id, first.catch_all_project_id);
-        // The catch-all row is inserted once, not duplicated.
-        assert_eq!(list_projects_at(Path::new(&path)).unwrap().len(), 1);
+        let root = Path::new(&path);
+        setup_workspace(&path).unwrap();
+        let marker_id = id_in(&root.join(".toolkit/workspace.json"));
+        let catch_all_id = id_in(&root.join("Drop Box/project.json"));
+        setup_workspace(&path).unwrap();
+        assert_eq!(id_in(&root.join(".toolkit/workspace.json")), marker_id);
+        assert_eq!(id_in(&root.join("Drop Box/project.json")), catch_all_id);
+        // One catch-all, not two.
+        assert_eq!(list_projects_at(root).unwrap().len(), 1);
     }
 
     #[test]
     fn setup_adopts_a_catch_all_renamed_in_finder() {
         let dir = tempfile::tempdir().unwrap();
         let path = workspace_path(&dir);
-        let first = setup_workspace(&path).unwrap();
+        let root = Path::new(&path);
+        setup_workspace(&path).unwrap();
+        let marker_id = id_in(&root.join(".toolkit/workspace.json"));
 
         // Identity comes from project.json, so a rename keeps the project.
-        std::fs::rename(
-            Path::new(&path).join(CATCH_ALL_TITLE),
-            Path::new(&path).join("Unsorted"),
-        )
-        .unwrap();
-        let info = setup_workspace(&path).unwrap();
-        assert_eq!(info.workspace_id, first.workspace_id);
+        std::fs::rename(root.join(CATCH_ALL_TITLE), root.join("Unsorted")).unwrap();
+        setup_workspace(&path).unwrap();
+        assert_eq!(id_in(&root.join(".toolkit/workspace.json")), marker_id);
         // A fresh catch-all, because the old one no longer sits under its name.
-        assert_ne!(info.catch_all_project_id, first.catch_all_project_id);
+        assert_ne!(
+            id_in(&root.join("Drop Box/project.json")),
+            id_in(&root.join("Unsorted/project.json"))
+        );
+        assert_eq!(list_projects_at(root).unwrap().len(), 2);
     }
 
     #[test]
@@ -621,45 +551,33 @@ mod tests {
     }
 
     #[test]
-    fn a_deleted_index_is_rebuilt_from_the_project_folders() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = workspace_path(&dir);
-        let info = setup_workspace(&path).unwrap();
-        let root = Path::new(&path);
-        let acme = create_project_at(root, "Acme").unwrap();
-
-        // index.db is derived, so deleting it costs only the re-walk.
-        std::fs::remove_file(root.join(".toolkit/index.db")).unwrap();
-        let projects = list_projects_at(root).unwrap();
-        let mut ids: Vec<&str> = projects.iter().map(|p| p.id.as_str()).collect();
-        ids.sort_unstable();
-        let mut want = vec![info.catch_all_project_id.as_str(), acme.id.as_str()];
-        want.sort_unstable();
-        assert_eq!(ids, want);
-        assert!(projects
-            .iter()
-            .any(|p| p.path == "Acme" && p.title == "Acme"));
-    }
-
-    #[test]
-    fn create_project_leaves_no_folder_behind_when_the_index_will_not_open() {
+    fn projects_are_listed_from_their_folders() {
         let dir = tempfile::tempdir().unwrap();
         let path = workspace_path(&dir);
         setup_workspace(&path).unwrap();
         let root = Path::new(&path);
+        let catch_all_id = id_in(&root.join("Drop Box/project.json"));
+        let acme = create_project_at(root, "Acme").unwrap();
 
-        // A directory where the file belongs makes SQLite refuse to open it.
-        std::fs::remove_file(root.join(".toolkit/index.db")).unwrap();
-        std::fs::create_dir(root.join(".toolkit/index.db")).unwrap();
-
-        assert!(create_project_at(root, "Acme").is_err());
-        assert!(
-            !root.join("Acme").exists(),
-            "an orphan folder was left behind"
-        );
-        // So the same name is still free once the index is reachable again.
-        std::fs::remove_dir(root.join(".toolkit/index.db")).unwrap();
-        assert!(create_project_at(root, "Acme").is_ok());
+        // A Finder rename shows up at once, a hand-made folder is skipped, and
+        // a Finder duplicate does not list the project twice.
+        std::fs::rename(root.join("Acme"), root.join("Acme 2026")).unwrap();
+        std::fs::create_dir(root.join("Loose")).unwrap();
+        std::fs::create_dir(root.join("Acme 2026 copy")).unwrap();
+        std::fs::copy(
+            root.join("Acme 2026/project.json"),
+            root.join("Acme 2026 copy/project.json"),
+        )
+        .unwrap();
+        let projects = list_projects_at(root).unwrap();
+        let mut ids: Vec<&str> = projects.iter().map(|p| p.id.as_str()).collect();
+        ids.sort_unstable();
+        let mut want = vec![catch_all_id.as_str(), acme.id.as_str()];
+        want.sort_unstable();
+        assert_eq!(ids, want);
+        assert!(projects
+            .iter()
+            .any(|p| p.path.starts_with("Acme 2026") && p.title == "Acme"));
     }
 
     /// `ensure_workspace` runs on every launch. A folder moved in Finder must
@@ -687,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn create_project_adds_a_folder_and_index_row() {
+    fn create_project_adds_a_listed_folder() {
         let dir = tempfile::tempdir().unwrap();
         let path = workspace_path(&dir);
         setup_workspace(&path).unwrap();
@@ -729,7 +647,8 @@ mod tests {
         let root = Path::new(&path);
 
         // A workspace as it was written before the rename.
-        let first = setup_workspace(&path).unwrap();
+        setup_workspace(&path).unwrap();
+        let catch_all_id = id_in(&root.join("Drop Box/project.json"));
         std::fs::rename(root.join(CATCH_ALL_TITLE), root.join("Inbox")).unwrap();
         let legacy_meta = root.join("Inbox/project.json");
         let mut meta: serde_json::Value = read_json(&legacy_meta).unwrap();
@@ -737,9 +656,9 @@ mod tests {
         write_json(&legacy_meta, &meta).unwrap();
         std::fs::write(root.join("Inbox/deck.md"), b"kept").unwrap();
 
-        let after = setup_workspace(&path).unwrap();
+        setup_workspace(&path).unwrap();
 
-        assert_eq!(after.catch_all_project_id, first.catch_all_project_id);
+        assert_eq!(id_in(&root.join("Drop Box/project.json")), catch_all_id);
         assert!(!root.join("Inbox").exists(), "the legacy folder survived");
         assert_eq!(
             std::fs::read(root.join("Drop Box/deck.md")).unwrap(),

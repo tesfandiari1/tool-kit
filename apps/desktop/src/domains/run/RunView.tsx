@@ -5,7 +5,6 @@ import {
   ClockCounterClockwiseIcon,
   CopyIcon,
   FileTextIcon,
-  FolderIcon,
   FolderOpenIcon,
   PlayIcon,
   StopIcon,
@@ -62,7 +61,6 @@ export function RunView({
   persist,
   onAddFiles,
   onAddFolders,
-  onPickOutput,
   onPickProject,
   onRemoveInput,
   onClearInputs,
@@ -98,7 +96,6 @@ export function RunView({
   persist: (patch: Partial<Settings>) => void;
   onAddFiles: () => void;
   onAddFolders: () => void;
-  onPickOutput: () => void;
   onPickProject: (rel: string) => void;
   onRemoveInput: (path: string) => void;
   onClearInputs: () => void;
@@ -251,17 +248,11 @@ export function RunView({
         onRemove={onRemoveInput}
         onClear={onClearInputs}
       />
-      {projects.length > 0 ? (
+      {projects.length > 0 && (
         <ProjectField
           projects={projects}
           value={settings.activeProjectPath}
           onPick={onPickProject}
-        />
-      ) : (
-        <FolderField
-          path={settings.outputDir}
-          placeholder="Choose where results are saved"
-          onPick={onPickOutput}
         />
       )}
     </>
@@ -300,34 +291,6 @@ function ProjectField({
         }}
         options={projects.map((p) => ({ value: p.path, label: p.title }))}
       />
-    </Panel>
-  );
-}
-
-function FolderField({
-  path,
-  placeholder,
-  onPick,
-}: {
-  path: string | null;
-  placeholder: string;
-  onPick: () => void;
-}) {
-  return (
-    <Panel
-      title="Output"
-      actions={
-        <Button variant="ghost" size="sm" onClick={onPick}>
-          {path ? "Change" : "Choose"}
-        </Button>
-      }
-    >
-      <button type="button" className="folder-hit" onClick={onPick} title={path ?? placeholder}>
-        <Row gap={2}>
-          {path ? <FolderOpenIcon weight="fill" /> : <FolderIcon />}
-          <Meta truncate>{path ? basename(path) : placeholder}</Meta>
-        </Row>
-      </button>
     </Panel>
   );
 }

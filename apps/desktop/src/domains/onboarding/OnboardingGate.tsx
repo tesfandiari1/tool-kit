@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button, Display, Path, Row, Stack, Text } from "@ui";
 import { commands } from "@/app/commands";
 import { tildePath } from "@/app/format";
@@ -66,21 +66,13 @@ export function OnboardingGate({
     }
   }, [candidate, onDone, onToast]);
 
+  const hello = step === "hello";
+
   const advance = useCallback(() => {
     if (busy) return;
-    switch (step) {
-      case "hello":
-        setStep("workspace");
-        return;
-      case "workspace":
-        void setup();
-        return;
-      default: {
-        const _exhaustive: never = step;
-        return _exhaustive;
-      }
-    }
-  }, [busy, setup, step]);
+    if (hello) setStep("workspace");
+    else void setup();
+  }, [busy, setup, hello]);
 
   // Return is the whole keyboard path through the gate.
   useEffect(() => {
@@ -99,59 +91,43 @@ export function OnboardingGate({
     };
   }, [advance]);
 
-  let beat: ReactNode;
-  let cta: string;
-  let ready = true;
-  switch (step) {
-    case "hello":
-      beat = (
-        <>
-          <Display as="h1" size="3xl">
-            Tool-Kit
-          </Display>
-          <Text tone="muted">
-            A local markdown workspace. Bring documents in, work on them, and keep every
-            file on your own disk.
-          </Text>
-        </>
-      );
-      cta = "Continue";
-      break;
-    case "workspace":
-      beat = (
-        <>
-          <Display as="h1" size="2xl">
-            One folder holds everything
-          </Display>
-          <Text tone="muted">
-            Projects are folders inside it and documents are plain markdown files. You can
-            open them in any other app, and back them up like the rest of your disk.
-          </Text>
-          {candidate ? (
-            <Stack gap={2}>
-              <Path path={tildePath(candidate.path)} />
-              <Row gap={2}>
-                <Button variant="ghost" onClick={() => void choose()}>
-                  Choose different folder
-                </Button>
-              </Row>
-            </Stack>
-          ) : (
-            <Text size="sm" tone="ghost">
-              Finding a place for it…
-            </Text>
-          )}
-        </>
-      );
-      cta = candidate?.existing ? "Open workspace" : "Create workspace";
-      ready = candidate !== null;
-      break;
-    default: {
-      const _exhaustive: never = step;
-      beat = _exhaustive;
-      cta = "";
-    }
-  }
+  const beat = hello ? (
+    <>
+      <Display as="h1" size="3xl">
+        Tool-Kit
+      </Display>
+      <Text tone="muted">
+        A local markdown workspace. Bring documents in, work on them, and keep every
+        file on your own disk.
+      </Text>
+    </>
+  ) : (
+    <>
+      <Display as="h1" size="2xl">
+        One folder holds everything
+      </Display>
+      <Text tone="muted">
+        Projects are folders inside it and documents are plain markdown files. You can
+        open them in any other app, and back them up like the rest of your disk.
+      </Text>
+      {candidate ? (
+        <Stack gap={2}>
+          <Path path={tildePath(candidate.path)} />
+          <Row gap={2}>
+            <Button variant="ghost" onClick={() => void choose()}>
+              Choose different folder
+            </Button>
+          </Row>
+        </Stack>
+      ) : (
+        <Text size="sm" tone="ghost">
+          Finding a place for it…
+        </Text>
+      )}
+    </>
+  );
+  const cta = hello ? "Continue" : candidate?.existing ? "Open workspace" : "Create workspace";
+  const ready = hello || candidate !== null;
 
   return (
     <main className="onboarding-gate">

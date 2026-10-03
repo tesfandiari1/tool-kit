@@ -214,17 +214,6 @@ export function Gallery() {
               <Button variant="primary" block>
                 Block
               </Button>
-              {/* Inverse only ever sits on a dark band, so the specimen brings
-                  its own. */}
-              <div className="gal__dark">
-                <Row gap={2} wrap>
-                  <Button variant="inverse">Choose folder</Button>
-                  <Button variant="inverse" size="sm">
-                    Small
-                  </Button>
-                  <Button variant="inverse" iconOnly icon="⧉" aria-label="Copy" />
-                </Row>
-              </div>
             </Stack>
           </div>
         </Section>
@@ -243,10 +232,7 @@ export function Gallery() {
               <Divider />
               <Row gap={2} wrap>
                 <Badge>Universal-3.5 Pro</Badge>
-                <Badge tone="info">Queued</Badge>
                 <Badge tone="success">Done</Badge>
-                <Badge tone="warning">Retrying</Badge>
-                <Badge tone="danger">Failed</Badge>
                 <Badge count>24</Badge>
                 {/* Rule 2: the empty count badge is the same width as the one
                     beside it, so a count landing never moves its neighbours. */}
@@ -382,7 +368,7 @@ export function Gallery() {
           title="Workspace"
           note="The document pane's parts. Tabs own a panel, so unlike Segmented they are a real tablist."
         >
-          <Stack gap={5}>
+          <Stack gap={4}>
             <Stack gap={2}>
               <Label>Tabs</Label>
               <Panel>

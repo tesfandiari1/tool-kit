@@ -11,29 +11,25 @@
 mod support;
 
 use std::{
-    fs::{self, File},
+    fs,
     io::Write as _,
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::{Command, Stdio},
     time::Duration,
 };
 
 use axum::http::StatusCode;
 use http_body_util::BodyExt;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use support::{corpus, pdf_with_content};
+use support::{corpus, digest, macos_product_version, pdf_with_content, read_report, run_worker};
 use tool_kit_converter::vision_protocol::{
     VisionOutcome, VisionPages, VisionRejectionCode, VisionReport, VISION_ENGINE_NAME,
-    VISION_MARKDOWN_FILE, VISION_WORKER_CUSTOM_WORDS_ENV, VISION_WORKER_EXPECTED_SOURCE_BYTES_ENV,
-    VISION_WORKER_EXPECTED_SOURCE_SHA256_ENV, VISION_WORKER_IDENTITY_PREFIX,
+    VISION_MARKDOWN_FILE, VISION_WORKER_CUSTOM_WORDS_ENV, VISION_WORKER_IDENTITY_PREFIX,
     VISION_WORKER_LANGUAGE_CORRECTION_ENV, VISION_WORKER_MAX_OUTPUT_BYTES_ENV,
     VISION_WORKER_PROTOCOL_VERSION, VISION_WORKER_REPORT_FILE,
 };
-
-const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 
 fn tool(name: &str) -> Option<PathBuf> {
     if !cfg!(target_os = "macos") {
@@ -47,71 +43,6 @@ fn tool(name: &str) -> Option<PathBuf> {
         .join("../../workers/vision/bin")
         .join(name);
     path.is_file().then_some(path)
-}
-
-/// The worker reports Foundation's three components; `sw_vers` drops a
-/// trailing zero, so pad before comparing.
-fn macos_product_version() -> String {
-    let output = Command::new("/usr/bin/sw_vers")
-        .arg("-productVersion")
-        .output()
-        .unwrap();
-    let printed = String::from_utf8(output.stdout).unwrap();
-    let mut parts: Vec<&str> = printed.trim().split('.').collect();
-    while parts.len() < 3 {
-        parts.push("0");
-    }
-    parts.join(".")
-}
-
-struct Run {
-    staging: PathBuf,
-    status: ExitStatus,
-}
-
-/// Spawns the worker exactly as `engines::pdf_inspector` spawns the PDF worker:
-/// the staging directory as argv[1], the attempt directory as the cwd, a
-/// cleared environment, the source on stdin, and both output streams on
-/// /dev/null. Every test runs through it, so the cleared environment is what
-/// every assertion below is made under.
-fn run_worker(
-    worker: &Path,
-    root: &Path,
-    source: &Path,
-    sha256: &str,
-    settings: &[(&str, &str)],
-) -> Run {
-    let attempt = root.join("attempt");
-    let staging = attempt.join("publication.staging");
-    fs::create_dir_all(&staging).unwrap();
-    let byte_length = fs::metadata(source).unwrap().len();
-
-    let mut command = Command::new(worker);
-    command
-        .arg(&staging)
-        .current_dir(&attempt)
-        .env_clear()
-        .env(
-            VISION_WORKER_MAX_OUTPUT_BYTES_ENV,
-            MAX_OUTPUT_BYTES.to_string(),
-        )
-        .env(
-            VISION_WORKER_EXPECTED_SOURCE_BYTES_ENV,
-            byte_length.to_string(),
-        )
-        .env(VISION_WORKER_EXPECTED_SOURCE_SHA256_ENV, sha256)
-        .stdin(Stdio::from(File::open(source).unwrap()))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    for (name, value) in settings {
-        command.env(name, value);
-    }
-    let status = command.status().unwrap();
-    Run { staging, status }
-}
-
-fn digest(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
 }
 
 /// Rasterizes a generated PDF with the `pdf2png` tool beside the worker, so the
@@ -193,39 +124,17 @@ fn scanned_pdf(directory: &Path, lines: [&str; 2]) -> Vec<u8> {
         );
     }
     for (page, line) in lines.iter().enumerate() {
-        let png = png(
+        let samples = jpeg_of(
             directory,
             &format!("scan-{page}"),
             &helvetica_lines(&[line]),
+            &[],
         );
-        let jpeg = directory.join(format!("scan-{page}.jpg"));
-        let status = Command::new("/usr/bin/sips")
-            .args(["-s", "format", "jpeg"])
-            .arg(&png)
-            .arg("--out")
-            .arg(&jpeg)
-            .stdout(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "sips failed on page {page}");
-        let samples = fs::read(jpeg).unwrap();
         // pdf2png renders 612x792 points at 200 dpi.
-        let mut image = format!(
-            "<< /Type /XObject /Subtype /Image /Width 1700 /Height 2200 /ColorSpace /DeviceRGB \
-             /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
-            samples.len()
-        )
-        .into_bytes();
-        image.extend_from_slice(&samples);
-        image.extend_from_slice(b"\nendstream");
-        objects.push(image);
+        objects.push(image_object(&samples, 1700, 2200));
     }
     for _ in 0..2 {
-        let draw = b"q 612 0 0 792 0 0 cm /Im0 Do Q";
-        let mut stream = format!("<< /Length {} >>\nstream\n", draw.len()).into_bytes();
-        stream.extend_from_slice(draw);
-        stream.extend_from_slice(b"\nendstream");
-        objects.push(stream);
+        objects.push(corpus::stream_object("", b"q 612 0 0 792 0 0 cm /Im0 Do Q"));
     }
     corpus::assemble(&objects)
 }
@@ -248,22 +157,13 @@ fn jpeg_of(directory: &Path, name: &str, content: &[u8], sips: &[&str]) -> Vec<u
 }
 
 fn image_object(samples: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let mut image = format!(
-        "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} \
-         /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
-        samples.len()
+    corpus::stream_object(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width {width} /Height {height} \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode"
+        ),
+        samples,
     )
-    .into_bytes();
-    image.extend_from_slice(samples);
-    image.extend_from_slice(b"\nendstream");
-    image
-}
-
-fn stream_object(content: &[u8]) -> Vec<u8> {
-    let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
-    stream.extend_from_slice(content);
-    stream.extend_from_slice(b"\nendstream");
-    stream
 }
 
 /// One scanned page stored sideways with `/Rotate 90`, the way a scanner fixes
@@ -285,7 +185,7 @@ fn rotated_scan(directory: &Path) -> Vec<u8> {
            /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>"
             .to_vec(),
         image_object(&samples, 2200, 1700),
-        stream_object(b"q 792 0 0 612 0 0 cm /Im0 Do Q"),
+        corpus::stream_object("", b"q 792 0 0 612 0 0 cm /Im0 Do Q"),
     ])
 }
 
@@ -308,19 +208,17 @@ fn mixed_pdf(directory: &Path) -> Vec<u8> {
            /Resources << /XObject << /Im0 7 0 R >> >> /Contents 8 0 R >>"
             .to_vec(),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
-        stream_object(&helvetica_lines(&[
-            "Native Page One",
-            "Balance 99,000.00 on the closing date.",
-            "Every figure here is exact native text.",
-        ])),
+        corpus::stream_object(
+            "",
+            &helvetica_lines(&[
+                "Native Page One",
+                "Balance 99,000.00 on the closing date.",
+                "Every figure here is exact native text.",
+            ]),
+        ),
         image_object(&samples, 1700, 2200),
-        stream_object(b"q 612 0 0 792 0 0 cm /Im0 Do Q"),
+        corpus::stream_object("", b"q 612 0 0 792 0 0 cm /Im0 Do Q"),
     ])
-}
-
-fn read_report(staging: &Path) -> VisionReport {
-    let encoded = fs::read(staging.join(VISION_WORKER_REPORT_FILE)).unwrap();
-    serde_json::from_slice(&encoded).unwrap()
 }
 
 #[test]
@@ -378,7 +276,7 @@ fn a_page_of_text_converts_and_the_artifact_matches_what_landed_on_disk() {
     );
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let report = read_report(&run.staging);
+    let report = read_report::<VisionReport>(&run.staging);
     assert_eq!(report.protocol_version, VISION_WORKER_PROTOCOL_VERSION);
     assert_eq!(report.engine.name, VISION_ENGINE_NAME);
     assert_eq!(report.engine.version, macos_product_version());
@@ -470,7 +368,7 @@ fn an_image_carrying_no_text_is_rejected_rather_than_converted_empty() {
     let run = run_worker(&worker, directory.path(), &source, &sha256, &[]);
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let report = read_report(&run.staging);
+    let report = read_report::<VisionReport>(&run.staging);
     let VisionOutcome::Rejected { code } = report.outcome else {
         panic!("a blank page should not convert");
     };
@@ -516,7 +414,7 @@ fn a_transparent_background_is_flattened_rather_than_read_as_blank() {
     let run = run_worker(&worker, directory.path(), &source, &sha256, &[]);
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let report = read_report(&run.staging);
+    let report = read_report::<VisionReport>(&run.staging);
     let VisionOutcome::Converted { .. } = report.outcome else {
         panic!(
             "a transparent background is not a blank page: {:?}",
@@ -544,7 +442,7 @@ fn a_source_holding_more_than_one_frame_is_rejected_rather_than_truncated() {
     let run = run_worker(&worker, directory.path(), &source, &sha256, &[]);
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let VisionOutcome::Rejected { code } = read_report(&run.staging).outcome else {
+    let VisionOutcome::Rejected { code } = read_report::<VisionReport>(&run.staging).outcome else {
         panic!("a two page TIFF converts to half a document or to nothing");
     };
     assert_eq!(code, VisionRejectionCode::MultiFrameImage);
@@ -564,7 +462,7 @@ fn bytes_no_decoder_can_read_are_rejected_as_an_invalid_image() {
     let run = run_worker(&worker, directory.path(), &source, &sha256, &[]);
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let VisionOutcome::Rejected { code } = read_report(&run.staging).outcome else {
+    let VisionOutcome::Rejected { code } = read_report::<VisionReport>(&run.staging).outcome else {
         panic!("text bytes are not an image");
     };
     assert_eq!(code, VisionRejectionCode::InvalidImage);
@@ -595,7 +493,7 @@ fn markdown_over_the_ceiling_is_rejected_and_nothing_is_published() {
     );
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let VisionOutcome::Rejected { code } = read_report(&run.staging).outcome else {
+    let VisionOutcome::Rejected { code } = read_report::<VisionReport>(&run.staging).outcome else {
         panic!("a one byte ceiling cannot hold a page of Markdown");
     };
     assert_eq!(code, VisionRejectionCode::OutputTooLarge);
@@ -619,7 +517,8 @@ fn a_scan_behind_a_bom_is_read_as_a_pdf_and_its_blank_page_is_counted() {
     let run = run_worker(&worker, directory.path(), &source, &digest(&pdf), &[]);
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let VisionOutcome::Converted { pages, .. } = read_report(&run.staging).outcome else {
+    let VisionOutcome::Converted { pages, .. } = read_report::<VisionReport>(&run.staging).outcome
+    else {
         panic!("a scan with one readable page should convert");
     };
     assert_eq!(
@@ -646,7 +545,7 @@ fn a_page_turned_by_its_rotate_key_reads_top_to_bottom() {
     let run = run_worker(&worker, directory.path(), &source, &digest(&pdf), &[]);
 
     assert!(run.status.success(), "worker exited {:?}", run.status);
-    let VisionOutcome::Converted { .. } = read_report(&run.staging).outcome else {
+    let VisionOutcome::Converted { .. } = read_report::<VisionReport>(&run.staging).outcome else {
         panic!("a rotated scan should convert");
     };
     let markdown = fs::read_to_string(run.staging.join(VISION_MARKDOWN_FILE)).unwrap();
@@ -807,12 +706,16 @@ async fn docx_pictures_never_leak_the_description_marker() {
     let app = harness.app().await;
     let response = app
         .submit(
-            support::multipart_body_with_media_type(
-                Uuid::new_v4(),
-                "standard",
-                &docx,
-                "pictures.docx",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            support::multipart(
+                &[
+                    ("clientRunId", &Uuid::new_v4().to_string()),
+                    ("profile", "standard"),
+                ],
+                Some((
+                    &docx,
+                    "pictures.docx",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )),
             ),
             "pictures",
             support::TOKEN,

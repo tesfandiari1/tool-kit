@@ -12,7 +12,6 @@ use std::{
     path::{Path, PathBuf},
     process::ExitStatus,
     process::{Command as StdCommand, Stdio},
-    sync::Arc,
     thread,
 };
 
@@ -23,15 +22,18 @@ use tokio::{
     fs,
     io::AsyncReadExt,
     process::Child,
-    sync::{watch, OwnedSemaphorePermit, Semaphore},
+    sync::watch,
     time::{sleep, Duration},
 };
+
+use tool_kit_worker_protocol::is_lowercase_sha256;
 
 use super::EngineFailure;
 use crate::artifacts::AttemptPaths;
 
 /// A worker report is a handful of fields; anything larger is not one.
 const MAX_REPORT_BYTES: u64 = 1024 * 1024;
+const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Waits for a worker child under a hard deadline and a cancellation watch.
 pub(crate) async fn wait_for_child(
@@ -73,15 +75,6 @@ pub(crate) async fn wait_for_child(
 async fn kill_and_reap(child: &mut Child) {
     let _ = child.start_kill();
     let _ = child.wait().await;
-}
-
-pub(crate) async fn acquire(
-    permits: &Arc<Semaphore>,
-) -> Result<OwnedSemaphorePermit, EngineFailure> {
-    Arc::clone(permits)
-        .acquire_owned()
-        .await
-        .map_err(|_| EngineFailure::Unavailable)
 }
 
 /// Reads one worker report off the staging directory. A symlink, a directory,
@@ -141,13 +134,6 @@ pub(crate) async fn reject_if_markdown_staged(paths: &AttemptPaths) -> Result<()
     Ok(())
 }
 
-pub(crate) fn is_lowercase_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 /// The shape of an OS or package version in a handshake line: digits and dots.
 pub(crate) fn is_dotted_number(value: &str) -> bool {
     !value.is_empty()
@@ -205,6 +191,25 @@ pub(crate) fn validate_worker(path: &Path, worker: &'static str) -> Result<(), W
         }
     }
     Ok(())
+}
+
+/// The version a `{prefix}{version}\n` handshake line carries. What the
+/// version must look like is the caller's check.
+pub(crate) fn identity_version(
+    path: &Path,
+    worker: &'static str,
+    prefix: &str,
+) -> Result<String, WorkerStartupError> {
+    let output = worker_identity_line(path, worker, IDENTITY_TIMEOUT)?;
+    std::str::from_utf8(&output)
+        .ok()
+        .and_then(|line| line.strip_prefix(prefix))
+        .and_then(|tail| tail.strip_suffix('\n'))
+        .map(str::to_owned)
+        .ok_or_else(|| WorkerStartupError::WorkerIdentityMismatch {
+            worker,
+            path: path.to_owned(),
+        })
 }
 
 /// Runs the `--version` handshake and returns the line the worker printed.

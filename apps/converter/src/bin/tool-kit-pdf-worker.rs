@@ -27,6 +27,7 @@ use tool_kit_worker_protocol::anydoc::{
     AnyDocRejection, AnyDocReport, MarkedPictures, ANYDOC_MARKDOWN_FILE, ANYDOC_MARKED_FILE,
     ANYDOC_PICTURES_DIRECTORY, ANYDOC_REPORT_FILE,
 };
+use tool_kit_worker_protocol::is_lowercase_sha256;
 
 fn main() -> ExitCode {
     match run() {
@@ -136,13 +137,6 @@ fn required_lowercase_sha256_env(name: &str) -> Result<String, ()> {
     } else {
         Err(())
     }
-}
-
-fn is_lowercase_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn copy_exact_source(

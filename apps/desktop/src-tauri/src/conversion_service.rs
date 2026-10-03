@@ -506,16 +506,8 @@ fn classify_conversion_get(path: &str) -> Result<ContractRoute, String> {
 }
 
 pub(crate) fn validate_uuid(value: &str, label: &str) -> Result<(), String> {
-    let bytes = value.as_bytes();
-    let valid = bytes.len() == 36
-        && bytes.iter().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                *byte == b'-'
-            } else {
-                byte.is_ascii_hexdigit()
-            }
-        });
-    if valid {
+    // Length 36 admits the hyphenated form alone.
+    if value.len() == 36 && uuid::Uuid::try_parse(value).is_ok() {
         Ok(())
     } else {
         Err(format!("Invalid {label}"))
@@ -879,6 +871,15 @@ mod tests {
         assert!(classify_route("GET", "/api/v1/private").is_err());
         assert!(classify_route("GET", "/health/live?redirect=https://example.com").is_err());
         assert!(classify_route("GET", "/api/v1/conversions/not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn a_uuid_must_be_hyphenated() {
+        assert!(validate_uuid(UUID, "id").is_ok());
+        assert!(validate_uuid("ABCDEF01-2345-4789-8abc-DEF012345678", "id").is_ok());
+        assert!(validate_uuid(&UUID.replace('-', ""), "id").is_err());
+        assert!(validate_uuid(&format!("{{{UUID}}}"), "id").is_err());
+        assert!(validate_uuid(&format!("urn:uuid:{UUID}"), "id").is_err());
     }
 
     #[test]
