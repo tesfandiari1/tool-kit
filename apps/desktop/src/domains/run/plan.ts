@@ -29,14 +29,12 @@ export interface RunPlan {
 export function planRun(
   jobType: JobId,
   inputCount: number,
-  scan: Pick<
-    Scan,
-    "alreadyHereConvert" | "alreadyHereTranscribe" | "reusableConvert" | "reusableTranscribe"
-  >,
+  scan: Pick<Scan, "alreadyHereTranscribe" | "reusableTranscribe">,
   skipAlreadyDone: boolean,
 ): RunPlan {
-  const alreadyHere = jobType === "transcribe" ? scan.alreadyHereTranscribe : scan.alreadyHereConvert;
-  const reusable = jobType === "transcribe" ? scan.reusableTranscribe : scan.reusableConvert;
+  // Convert never reuses a result.
+  const alreadyHere = jobType === "transcribe" ? scan.alreadyHereTranscribe : 0;
+  const reusable = jobType === "transcribe" ? scan.reusableTranscribe : 0;
   const skipping = skipAlreadyDone ? Math.min(alreadyHere, inputCount) : 0;
   const copying = skipAlreadyDone ? Math.min(reusable, inputCount - skipping) : 0;
   const toRun = Math.max(0, inputCount - skipping - copying);

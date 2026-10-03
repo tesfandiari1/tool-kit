@@ -3,7 +3,6 @@
 export type JobId = "convert" | "transcribe";
 export type Status = "queued" | "working" | "processing" | "done" | "failed";
 export type SecretId = "backend";
-export type ReuseDisposition = "pending" | "already_here" | "reusable";
 /// What the end pane holds. Settings is a sheet, not a fourth member.
 export type View = "library" | "run" | "history";
 
@@ -68,12 +67,6 @@ export interface KnownDir {
   modifiedMs: number;
 }
 
-export interface ScannedConversionFile {
-  sourcePath: string;
-  mediaType: string;
-  reuse: ReuseDisposition;
-}
-
 export interface InputMatch {
   path: string;
   /// Relative to the dropped folder.
@@ -95,16 +88,11 @@ export interface InputNode {
 export interface Scan {
   convert: number;
   transcribe: number;
-  /// Already in the output folder: nothing happens to these. Both jobs report,
-  /// so switching job needs no re-scan and autodetect sees no new signal.
-  alreadyHereConvert: number;
+  /// Transcripts already in the output folder: nothing happens to these.
+  /// Convert never reuses a result.
   alreadyHereTranscribe: number;
-  /// Result in another folder: copied rather than converted again.
-  reusableConvert: number;
+  /// Transcripts in another folder: copied rather than transcribed again.
   reusableTranscribe: number;
-  convertFiles: ScannedConversionFile[];
-  /// The same for Transcribe: the preflight routes both jobs.
-  transcribeFiles: ScannedConversionFile[];
   alreadyText: number;
   suggestedOutput: string | null;
   nodes: InputNode[];
@@ -214,12 +202,8 @@ export const HISTORY_LIMIT = 400;
 export const EMPTY_SCAN: Scan = {
   convert: 0,
   transcribe: 0,
-  alreadyHereConvert: 0,
   alreadyHereTranscribe: 0,
-  reusableConvert: 0,
   reusableTranscribe: 0,
-  convertFiles: [],
-  transcribeFiles: [],
   alreadyText: 0,
   suggestedOutput: null,
   nodes: [],

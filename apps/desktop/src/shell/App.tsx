@@ -27,7 +27,6 @@ import {
   planRun,
   runButtonLabel,
 } from "@/domains/run/plan";
-import { planConversionRoutes, type ConversionCapabilities } from "@/domains/run/routes";
 import { HistoryPanel } from "@/domains/history/HistoryPanel";
 import { SettingsPanel } from "@/domains/settings/SettingsPanel";
 import { DocumentPane } from "@/domains/thread/DocumentPane";
@@ -66,6 +65,12 @@ const VIEW_ITEMS = [
 ] satisfies { value: View; label: string }[];
 
 const CAPABILITY_PROBE_INTERVAL_MS = 15_000;
+
+type ConversionCapabilities =
+  | { state: "loading" }
+  /// The host's own reason: nothing in Settings moves the service.
+  | { state: "unavailable"; message?: string }
+  | { state: "ready"; acceptingJobs: boolean };
 
 /// A live drag reports every frame, and each write is a settings save.
 const RESIZE_SETTLE_MS = 400;
@@ -300,7 +305,6 @@ export default function App() {
         setCapabilities({
           state: "ready",
           acceptingJobs: data.data.conversion.acceptingJobs,
-          inputFormats: data.data.conversion.inputFormats,
         });
         if (keys) setSecrets(keys);
         return true;
@@ -815,14 +819,15 @@ export default function App() {
     skipAlreadyDone,
   );
 
-  /// The job in force: both run in the local service, so its refusals belong
-  /// in the preflight.
-  const conversionPlan = planConversionRoutes({
-    files: settings.jobType === "convert" ? scan.convertFiles : scan.transcribeFiles,
-    capabilities,
-    skipAlreadyDone,
-  });
-  const missingToken = conversionPlan.backend.length > 0 && !secrets.backend;
+  /// Both jobs run in the local service, so its state belongs in the
+  /// preflight. The scan already dropped what the service cannot take.
+  const serviceBlocked =
+    capabilities.state !== "ready"
+      ? capabilities.state
+      : capabilities.acceptingJobs
+        ? null
+        : "not_accepting";
+  const missingToken = toRun > 0 && !secrets.backend;
   /// For naming and revealing the destination, never for deciding it. Keep it
   /// in step with `output_dir_for`, which settles that.
   const destination =
@@ -835,7 +840,7 @@ export default function App() {
         ? { rel: null, path: settings.outputDir }
         : null;
 
-  const routeBlocked = conversionPlan.blocked.length > 0;
+  const routeBlocked = serviceBlocked !== null && toRun > 0;
   const preflightReady = scanCurrent && !routeBlocked && !missingToken;
   const canRun = canStartRun({
     hasInputs: settings.inputs.length > 0,
@@ -962,18 +967,15 @@ export default function App() {
       hint = "Nothing to do here. Convert takes PDF, Office and image files; Transcribe takes audio and video.";
     }
   } else if (routeBlocked) {
-    const reason = conversionPlan.blocked[0]?.reason;
-    const count = conversionPlan.blocked.length;
-    if (reason === "capabilities_pending") {
+    const count = toRun;
+    if (serviceBlocked === "loading") {
       hint = "Checking conversion service capabilities…";
-    } else if (reason === "backend_unavailable") {
+    } else if (serviceBlocked === "unavailable") {
       // Carry the host's own reason.
       const detail = capabilities.state === "unavailable" ? capabilities.message : undefined;
       hint = detail ?? `Conversion service unavailable for ${count} file${count > 1 ? "s" : ""}`;
-    } else if (reason === "backend_not_accepting") {
-      hint = `Conversion service is not accepting jobs for ${count} file${count > 1 ? "s" : ""} right now`;
     } else {
-      hint = `${count} file${count > 1 ? "s" : ""} cannot be converted on this Mac — remove ${count > 1 ? "them" : "it"}`;
+      hint = `Conversion service is not accepting jobs for ${count} file${count > 1 ? "s" : ""} right now`;
     }
   } else if (missingToken) {
     hint = "Add your backend token in Settings";
