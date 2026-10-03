@@ -14,7 +14,6 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
     time::Duration,
 };
 
@@ -22,7 +21,7 @@ use tokio::{
     fs,
     io::AsyncWriteExt,
     process::Command,
-    sync::{watch, OwnedSemaphorePermit, Semaphore},
+    sync::watch,
 };
 use tool_kit_worker_protocol::anydoc::{
     AnyDocRejection, AnyDocReport, ANYDOC_MARKDOWN_FILE, ANYDOC_MARKED_FILE,
@@ -53,7 +52,6 @@ pub struct AnyDocEngine {
     worker: PathBuf,
     max_output_bytes: u64,
     timeout: Duration,
-    permits: Arc<Semaphore>,
     /// The Vision worker, which also describes DOCX and PPTX pictures.
     describer: Option<PathBuf>,
 }
@@ -69,20 +67,14 @@ impl AnyDocEngine {
             worker,
             max_output_bytes,
             timeout,
-            permits: Arc::new(Semaphore::new(1)),
             describer,
         }
-    }
-
-    pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, EngineFailure> {
-        child::acquire(&self.permits).await
     }
 
     pub async fn convert(
         &self,
         paths: &AttemptPaths,
         source: ValidatedOpenFile,
-        _permit: OwnedSemaphorePermit,
         cancellation: watch::Receiver<bool>,
         admitted_label: &str,
     ) -> Result<EngineOutcome, EngineFailure> {

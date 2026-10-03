@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio::{
     fs,
     process::Command,
-    sync::{watch, OwnedSemaphorePermit, Semaphore},
+    sync::watch,
 };
 
 use super::child::{self, is_lowercase_sha256, wait_for_child, WorkerStartupError};
@@ -44,7 +44,6 @@ pub struct PdfInspectorEngine {
     timeout: Duration,
     max_output_bytes: u64,
     rayon_threads: usize,
-    permits: Arc<Semaphore>,
 }
 
 impl PdfInspectorEngine {
@@ -75,19 +74,13 @@ impl PdfInspectorEngine {
             timeout,
             max_output_bytes,
             rayon_threads,
-            permits: Arc::new(Semaphore::new(1)),
         })
-    }
-
-    pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, EngineFailure> {
-        child::acquire(&self.permits).await
     }
 
     pub async fn convert(
         &self,
         paths: &AttemptPaths,
         source: ValidatedOpenFile,
-        _permit: OwnedSemaphorePermit,
         cancellation: watch::Receiver<bool>,
     ) -> Result<EngineOutcome, EngineFailure> {
         if *cancellation.borrow() {
@@ -511,9 +504,8 @@ mod tests {
 
         let engine =
             PdfInspectorEngine::initialize(worker, None, Duration::from_secs(2), 1024, 1).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
-        let result = engine.convert(&paths, source, permit, cancellation).await;
+        let result = engine.convert(&paths, source, cancellation).await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Crashed);
         assert_eq!(
@@ -548,9 +540,8 @@ mod tests {
 
         let engine =
             PdfInspectorEngine::initialize(worker, None, Duration::from_secs(2), 1024, 1).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
-        let result = engine.convert(&paths, source, permit, cancellation).await;
+        let result = engine.convert(&paths, source, cancellation).await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Crashed);
         assert_eq!(
@@ -582,9 +573,8 @@ mod tests {
 
         let engine =
             PdfInspectorEngine::initialize(worker, None, Duration::from_secs(2), 1024, 1).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
-        let result = engine.convert(&paths, source, permit, cancellation).await;
+        let result = engine.convert(&paths, source, cancellation).await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Protocol);
         assert!(!paths.attempt.join("worker-started").exists());
@@ -603,13 +593,12 @@ mod tests {
         let source = source(&paths.source, b"source").await;
         let engine =
             PdfInspectorEngine::initialize(worker, None, Duration::from_secs(30), 1024, 1).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (cancel, cancellation) = watch::channel(false);
         let marker = paths.attempt.join("worker-started");
         let task_paths = paths.clone();
         let task = tokio::spawn(async move {
             engine
-                .convert(&task_paths, source, permit, cancellation)
+                .convert(&task_paths, source, cancellation)
                 .await
         });
         for _ in 0..200 {

@@ -1,7 +1,6 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
 use sha2::{Digest, Sha256};
@@ -74,17 +73,11 @@ pub struct ConversionService {
     /// Absent wherever the audio worker does not run, exactly like Vision.
     audio_engine: Option<AudioEngine>,
     max_output_bytes: u64,
-    /// How long a claimed job may wait for its engine's parser permit before
-    /// the runner gives up and lets startup recovery requeue it.
-    permit_wait_limit: Duration,
     work_notification: Arc<Notify>,
     faults: Arc<FaultBarrier>,
 }
 
 impl ConversionService {
-    // Four engines and their two shared limits. Grouping them into a record
-    // would be a second name for the field list right below.
-    #[expect(clippy::too_many_arguments)]
     pub fn new(
         repository: SqliteRepository,
         artifacts: ArtifactStore,
@@ -93,7 +86,6 @@ impl ConversionService {
         vision_engine: Option<VisionEngine>,
         audio_engine: Option<AudioEngine>,
         max_output_bytes: u64,
-        permit_wait_limit: Duration,
     ) -> Self {
         Self {
             repository,
@@ -103,7 +95,6 @@ impl ConversionService {
             vision_engine,
             audio_engine,
             max_output_bytes,
-            permit_wait_limit,
             work_notification: Arc::new(Notify::new()),
             faults: Arc::new(FaultBarrier::default()),
         }
@@ -445,51 +436,25 @@ impl ConversionService {
             },
         };
 
-        // A long conversion holds its engine's permit, so this wait is not
-        // always short. Unbounded and cancellation-blind, it froze the single
-        // runner for every engine and outlasted graceful shutdown.
-        let acquire = async {
-            match source_format.engine {
-                LocalEngineKind::Pdf => self.pdf_engine.acquire().await,
-                LocalEngineKind::AnyDoc => self.anydoc_engine.acquire().await,
-                LocalEngineKind::Vision => match self.vision_engine.as_ref() {
-                    Some(engine) => engine.acquire().await,
-                    None => Err(EngineFailure::Unavailable),
-                },
-                LocalEngineKind::Audio => match self.audio_engine.as_ref() {
-                    Some(engine) => engine.acquire().await,
-                    None => Err(EngineFailure::Unavailable),
-                },
-            }
+        // A Swift worker absent from this host fails the job before staging.
+        let unavailable = match source_format.engine {
+            LocalEngineKind::Pdf | LocalEngineKind::AnyDoc => false,
+            LocalEngineKind::Vision => self.vision_engine.is_none(),
+            LocalEngineKind::Audio => self.audio_engine.is_none(),
         };
-        let mut cancellation = shutdown.clone();
-        let permit = tokio::select! {
-            permit = acquire => permit,
-            () = async {
-                let _ = cancellation.wait_for(|stop| *stop).await;
-            } => {
-                tracing::info!(%job_id, %attempt_id, "shutdown interrupted an engine permit wait; preserving claim");
-                return Ok(());
-            }
-            () = tokio::time::sleep(self.permit_wait_limit) => {
-                return Err(ConversionExecutionError::EnginePermitStalled { job_id, attempt_id });
-            }
-        };
-        let permit = match permit {
-            Ok(permit) => permit,
-            Err(failure) => {
-                self.finish_failure(
-                    job_id,
-                    attempt_id,
-                    FailureStage::ConvertingLocal,
-                    failure.code(),
-                    failure.message(),
-                    true,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
+        if unavailable {
+            let failure = EngineFailure::Unavailable;
+            self.finish_failure(
+                job_id,
+                attempt_id,
+                FailureStage::ConvertingLocal,
+                failure.code(),
+                failure.message(),
+                true,
+            )
+            .await?;
+            return Ok(());
+        }
 
         let paths = match self.artifacts.prepare_artifacts(job_id, attempt_id).await {
             Ok(paths) => paths,
@@ -512,16 +477,15 @@ impl ConversionService {
         let conversion = match source_format.engine {
             LocalEngineKind::Pdf => {
                 self.pdf_engine
-                    .convert(&paths, source, permit, shutdown)
+                    .convert(&paths, source, shutdown)
                     .await
             }
             LocalEngineKind::AnyDoc => {
                 self.anydoc_engine
-                    .convert(&paths, source, permit, shutdown, source_format.format_label)
+                    .convert(&paths, source, shutdown, source_format.format_label)
                     .await
             }
-            // Unreachable: the permit above came from the same engine, so an
-            // absent one already failed the job. Spelled out because `expect`
+            // Unreachable: an absent engine already failed the job above. Spelled out because `expect`
             // is denied and a wrong guess here would spend a real conversion.
             LocalEngineKind::Vision => match self.vision_engine.as_ref() {
                 Some(engine) => {
@@ -529,7 +493,6 @@ impl ConversionService {
                         .convert(
                             &paths,
                             source,
-                            permit,
                             shutdown,
                             job.ocr_language_correction,
                             &job.ocr_custom_words,
@@ -544,7 +507,6 @@ impl ConversionService {
                         .convert(
                             &paths,
                             source,
-                            permit,
                             shutdown,
                             &job.source.media_type,
                             job.speaker_count,
@@ -718,12 +680,10 @@ impl ConversionService {
             )
             .await
             .map_err(|_| EngineFailure::Unavailable)?;
-        let permit = engine.acquire().await?;
         engine
             .convert(
                 paths,
                 source,
-                permit,
                 cancellation,
                 job.ocr_language_correction,
                 &job.ocr_custom_words,
@@ -1202,10 +1162,6 @@ pub(crate) enum ConversionExecutionError {
         attempt_id: Uuid,
         state: ConversionState,
     },
-    #[error(
-        "conversion {job_id} attempt {attempt_id} waited past the engine permit limit; recovery is required"
-    )]
-    EnginePermitStalled { job_id: Uuid, attempt_id: Uuid },
     #[error(transparent)]
     Artifacts(#[from] ArtifactError),
     #[error(transparent)]

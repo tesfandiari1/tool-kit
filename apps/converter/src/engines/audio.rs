@@ -19,7 +19,7 @@ use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncRead, BufReader},
     process::Command,
-    sync::{watch, OwnedSemaphorePermit, Semaphore},
+    sync::watch,
 };
 
 use super::child::{
@@ -79,7 +79,6 @@ pub struct AudioEngine {
     version: Arc<str>,
     timeout: Duration,
     max_output_bytes: u64,
-    permits: Arc<Semaphore>,
 }
 
 impl AudioEngine {
@@ -116,7 +115,6 @@ impl AudioEngine {
             version: version.into(),
             timeout,
             max_output_bytes,
-            permits: Arc::new(Semaphore::new(1)),
         })
     }
 
@@ -124,15 +122,10 @@ impl AudioEngine {
         &self.version
     }
 
-    pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, EngineFailure> {
-        child::acquire(&self.permits).await
-    }
-
     pub async fn convert(
         &self,
         paths: &AttemptPaths,
         source: ValidatedOpenFile,
-        _permit: OwnedSemaphorePermit,
         cancellation: watch::Receiver<bool>,
         media_type: &str,
         speaker_count: Option<u32>,
@@ -538,10 +531,9 @@ mod tests {
 
         let engine =
             AudioEngine::initialize(worker, models, Duration::from_secs(10), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None)
             .await
             .unwrap();
         assert!(matches!(outcome, EngineOutcome::Converted { .. }));
@@ -601,10 +593,9 @@ mod tests {
 
         let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
         assert_eq!(engine.version(), IDENTITY);
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", Some(2))
+            .convert(&paths, source, cancellation, "audio/wav", Some(2))
             .await
             .unwrap();
 
@@ -649,10 +640,9 @@ mod tests {
 
             let engine =
                 AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
-            let permit = engine.acquire().await.unwrap();
             let (_cancel, cancellation) = watch::channel(false);
             let outcome = engine
-                .convert(&paths, source, permit, cancellation, "audio/wav", None)
+                .convert(&paths, source, cancellation, "audio/wav", None)
                 .await
                 .unwrap();
 
@@ -674,10 +664,9 @@ mod tests {
         let source = source(&paths.source, b"audio bytes").await;
 
         let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Crashed);
@@ -699,10 +688,9 @@ mod tests {
         let source = source(&paths.source, b"audio bytes").await;
 
         let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Protocol);
@@ -724,10 +712,9 @@ mod tests {
         let source = source(&paths.source, b"audio bytes").await;
 
         let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Protocol);
@@ -750,10 +737,9 @@ mod tests {
 
         let engine =
             AudioEngine::initialize(worker, models, Duration::from_millis(200), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, permit, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Timeout);
@@ -785,13 +771,11 @@ mod tests {
             let engine =
                 AudioEngine::initialize(worker, models.clone(), Duration::from_secs(5), 1024)
                     .unwrap();
-            let permit = engine.acquire().await.unwrap();
             let (_cancel, cancellation) = watch::channel(false);
             engine
                 .convert(
                     &paths,
                     source,
-                    permit,
                     cancellation,
                     "audio/mpeg",
                     speaker_count,

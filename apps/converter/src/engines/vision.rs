@@ -16,7 +16,7 @@ use std::{
 use tokio::{
     fs,
     process::Command,
-    sync::{watch, OwnedSemaphorePermit, Semaphore},
+    sync::watch,
 };
 
 use super::child::{
@@ -60,7 +60,6 @@ pub struct VisionEngine {
     version: Arc<str>,
     timeout: Duration,
     max_output_bytes: u64,
-    permits: Arc<Semaphore>,
     /// The PDF worker staged native pages, so Vision OCRs only the others.
     native_pages: bool,
 }
@@ -79,7 +78,6 @@ impl VisionEngine {
             version: version.into(),
             timeout,
             max_output_bytes,
-            permits: Arc::new(Semaphore::new(1)),
             native_pages: false,
         })
     }
@@ -88,7 +86,7 @@ impl VisionEngine {
         &self.version
     }
 
-    /// The same engine and permit with one more second per page, for a
+    /// The same engine with one more second per page, for a
     /// scanned PDF the worker reads a page at a time, up to
     /// [`MAX_SCAN_TIMEOUT`]. A scan past it times out into the inspector's
     /// needs_remote.
@@ -108,15 +106,10 @@ impl VisionEngine {
         }
     }
 
-    pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, EngineFailure> {
-        child::acquire(&self.permits).await
-    }
-
     pub async fn convert(
         &self,
         paths: &AttemptPaths,
         source: ValidatedOpenFile,
-        _permit: OwnedSemaphorePermit,
         cancellation: watch::Receiver<bool>,
         language_correction: bool,
         custom_words: &str,
@@ -452,10 +445,9 @@ mod tests {
         let source = source(&paths.source, b"image bytes").await;
 
         let engine = VisionEngine::initialize(worker, Duration::from_secs(5), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
-            .convert(&paths, source, permit, cancellation, true, "")
+            .convert(&paths, source, cancellation, true, "")
             .await
             .unwrap();
 
@@ -492,10 +484,9 @@ mod tests {
             let source = source(&paths.source, b"%PDF-1.7 scan").await;
 
             let engine = VisionEngine::initialize(worker, Duration::from_secs(5), 1024).unwrap();
-            let permit = engine.acquire().await.unwrap();
             let (_cancel, cancellation) = watch::channel(false);
             let result = engine
-                .convert(&paths, source, permit, cancellation, true, "")
+                .convert(&paths, source, cancellation, true, "")
                 .await;
 
             match (result, warns) {
@@ -525,10 +516,9 @@ mod tests {
         let source = source(&paths.source, b"image bytes").await;
 
         let engine = VisionEngine::initialize(worker, Duration::from_secs(5), 1024).unwrap();
-        let permit = engine.acquire().await.unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, permit, cancellation, true, "")
+            .convert(&paths, source, cancellation, true, "")
             .await;
 
         assert_eq!(result.unwrap_err(), super::EngineFailure::Protocol);
@@ -567,10 +557,9 @@ mod tests {
             let source = source(&paths.source, b"image bytes").await;
 
             let engine = VisionEngine::initialize(worker, Duration::from_secs(5), 1024).unwrap();
-            let permit = engine.acquire().await.unwrap();
             let (_cancel, cancellation) = watch::channel(false);
             let outcome = engine
-                .convert(&paths, source, permit, cancellation, true, "")
+                .convert(&paths, source, cancellation, true, "")
                 .await
                 .unwrap();
 

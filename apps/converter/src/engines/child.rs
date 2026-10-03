@@ -12,7 +12,6 @@ use std::{
     path::{Path, PathBuf},
     process::ExitStatus,
     process::{Command as StdCommand, Stdio},
-    sync::Arc,
     thread,
 };
 
@@ -23,7 +22,7 @@ use tokio::{
     fs,
     io::AsyncReadExt,
     process::Child,
-    sync::{watch, OwnedSemaphorePermit, Semaphore},
+    sync::watch,
     time::{sleep, Duration},
 };
 
@@ -73,15 +72,6 @@ pub(crate) async fn wait_for_child(
 async fn kill_and_reap(child: &mut Child) {
     let _ = child.start_kill();
     let _ = child.wait().await;
-}
-
-pub(crate) async fn acquire(
-    permits: &Arc<Semaphore>,
-) -> Result<OwnedSemaphorePermit, EngineFailure> {
-    Arc::clone(permits)
-        .acquire_owned()
-        .await
-        .map_err(|_| EngineFailure::Unavailable)
 }
 
 /// Reads one worker report off the staging directory. A symlink, a directory,

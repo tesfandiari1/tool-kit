@@ -111,9 +111,6 @@ impl AppState {
             vision_engine,
             audio_engine,
             settings.limits.max_output_bytes,
-            // Give the next claim one more timeout to wait for a permit, then
-            // exit so startup recovery requeues instead of the runner freezing.
-            settings.limits.pdf_timeout,
         );
         StartupRecovery::new(settings.recovery_limit)
             .run(&service)
