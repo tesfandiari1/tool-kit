@@ -13,11 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::{
-    fs,
-    process::Command,
-    sync::watch,
-};
+use tokio::{fs, process::Command, sync::watch};
 
 use super::child::{
     self, is_dotted_number, is_lowercase_sha256, wait_for_child, WorkerStartupError,
@@ -485,9 +481,7 @@ mod tests {
 
             let engine = VisionEngine::initialize(worker, Duration::from_secs(5), 1024).unwrap();
             let (_cancel, cancellation) = watch::channel(false);
-            let result = engine
-                .convert(&paths, source, cancellation, true, "")
-                .await;
+            let result = engine.convert(&paths, source, cancellation, true, "").await;
 
             match (result, warns) {
                 (Ok(EngineOutcome::Converted { analysis, .. }), Some(warns)) => {
@@ -517,9 +511,7 @@ mod tests {
 
         let engine = VisionEngine::initialize(worker, Duration::from_secs(5), 1024).unwrap();
         let (_cancel, cancellation) = watch::channel(false);
-        let result = engine
-            .convert(&paths, source, cancellation, true, "")
-            .await;
+        let result = engine.convert(&paths, source, cancellation, true, "").await;
 
         assert_eq!(result.unwrap_err(), super::EngineFailure::Protocol);
     }

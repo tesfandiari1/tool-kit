@@ -475,11 +475,7 @@ impl ConversionService {
 
         let scan_cancellation = shutdown.clone();
         let conversion = match source_format.engine {
-            LocalEngineKind::Pdf => {
-                self.pdf_engine
-                    .convert(&paths, source, shutdown)
-                    .await
-            }
+            LocalEngineKind::Pdf => self.pdf_engine.convert(&paths, source, shutdown).await,
             LocalEngineKind::AnyDoc => {
                 self.anydoc_engine
                     .convert(&paths, source, shutdown, source_format.format_label)

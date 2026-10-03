@@ -143,8 +143,16 @@ mod tests {
     fn each_engine_records_its_own_route_and_reason() {
         for (engine, route, reason) in [
             (LocalEngineKind::Pdf, "local_pdf", "native_text_pdf"),
-            (LocalEngineKind::AnyDoc, "local_anydoc", "structured_document"),
-            (LocalEngineKind::Vision, "local_vision", "recognized_image_text"),
+            (
+                LocalEngineKind::AnyDoc,
+                "local_anydoc",
+                "structured_document",
+            ),
+            (
+                LocalEngineKind::Vision,
+                "local_vision",
+                "recognized_image_text",
+            ),
             (LocalEngineKind::Audio, "local_audio", "transcribed_audio"),
         ] {
             assert_eq!(engine.route_str(), route);

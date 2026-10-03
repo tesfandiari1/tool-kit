@@ -6,11 +6,7 @@ use std::{
 };
 
 use thiserror::Error;
-use tokio::{
-    fs,
-    process::Command,
-    sync::watch,
-};
+use tokio::{fs, process::Command, sync::watch};
 
 use super::child::{self, is_lowercase_sha256, wait_for_child, WorkerStartupError};
 use super::{EngineAnalysis, EngineFailure, EngineOutcome, EngineRejection, QualitySignals};
@@ -596,11 +592,8 @@ mod tests {
         let (cancel, cancellation) = watch::channel(false);
         let marker = paths.attempt.join("worker-started");
         let task_paths = paths.clone();
-        let task = tokio::spawn(async move {
-            engine
-                .convert(&task_paths, source, cancellation)
-                .await
-        });
+        let task =
+            tokio::spawn(async move { engine.convert(&task_paths, source, cancellation).await });
         for _ in 0..200 {
             if marker.exists() {
                 break;

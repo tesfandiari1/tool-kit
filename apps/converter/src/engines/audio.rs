@@ -773,13 +773,7 @@ mod tests {
                     .unwrap();
             let (_cancel, cancellation) = watch::channel(false);
             engine
-                .convert(
-                    &paths,
-                    source,
-                    cancellation,
-                    "audio/mpeg",
-                    speaker_count,
-                )
+                .convert(&paths, source, cancellation, "audio/mpeg", speaker_count)
                 .await
                 .unwrap();
 

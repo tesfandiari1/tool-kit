@@ -17,12 +17,7 @@ use std::{
     time::Duration,
 };
 
-use tokio::{
-    fs,
-    io::AsyncWriteExt,
-    process::Command,
-    sync::watch,
-};
+use tokio::{fs, io::AsyncWriteExt, process::Command, sync::watch};
 use tool_kit_worker_protocol::anydoc::{
     AnyDocRejection, AnyDocReport, ANYDOC_MARKDOWN_FILE, ANYDOC_MARKED_FILE,
     ANYDOC_PICTURES_DIRECTORY, ANYDOC_REPORT_FILE,
