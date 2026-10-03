@@ -180,33 +180,21 @@ values or unavailable startup dependencies prevent the listener from binding.
 | `TOOLKIT_CONVERTER_BIND_ADDR` | `127.0.0.1:8080` | Listener socket |
 | `TOOLKIT_CONVERTER_TOKEN_FILE` | `/run/secrets/bootstrap_token` | Mounted bootstrap-token file |
 | `TOOLKIT_CONVERTER_DATA_DIR` | `/data` | Persistent data root: database and every artifact |
-| `TOOLKIT_CONVERTER_SCRATCH_PARENT` | `/tmp` | Read by the config loader and used nowhere else |
 | `TOOLKIT_CONVERTER_PDF_WORKER_PATH` | sibling binary | Absolute worker override |
-| `TOOLKIT_CONVERTER_VISION_WORKER_PATH` | sibling binary where it exists | Absolute macOS Vision worker override |
-| `TOOLKIT_CONVERTER_AUDIO_WORKER_PATH` | sibling binary where it exists | Absolute macOS audio worker override |
 | `TOOLKIT_CONVERTER_AUDIO_DIARIZER_DIR` | unset | Parent of the staged `speaker-diarization/` CoreML set. Required whenever the audio worker is present |
 | `TOOLKIT_CONVERTER_AUDIO_TIMEOUT_SECS` | `1800` | Audio worker wall deadline |
-| `TOOLKIT_CONVERTER_MAX_AUDIO_UPLOAD_BYTES` | `1073741824` | Per-recording streaming ceiling. Documents keep `MAX_UPLOAD_BYTES` |
+| `TOOLKIT_CONVERTER_MAX_AUDIO_UPLOAD_BYTES` | `1073741824` | Per-recording streaming ceiling. Documents stop at 25 MiB |
 | `TOOLKIT_CONVERTER_PDF_BCMAPS_DIR` | crate fallback | Runtime CMap directory; container sets this explicitly |
-| `TOOLKIT_CONVERTER_MAX_UPLOAD_BYTES` | `26214400` | Per-source streaming ceiling |
-| `TOOLKIT_CONVERTER_MAX_OUTPUT_BYTES` | `52428800` | Markdown ceiling enforced before worker write |
 | `TOOLKIT_CONVERTER_MAX_JOBS` | `32` | Active-job ceiling, counted from durable state |
 | `TOOLKIT_CONVERTER_MAX_CONCURRENT_UPLOADS` | `2` | Concurrent staging permits before immediate `429` |
 | `TOOLKIT_CONVERTER_UPLOAD_TIMEOUT_SECS` | `120` | Whole-upload deadline |
 | `TOOLKIT_CONVERTER_PDF_TIMEOUT_SECS` | `60` | Per-worker wall deadline |
-| `TOOLKIT_CONVERTER_PDF_THREADS` | `2` | Native parser Rayon threads |
-| `TOOLKIT_CONVERTER_DATABASE_BUSY_TIMEOUT_SECS` | `5` | SQLite lock wait before a busy error |
-| `TOOLKIT_CONVERTER_WORKER_POLL_INTERVAL_SECS` | `1` | Queue poll that backs up the wake-up notification |
-| `TOOLKIT_CONVERTER_RECOVERY_LIMIT` | `3` | Fresh attempts a job may receive across restarts |
 | `TOOLKIT_CONVERTER_SHUTDOWN_GRACE_SECS` | `30` | Shared HTTP and worker shutdown deadline |
 | `TOOLKIT_CONVERTER_SHUTDOWN_ON_STDIN_EOF` | `0` | Shut down when stdin closes; `0` or `1` |
 | `RUST_LOG` | `tool_kit_converter=info` | Structured tracing filter |
 
-The Swift worker overrides differ from the PDF one in one way. A configured
-path is a promise, so the engine reports what it finds there whether or not the
-file exists. Only the implicit sibling probe is allowed to come back empty, and
-an absent Vision or audio worker means the engine is simply absent, which is
-the normal case off macOS. A present audio worker with no diarizer directory,
+The Vision and audio workers are found only by the sibling probe. An absent
+worker means the engine is simply absent, which is the normal case off macOS. A present audio worker with no diarizer directory,
 or one missing any model file FluidAudio loads, refuses to start: that is a
 packaging bug, not a host without the engine. The audio worker's last stderr
 line reaches `converter.log` when it fails.
@@ -221,10 +209,6 @@ including a kill it could not handle, so EOF is a parent-death signal no
 handler can deliver. Leave it off wherever stdin is a terminal, a closed
 descriptor, or `/dev/null`, because EOF there says nothing about a parent. The
 container leaves it off and shuts down on SIGTERM alone.
-
-`TOOLKIT_CONVERTER_SCRATCH_PARENT` does not work. The config loader parses and
-validates it, and no other code reads it. It stays until a separate decision on
-the environment surface, so setting it changes nothing.
 
 ## Traps
 
@@ -256,10 +240,6 @@ the environment surface, so setting it changes nothing.
   `every_no_transaction_migration_wraps_its_rebuild_in_one_transaction` pins
   every one of them. After the first deployment, a broken migration needs a new
   file.
-- **`execute_claimed` bounds its engine-permit wait and honors shutdown.** A
-  detached AnyDoc parse still holds its permit, so the wait is real.
-- **`TOOLKIT_CONVERTER_SCRATCH_PARENT` is dead config.** `config.rs` parses and
-  validates it, and nothing reads it. Do not wire it to anything.
 - **`/health/ready` is unauthenticated** and opens a `BEGIN IMMEDIATE`
   transaction per request against a four-connection pool. Loopback only today.
 

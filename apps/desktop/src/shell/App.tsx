@@ -269,7 +269,7 @@ export default function App() {
     };
   }, [libraryMode, workspacePath, runsFinished, showToast, openPath, persist]);
 
-  // The counts drive the run label, the autodetect and the output folder, and
+  // The counts drive the run label and the autodetect, and
   // "already done" is format-specific.
   useEffect(() => {
     if (settings.inputs.length === 0) {

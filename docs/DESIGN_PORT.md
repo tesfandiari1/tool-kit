@@ -29,7 +29,7 @@ Hover is the only motion, 180ms.
    code/pre`. No Google Fonts import: the CSP is `font-src 'self'`.
 4. **`Mono` became `Meta`.** The face is no longer monospace and the old name
    would lie.
-5. **Button variants** are `primary | secondary | inverse | ghost`, default
+5. **Button variants** are `primary | secondary | ghost`, default
    `secondary`. Primary is a solid the Run button needs, which the system has
    only as an outline on dark. `busy` is an outline in `--status-warning`.
 6. **Badge tones** are `neutral | info | success | warning | danger`, and
@@ -46,7 +46,7 @@ Hover is the only motion, 180ms.
 10. **`scripts/lint-tokens.sh` is the guard**, wired into `pnpm lint`. It fails
     on a hex colour, `rgba(`, `box-shadow`, `border-radius`, `backdrop-filter`,
     a literal `font-family:` and every deleted token name, anywhere under
-    `src/` except `ui/tokens.css`, `ui/fonts.css` and the one `.gal__dark`.
+    `src/` except `ui/tokens.css` and `ui/fonts.css`.
 11. **Status colours are lifted on ink.** `--status-danger` `#8C4A48` on ink is
     2.15:1, so each status token takes a lighter step on the dark side.
 12. **Every ticking figure sits on Red Hat Display** with
