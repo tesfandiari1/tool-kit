@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build the Vision worker and the development tools in this directory.
+# Build the Vision worker and the pdf2png test tool in this directory.
 #
 # `swiftc` ships with the Command Line Tools, so this needs no Xcode, no
-# SwiftPM, and no dependencies. `tk-vision` and `pdf2png` judge Vision's output
-# on real documents; `tool-kit-vision-worker` is the protocol worker itself.
+# SwiftPM, and no dependencies. `tool-kit-vision-worker` is the protocol worker.
+# `pdf2png` turns a text PDF into a scan for the vision_worker tests.
 
 set -euo pipefail
 
@@ -27,11 +27,7 @@ mkdir -p "${OUT}"
 # The worker deploys below the macOS 26 floor so its `#available` guard is
 # reachable: carried to an older system it prints why and exits, rather than
 # failing to launch at all.
-# Both binaries compile `render.swift` so the preview tool cannot print
-# markdown the worker would not publish.
 swiftc -O -parse-as-library -target "$(uname -m)-apple-macos15.0" \
   "${DIR}/main.swift" "${DIR}/render.swift" -o "${OUT}/tool-kit-vision-worker"
-swiftc -O -parse-as-library \
-  "${DIR}/tk-vision.swift" "${DIR}/render.swift" -o "${OUT}/tk-vision"
 swiftc -O "${DIR}/pdf2png.swift" -o "${OUT}/pdf2png"
-printf 'Built %s/{tool-kit-vision-worker,tk-vision,pdf2png}\n' "${OUT}"
+printf 'Built %s/{tool-kit-vision-worker,pdf2png}\n' "${OUT}"

@@ -1,9 +1,4 @@
 // Markdown rendering from a Vision document observation.
-//
-// Shared by the worker and by tk-vision so the preview tool cannot drift from
-// what the worker actually publishes. It drifted once: the false-table guard
-// landed in the worker while tk-vision kept its own copy and went on printing
-// the table the worker had stopped emitting.
 
 import CoreGraphics
 import Foundation
