@@ -873,13 +873,15 @@ fn converter_env(layout: &Layout, bcmaps: &Path, diarizer: &Path) -> BTreeMap<St
             "TOOLKIT_CONVERTER_AUDIO_TIMEOUT_SECS".to_string(),
             "1800".to_string(),
         ),
+        // The converter's own bound. A 132-minute 1.3 GB WAV transcribed in
+        // 132 s at a 1.3 GB peak, and 1 GiB refused every recording past
+        // about 110 minutes of WAV.
         (
             "TOOLKIT_CONVERTER_MAX_AUDIO_UPLOAD_BYTES".to_string(),
-            "1073741824".to_string(),
+            "4294967296".to_string(),
         ),
-        // The default 120s needs 9 MB/s for that 1 GiB. 1800s, the host's own
-        // stream timeout, covers it at 0.6 MB/s: a slow network share or a
-        // USB 2 disk.
+        // 1800s, the host's own stream timeout, moves that 4 GiB at 2.3 MB/s
+        // and 1 GiB at 0.6 MB/s, a slow network share.
         (
             "TOOLKIT_CONVERTER_UPLOAD_TIMEOUT_SECS".to_string(),
             "1800".to_string(),
@@ -1023,7 +1025,7 @@ mod tests {
         assert_eq!(env["TOOLKIT_CONVERTER_AUDIO_TIMEOUT_SECS"], "1800");
         assert_eq!(
             env["TOOLKIT_CONVERTER_MAX_AUDIO_UPLOAD_BYTES"],
-            "1073741824"
+            "4294967296"
         );
         assert_eq!(env["TOOLKIT_CONVERTER_UPLOAD_TIMEOUT_SECS"], "1800");
         assert_eq!(env["TOOLKIT_CONVERTER_SHUTDOWN_GRACE_SECS"], "5");

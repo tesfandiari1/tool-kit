@@ -262,9 +262,14 @@ fn parse_success<T: for<'de> Deserialize<'de>>(
     operation: &str,
 ) -> Result<T, String> {
     if !(200..300).contains(&response.status) {
+        // The service's own sentence, not its JSON: this lands in the job row.
+        let message = serde_json::from_str::<serde_json::Value>(&response.body)
+            .ok()
+            .and_then(|body| body["error"]["message"].as_str().map(str::to_owned))
+            .unwrap_or(response.body);
         return Err(format!(
-            "Conversion service {operation} returned HTTP {}: {}",
-            response.status, response.body
+            "Conversion service {operation} failed (HTTP {}): {message}",
+            response.status
         ));
     }
     serde_json::from_str(&response.body)
@@ -718,6 +723,22 @@ mod tests {
     use tokio::sync::oneshot;
 
     const UUID: &str = "11111111-1111-4111-8111-111111111111";
+
+    /// A refused upload reaches the job row as the service's sentence, not
+    /// as its JSON envelope.
+    #[test]
+    fn a_refusal_reads_as_the_services_message() {
+        let refused = ServiceResponsePayload {
+            status: 413,
+            headers: BTreeMap::new(),
+            body: r#"{"error":{"code":"upload_too_large","message":"The upload exceeds the configured limit.","requestId":"r","details":[]}}"#.into(),
+        };
+        let error = parse_success::<ConversionJobEnvelope>(refused, "submission").unwrap_err();
+        assert_eq!(
+            error,
+            "Conversion service submission failed (HTTP 413): The upload exceeds the configured limit."
+        );
+    }
 
     struct MockResponse {
         status: &'static str,
