@@ -53,7 +53,7 @@ cited from source, not yet run.
 6. **Transcribe follows `conversion_route`.** Backend is the sidecar's audio
    engine, Direct is Rev.ai unchanged. No second route setting.
 7. **No Rev.ai fallback from a failed local job in v1.** A rejection fails the
-   job with its reason. `needs_remote` exists on the wire for later.
+   job with its reason.
 8. **The worker never reaches Hugging Face.** `ModelHub.offlineMode = true`,
    models load from an explicit directory env, and an unset env is fatal
    (`TOOLKIT_CONVERTER_PDF_BCMAPS_DIR` already burned once by failing silently).
@@ -340,7 +340,7 @@ change makes a CRITICAL diff unreviewable) and the history provenance fix.
 ```bash
 workers/audio/build.sh                                   # the worker alone
 cargo test --manifest-path apps/converter/Cargo.toml --test audio_worker
-pnpm verify:backend                                      # lint:api, converter clippy and tests
+pnpm verify:backend                                      # converter clippy and tests
 pnpm verify                                              # desktop
 pnpm tauri build && apps/desktop/src-tauri/scripts/verify-release.sh
 ```

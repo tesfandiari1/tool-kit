@@ -9,16 +9,16 @@ originals stay where they are and are never copied.
 
 ## Current desktop implementation
 
-| Job | Service | In → Out |
+| Job | Engine | In → Out |
 |---|---|---|
-| Convert | Datalab | PDF / DOCX / XLSX / images / … → Markdown |
-| Transcribe | Rev.ai | audio / video → text |
+| Convert | Local converter: pdf-inspector, AnyDoc, Vision OCR | PDF / DOCX / PPTX / XLSX / images / … → Markdown |
+| Transcribe | Local worker (SpeechAnalyzer + FluidAudio) | audio / video → Markdown transcript |
 
-The job is chosen from what you drop. Results land in the active project, and a
-dropped folder keeps its shape there. Without a library, results default to the
-folder the input came from. Settings → Runs can move dropped files into the
-project instead of leaving them in place. API keys live in the macOS Keychain and are not exposed to the
-webview or stored in plaintext application settings.
+Everything runs on the Mac. The app spawns the converter as a loopback sidecar,
+and no file content leaves the machine. The job is chosen from what you drop.
+Results land in the active project, and a dropped folder keeps its shape there.
+A Settings toggle moves dropped files into the project instead of leaving them
+in place.
 
 ## Develop
 
@@ -39,8 +39,7 @@ cargo clippy --manifest-path apps/converter/Cargo.toml --all-targets -- -D warni
 ```
 
 See [`docs/STATUS.md`](docs/STATUS.md) for session state and
-[`CLAUDE.md`](CLAUDE.md) for desktop architecture, live API smokes, and
-signing details. Weekly Dependabot keeps npm, both Cargo crates, and Actions
+[`CLAUDE.md`](CLAUDE.md) for desktop architecture and signing details. Weekly Dependabot keeps npm, both Cargo crates, and Actions
 current; do not jump to TypeScript 7.
 
 ## Test
@@ -51,22 +50,12 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib
 cargo test --locked --manifest-path apps/converter/Cargo.toml
 ```
 
-Three gates come from outside the repo, so they check work nobody here wrote
-the assertions for:
-
 ```bash
-pnpm lint:api        # Spectral, ~60 OpenAPI rules over the contract
 pnpm verify:deps     # cargo-deny, the RustSec advisory database and licenses
-pnpm verify:contract # Schemathesis, property-based testing of the live service
 ```
 
-`verify:contract` builds the backend, starts it on a throwaway port and data
-root, seeds one conversion, and derives its cases from
-`contract/http/openapi.yaml`. It needs `uv` and Docker is not involved.
-
-Ignored desktop tests in `apps/desktop/src-tauri/src/live_smoke.rs` hit real Datalab and
-Rev.ai endpoints and spend API credits. CI runs all of the above on every push
-and pull request.
+`apps/converter/tests/http_contract.rs` is the HTTP contract. CI runs all of the
+above on every push and pull request.
 
 ## Release
 
@@ -97,26 +86,14 @@ Do not skip the verify step. A build with no signing identity still succeeds
 and still produces a working `.app`, but it is ad-hoc signed: Gatekeeper on any
 other Mac rejects it and notarization will not touch it. `verify-release.sh`
 fails on exactly that, plus the team clause in the designated requirement, the
-Info.plist keys, the bundled font licence, and the keychain entitlement. Add
+sidecar signatures, the Info.plist keys and the bundled licences. Add
 `--notarized` to also check both stapled tickets and Gatekeeper.
-
-### Keychain
-
-API keys live in the macOS **data protection** keychain, which has no access
-dialogs: reads are authorised by the `keychain-access-groups` entitlement and
-matched on team id rather than by a per-item ACL bound to the code signature.
-
-That entitlement is restricted, so it only works when
-`apps/desktop/src-tauri/embedded.provisionprofile` is present to authorise it. Without the
-profile the app falls back to the legacy keychain, which still works but ties
-access to the signature. A bare `cargo run` binary can never carry the profile,
-so the dev loop always uses the fallback and keeps its own copy of each key.
 
 ## Conversion backend
 
-The production conversion service lives in [`apps/converter/`](apps/converter/). It converts
-native-text PDFs and supported office formats on loopback. M4 routing policy and M6 desktop integration are landed. Backend Datalab
-fallback is Phase 2. LAN deploy is Phase 3. See [`docs/STATUS.md`](docs/STATUS.md).
+The conversion service lives in [`apps/converter/`](apps/converter/). The app
+spawns it on loopback, and it is the only service. See
+[`docs/STATUS.md`](docs/STATUS.md).
 
 - [`docs/STATUS.md`](docs/STATUS.md): state, critical path, milestones, traps, verify commands
 - [`apps/converter/README.md`](apps/converter/README.md): backend setup and verification

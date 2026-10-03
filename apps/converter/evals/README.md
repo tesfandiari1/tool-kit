@@ -15,8 +15,7 @@ the corpus carries no fixture blobs and no licences.
 | `id` | Unique case name |
 | `generator` | Function in `tests/support/corpus.rs` that writes the bytes |
 | `generatorArgs` | Page counts that generator takes |
-| `profile` | `standard`, `local_only`, or `best_quality` |
-| `expectedStatus` | Terminal `JobStatus`: `succeeded`, `failed`, `needs_remote` |
+| `expectedStatus` | Terminal `JobStatus`: `succeeded` or `failed` |
 | `expectedRoute` | `local_pdf` or `local_anydoc` |
 | `expectedReasonCodes` | `RouteView.reasonCodes`, in order |
 | `expectedWarnings` | `JobView.warnings`, in order |
@@ -57,6 +56,6 @@ through `cargo test`. Current milestone and corpus policy live in
 The manifest is PDF-only, because the PDF worker is the engine whose routing
 decisions the policy reads. AnyDoc formats are covered by the vendored fixtures
 in `../tests/fixtures/anydoc`, which the HTTP contract tests drive one
-extension at a time. Standalone image and HTML cases wait on the remote route.
+extension at a time.
 M8 freezes the completed corpus. See Phase 4 in
 [`../../../docs/STATUS.md`](../../../docs/STATUS.md).
