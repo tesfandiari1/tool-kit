@@ -36,10 +36,8 @@ export function Well({ className, selectable = true, ...rest }: WellProps) {
   return <div className={cx("ui-well", selectable && "ui-selectable", className)} {...rest} />;
 }
 
-export interface DividerProps extends HTMLAttributes<HTMLHRElement> {
-  vertical?: boolean;
-}
+export type DividerProps = HTMLAttributes<HTMLHRElement>;
 
-export function Divider({ vertical = false, className, ...rest }: DividerProps) {
-  return <hr className={cx("ui-divider", vertical && "ui-divider--vertical", className)} {...rest} />;
+export function Divider({ className, ...rest }: DividerProps) {
+  return <hr className={cx("ui-divider", className)} {...rest} />;
 }

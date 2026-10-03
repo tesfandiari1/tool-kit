@@ -3,7 +3,7 @@ import { cx } from "../cx";
 import "./Layout.css";
 
 /// Gap steps map to the 4px scale. There is no arbitrary spacing value.
-export type Gap = 1 | 2 | 3 | 4 | 5 | 6;
+export type Gap = 2 | 3 | 4;
 export type Align = "center" | "stretch";
 
 interface LayoutBase extends HTMLAttributes<HTMLElement> {

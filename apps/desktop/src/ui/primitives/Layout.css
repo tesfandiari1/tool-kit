@@ -19,9 +19,6 @@
     flex-wrap: wrap;
   }
 
-  .ui-gap-1 {
-    gap: var(--s1);
-  }
   .ui-gap-2 {
     gap: var(--s2);
   }
@@ -30,12 +27,6 @@
   }
   .ui-gap-4 {
     gap: var(--s4);
-  }
-  .ui-gap-5 {
-    gap: var(--s5);
-  }
-  .ui-gap-6 {
-    gap: var(--s6);
   }
 
   .ui-align-center {

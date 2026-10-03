@@ -190,8 +190,7 @@ layer into two chunks with two competing `:root` blocks.
 6. **`pnpm lint:tokens` is the guard**, and it runs inside `pnpm lint`. It fails
    on a hex colour, an `rgba(`, a `box-shadow`, a `border-radius`, a
    `backdrop-filter`, a literal font family, or a deleted token name anywhere
-   under `src/`. Only `tokens.css`, `fonts.css` and the gallery's one
-   `.gal__dark` line are exempt.
+   under `src/`. Only `tokens.css` and `fonts.css` are exempt.
 
 ## What is deliberately absent
 

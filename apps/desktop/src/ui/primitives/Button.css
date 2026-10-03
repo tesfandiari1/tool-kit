@@ -67,16 +67,6 @@
     color: var(--btn-secondary-hover-fg);
   }
 
-  /* --- inverse: the same outline over a dark band ----------------------- */
-  .ui-btn--inverse {
-    border-color: var(--btn-inverse-border);
-    color: var(--btn-inverse-fg);
-  }
-  .ui-btn--inverse:hover:not(:disabled) {
-    background: var(--btn-inverse-hover-bg);
-    color: var(--btn-inverse-hover-fg);
-  }
-
   /* --- ghost: a text action with no box, still caps-treated ------------- */
   .ui-btn--ghost {
     height: auto;

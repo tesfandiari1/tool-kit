@@ -12,10 +12,7 @@
 
   /* A 6px mark, and only when the tone carries a status: a neutral swatch
      would be decoration (UI.md rule 1). */
-  .ui-badge--info::before,
-  .ui-badge--success::before,
-  .ui-badge--warning::before,
-  .ui-badge--danger::before {
+  .ui-badge--success::before {
     content: "";
     width: 6px;
     height: 6px;
@@ -23,17 +20,8 @@
     background: currentColor;
   }
 
-  .ui-badge--info {
-    color: var(--status-info);
-  }
   .ui-badge--success {
     color: var(--status-success);
-  }
-  .ui-badge--warning {
-    color: var(--status-warning);
-  }
-  .ui-badge--danger {
-    color: var(--status-danger);
   }
 
   /* A count is the one boxed badge: a ruled rectangle holding two digits, so
