@@ -1,17 +1,9 @@
 import { useState } from "react";
-import { Input, Meta, Segmented, Stack, Switch } from "@ui";
+import { Input, Meta, Stack, Switch } from "@ui";
 import { type Settings } from "@/app/types";
 
-/// Session state: reopening on last week's tab is a worse default.
-type Group = "conversion" | "runs";
-
-const GROUPS: { value: Group; label: string }[] = [
-  { value: "conversion", label: "Conversion" },
-  { value: "runs", label: "Runs" },
-];
-
-/// Two bands behind one nav. A plain column, never `FlowLayout`, whose scroll
-/// region cannot resolve a height inside a sheet body that already scrolls.
+/// One list. A plain column, never `FlowLayout`, whose scroll region cannot
+/// resolve a height inside a sheet body that already scrolls.
 export function SettingsPanel({
   settings,
   onPersist,
@@ -21,72 +13,48 @@ export function SettingsPanel({
   onPersist: (patch: Partial<Settings>) => void;
   onToast: (msg: string) => void;
 }) {
-  const [group, setGroup] = useState<Group>("conversion");
-
   return (
-    <div className="settings">
-      {/* Sticky, so the sheet body stays the one scroll container. */}
-      <div className="settings__nav">
-        <Segmented
-          options={GROUPS}
-          value={group}
-          onChange={setGroup}
-          label="Settings section"
-          size="sm"
+    <Stack gap={3} className="settings">
+      <Switch
+        label="OCR language correction"
+        hint="Lets local OCR correct what it reads against a dictionary. Turn it off for part numbers, codes, and names it keeps rewriting."
+        checked={settings.languageCorrection}
+        onChange={(e) => {
+          onPersist({ languageCorrection: e.target.checked });
+        }}
+      />
+      <CustomWordsField
+        value={settings.customWords}
+        onCommit={(customWords) => {
+          onPersist({ customWords });
+        }}
+        onToast={onToast}
+      />
+      <SpeakerCountField
+        value={settings.speakerCount}
+        onCommit={(speakerCount) => {
+          onPersist({ speakerCount });
+        }}
+      />
+      <Switch
+        label="Skip files already done"
+        hint="Leaves a file alone when its result is still on disk. Edit the file or delete the result and it runs again."
+        checked={settings.skipAlreadyDone}
+        onChange={(e) => {
+          onPersist({ skipAlreadyDone: e.target.checked });
+        }}
+      />
+      {settings.workspacePath !== null && (
+        <Switch
+          label="Move dropped files into the project"
+          hint="Off, a dropped file stays where it is and only its result lands in the project. On, the file moves in beside its result. Nothing is ever copied."
+          checked={settings.moveDroppedFiles}
+          onChange={(e) => {
+            onPersist({ moveDroppedFiles: e.target.checked });
+          }}
         />
-      </div>
-
-      <div className="settings__body">
-        {group === "conversion" && (
-          <Stack gap={3}>
-            <Switch
-              label="OCR language correction"
-              hint="Lets local OCR correct what it reads against a dictionary. Turn it off for part numbers, codes, and names it keeps rewriting."
-              checked={settings.languageCorrection}
-              onChange={(e) => {
-                onPersist({ languageCorrection: e.target.checked });
-              }}
-            />
-            <CustomWordsField
-              value={settings.customWords}
-              onCommit={(customWords) => {
-                onPersist({ customWords });
-              }}
-              onToast={onToast}
-            />
-            <SpeakerCountField
-              value={settings.speakerCount}
-              onCommit={(speakerCount) => {
-                onPersist({ speakerCount });
-              }}
-            />
-          </Stack>
-        )}
-
-        {group === "runs" && (
-          <Stack gap={3}>
-            <Switch
-              label="Skip files already done"
-              hint="Leaves a file alone when its result is still on disk. Edit the file or delete the result and it runs again."
-              checked={settings.skipAlreadyDone}
-              onChange={(e) => {
-                onPersist({ skipAlreadyDone: e.target.checked });
-              }}
-            />
-            {settings.workspacePath !== null && (
-              <Switch
-                label="Move dropped files into the project"
-                hint="Off, a dropped file stays where it is and only its result lands in the project. On, the file moves in beside its result. Nothing is ever copied."
-                checked={settings.moveDroppedFiles}
-                onChange={(e) => {
-                  onPersist({ moveDroppedFiles: e.target.checked });
-                }}
-              />
-            )}
-          </Stack>
-        )}
-      </div>
-    </div>
+      )}
+    </Stack>
   );
 }
 
