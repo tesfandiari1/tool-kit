@@ -10,10 +10,10 @@ Closed work is in [`archive/`](archive/README.md).
 
 | Item | Value |
 | --- | --- |
-| Branch tip | `main`, not pushed. Sprint 1, local PDF OCR, image descriptions, the 2026-10-01 upgrades, the 2026-10-02 code-review fixes (`44867b9` to `aaea300`) the 2026-10-02 PDF splice (`87d482b`), the 4 GiB audio ceiling (`41eddf6`) and no-copy drops (`b1f36be`) are committed |
+| Branch tip | `main` at `35e24fa`, pushed. It holds everything through the local-only removal (`7f03a88`), the 2026-10-03 cleanup (PRs #29 and #30) and four Dependabot bumps (thiserror, uuid twice, reqwest). CI green |
 | HTTP contract | `apps/converter/tests/http_contract.rs`. The OpenAPI, Spectral and Schemathesis suite was removed on 2026-10-03 |
 | Desktop version | 1.0.0 (`package.json`, `Cargo.toml`, `tauri.conf.json`) |
-| Installed bundle | Stale: `/Applications/Tool-Kit.app` is a signed build of `d9a0cb5`, installed 2026-10-03. It predates no-copy drops, the AnyDoc worker and the local-only removal |
+| Installed bundle | Current: `/Applications/Tool-Kit.app` is a signed, not notarized, build of `35e24fa`, installed 2026-10-03. `verify-release.sh` passes in full |
 | Backend | M0 to M4 complete. M5 and M7 cancelled |
 | Desktop | M6 landed. Gate open on CVR-067 and CVR-081 |
 | Service | One sidecar inside the `.app`, loopback only. The Docker image and Manual mode were removed on 2026-10-03 |
@@ -36,9 +36,14 @@ Behaviour that is a decision, not an accident:
   instead.
 - A backend job persists its run id, idempotency key, origin, source mtime and
   profile before submission. Restart recovery replays against the recorded
-  origin.
+  origin. The 2026-10-03 cleanup kept this on purpose: a quit or a converter
+  crash mid-run resumes on its own, and the converter still requeues
+  interrupted jobs.
 
 ## Known issues
+
+- Dependabot reopens the TypeScript 7 bump every week. `.github/dependabot.yml`
+  has no ignore rule for it, and CLAUDE.md pins TypeScript to 6.x.
 
 - The tray left-click fix in Tauri 2.12 is unverified by hand on macOS 27.
 - No-copy drops (`b1f36be`) are unverified by hand: drop a folder with the move
@@ -93,6 +98,15 @@ One low item left from the verify pass over the 2026-09-12 fix:
   local-only decision.
 
 Deferred, nobody scheduled:
+
+- **Converter ledger to memory.** The 2026-10-03 audit found the SQLite ledger
+  (`sqlite.rs`, the migrations, `recovery.rs`, `faults.rs`, about 3,000 lines)
+  is mostly crash-durability built for paid cloud calls. Replacing it is a
+  rewrite with no visible gain, and auto-resume depends on it. Revisit only
+  with a reason.
+- **The Inbox to Drop Box migration** (`workspace.rs`, about 115 lines) can go
+  once every Mac that had an `Inbox` workspace has launched a build from after
+  2026-09-12. Owner call.
 
 - **M8, evaluation and cutover.** Moot: there is no other route to cut over
   from.
