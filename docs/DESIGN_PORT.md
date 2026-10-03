@@ -2,9 +2,9 @@
 
 `apps/desktop/src/ui` was rebuilt on the Tristin Esfandiari Design System. This
 is the record of what shipped and why, so the next agent does not re-litigate
-it. Sources are in `design/`: `design/tristin-ds/` holds the token CSS, the
-component sources and `readme.md`, which states every rule, and `design/fonts/`
-holds the three faces.
+it. The source export lived in `design/` until commit `e636d2f`:
+`design/tristin-ds/` held the token CSS, the component sources and `readme.md`,
+which states every rule. Read it with `git show e636d2f:design/tristin-ds/readme.md`.
 
 ## The system
 

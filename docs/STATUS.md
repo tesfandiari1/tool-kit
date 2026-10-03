@@ -153,7 +153,7 @@ nothing, because the RustSec database moves.
 | `docs/STATUS.md` | This file. The single live status document |
 | `docs/north-star.md` | The local-first product target |
 | `docs/AUDIO_EPIC.md` | The local transcription epic: evidence, decisions, sprint 1 |
-| `docs/DESIGN_PORT.md` | Why the design system looks the way it does. Sources in `design/` |
+| `docs/DESIGN_PORT.md` | Why the design system looks the way it does |
 | `docs/archive/` | Everything closed, with a note on why |
 | `README.md` | How to run, test, and release |
 | `CLAUDE.md` | Desktop architecture contract and the gotcha list |
