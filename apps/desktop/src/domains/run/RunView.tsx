@@ -582,11 +582,7 @@ function JobRow({
       : "0:00";
   const details = jobDetailItems(job);
   const detailText = jobDetailText(details);
-  const detailTone = details.some(({ kind }) => kind === "failure")
-    ? "fault"
-    : details.some(({ kind }) => kind === "warning")
-      ? "muted"
-      : "ghost";
+  const detailTone = details.some(({ kind }) => kind === "failure") ? "fault" : "muted";
   return (
     /* Not a <button>: the row holds three already and nesting is invalid. The
        rest of the row forwards its click to the name. */

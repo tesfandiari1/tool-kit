@@ -1,131 +1,60 @@
-import { useId, useState } from "react";
-import {
-  Badge,
-  Button,
-  Field,
-  Input,
-  Meta,
-  Segmented,
-  Stack,
-  Switch,
-} from "@ui";
-import { commands } from "@/app/commands";
-import { type SecretId, type SecretStatus, type Settings } from "@/app/types";
+import { useState } from "react";
+import { Input, Meta, Stack, Switch } from "@ui";
+import { type Settings } from "@/app/types";
 
-/// Session state: reopening on last week's tab is a worse default.
-type Group = "conversion" | "runs";
-
-const GROUPS: { value: Group; label: string }[] = [
-  { value: "conversion", label: "Conversion" },
-  { value: "runs", label: "Runs" },
-];
-
-/// Two bands behind one nav. A plain column, never `FlowLayout`, whose scroll
-/// region cannot resolve a height inside a sheet body that already scrolls.
+/// One list. A plain column, never `FlowLayout`, whose scroll region cannot
+/// resolve a height inside a sheet body that already scrolls.
 export function SettingsPanel({
   settings,
-  secrets,
-  appOwnsBackend,
   onPersist,
-  onSecrets,
   onToast,
 }: {
   settings: Settings;
-  secrets: SecretStatus;
-  /// The app mints the service's token per launch, and one typed here would
-  /// 401 every conversion until the next one. The field is not offered.
-  appOwnsBackend: boolean;
   onPersist: (patch: Partial<Settings>) => void;
-  onSecrets: (s: SecretStatus) => void;
   onToast: (msg: string) => void;
 }) {
-  const [group, setGroup] = useState<Group>("conversion");
-
-  /// Reports whether the write landed, so a refused key stays in the field.
-  const saveKey = async (provider: SecretId, value: string) => {
-    try {
-      await commands.setSecret(provider, value);
-      onSecrets(await commands.secretStatus());
-      onToast(value ? "Key saved" : "Key cleared");
-      return true;
-    } catch (e) {
-      onToast(String(e));
-      return false;
-    }
-  };
-
   return (
-    <div className="settings">
-      {/* Sticky, so the sheet body stays the one scroll container. */}
-      <div className="settings__nav">
-        <Segmented
-          options={GROUPS}
-          value={group}
-          onChange={setGroup}
-          label="Settings section"
-          size="sm"
+    <Stack gap={3} className="settings">
+      <Switch
+        label="OCR language correction"
+        hint="Lets local OCR correct what it reads against a dictionary. Turn it off for part numbers, codes, and names it keeps rewriting."
+        checked={settings.languageCorrection}
+        onChange={(e) => {
+          onPersist({ languageCorrection: e.target.checked });
+        }}
+      />
+      <CustomWordsField
+        value={settings.customWords}
+        onCommit={(customWords) => {
+          onPersist({ customWords });
+        }}
+        onToast={onToast}
+      />
+      <SpeakerCountField
+        value={settings.speakerCount}
+        onCommit={(speakerCount) => {
+          onPersist({ speakerCount });
+        }}
+      />
+      <Switch
+        label="Skip files already done"
+        hint="Leaves a file alone when its result is still on disk. Edit the file or delete the result and it runs again."
+        checked={settings.skipAlreadyDone}
+        onChange={(e) => {
+          onPersist({ skipAlreadyDone: e.target.checked });
+        }}
+      />
+      {settings.workspacePath !== null && (
+        <Switch
+          label="Move dropped files into the project"
+          hint="Off, a dropped file stays where it is and only its result lands in the project. On, the file moves in beside its result. Nothing is ever copied."
+          checked={settings.moveDroppedFiles}
+          onChange={(e) => {
+            onPersist({ moveDroppedFiles: e.target.checked });
+          }}
         />
-      </div>
-
-      <div className="settings__body">
-        {group === "conversion" && (
-          <Stack gap={3}>
-            <Switch
-              label="OCR language correction"
-              hint="Lets local OCR correct what it reads against a dictionary. Turn it off for part numbers, codes, and names it keeps rewriting."
-              checked={settings.languageCorrection}
-              onChange={(e) => {
-                onPersist({ languageCorrection: e.target.checked });
-              }}
-            />
-            <CustomWordsField
-              value={settings.customWords}
-              onCommit={(customWords) => {
-                onPersist({ customWords });
-              }}
-              onToast={onToast}
-            />
-            <SpeakerCountField
-              value={settings.speakerCount}
-              onCommit={(speakerCount) => {
-                onPersist({ speakerCount });
-              }}
-            />
-            {!appOwnsBackend && (
-              <KeyField
-                label="Backend token"
-                hint="Bearer token"
-                saved={secrets.backend}
-                onSave={(v) => saveKey("backend", v)}
-              />
-            )}
-          </Stack>
-        )}
-
-        {group === "runs" && (
-          <Stack gap={3}>
-            <Switch
-              label="Skip files already done"
-              hint="Leaves a file alone when its result is still on disk. Edit the file or delete the result and it runs again."
-              checked={settings.skipAlreadyDone}
-              onChange={(e) => {
-                onPersist({ skipAlreadyDone: e.target.checked });
-              }}
-            />
-            {settings.workspacePath !== null && (
-              <Switch
-                label="Move dropped files into the project"
-                hint="Off, a dropped file stays where it is and only its result lands in the project. On, the file moves in beside its result. Nothing is ever copied."
-                checked={settings.moveDroppedFiles}
-                onChange={(e) => {
-                  onPersist({ moveDroppedFiles: e.target.checked });
-                }}
-              />
-            )}
-          </Stack>
-        )}
-      </div>
-    </div>
+      )}
+    </Stack>
   );
 }
 
@@ -252,74 +181,5 @@ function SpeakerCountField({
         if (e.key === "Enter") commit(e.currentTarget.validity.badInput);
       }}
     />
-  );
-}
-
-function KeyField({
-  label,
-  hint,
-  saved,
-  onSave,
-}: {
-  label: string;
-  hint: string;
-  saved: boolean;
-  onSave: (value: string) => Promise<boolean>;
-}) {
-  const [typed, setTyped] = useState(false);
-  const inputId = useId();
-
-  const commit = () => {
-    const input = document.getElementById(inputId);
-    if (!(input instanceof HTMLInputElement)) return;
-    // Clear only once the write lands, or a rejected save loses the key.
-    void onSave(input.value.trim()).then((ok) => {
-      if (!ok) return;
-      input.value = "";
-      setTyped(false);
-    });
-  };
-
-  return (
-    <Field
-      htmlFor={inputId}
-      label={
-        <>
-          {label} {saved && <Badge tone="success">saved</Badge>}
-        </>
-      }
-    >
-      <div className="settings-key">
-        <Input
-          id={inputId}
-          type="password"
-          placeholder={saved ? "••••••••••••  stored in Keychain" : hint}
-          onChange={(e) => {
-            setTyped(e.target.value.trim().length > 0);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && typed) commit();
-          }}
-        />
-        <div className="settings-key__actions">
-          {/* Saving nothing deletes the stored key, and the masked
-              placeholder makes that look like a no-op. */}
-          <Button disabled={!typed} onClick={commit}>
-            Save
-          </Button>
-          {saved && !typed && (
-            <Button
-              variant="ghost"
-              onClick={() => {
-                void onSave("");
-              }}
-              title={`Remove the ${label} key`}
-            >
-              Remove
-            </Button>
-          )}
-        </div>
-      </div>
-    </Field>
   );
 }

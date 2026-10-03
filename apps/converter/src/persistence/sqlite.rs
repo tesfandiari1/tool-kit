@@ -15,11 +15,10 @@ use tool_kit_worker_protocol::is_lowercase_sha256;
 use uuid::Uuid;
 
 use super::model::{
-    ArtifactKind, AttemptState, CommitOperation, ConversionState, CreateOutcome,
-    DocumentClassification, EngineRecord, FailedResult, FailureStage, LocalAnalysis, LocalStart,
-    NeedsRemoteResult, NewArtifact, NewConversion, RecoveryCandidate, RequeueOutcome,
-    StoredArtifact, StoredAttempt, StoredConversion, StoredFailure, StoredSource,
-    SuccessfulArtifacts,
+    AttemptState, CommitOperation, ConversionState, CreateOutcome, DocumentClassification,
+    EngineRecord, FailedResult, FailureStage, LocalAnalysis, LocalStart, NewArtifact,
+    NewConversion, RecoveryCandidate, RequeueOutcome, StoredArtifact, StoredAttempt,
+    StoredConversion, StoredFailure, StoredSource,
 };
 
 pub const DATABASE_FILENAME: &str = "converter.sqlite";
@@ -129,14 +128,14 @@ impl SqliteRepository {
         sqlx::query(
             "INSERT INTO conversions (
                 id, client_run_id, auth_scope, idempotency_key_hash,
-                request_fingerprint, profile, status, source_relative_path,
+                request_fingerprint, status, source_relative_path,
                 source_media_type, source_byte_length, source_sha256,
                 reason_codes_json, warnings_json,
                 origin_request_id, created_at, updated_at,
                 ocr_language_correction, ocr_custom_words, speaker_count
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8, ?9, ?10,
-                '[]', '[]', ?11, ?12, ?12, ?13, ?14, ?15
+                ?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9,
+                '[]', '[]', ?10, ?11, ?11, ?12, ?13, ?14
              )",
         )
         .bind(&conversion_id)
@@ -144,7 +143,6 @@ impl SqliteRepository {
         .bind(AUTH_SCOPE)
         .bind(&input.idempotency_key_sha256)
         .bind(&input.request_fingerprint)
-        .bind(input.profile)
         .bind(&input.source.relative_path)
         .bind(&input.source.media_type)
         .bind(source_byte_length)
@@ -294,11 +292,20 @@ impl SqliteRepository {
         conversion_id: Uuid,
         attempt_id: Uuid,
         analysis: LocalAnalysis,
+        // The staged Markdown's size and digest, as the engine measured them.
+        markdown: (u64, &str),
         // The engine that wrote the Markdown, when it is not the one the claim
         // recorded: a scanned PDF Vision read publishes under Vision's name.
         relabel: Option<&LocalStart>,
     ) -> Result<StoredConversion, RepositoryError> {
         let analysis = encode_local_analysis(&analysis)?;
+        let markdown_byte_length = i64::try_from(markdown.0)
+            .ok()
+            .filter(|length| *length > 0)
+            .ok_or(RepositoryError::InvalidInput(
+                "markdown byte length is invalid",
+            ))?;
+        validate_sha256(markdown.1, "markdown hash is invalid")?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         require_active_state(
             &mut transaction,
@@ -335,6 +342,17 @@ impl SqliteRepository {
             .await?;
             require_one_transition_row(conversion.rows_affected(), "conversions.route")?;
         }
+        let recorded = sqlx::query(
+            "UPDATE attempts SET markdown_byte_length = ?1, markdown_sha256 = ?2
+             WHERE conversion_id = ?3 AND id = ?4",
+        )
+        .bind(markdown_byte_length)
+        .bind(markdown.1)
+        .bind(conversion_id.hyphenated().to_string())
+        .bind(attempt_id.hyphenated().to_string())
+        .execute(&mut *transaction)
+        .await?;
+        require_one_transition_row(recorded.rows_affected(), "attempts.markdown")?;
 
         update_attempt_analysis(
             &mut transaction,
@@ -371,14 +389,17 @@ impl SqliteRepository {
         Ok(conversion)
     }
 
-    pub async fn finish_needs_remote(
+    /// An engine that gave up. The attempt keeps the analysis it reported, and
+    /// both rows fail with the engine's reason as the code.
+    pub async fn finish_gave_up(
         &self,
         conversion_id: Uuid,
         attempt_id: Uuid,
-        result: NeedsRemoteResult,
+        analysis: LocalAnalysis,
+        failure: StoredFailure,
     ) -> Result<StoredConversion, RepositoryError> {
-        validate_bounded_text(&result.fallback_reason, 128, "fallback reason is invalid")?;
-        let analysis = encode_local_analysis(&result.analysis)?;
+        validate_failure(&failure)?;
+        let analysis = encode_local_analysis(&analysis)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         require_active_state(
             &mut transaction,
@@ -397,9 +418,9 @@ impl SqliteRepository {
                 attempt_id,
             },
             AttemptState::ConvertingLocal,
-            AttemptState::NeedsRemote,
+            AttemptState::ConvertingLocal,
             &analysis,
-            Some(&result.fallback_reason),
+            Some(&failure.code),
             &updated_at,
         )
         .await?;
@@ -408,16 +429,27 @@ impl SqliteRepository {
             conversion_id,
             attempt_id,
             ConversionState::ConvertingLocal,
-            ConversionState::NeedsRemote,
+            ConversionState::ConvertingLocal,
             &analysis,
             &updated_at,
+        )
+        .await?;
+        fail_rows(
+            &mut transaction,
+            ActiveIds {
+                conversion_id,
+                attempt_id,
+            },
+            FailureStage::ConvertingLocal,
+            &failure.code,
+            &failure.message,
         )
         .await?;
 
         let conversion = load_required_conversion(&mut transaction, conversion_id).await?;
         commit_transition(
             transaction,
-            CommitOperation::FinishNeedsRemote,
+            CommitOperation::FinishFailed,
             conversion_id,
             attempt_id,
         )
@@ -470,20 +502,9 @@ impl SqliteRepository {
         &self,
         conversion_id: Uuid,
         attempt_id: Uuid,
-        artifacts: SuccessfulArtifacts,
+        markdown: NewArtifact,
     ) -> Result<StoredConversion, RepositoryError> {
-        let markdown_length = validate_artifact(
-            conversion_id,
-            attempt_id,
-            ArtifactKind::Markdown,
-            &artifacts.markdown,
-        )?;
-        let manifest_length = validate_artifact(
-            conversion_id,
-            attempt_id,
-            ArtifactKind::Manifest,
-            &artifacts.manifest,
-        )?;
+        let markdown_length = validate_artifact(conversion_id, attempt_id, &markdown)?;
         let conversion_id_text = conversion_id.hyphenated().to_string();
         let attempt_id_text = attempt_id.hyphenated().to_string();
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -514,23 +535,17 @@ impl SqliteRepository {
             "INSERT INTO artifacts (
                 attempt_id, kind, relative_path, media_type, byte_length,
                 sha256, created_at
-             ) VALUES
-                (?1, 'markdown', ?2, ?3, ?4, ?5, ?6),
-                (?1, 'manifest', ?7, ?8, ?9, ?10, ?6)",
+             ) VALUES (?1, 'markdown', ?2, ?3, ?4, ?5, ?6)",
         )
         .bind(&attempt_id_text)
-        .bind(&artifacts.markdown.relative_path)
-        .bind(&artifacts.markdown.media_type)
+        .bind(&markdown.relative_path)
+        .bind(&markdown.media_type)
         .bind(markdown_length)
-        .bind(&artifacts.markdown.sha256)
+        .bind(&markdown.sha256)
         .bind(&updated_at)
-        .bind(&artifacts.manifest.relative_path)
-        .bind(&artifacts.manifest.media_type)
-        .bind(manifest_length)
-        .bind(&artifacts.manifest.sha256)
         .execute(&mut *transaction)
         .await?;
-        if inserted.rows_affected() != 2 {
+        if inserted.rows_affected() != 1 {
             return Err(RepositoryError::CorruptData("artifacts.insert"));
         }
 
@@ -1298,15 +1313,10 @@ fn validate_failure(failure: &StoredFailure) -> Result<(), RepositoryError> {
 fn validate_artifact(
     conversion_id: Uuid,
     attempt_id: Uuid,
-    kind: ArtifactKind,
     artifact: &NewArtifact,
 ) -> Result<i64, RepositoryError> {
-    let file_name = match kind {
-        ArtifactKind::Markdown => "result.md",
-        ArtifactKind::Manifest => "manifest.json",
-    };
     let expected_path = format!(
-        "jobs/{}/attempts/{}/artifacts/{file_name}",
+        "jobs/{}/attempts/{}/artifacts/result.md",
         conversion_id.hyphenated(),
         attempt_id.hyphenated()
     );
@@ -1315,11 +1325,7 @@ fn validate_artifact(
             "artifact path does not belong to the active attempt",
         ));
     }
-    let expected_media_type = match kind {
-        ArtifactKind::Markdown => "text/markdown; charset=utf-8",
-        ArtifactKind::Manifest => "application/json",
-    };
-    if artifact.media_type != expected_media_type {
+    if artifact.media_type != "text/markdown; charset=utf-8" {
         return Err(RepositoryError::InvalidInput(
             "artifact media type is invalid",
         ));
@@ -1369,7 +1375,6 @@ async fn load_conversion(
         "SELECT
             c.id AS conversion_id,
             c.client_run_id,
-            c.profile,
             c.status AS conversion_state,
             c.source_relative_path,
             c.source_media_type,
@@ -1401,6 +1406,8 @@ async fn load_conversion(
             a.fallback_reason,
             a.failure_code AS attempt_failure_code,
             a.failure_message AS attempt_failure_message,
+            a.markdown_byte_length,
+            a.markdown_sha256,
             a.created_at AS attempt_created_at,
             a.updated_at AS attempt_updated_at,
             a.started_at,
@@ -1429,11 +1436,9 @@ async fn load_artifacts(
     attempt_id: Uuid,
 ) -> Result<Vec<StoredArtifact>, RepositoryError> {
     let rows = sqlx::query(
-        "SELECT attempt_id, kind, relative_path, media_type, byte_length,
-                sha256, created_at
+        "SELECT attempt_id, relative_path, media_type, byte_length, sha256, created_at
          FROM artifacts
-         WHERE attempt_id = ?1
-         ORDER BY kind",
+         WHERE attempt_id = ?1",
     )
     .bind(attempt_id.hyphenated().to_string())
     .fetch_all(&mut *connection)
@@ -1505,7 +1510,6 @@ fn decode_conversion(row: &SqliteRow) -> Result<StoredConversion, RepositoryErro
     Ok(StoredConversion {
         id: parse_uuid(row.try_get("conversion_id")?, "conversions.id")?,
         client_run_id: parse_uuid(row.try_get("client_run_id")?, "conversions.client_run_id")?,
-        profile: row.try_get("profile")?,
         state: row.try_get("conversion_state")?,
         source: StoredSource {
             relative_path: row.try_get("source_relative_path")?,
@@ -1539,6 +1543,11 @@ fn decode_conversion(row: &SqliteRow) -> Result<StoredConversion, RepositoryErro
             )?,
             fallback_reason: row.try_get("fallback_reason")?,
             failure: attempt_failure,
+            markdown_byte_length: row
+                .try_get::<Option<i64>, _>("markdown_byte_length")?
+                .map(|length| positive_u64(length, "attempts.markdown_byte_length"))
+                .transpose()?,
+            markdown_sha256: row.try_get("markdown_sha256")?,
             created_at: row.try_get("attempt_created_at")?,
             updated_at: row.try_get("attempt_updated_at")?,
             started_at: row.try_get("started_at")?,
@@ -1570,7 +1579,6 @@ fn decode_conversion(row: &SqliteRow) -> Result<StoredConversion, RepositoryErro
 fn decode_artifact(row: &SqliteRow) -> Result<StoredArtifact, RepositoryError> {
     Ok(StoredArtifact {
         attempt_id: parse_uuid(row.try_get("attempt_id")?, "artifacts.attempt_id")?,
-        kind: row.try_get("kind")?,
         relative_path: row.try_get("relative_path")?,
         media_type: row.try_get("media_type")?,
         byte_length: positive_u64(row.try_get("byte_length")?, "artifacts.byte_length")?,
@@ -1751,13 +1759,16 @@ mod tests {
         DATABASE_FILENAME, MAX_POOL_CONNECTIONS,
     };
     use crate::persistence::{
-        ArtifactKind, AttemptState, ConversionState, CreateOutcome, DocumentClassification,
-        EngineRecord, FailedResult, FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult,
-        NewArtifact, NewConversion, NewSource, Profile, RecoveryCandidate, RequeueOutcome,
-        StoredFailure, SuccessfulArtifacts,
+        AttemptState, ConversionState, CreateOutcome, DocumentClassification, EngineRecord,
+        FailedResult, FailureStage, LocalAnalysis, LocalStart, NewArtifact, NewConversion,
+        NewSource, RecoveryCandidate, RequeueOutcome, StoredFailure,
     };
 
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+    const MARKDOWN: (u64, &str) = (
+        32,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
 
     /// Startup quarantine is terminal, so this split decides whether a healthy
     /// job survives a database blip. Getting it backwards either strands good
@@ -1875,46 +1886,24 @@ mod tests {
 
         let job_id = "11111111-2222-4333-8444-555555555555";
         let attempt_id = "66666666-7777-4888-8999-000000000000";
-        // Every seeded conversion is this insert. Only the columns it takes vary.
-        let insert_conversion = async |id: &str,
-                                       digest_character: &str,
-                                       profile: &str,
-                                       media_type: &str,
-                                       byte_length: i64,
-                                       origin_request_id: &str,
-                                       timestamp: &str| {
-            sqlx::query(
-                "INSERT INTO conversions (
-                    id, client_run_id, auth_scope, idempotency_key_hash,
-                    request_fingerprint, profile, status, source_relative_path,
-                    source_media_type, source_byte_length, source_sha256,
-                    reason_codes_json, warnings_json, origin_request_id,
-                    created_at, updated_at
-                 ) VALUES (
-                    ?1, ?1, 'bootstrap', ?2, ?2, ?3, 'queued', ?4, ?5, ?6, ?2,
-                    '[]', '[]', ?7, ?8, ?8
-                 )",
-            )
-            .bind(id)
-            .bind(digest_character.repeat(64))
-            .bind(profile)
-            .bind(format!("jobs/{id}/source/input"))
-            .bind(media_type)
-            .bind(byte_length)
-            .bind(origin_request_id)
-            .bind(timestamp)
-            .execute(&pool)
-            .await
-        };
-        insert_conversion(
-            job_id,
-            "a",
-            "standard",
-            "application/pdf",
-            128,
-            "request-1",
-            "2026-08-18T00:00:00Z",
+        // M2 required a profile. Migration 0007 dropped it.
+        sqlx::query(
+            "INSERT INTO conversions (
+                id, client_run_id, auth_scope, idempotency_key_hash,
+                request_fingerprint, profile, status, source_relative_path,
+                source_media_type, source_byte_length, source_sha256,
+                reason_codes_json, warnings_json, origin_request_id,
+                created_at, updated_at
+             ) VALUES (
+                ?1, ?1, 'bootstrap', ?2, ?2, 'standard', 'queued', ?3,
+                'application/pdf', 128, ?2, '[]', '[]', 'request-1', ?4, ?4
+             )",
         )
+        .bind(job_id)
+        .bind("a".repeat(64))
+        .bind(format!("jobs/{job_id}/source/input"))
+        .bind("2026-08-18T00:00:00Z")
+        .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
@@ -1930,8 +1919,38 @@ mod tests {
         .await
         .unwrap();
 
-        // The full migrator applies 0002 and 0003 over the populated M2 rows.
+        // The full migrator applies every later migration over the M2 rows.
         super::MIGRATOR.run(&pool).await.unwrap();
+        // Every conversion seeded after the upgrade is this insert. Only the
+        // columns it takes vary.
+        let insert_conversion = async |id: &str,
+                                       digest_character: &str,
+                                       media_type: &str,
+                                       byte_length: i64,
+                                       origin_request_id: &str,
+                                       timestamp: &str| {
+            sqlx::query(
+                "INSERT INTO conversions (
+                    id, client_run_id, auth_scope, idempotency_key_hash,
+                    request_fingerprint, status, source_relative_path,
+                    source_media_type, source_byte_length, source_sha256,
+                    reason_codes_json, warnings_json, origin_request_id,
+                    created_at, updated_at
+                 ) VALUES (
+                    ?1, ?1, 'bootstrap', ?2, ?2, 'queued', ?3, ?4, ?5, ?2,
+                    '[]', '[]', ?6, ?7, ?7
+                 )",
+            )
+            .bind(id)
+            .bind(digest_character.repeat(64))
+            .bind(format!("jobs/{id}/source/input"))
+            .bind(media_type)
+            .bind(byte_length)
+            .bind(origin_request_id)
+            .bind(timestamp)
+            .execute(&pool)
+            .await
+        };
 
         let surviving: i64 = sqlx::query("SELECT COUNT(*) AS n FROM conversions")
             .fetch_one(&pool)
@@ -1958,7 +1977,6 @@ mod tests {
         insert_conversion(
             docx_id,
             "b",
-            "local_only",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             256,
             "request-2",
@@ -1972,7 +1990,6 @@ mod tests {
         insert_conversion(
             odt_id,
             "c",
-            "standard",
             "application/vnd.oasis.opendocument.text",
             256,
             "request-3",
@@ -2001,13 +2018,13 @@ mod tests {
         sqlx::query(
             "INSERT INTO conversions (
                 id, client_run_id, auth_scope, idempotency_key_hash,
-                request_fingerprint, profile, status, source_relative_path,
+                request_fingerprint, status, source_relative_path,
                 source_media_type, source_byte_length, source_sha256,
                 reason_codes_json, warnings_json, origin_request_id,
                 created_at, updated_at, ocr_language_correction,
                 ocr_custom_words
              ) VALUES (
-                ?1, ?1, 'bootstrap', ?2, ?2, 'standard', 'queued', ?3,
+                ?1, ?1, 'bootstrap', ?2, ?2, 'queued', ?3,
                 'image/png', 256, ?2, '[]', '[]', 'request-4',
                 '2026-08-18T00:00:03Z', '2026-08-18T00:00:03Z', 0, 'Uniwise'
              )",
@@ -2042,7 +2059,6 @@ mod tests {
         let rejected = insert_conversion(
             bad_id,
             "c",
-            "standard",
             "text/plain",
             64,
             "request-3",
@@ -2052,6 +2068,209 @@ mod tests {
         assert!(rejected.is_err(), "an unlisted media type must be rejected");
 
         pool.close().await;
+    }
+
+    /// Migration 0007 runs over ledgers that already hold finished jobs. A
+    /// succeeded job keeps its Markdown row and stays readable, and its
+    /// manifest row goes. A needs_remote job becomes failed with its reason as
+    /// the code, and the profile column goes.
+    #[tokio::test]
+    async fn migration_0007_upgrades_a_ledger_with_finished_jobs() {
+        use sqlx::migrate::Migrator;
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        let directory = TempDir::new().unwrap();
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(directory.path().join(DATABASE_FILENAME))
+                    .create_if_missing(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        let before_0007 = TempDir::new().unwrap();
+        for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).unwrap()
+        {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_owned();
+            if name.to_str().unwrap() < "0007" {
+                std::fs::copy(&path, before_0007.path().join(name)).unwrap();
+            }
+        }
+        Migrator::new(before_0007.path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+
+        let succeeded = "11111111-2222-4333-8444-555555555555";
+        let succeeded_attempt = "66666666-7777-4888-8999-000000000000";
+        let at = "2026-10-01T00:00:00Z";
+        sqlx::query(
+            "INSERT INTO conversions (
+                id, client_run_id, auth_scope, idempotency_key_hash,
+                request_fingerprint, profile, status, source_relative_path,
+                source_media_type, source_byte_length, source_sha256, route,
+                reason_codes_json, warnings_json, origin_request_id,
+                created_at, updated_at
+             ) VALUES (
+                ?1, ?1, 'bootstrap', ?2, ?2, 'local_only', 'succeeded',
+                'jobs/' || ?1 || '/source/input', 'application/pdf', 128, ?2,
+                'local_pdf', '[\"native_text_pdf\"]', '[]', 'request-1', ?3, ?3
+             )",
+        )
+        .bind(succeeded)
+        .bind("a".repeat(64))
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attempts (
+                id, conversion_id, attempt_number, state, recovery_count,
+                engine_name, engine_version, route, classification,
+                inspection_json, reason_codes_json, warnings_json,
+                created_at, updated_at, started_at, finished_at
+             ) VALUES (
+                ?1, ?2, 1, 'succeeded', 0, 'pdf-inspector', '1.25.2',
+                'local_pdf', 'text_based', '{}', '[\"native_text_pdf\"]', '[]',
+                ?3, ?3, ?3, ?3
+             )",
+        )
+        .bind(succeeded_attempt)
+        .bind(succeeded)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE conversions SET active_attempt_id = ?1 WHERE id = ?2")
+            .bind(succeeded_attempt)
+            .bind(succeeded)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let published = format!("jobs/{succeeded}/attempts/{succeeded_attempt}/artifacts");
+        sqlx::query(
+            "INSERT INTO artifacts (
+                attempt_id, kind, relative_path, media_type, byte_length,
+                sha256, created_at
+             ) VALUES
+                (?1, 'markdown', ?2 || '/result.md',
+                 'text/markdown; charset=utf-8', 9, ?3, ?5),
+                (?1, 'manifest', ?2 || '/manifest.json',
+                 'application/json', 64, ?4, ?5)",
+        )
+        .bind(succeeded_attempt)
+        .bind(&published)
+        .bind("b".repeat(64))
+        .bind("c".repeat(64))
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let gave_up = "22222222-2222-4333-8444-555555555555";
+        let gave_up_attempt = "77777777-7777-4888-8999-000000000000";
+        sqlx::query(
+            "INSERT INTO conversions (
+                id, client_run_id, auth_scope, idempotency_key_hash,
+                request_fingerprint, profile, status, source_relative_path,
+                source_media_type, source_byte_length, source_sha256, route,
+                reason_codes_json, warnings_json, origin_request_id,
+                created_at, updated_at
+             ) VALUES (
+                ?1, ?1, 'bootstrap', ?2, ?2, 'local_only', 'needs_remote',
+                'jobs/' || ?1 || '/source/input', 'application/pdf', 128, ?2,
+                'local_pdf', '[\"mixed_pdf\"]', '[]', 'request-2', ?3, ?3
+             )",
+        )
+        .bind(gave_up)
+        .bind("d".repeat(64))
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attempts (
+                id, conversion_id, attempt_number, state, recovery_count,
+                engine_name, engine_version, route, classification,
+                inspection_json, reason_codes_json, warnings_json,
+                fallback_reason, created_at, updated_at, started_at, finished_at
+             ) VALUES (
+                ?1, ?2, 1, 'needs_remote', 0, 'pdf-inspector', '1.25.2',
+                'local_pdf', 'mixed', '{\"pageCount\":2}', '[\"mixed_pdf\"]', '[]',
+                'mixed_pdf', ?3, ?3, ?3, ?3
+             )",
+        )
+        .bind(gave_up_attempt)
+        .bind(gave_up)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE conversions SET active_attempt_id = ?1 WHERE id = ?2")
+            .bind(gave_up_attempt)
+            .bind(gave_up)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        super::MIGRATOR.run(&pool).await.unwrap();
+        let columns: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('conversions')")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.try_get("name").unwrap())
+            .collect();
+        assert!(!columns.iter().any(|name| name == "profile"));
+        let kinds: Vec<String> = sqlx::query("SELECT kind FROM artifacts")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.try_get("kind").unwrap())
+            .collect();
+        assert_eq!(kinds, ["markdown"]);
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+        pool.close().await;
+
+        let repository = SqliteRepository::open(directory.path(), 4, BUSY_TIMEOUT)
+            .await
+            .unwrap();
+        let job = repository
+            .get(Uuid::parse_str(succeeded).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.state, ConversionState::Succeeded);
+        assert_eq!(job.artifacts.len(), 1);
+        assert_eq!(job.artifacts[0].sha256, "b".repeat(64));
+        assert_eq!(job.active_attempt.markdown_byte_length, None);
+
+        let job = repository
+            .get(Uuid::parse_str(gave_up).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.state, ConversionState::Failed);
+        assert_eq!(job.active_attempt.state, AttemptState::Failed);
+        let failure = StoredFailure {
+            code: "mixed_pdf".to_owned(),
+            message: "This file could not be converted on this Mac because some pages are \
+                      scanned images."
+                .to_owned(),
+        };
+        assert_eq!(job.failure.as_ref(), Some(&failure));
+        assert_eq!(job.active_attempt.failure.as_ref(), Some(&failure));
+        assert_eq!(job.reason_codes, ["mixed_pdf"]);
+        assert!(job.active_attempt.inspection.is_some());
     }
 
     #[tokio::test]
@@ -2344,7 +2563,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legal_success_path_commits_both_artifacts_and_integrity_failure_retains_audit_rows() {
+    async fn legal_success_path_commits_the_markdown_and_integrity_failure_retains_audit_rows() {
         let (_directory, repository) = open_repository(2).await;
         let queued = queued_conversion(&repository, "success", "a").await;
         let conversion_id = queued.id;
@@ -2364,7 +2583,7 @@ mod tests {
         assert!(converting.active_attempt.started_at.is_some());
 
         let finalizing = repository
-            .mark_finalizing(conversion_id, attempt_id, local_analysis(), None)
+            .mark_finalizing(conversion_id, attempt_id, local_analysis(), MARKDOWN, None)
             .await
             .unwrap();
         assert_eq!(finalizing.state, ConversionState::Finalizing);
@@ -2374,27 +2593,25 @@ mod tests {
             Some("text_based")
         );
         assert_eq!(finalizing.reason_codes, vec!["native_text_pdf"]);
+        assert_eq!(finalizing.active_attempt.markdown_byte_length, Some(32));
+        assert_eq!(
+            finalizing.active_attempt.markdown_sha256.as_deref(),
+            Some(MARKDOWN.1)
+        );
 
         let succeeded = repository
             .finish_succeeded(
                 conversion_id,
                 attempt_id,
-                successful_artifacts(conversion_id, attempt_id),
+                markdown_artifact(conversion_id, attempt_id),
             )
             .await
             .unwrap();
         assert_eq!(succeeded.state, ConversionState::Succeeded);
         assert_eq!(succeeded.active_attempt.state, AttemptState::Succeeded);
         assert!(succeeded.active_attempt.finished_at.is_some());
-        assert_eq!(succeeded.artifacts.len(), 2);
-        assert!(succeeded
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.kind == ArtifactKind::Markdown));
-        assert!(succeeded
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.kind == ArtifactKind::Manifest));
+        assert_eq!(succeeded.artifacts.len(), 1);
+        assert!(succeeded.artifacts[0].relative_path.ends_with("/result.md"));
 
         let integrity_failed = repository
             .mark_artifact_integrity_failed(
@@ -2412,7 +2629,7 @@ mod tests {
             integrity_failed.active_attempt.state,
             AttemptState::Succeeded
         );
-        assert_eq!(integrity_failed.artifacts.len(), 2);
+        assert_eq!(integrity_failed.artifacts.len(), 1);
         assert_eq!(
             integrity_failed.failure.unwrap().code,
             "artifact_integrity_failed"
@@ -2435,28 +2652,28 @@ mod tests {
         assert_eq!(failed.state, ConversionState::Failed);
         assert_eq!(failed.active_attempt.state, AttemptState::Failed);
 
-        let remote = converting_conversion(&repository, "needs-remote", "b").await;
-        let remote = repository
-            .finish_needs_remote(
-                remote.id,
-                remote.active_attempt.id,
-                NeedsRemoteResult {
-                    analysis: LocalAnalysis {
-                        classification: DocumentClassification::Scanned,
-                        inspection: serde_json::json!({"pageCount": 2}),
-                        reason_codes: vec!["scanned_pdf".to_owned()],
-                        warnings: vec![],
-                    },
-                    fallback_reason: "scanned_pdf".to_owned(),
-                },
+        let gave_up = converting_conversion(&repository, "gave-up", "b").await;
+        let gave_up = repository
+            .finish_gave_up(
+                gave_up.id,
+                gave_up.active_attempt.id,
+                scanned_analysis(),
+                failed_result(FailureStage::ConvertingLocal, "scanned_pdf").failure,
             )
             .await
             .unwrap();
-        assert_eq!(remote.state, ConversionState::NeedsRemote);
-        assert_eq!(remote.active_attempt.state, AttemptState::NeedsRemote);
+        assert_eq!(gave_up.state, ConversionState::Failed);
+        assert_eq!(gave_up.active_attempt.state, AttemptState::Failed);
+        assert_eq!(gave_up.failure.unwrap().code, "scanned_pdf");
+        assert_eq!(gave_up.reason_codes, ["scanned_pdf"]);
+        // The analysis stays as failure evidence.
         assert_eq!(
-            remote.active_attempt.fallback_reason.as_deref(),
+            gave_up.active_attempt.fallback_reason.as_deref(),
             Some("scanned_pdf")
+        );
+        assert_eq!(
+            gave_up.active_attempt.inspection,
+            Some(serde_json::json!({"pageCount": 1}))
         );
 
         let converting_failure =
@@ -2478,6 +2695,7 @@ mod tests {
                 finalizing_failure.id,
                 finalizing_failure.active_attempt.id,
                 local_analysis(),
+                MARKDOWN,
                 None,
             )
             .await
@@ -2507,7 +2725,13 @@ mod tests {
         ));
         assert!(matches!(
             repository
-                .mark_finalizing(queued.id, queued.active_attempt.id, local_analysis(), None)
+                .mark_finalizing(
+                    queued.id,
+                    queued.active_attempt.id,
+                    local_analysis(),
+                    MARKDOWN,
+                    None
+                )
                 .await,
             Err(RepositoryError::IllegalTransition { .. })
         ));
@@ -2530,7 +2754,7 @@ mod tests {
                 .finish_succeeded(
                     queued.id,
                     queued.active_attempt.id,
-                    successful_artifacts(queued.id, queued.active_attempt.id),
+                    markdown_artifact(queued.id, queued.active_attempt.id),
                 )
                 .await,
             Err(RepositoryError::IllegalTransition { .. })
@@ -2658,7 +2882,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn artifact_insert_failure_rolls_back_both_rows_and_success_transition() {
+    async fn artifact_insert_failure_rolls_back_the_row_and_success_transition() {
         let (_directory, repository) = open_repository(2).await;
         let conversion = converting_conversion(&repository, "artifact-atomic", "a").await;
         repository
@@ -2666,16 +2890,16 @@ mod tests {
                 conversion.id,
                 conversion.active_attempt.id,
                 local_analysis(),
+                MARKDOWN,
                 None,
             )
             .await
             .unwrap();
 
         sqlx::query(
-            "CREATE TRIGGER reject_manifest
+            "CREATE TRIGGER reject_markdown
              BEFORE INSERT ON artifacts
-             WHEN NEW.kind = 'manifest'
-             BEGIN SELECT RAISE(ABORT, 'test manifest failure'); END",
+             BEGIN SELECT RAISE(ABORT, 'test artifact failure'); END",
         )
         .execute(&repository.pool)
         .await
@@ -2685,7 +2909,7 @@ mod tests {
                 .finish_succeeded(
                     conversion.id,
                     conversion.active_attempt.id,
-                    successful_artifacts(conversion.id, conversion.active_attempt.id),
+                    markdown_artifact(conversion.id, conversion.active_attempt.id),
                 )
                 .await,
             Err(RepositoryError::Database(_))
@@ -2820,7 +3044,13 @@ mod tests {
             .await
             .unwrap();
         repository
-            .mark_finalizing(queued.id, queued.active_attempt.id, local_analysis(), None)
+            .mark_finalizing(
+                queued.id,
+                queued.active_attempt.id,
+                local_analysis(),
+                MARKDOWN,
+                None,
+            )
             .await
             .unwrap();
         assert!(matches!(
@@ -2901,6 +3131,7 @@ mod tests {
                 finalizing.id,
                 finalizing.active_attempt.id,
                 local_analysis(),
+                MARKDOWN,
                 None,
             )
             .await
@@ -2911,6 +3142,7 @@ mod tests {
                 succeeded.id,
                 succeeded.active_attempt.id,
                 local_analysis(),
+                MARKDOWN,
                 None,
             )
             .await
@@ -2919,7 +3151,7 @@ mod tests {
             .finish_succeeded(
                 succeeded.id,
                 succeeded.active_attempt.id,
-                successful_artifacts(succeeded.id, succeeded.active_attempt.id),
+                markdown_artifact(succeeded.id, succeeded.active_attempt.id),
             )
             .await
             .unwrap();
@@ -2932,20 +3164,13 @@ mod tests {
             )
             .await
             .unwrap();
-        let needs_remote = converting_conversion(&repository, "list-needs-remote", "f").await;
+        let gave_up = converting_conversion(&repository, "list-gave-up", "f").await;
         repository
-            .finish_needs_remote(
-                needs_remote.id,
-                needs_remote.active_attempt.id,
-                NeedsRemoteResult {
-                    analysis: LocalAnalysis {
-                        classification: DocumentClassification::Scanned,
-                        inspection: serde_json::json!({"pageCount": 1}),
-                        reason_codes: vec!["scanned_pdf".to_owned()],
-                        warnings: vec![],
-                    },
-                    fallback_reason: "scanned_pdf".to_owned(),
-                },
+            .finish_gave_up(
+                gave_up.id,
+                gave_up.active_attempt.id,
+                scanned_analysis(),
+                failed_result(FailureStage::ConvertingLocal, "scanned_pdf").failure,
             )
             .await
             .unwrap();
@@ -2975,7 +3200,7 @@ mod tests {
                 .unwrap()
                 .artifacts
                 .len(),
-            2
+            1
         );
 
         let all_ids = repository.list_conversion_ids().await.unwrap();
@@ -2987,7 +3212,7 @@ mod tests {
                 finalizing.id,
                 succeeded.id,
                 failed.id,
-                needs_remote.id,
+                gave_up.id,
             ])
         );
         repository.health_check().await.unwrap();
@@ -3144,7 +3369,6 @@ mod tests {
             client_run_id: Uuid::nil(),
             idempotency_key_sha256: hash_idempotency_key(key),
             request_fingerprint: fingerprint_character.repeat(64),
-            profile: Profile::Standard,
             source: NewSource {
                 relative_path: format!("jobs/{id}/source/input"),
                 media_type: "application/pdf".to_owned(),
@@ -3177,6 +3401,15 @@ mod tests {
         }
     }
 
+    fn scanned_analysis() -> LocalAnalysis {
+        LocalAnalysis {
+            classification: DocumentClassification::Scanned,
+            inspection: serde_json::json!({"pageCount": 1}),
+            reason_codes: vec!["scanned_pdf".to_owned()],
+            warnings: vec![],
+        }
+    }
+
     fn failed_result(stage: FailureStage, code: &str) -> FailedResult {
         FailedResult {
             stage,
@@ -3187,21 +3420,14 @@ mod tests {
         }
     }
 
-    fn successful_artifacts(conversion_id: Uuid, attempt_id: Uuid) -> SuccessfulArtifacts {
-        let base = format!("jobs/{conversion_id}/attempts/{attempt_id}/artifacts");
-        SuccessfulArtifacts {
-            markdown: NewArtifact {
-                relative_path: format!("{base}/result.md"),
-                media_type: "text/markdown; charset=utf-8".to_owned(),
-                byte_length: 32,
-                sha256: "a".repeat(64),
-            },
-            manifest: NewArtifact {
-                relative_path: format!("{base}/manifest.json"),
-                media_type: "application/json".to_owned(),
-                byte_length: 64,
-                sha256: "b".repeat(64),
-            },
+    fn markdown_artifact(conversion_id: Uuid, attempt_id: Uuid) -> NewArtifact {
+        NewArtifact {
+            relative_path: format!(
+                "jobs/{conversion_id}/attempts/{attempt_id}/artifacts/result.md"
+            ),
+            media_type: "text/markdown; charset=utf-8".to_owned(),
+            byte_length: MARKDOWN.0,
+            sha256: MARKDOWN.1.to_owned(),
         }
     }
 }

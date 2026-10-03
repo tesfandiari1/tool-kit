@@ -19,9 +19,8 @@ use uuid::Uuid;
 use crate::{
     config::Limits,
     conversion::{
-        source_format_by_extension, ArtifactKind, ArtifactLookup, ArtifactView, ContainerMagic,
-        ConversionProfile, EngineAvailability, JobView, LocalEngineKind, SourceMetadata,
-        Submission, SubmissionDecision,
+        source_format_by_extension, ArtifactLookup, ContainerMagic, EngineAvailability, JobView,
+        LocalEngineKind, SourceMetadata, Submission, SubmissionDecision,
     },
     error::{ApiError, RequestId},
     AppState,
@@ -136,17 +135,6 @@ pub async fn create(
             ));
         }
     };
-    if staged.profile == ConversionProfile::BestQuality {
-        state.service().discard_unaccepted_job(job_id).await;
-        staged_guard.disarm();
-        return Err(error(
-            StatusCode::CONFLICT,
-            "profile_unavailable",
-            "The best_quality profile is not available in this service version.",
-            &request_id,
-        ));
-    }
-
     // The service owns the tree from here, and its own error handling applies.
     staged_guard.disarm();
     let decision = state
@@ -155,7 +143,6 @@ pub async fn create(
             prepared,
             attempt_id,
             client_run_id: staged.client_run_id,
-            profile: staged.profile,
             source: staged.source,
             language_correction: staged.language_correction,
             custom_words: staged.custom_words,
@@ -198,47 +185,15 @@ pub async fn get(
     Ok(Json(JobEnvelope { data: job }))
 }
 
-pub async fn list_artifacts(
-    State(state): State<AppState>,
-    Extension(request_id): Extension<RequestId>,
-    Path(raw_job_id): Path<String>,
-) -> Result<Json<ArtifactListEnvelope>, ApiError> {
-    let job_id = parse_job_id(&raw_job_id, &request_id)?;
-    let artifacts = state
-        .service()
-        .artifact_views(job_id)
-        .await
-        .map_err(|_| service_unavailable(&request_id))?
-        .ok_or_else(|| not_found(&request_id))?;
-    Ok(Json(ArtifactListEnvelope { data: artifacts }))
-}
-
 pub async fn download_markdown(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
     Path(raw_job_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    download(state, request_id, raw_job_id, ArtifactKind::Markdown).await
-}
-
-pub async fn download_manifest(
-    State(state): State<AppState>,
-    Extension(request_id): Extension<RequestId>,
-    Path(raw_job_id): Path<String>,
-) -> Result<Response, ApiError> {
-    download(state, request_id, raw_job_id, ArtifactKind::Manifest).await
-}
-
-async fn download(
-    state: AppState,
-    request_id: RequestId,
-    raw_job_id: String,
-    kind: ArtifactKind,
-) -> Result<Response, ApiError> {
     let job_id = parse_job_id(&raw_job_id, &request_id)?;
     let lookup = state
         .service()
-        .artifact(job_id, kind)
+        .markdown(job_id)
         .await
         .map_err(|_| service_unavailable(&request_id))?
         .ok_or_else(|| not_found(&request_id))?;
@@ -261,11 +216,7 @@ async fn download(
             ));
         }
     };
-    let extension = match kind {
-        ArtifactKind::Markdown => "md",
-        ArtifactKind::Manifest => "json",
-    };
-    let disposition = format!("attachment; filename=\"conversion-{job_id}.{extension}\"");
+    let disposition = format!("attachment; filename=\"conversion-{job_id}.md\"");
     let etag = format!("\"sha256-{}\"", artifact.sha256);
     Response::builder()
         .status(StatusCode::OK)
@@ -294,7 +245,7 @@ async fn stage_multipart(
     request_id: &RequestId,
 ) -> Result<StagedSubmission, ApiError> {
     let mut client_run_id = None;
-    let mut profile = None;
+    let mut profile_seen = false;
     let mut source = None;
     let mut language_correction = None;
     let mut custom_words = None;
@@ -316,16 +267,11 @@ async fn stage_multipart(
                     )
                 })?);
             }
-            Some("profile") if profile.is_none() => {
-                let value = read_text(field, request_id).await?;
-                profile = Some(value.parse::<ConversionProfile>().map_err(|_| {
-                    error(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "invalid_profile",
-                        "profile must be standard, local_only, or best_quality.",
-                        request_id,
-                    )
-                })?);
+            // Retired: every job runs on this Mac. Read and dropped, because
+            // the desktop still sends one.
+            Some("profile") if !profile_seen => {
+                read_text(field, request_id).await?;
+                profile_seen = true;
             }
             Some("languageCorrection") if language_correction.is_none() => {
                 let value = read_text(field, request_id).await?;
@@ -410,8 +356,6 @@ async fn stage_multipart(
                 request_id,
             )
         })?,
-        profile: profile
-            .ok_or_else(|| missing("missing_profile", "profile is required.", request_id))?,
         source: source
             .ok_or_else(|| missing("missing_source", "source is required.", request_id))?,
         // Both are optional; absent is the documented default.
@@ -768,7 +712,6 @@ fn scratch_write_failed(request_id: &RequestId) -> ApiError {
 
 struct StagedSubmission {
     client_run_id: Uuid,
-    profile: ConversionProfile,
     source: SourceMetadata,
     language_correction: bool,
     custom_words: String,
@@ -778,11 +721,6 @@ struct StagedSubmission {
 #[derive(Debug, Serialize)]
 pub(super) struct JobEnvelope {
     data: JobView,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct ArtifactListEnvelope {
-    data: Vec<ArtifactView>,
 }
 
 #[cfg(test)]

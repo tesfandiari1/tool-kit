@@ -13,7 +13,7 @@ import reactRefresh from "eslint-plugin-react-refresh";
 ///   effect/render, immutability, purity)
 export default tseslint.config(
   {
-    ignores: ["dist", "node_modules", "src-tauri", "eslint.config.js", "vite.config.ts", "src/app/api/schema.ts"],
+    ignores: ["dist", "node_modules", "src-tauri", "eslint.config.js", "vite.config.ts"],
   },
   {
     files: ["src/**/*.{ts,tsx}"],
@@ -52,33 +52,6 @@ export default tseslint.config(
         "error",
         { ignoreArrowShorthand: true },
       ],
-      // The generated OpenAPI schema has one door: the `@/app/api` module.
-      // Everything outside it uses the client or the re-exported schema types.
-      "no-restricted-imports": [
-        "error",
-        {
-          patterns: [
-            {
-              group: [
-                "@/app/api/schema",
-                "./api/schema",
-                "../api/schema",
-                "../app/api/schema",
-                "../../app/api/schema",
-              ],
-              message:
-                "Import the conversion client or schema types from @/app/api, never the generated schema directly.",
-            },
-          ],
-        },
-      ],
-    },
-  },
-  // Inside the API layer the rule above is lifted: that is the schema's door.
-  {
-    files: ["src/app/api/**/*.{ts,tsx}"],
-    rules: {
-      "no-restricted-imports": "off",
     },
   },
   // The design-system boundary, enforced rather than documented. `src/ui` may

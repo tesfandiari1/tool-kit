@@ -2,7 +2,6 @@
 
 export type JobId = "convert" | "transcribe";
 export type Status = "queued" | "working" | "processing" | "done" | "failed";
-export type SecretId = "backend";
 /// What the end pane holds. Settings is a sheet, not a fourth member.
 export type View = "library" | "run" | "history";
 
@@ -117,9 +116,6 @@ export interface Job {
   jobType: JobId;
   status: Status;
   progressNote: string;
-  /// Backend route identifiers are service-owned data, not a closed frontend enum.
-  route: string | null;
-  reasonCodes: string[];
   warnings: string[];
   failure: { code: string; message: string } | null;
   outputPath: string | null;
@@ -159,8 +155,6 @@ export interface MoveOutcome {
   staged: string[];
   failed: string[];
 }
-
-export type SecretStatus = Record<SecretId, boolean>;
 
 export const DEFAULT_SETTINGS: Settings = {
   workspacePath: null,

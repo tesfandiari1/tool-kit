@@ -34,10 +34,10 @@ use crate::{
 pub(crate) const ANYDOC_ENGINE_NAME: &str = "anydoc";
 pub(crate) const ANYDOC_VERSION: &str = "0.2.4";
 
-/// Engine-specific detail persisted as attempt diagnostics and embedded in
-/// the manifest. Content-free: the detected format family and wall time only.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+/// Engine-specific detail persisted as attempt diagnostics. Content-free: the
+/// detected format family and wall time only.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AnyDocDiagnostics {
     pub format: String,
     pub processing_time_ms: u64,

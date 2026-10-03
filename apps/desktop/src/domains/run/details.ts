@@ -1,6 +1,6 @@
 import type { Job } from "@/app/types";
 
-export type JobDetailKind = "route" | "reason" | "warning" | "failure";
+export type JobDetailKind = "warning" | "failure";
 
 export interface JobDetailItem {
   kind: JobDetailKind;
@@ -8,19 +8,13 @@ export interface JobDetailItem {
   value: string;
 }
 
-type JobMetadata = Pick<Job, "route" | "reasonCodes" | "warnings" | "failure" | "error">;
+type JobMetadata = Pick<Job, "warnings" | "failure" | "error">;
 
-/// Keep service-owned values intact so new route, reason, warning, and failure
-/// codes become visible without a frontend release.
+/// Keep service-owned values intact so new warning and failure codes become
+/// visible without a frontend release.
 export function jobDetailItems(job: JobMetadata): JobDetailItem[] {
   const items: JobDetailItem[] = [];
 
-  if (job.route !== null) {
-    items.push({ kind: "route", label: "Route", value: job.route });
-  }
-  for (const reason of job.reasonCodes) {
-    items.push({ kind: "reason", label: "Reason", value: reason });
-  }
   for (const warning of job.warnings) {
     items.push({ kind: "warning", label: "Warning", value: warning });
   }

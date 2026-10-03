@@ -11,12 +11,9 @@ import type {
   ProjectSummary,
   RunResult,
   Scan,
-  SecretId,
-  SecretStatus,
   Settings,
   WorkspaceInfo,
 } from "./types";
-import type { ServiceRequestPayload, ServiceResponsePayload } from "./api/transport";
 
 /// Typed IPC boundary. `@/platform/host` covers dialogs, window, drag-drop.
 export const commands = {
@@ -36,13 +33,6 @@ export const commands = {
   /// One directory level, `rel` workspace-relative. Rejects with a `ListError`,
   /// not a string: see `listFailure` in `useProjectTree`.
   listProjectFiles: (rel: string) => invoke<DirListing>("list_project_files", { rel }),
-  /// While true the token is the host's own, and `setSecret("backend", …)` is
-  /// refused.
-  appOwnsBackend: () => invoke<boolean>("app_owns_backend"),
-  secretStatus: () => invoke<SecretStatus>("secret_status"),
-  setSecret: async (provider: SecretId, value: string): Promise<void> => {
-    await invoke("set_secret", { provider, value });
-  },
   listJobs: () => invoke<Job[]>("list_jobs"),
   scanInputs: (inputs: string[]) => invoke<Scan>("scan_inputs", { inputs }),
   /// No destination argument: the host derives it from the same settings the
@@ -82,10 +72,9 @@ export const commands = {
   quitApp: async (): Promise<void> => {
     await invoke("quit_app");
   },
-  /// Only `@/app/api/transport` calls this. It refuses Markdown artifacts, so
-  /// a large result never crosses IPC.
-  serviceRequest: (request: ServiceRequestPayload) =>
-    invoke<ServiceResponsePayload>("service_request", { request }),
+  /// The webview's one question for the conversion service.
+  capabilities: () =>
+    invoke<{ acceptingJobs: boolean; inputFormats: string[] }>("conversion_capabilities"),
   onJobUpdated: (handler: (job: Job) => void) => listen<Job>("job-updated", (e) => {
     handler(e.payload);
   }),

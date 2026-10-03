@@ -11,23 +11,19 @@ Closed work is in [`archive/`](archive/README.md).
 | Item | Value |
 | --- | --- |
 | Branch tip | `main`, not pushed. Sprint 1, local PDF OCR, image descriptions, the 2026-10-01 upgrades, the 2026-10-02 code-review fixes (`44867b9` to `aaea300`) the 2026-10-02 PDF splice (`87d482b`), the 4 GiB audio ceiling (`41eddf6`) and no-copy drops (`b1f36be`) are committed |
-| OpenAPI contract | 0.5.0 (`contract/http/openapi.yaml`). The converter crate moves with it |
+| HTTP contract | `apps/converter/tests/http_contract.rs`. The OpenAPI, Spectral and Schemathesis suite was removed on 2026-10-03 |
 | Desktop version | 1.0.0 (`package.json`, `Cargo.toml`, `tauri.conf.json`) |
 | Installed bundle | Stale: `/Applications/Tool-Kit.app` is a signed build of `d9a0cb5`, installed 2026-10-03. It predates no-copy drops, the AnyDoc worker and the local-only removal |
 | Backend | M0 to M4 complete. M5 and M7 cancelled |
 | Desktop | M6 landed. Gate open on CVR-067 and CVR-081 |
-| Service | Sidecar inside the `.app`, loopback only. Docker needs a `backend-override.json` that only `pnpm backend:docker` writes |
-| Container smoke | `20260819T161851Z`, image `sha256:4a0cbdd0…`. It predates the worker-protocol refactor in `d4f83eb`, so re-run it before closing converter work |
-
-The keychain entitlement is parked, so `verify-release.sh` fails its Keychain
-section by design. CLAUDE.md says what restores it.
+| Service | One sidecar inside the `.app`, loopback only. The Docker image and Manual mode were removed on 2026-10-03 |
 
 Behaviour that is a decision, not an accident:
 
 - Local only (2026-10-03). Tool-Kit converts sensitive documents, so no file
   content leaves the Mac. Datalab, Rev.ai, the Direct route and the Standard
-  profile are gone. The desktop always sends `local_only`, and a Manual backend
-  must be loopback. A format no local engine takes is refused. Users lost HTML
+  profile are gone. A local engine that gives up fails the job with its reason.
+  A format no local engine takes is refused. Users lost HTML
   conversion and the recordings AVFoundation cannot read (ogg, aac, mkv, webm,
   avi, …).
 - AnyDoc parses in `tool-kit-pdf-worker --anydoc`, not in the converter
@@ -84,8 +80,7 @@ One low item left from the verify pass over the 2026-09-12 fix:
   A find, refute, fix review pass landed 24 fixes the same day, the run door
   that demanded a Rev.ai key for a local transcription among them.
   `pnpm verify` and `pnpm verify:backend` green, `verify-release.sh` green
-  through the four signed sidecars and the bundled resources (its Keychain
-  entitlement section still fails by design, see CLAUDE.md), and the installed
+  through the four signed sidecars and the bundled resources, and the installed
   bundle transcribed a two-speaker fixture through its own sidecars.
   Sprint 2 (Parakeet tier through a Settings model list) and the next epic
   (front matter and structure for AI readers) are in
@@ -116,19 +111,14 @@ Mac. The plan is in [`archive/M7_EXECUTION.md`](archive/M7_EXECUTION.md).
 ```bash
 pnpm check               # tsc --noEmit, eslint, vitest        (fast inner loop)
 pnpm verify              # check, build, desktop clippy and Rust tests
-pnpm verify:backend      # lint:api, converter clippy and tests
+pnpm verify:backend      # converter clippy and tests
 pnpm verify:all          # both of the above
-pnpm verify:container    # built image, graceful and SIGKILL restart smokes
-pnpm lint:api            # Spectral over the contract   (also in verify:backend)
-pnpm verify:api-drift    # schema.ts still matches the contract
 pnpm verify:deps         # cargo-deny over all three crates
-pnpm verify:contract     # Schemathesis against a live converter, needs uv
 pnpm verify:release      # the built bundle, after pnpm tauri build
 ```
 
 `pnpm verify` is desktop-scoped, so in-flight backend work cannot fail a
-desktop change. `verify:container` needs Docker and minutes, so it stays out of
-`verify:all` and is a local release gate. CI runs frontend, backend, desktop and
+desktop change. CI runs frontend, backend, desktop and
 dependencies as four jobs. `dependencies` can go red on a commit that changed
 nothing, because the RustSec database moves.
 
@@ -137,7 +127,7 @@ nothing, because the RustSec database moves.
 | Session | May edit | Must not edit |
 | --- | --- | --- |
 | Backend | `apps/converter/**`, `docs/*.md` | `apps/desktop/**` |
-| Desktop | `apps/desktop/**` | `apps/converter/**` persistence, worker, OpenAPI |
+| Desktop | `apps/desktop/**` | `apps/converter/**` persistence, worker, HTTP contract |
 | Either | `README.md`, `CLAUDE.md`, `AGENTS.md`: append or reconcile | The other session's section. Shared repo files (`.github/`, `LICENSE`, `rust-toolchain.toml`, `.node-version`, `.gitignore`, `package.json`) |
 
 ## Doc map

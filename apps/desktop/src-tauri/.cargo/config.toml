@@ -1,8 +1,0 @@
-# `cargo run` (and so `pnpm tauri dev`) execs the binary through a wrapper that
-# signs it first. Without a stable code signature the macOS keychain treats
-# every rebuild as a different app and re-prompts for each API key it reads.
-# See scripts/dev-run.sh. Cargo resolves this path against this file's crate
-# directory, and the wrapper falls back to running unsigned when no signing
-# identity is available.
-[target.'cfg(target_os = "macos")']
-runner = "scripts/dev-run.sh"

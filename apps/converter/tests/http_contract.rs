@@ -2,7 +2,7 @@
 
 mod support;
 
-use std::{fs, path::Path, process::Command, time::Duration};
+use std::{fs, time::Duration};
 
 use axum::{
     body::Body,
@@ -10,19 +10,15 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::Value;
-use serde_yaml_ng::Value as YamlValue;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
-use tool_kit_converter::{
-    audio_protocol::AUDIO_WORKER_IDENTITY_PREFIX, worker_protocol::FallbackReason,
-};
 use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::{
-    assert_server_request_id, audio_tools, clean_pdf, count_job_directories, count_named_files,
-    json_body, multipart, multipart_body, pdf_with_content, slow_multipart_prefix, streaming_body,
-    test_app, test_app_with_max_jobs, test_app_with_output_limit, test_app_with_poll_interval,
+    assert_server_request_id, clean_pdf, count_job_directories, count_named_files, json_body,
+    multipart, multipart_body, pdf_with_content, slow_multipart_prefix, streaming_body, test_app,
+    test_app_with_max_jobs, test_app_with_output_limit, test_app_with_poll_interval,
     test_app_with_upload_limits, test_app_with_worker_script, TestHarness, TOKEN,
 };
 
@@ -42,15 +38,6 @@ async fn public_health_and_capabilities_are_truthful() {
     let payload = json_body(response).await;
     let conversion = &payload["data"]["conversion"];
     assert_eq!(conversion["acceptingJobs"], true);
-    assert_eq!(conversion["durability"], "persistent");
-    assert!(conversion["limits"]["maxActiveJobs"].is_u64());
-    assert!(conversion["limits"]["maxEphemeralJobs"].is_null());
-    assert_eq!(
-        conversion["limits"]["maxAudioUploadBytes"].as_u64(),
-        Some(1024 * 1024),
-        "audio has its own ceiling, and a client that reads only maxUploadBytes \
-         refuses recordings this service accepts"
-    );
     assert_eq!(
         conversion["inputFormats"],
         serde_json::json!([
@@ -75,17 +62,16 @@ async fn public_health_and_capabilities_are_truthful() {
         ]),
         "the test app runs no Vision worker, so the image types are contract only"
     );
-    let engines = conversion["engines"].as_array().unwrap();
-    assert_eq!(engines.len(), 2, "apple-vision is absent with its engine");
-    assert_eq!(engines[0]["name"], "pdf-inspector");
-    assert_eq!(engines[0]["version"], "1.25.2");
-    assert_eq!(engines[1]["name"], "anydoc");
-    assert_eq!(engines[1]["version"], "0.2.4");
-    assert!(
-        conversion["engine"].is_null(),
-        "the singular engine field is gone"
-    );
-    assert_eq!(payload["data"]["remoteFallback"]["available"], false);
+    let keys = |value: &Value| {
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(&payload["data"]), ["conversion"]);
+    assert_eq!(keys(conversion), ["acceptingJobs", "inputFormats"]);
 }
 
 #[tokio::test]
@@ -243,146 +229,6 @@ async fn startup_reconciliation_ignores_the_readiness_probe_directory() {
     );
 }
 
-#[test]
-fn conversion_profile_job_status_and_route_json_values_are_stable() {
-    let document: YamlValue =
-        serde_yaml_ng::from_str(include_str!("../../../contract/http/openapi.yaml"))
-            .expect("OpenAPI must be valid YAML");
-    let profile_values = document["components"]["schemas"]["ConversionProfile"]["enum"]
-        .as_sequence()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect::<Vec<_>>();
-    let status_values = document["components"]["schemas"]["ConversionJob"]["properties"]["status"]
-        ["enum"]
-        .as_sequence()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect::<Vec<_>>();
-    // Status and manifest share one Route schema, so the kinds cannot diverge.
-    for holder in ["ConversionJob", "ConversionManifest"] {
-        assert_eq!(
-            document["components"]["schemas"][holder]["properties"]["route"]["$ref"].as_str(),
-            Some("#/components/schemas/Route"),
-            "{holder} must reuse the shared Route schema"
-        );
-    }
-    let route_values = document["components"]["schemas"]["Route"]["properties"]["kind"]["enum"]
-        .as_sequence()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect::<Vec<_>>();
-
-    assert_eq!(profile_values, ["standard", "local_only", "best_quality"]);
-    assert_eq!(
-        status_values,
-        [
-            "queued",
-            "converting_local",
-            "finalizing",
-            "succeeded",
-            "failed",
-            "needs_remote",
-        ]
-    );
-    assert_eq!(
-        route_values,
-        ["local_pdf", "local_anydoc", "local_vision", "local_audio"]
-    );
-}
-
-/// Pull the published strings out of one `as_str` match in policy.rs. The
-/// policy types are crate-private, so the source is the only place an
-/// integration test can read the vocabulary from.
-fn policy_strings(type_name: &str) -> Vec<&'static str> {
-    let source = include_str!("../src/conversion/policy.rs");
-    let (_, after) = source
-        .split_once(&format!("impl {type_name} {{"))
-        .unwrap_or_else(|| panic!("policy.rs must have an impl block for {type_name}"));
-    let (block, _) = after
-        .split_once("\n}\n")
-        .unwrap_or_else(|| panic!("impl {type_name} must end at column zero"));
-    block
-        .split("=> \"")
-        .skip(1)
-        .filter_map(|arm| arm.split_once('"').map(|(value, _)| value))
-        .collect()
-}
-
-fn vocabulary(schema: &YamlValue) -> Vec<&str> {
-    schema["x-vocabulary"]
-        .as_sequence()
-        .expect("x-vocabulary must be a sequence")
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect()
-}
-
-/// The routing vocabulary is documented, not enumerated: the remote route adds
-/// reason codes later, and a closed enum makes that a breaking change for every
-/// generated client. `x-vocabulary` is what keeps "documented" from meaning
-/// "free to drift".
-#[test]
-fn the_documented_routing_vocabulary_is_everything_the_policy_can_emit() {
-    let document: YamlValue =
-        serde_yaml_ng::from_str(include_str!("../../../contract/http/openapi.yaml"))
-            .expect("OpenAPI must be valid YAML");
-    let schemas = &document["components"]["schemas"];
-
-    let reason_codes = &schemas["Route"]["properties"]["reasonCodes"]["items"];
-    assert!(
-        reason_codes["enum"].is_null() && schemas["Warning"]["enum"].is_null(),
-        "closing either vocabulary breaks every client the day a remote code lands"
-    );
-
-    let mut documented_reasons = vocabulary(reason_codes);
-    let mut emitted_reasons = policy_strings("ReasonCode");
-    // ReasonCode::Engine delegates, so the engine's own reasons are published
-    // through the same array. The match makes a new variant a compile error.
-    emitted_reasons.extend(
-        [
-            FallbackReason::ScannedPdf,
-            FallbackReason::ImageBasedPdf,
-            FallbackReason::MixedPdf,
-            FallbackReason::GarbledText,
-            FallbackReason::OcrRequired,
-            FallbackReason::LocalQualityFailed,
-            FallbackReason::OutputTooLarge,
-        ]
-        .map(|reason| match reason {
-            FallbackReason::ScannedPdf => "scanned_pdf",
-            FallbackReason::ImageBasedPdf => "image_based_pdf",
-            FallbackReason::MixedPdf => "mixed_pdf",
-            FallbackReason::GarbledText => "garbled_text",
-            FallbackReason::OcrRequired => "ocr_required",
-            FallbackReason::LocalQualityFailed => "local_quality_failed",
-            FallbackReason::OutputTooLarge => "output_too_large",
-        }),
-    );
-    documented_reasons.sort_unstable();
-    emitted_reasons.sort_unstable();
-    assert_eq!(documented_reasons, emitted_reasons);
-
-    let mut documented_warnings = vocabulary(&schemas["Warning"]);
-    let mut emitted_warnings = policy_strings("Warning");
-    documented_warnings.sort_unstable();
-    emitted_warnings.sort_unstable();
-    assert_eq!(documented_warnings, emitted_warnings);
-
-    // Status and manifest share one Warning schema, so the two lists of
-    // caveats cannot diverge.
-    for holder in ["ConversionJob", "ConversionManifest"] {
-        assert_eq!(
-            schemas[holder]["properties"]["warnings"]["items"]["$ref"].as_str(),
-            Some("#/components/schemas/Warning"),
-            "{holder} must reuse the shared Warning schema"
-        );
-    }
-}
-
 #[tokio::test]
 async fn conversion_routes_require_one_valid_bearer_token() {
     let app = test_app().await;
@@ -450,7 +296,7 @@ async fn clean_pdf_completes_and_idempotency_replays_the_job() {
     let location = response.headers()["location"].to_str().unwrap().to_owned();
     let submitted = json_body(response).await;
     let job_id = submitted["data"]["id"].as_str().unwrap().to_owned();
-    assert_eq!(submitted["data"]["profile"], "standard");
+    assert!(submitted["data"].get("profile").is_none());
     assert_eq!(submitted["data"]["status"], "queued");
     assert_eq!(location, format!("/api/v1/conversions/{job_id}"));
 
@@ -462,35 +308,18 @@ async fn clean_pdf_completes_and_idempotency_replays_the_job() {
         serde_json::json!(["native_text_pdf"])
     );
 
-    let artifacts = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
-        .await;
-    assert_eq!(artifacts.status(), StatusCode::OK);
-    let artifacts = json_body(artifacts).await;
-    assert_eq!(artifacts["data"].as_array().unwrap().len(), 2);
-
     let markdown = app
         .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
     assert_eq!(markdown.status(), StatusCode::OK);
     assert_eq!(markdown.headers()["cache-control"], "private, no-store");
+    let etag = markdown.headers()["etag"].to_str().unwrap().to_owned();
     let markdown = markdown.into_body().collect().await.unwrap().to_bytes();
     assert!(!markdown.is_empty());
-
-    let manifest = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await;
-    assert_eq!(manifest.status(), StatusCode::OK);
-    let manifest_bytes = manifest.into_body().collect().await.unwrap().to_bytes();
-    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
-    assert_eq!(manifest["schemaVersion"], 1);
-    assert_eq!(manifest["engine"]["version"], "1.25.2");
-    assert_eq!(manifest["document"]["pdfType"], "text_based");
     assert_eq!(
-        manifest["output"]["sha256"],
-        hex::encode(Sha256::digest(&markdown))
+        etag,
+        format!("\"sha256-{}\"", hex::encode(Sha256::digest(&markdown)))
     );
-    assert!(!String::from_utf8_lossy(&manifest_bytes).contains("fixture.pdf"));
 
     let replay = app.submit(body, "clean-pdf-1", TOKEN).await;
     assert_eq!(replay.status(), StatusCode::ACCEPTED);
@@ -542,25 +371,6 @@ async fn docx_completes_through_anydoc_and_replays() {
     assert_eq!(markdown.status(), StatusCode::OK);
     let markdown = markdown.into_body().collect().await.unwrap().to_bytes();
     assert!(String::from_utf8_lossy(&markdown).contains("Fixture Document"));
-
-    let manifest = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await;
-    assert_eq!(manifest.status(), StatusCode::OK);
-    let manifest_bytes = manifest.into_body().collect().await.unwrap().to_bytes();
-    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
-    assert_eq!(manifest["engine"]["name"], "anydoc");
-    assert_eq!(manifest["engine"]["version"], "0.2.4");
-    assert_eq!(manifest["document"]["format"], "docx");
-    assert_eq!(
-        manifest["source"]["mediaType"],
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    );
-    assert_eq!(
-        manifest["output"]["sha256"],
-        hex::encode(Sha256::digest(&markdown))
-    );
-    assert!(!String::from_utf8_lossy(&manifest_bytes).contains("notes.docx"));
 
     let replay = app.submit(body, "anydoc-docx-1", TOKEN).await;
     assert_eq!(replay.status(), StatusCode::ACCEPTED);
@@ -707,16 +517,12 @@ async fn every_advertised_anydoc_family_converts() {
             "{label}"
         );
 
-        let manifest = app
-            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
+        let markdown = app
+            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
             .await;
-        assert_eq!(manifest.status(), StatusCode::OK, "{label}");
-        let manifest: Value =
-            serde_json::from_slice(&manifest.into_body().collect().await.unwrap().to_bytes())
-                .unwrap();
-        assert_eq!(manifest["engine"]["name"], "anydoc", "{label}");
-        assert_eq!(manifest["document"]["format"], label, "{label}");
-        assert!(manifest["document"]["processingTimeMs"].is_u64(), "{label}");
+        assert_eq!(markdown.status(), StatusCode::OK, "{label}");
+        let markdown = markdown.into_body().collect().await.unwrap().to_bytes();
+        assert!(!markdown.is_empty(), "{label}");
     }
 }
 
@@ -817,16 +623,6 @@ async fn broken_and_hostile_anydoc_inputs_fail_closed_without_artifacts() {
         );
         assert_eq!(completed["data"]["failure"]["code"], code, "{code}");
 
-        let artifacts = app
-            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
-            .await;
-        assert!(
-            json_body(artifacts).await["data"]
-                .as_array()
-                .unwrap()
-                .is_empty(),
-            "{code}"
-        );
         let markdown = app
             .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
             .await;
@@ -839,7 +635,7 @@ async fn broken_and_hostile_anydoc_inputs_fail_closed_without_artifacts() {
 async fn a_cross_family_mislabelled_container_fails_before_conversion() {
     // docx/xlsx/pptx/epub all carry the same ZIP magic, so upload admission
     // cannot separate them. An xlsx sent as .docx used to convert fine and
-    // then trip the manifest check as `artifact_integrity_failed` - a
+    // then trip the artifact check as `artifact_integrity_failed` - a
     // corruption code for a merely misnamed file. It must fail as an invalid
     // document instead, and before any parsing happens.
     let app = test_app().await;
@@ -866,13 +662,10 @@ async fn a_cross_family_mislabelled_container_fails_before_conversion() {
         completed["data"]["failure"]["code"], "invalid_document",
         "{completed:#}"
     );
-    let artifacts = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
+    let markdown = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
-    assert!(json_body(artifacts).await["data"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert_eq!(markdown.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1055,14 +848,6 @@ async fn completed_job_idempotency_and_downloads_survive_app_restart() {
         .await
         .unwrap()
         .to_bytes();
-    let manifest_before = first
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
     first.shutdown(Duration::from_secs(1)).await;
     drop(first);
 
@@ -1085,19 +870,6 @@ async fn completed_job_idempotency_and_downloads_survive_app_restart() {
             .unwrap()
             .to_bytes(),
         markdown_before
-    );
-    let manifest_after = restarted
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await;
-    assert_eq!(manifest_after.status(), StatusCode::OK);
-    assert_eq!(
-        manifest_after
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes(),
-        manifest_before
     );
 
     let replay = restarted.submit(body, "durable-restart-1", TOKEN).await;
@@ -1166,13 +938,6 @@ async fn corrupted_published_artifact_fails_closed_and_preserves_audit_files() {
         status["data"]["failure"]["code"],
         "artifact_integrity_failed"
     );
-    let artifacts = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
-        .await;
-    assert!(json_body(artifacts).await["data"]
-        .as_array()
-        .unwrap()
-        .is_empty());
     let download = app
         .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
@@ -1309,16 +1074,14 @@ async fn finalizing_job_with_a_valid_published_bundle_completes_during_restart()
         seeded.attempt_id.to_string()
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
-    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 2);
-    for name in ["markdown", "manifest"] {
-        let download = restarted
-            .authorized_get(&format!(
-                "/api/v1/conversions/{}/artifacts/{name}",
-                seeded.job_id
-            ))
-            .await;
-        assert_eq!(download.status(), StatusCode::OK, "{name}");
-    }
+    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 1);
+    let download = restarted
+        .authorized_get(&format!(
+            "/api/v1/conversions/{}/artifacts/markdown",
+            seeded.job_id
+        ))
+        .await;
+    assert_eq!(download.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1339,7 +1102,6 @@ async fn corrupted_succeeded_bundle_is_persisted_failed_on_restart_and_retained_
         .join(seeded.attempt_id.to_string())
         .join("artifacts");
     let markdown = artifacts.join("result.md");
-    let manifest = artifacts.join("manifest.json");
     fs::write(&markdown, b"corrupted while the service was stopped").unwrap();
 
     let restarted = harness.app().await;
@@ -1353,18 +1115,15 @@ async fn corrupted_succeeded_bundle_is_persisted_failed_on_restart_and_retained_
         "artifact_integrity_failed"
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
-    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 2);
+    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 1);
     assert!(markdown.exists());
-    assert!(manifest.exists());
-    for name in ["markdown", "manifest"] {
-        let download = restarted
-            .authorized_get(&format!(
-                "/api/v1/conversions/{}/artifacts/{name}",
-                seeded.job_id
-            ))
-            .await;
-        assert_eq!(download.status(), StatusCode::NOT_FOUND, "{name}");
-    }
+    let download = restarted
+        .authorized_get(&format!(
+            "/api/v1/conversions/{}/artifacts/markdown",
+            seeded.job_id
+        ))
+        .await;
+    assert_eq!(download.status(), StatusCode::NOT_FOUND);
 
     restarted.shutdown(Duration::from_secs(1)).await;
     drop(restarted);
@@ -1380,7 +1139,6 @@ async fn corrupted_succeeded_bundle_is_persisted_failed_on_restart_and_retained_
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
     assert!(markdown.exists());
-    assert!(manifest.exists());
 }
 
 #[tokio::test]
@@ -1429,7 +1187,7 @@ async fn database_less_canonical_job_is_quarantined_without_touching_an_owned_si
 
 #[tokio::test]
 async fn invalid_finalizing_bundles_requeue_to_a_fresh_attempt() {
-    for case in ["unknown-manifest-field", "extra-publication-file"] {
+    for case in ["changed-markdown", "extra-publication-file"] {
         let harness = TestHarness::new();
         let first = harness.app().await;
         let seeded = first.submit_succeeded_job(case).await;
@@ -1445,15 +1203,9 @@ async fn invalid_finalizing_bundles_requeue_to_a_fresh_attempt() {
             .join(seeded.attempt_id.to_string())
             .join("artifacts");
         match case {
-            "unknown-manifest-field" => {
-                let path = published.join("manifest.json");
-                let mut manifest: Value =
-                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                manifest
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("unexpected".to_owned(), Value::Bool(true));
-                fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            // Finalizing recorded the digest, and this no longer matches it.
+            "changed-markdown" => {
+                fs::write(published.join("result.md"), b"changed after publication").unwrap();
             }
             "extra-publication-file" => {
                 fs::write(published.join("unexpected.bin"), b"unexpected").unwrap();
@@ -1490,18 +1242,6 @@ const AUDIO_MEDIA_TYPES: [&str; 6] = [
 const TWO_SPEAKERS_WAV: &[u8] = include_bytes!("fixtures/audio/two-speakers.wav");
 const SILENCE_WAV: &[u8] = include_bytes!("fixtures/audio/silence.wav");
 
-/// The version half of the worker's handshake line, which is the version
-/// capabilities must publish for the engine.
-fn worker_identity_version(worker: &Path) -> String {
-    let output = Command::new(worker).arg("--version").output().unwrap();
-    String::from_utf8(output.stdout)
-        .unwrap()
-        .strip_prefix(AUDIO_WORKER_IDENTITY_PREFIX)
-        .and_then(|tail| tail.strip_suffix('\n'))
-        .expect("the worker must answer --version with its identity line")
-        .to_owned()
-}
-
 /// Runs everywhere, because the default harness stages no audio worker. An
 /// advertised format with no engine behind it is a job that is accepted and
 /// never claimed, so the whole audio surface has to be absent instead.
@@ -1510,11 +1250,6 @@ async fn audio_is_unadvertised_and_refused_without_the_worker() {
     let app = test_app().await;
     let payload = json_body(app.request(Method::GET, "/api/v1/capabilities", None).await).await;
     let conversion = &payload["data"]["conversion"];
-    assert!(conversion["engines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|engine| engine["name"] != "local-audio"));
     let formats = conversion["inputFormats"].as_array().unwrap();
     for media_type in AUDIO_MEDIA_TYPES {
         assert!(
@@ -1556,14 +1291,6 @@ async fn a_two_speaker_recording_transcribes_end_to_end() {
 
     let payload = json_body(app.request(Method::GET, "/api/v1/capabilities", None).await).await;
     let conversion = &payload["data"]["conversion"];
-    let engine = conversion["engines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|engine| engine["name"] == "local-audio")
-        .expect("a staged worker must be advertised");
-    let (worker, _) = audio_tools().unwrap();
-    assert_eq!(engine["version"], worker_identity_version(&worker));
     let formats = conversion["inputFormats"].as_array().unwrap();
     for media_type in AUDIO_MEDIA_TYPES {
         assert!(
@@ -1614,32 +1341,10 @@ async fn a_two_speaker_recording_transcribes_end_to_end() {
         !transcript.contains("Speakers guessed"),
         "a pinned count is not a guess:\n{transcript}"
     );
-
-    // Serving the manifest at all is the classification assertion: the read
-    // path refuses one whose stored classification disagrees with the engine
-    // that produced it, and "audio" is the only value local-audio may carry.
-    let manifest = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await;
-    assert_eq!(manifest.status(), StatusCode::OK);
-    let manifest: Value =
-        serde_json::from_slice(&manifest.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(manifest["engine"]["name"], "local-audio");
-    assert_eq!(manifest["route"]["kind"], "local_audio");
-    assert_eq!(
-        manifest["route"]["reasonCodes"],
-        serde_json::json!(["transcribed_audio"])
-    );
-    assert_eq!(manifest["document"]["speakersFound"], 2);
-    assert_eq!(manifest["document"]["speakerCountGuessed"], false);
-    assert_eq!(
-        manifest["output"]["sha256"],
-        hex::encode(Sha256::digest(&markdown))
-    );
 }
 
 /// A rejection ends the job. v1 has no remote leg for a local transcription,
-/// so `needs_remote` here would strand it.
+/// so the job fails with the worker's code.
 #[tokio::test]
 async fn a_recording_with_no_speech_fails_rather_than_asking_for_a_remote() {
     let Some(harness) = TestHarness::with_audio_worker() else {
@@ -1779,15 +1484,6 @@ async fn the_audio_ceiling_bounds_recordings_without_touching_documents() {
 #[tokio::test]
 async fn invalid_submission_fields_are_rejected_without_creating_jobs() {
     let app = test_app().await;
-    let pdf = clean_pdf();
-
-    let wrong_profile = multipart_body(Uuid::new_v4(), "best_quality", &pdf, "fixture.pdf");
-    let response = app.submit(wrong_profile, "profile-1", TOKEN).await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        json_body(response).await["error"]["code"],
-        "profile_unavailable"
-    );
 
     // A real PNG, well formed and advertised by the contract. Only the missing
     // engine refuses it, and it must refuse before anything is staged.
@@ -1824,6 +1520,38 @@ async fn invalid_submission_fields_are_rejected_without_creating_jobs() {
     assert_eq!(count_job_directories(app.data_dir()), 0);
     assert_eq!(count_named_files(app.data_dir(), "input"), 0);
     assert_eq!(count_named_files(app.data_dir(), "input.staging"), 0);
+}
+
+/// The desktop still sends a profile. Its value is ignored, so a resubmit with
+/// another value, or with none, replays the same job.
+#[tokio::test]
+async fn a_retired_profile_is_accepted_and_ignored() {
+    let app = test_app().await;
+    let pdf = clean_pdf();
+    let client_run_id = Uuid::new_v4();
+    let response = app
+        .submit(
+            multipart_body(client_run_id, "local_only", &pdf, "fixture.pdf"),
+            "retired-profile-1",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job_id = json_body(response).await["data"]["id"].clone();
+
+    let without_profile = multipart(
+        &[("clientRunId", &client_run_id.to_string())],
+        Some((&pdf, "fixture.pdf", "application/pdf")),
+    );
+    for body in [
+        multipart_body(client_run_id, "best_quality", &pdf, "fixture.pdf"),
+        without_profile,
+    ] {
+        let replay = app.submit(body, "retired-profile-1", TOKEN).await;
+        assert_eq!(replay.status(), StatusCode::ACCEPTED);
+        assert_eq!(replay.headers()["idempotency-replayed"], "true");
+        assert_eq!(json_body(replay).await["data"]["id"], job_id);
+    }
 }
 
 #[tokio::test]
@@ -1986,22 +1714,23 @@ async fn non_text_pdf_never_publishes_partial_markdown() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let submitted = json_body(response).await;
     let job_id = submitted["data"]["id"].as_str().unwrap();
-    assert_eq!(submitted["data"]["profile"], "local_only");
     assert_eq!(submitted["data"]["status"], "queued");
 
     let completed = app.wait_for_terminal(job_id).await;
-    assert_eq!(completed["data"]["status"], "needs_remote", "{completed:#}");
+    assert_eq!(completed["data"]["status"], "failed", "{completed:#}");
     assert_ne!(
         completed["data"]["route"]["reasonCodes"],
         serde_json::json!(["native_text_pdf"])
     );
-    let artifacts = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
-        .await;
-    assert!(json_body(artifacts).await["data"]
-        .as_array()
+    // The engine's reason is the code, and the message is plain words.
+    assert_eq!(
+        completed["data"]["failure"]["code"],
+        completed["data"]["route"]["reasonCodes"][0]
+    );
+    assert!(completed["data"]["failure"]["message"]
+        .as_str()
         .unwrap()
-        .is_empty());
+        .starts_with("This file could not be converted on this Mac because "));
     let markdown = app
         .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
@@ -2014,7 +1743,7 @@ async fn non_text_pdf_never_publishes_partial_markdown() {
 }
 
 #[tokio::test]
-async fn worker_output_limit_routes_without_writing_an_artifact() {
+async fn worker_output_limit_fails_without_writing_an_artifact() {
     let app = test_app_with_output_limit(16).await;
     let body = multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "bounded.pdf");
     let response = app.submit(body, "bounded-output-1", TOKEN).await;
@@ -2023,18 +1752,16 @@ async fn worker_output_limit_routes_without_writing_an_artifact() {
     let job_id = submitted["data"]["id"].as_str().unwrap();
 
     let completed = app.wait_for_terminal(job_id).await;
-    assert_eq!(completed["data"]["status"], "needs_remote", "{completed:#}");
+    assert_eq!(completed["data"]["status"], "failed", "{completed:#}");
+    assert_eq!(completed["data"]["failure"]["code"], "output_too_large");
     assert_eq!(
         completed["data"]["route"]["reasonCodes"],
         serde_json::json!(["output_too_large"])
     );
-    let artifacts = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
+    let markdown = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
-    assert!(json_body(artifacts).await["data"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert_eq!(markdown.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -2424,13 +2151,10 @@ async fn malformed_or_untrusted_worker_outputs_never_publish() {
             completed["data"]["failure"]["code"], expected_code,
             "{name}: {completed:#}"
         );
-        let artifacts = app
-            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
+        let markdown = app
+            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
             .await;
-        assert!(json_body(artifacts).await["data"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert_eq!(markdown.status(), StatusCode::NOT_FOUND, "{name}");
         assert_eq!(
             app.request(Method::GET, "/health/live", None)
                 .await
@@ -2482,6 +2206,16 @@ async fn persistence_dependent_routes_remain_absent() {
             "/api/v1/conversions/00000000-0000-0000-0000-000000000000",
             StatusCode::METHOD_NOT_ALLOWED,
         ),
+        (
+            Method::GET,
+            "/api/v1/conversions/00000000-0000-0000-0000-000000000000/artifacts",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::GET,
+            "/api/v1/conversions/00000000-0000-0000-0000-000000000000/artifacts/manifest",
+            StatusCode::NOT_FOUND,
+        ),
     ] {
         let response = app
             .request_with_headers(
@@ -2493,147 +2227,4 @@ async fn persistence_dependent_routes_remain_absent() {
             .await;
         assert_eq!(response.status(), expected, "{path}");
     }
-}
-
-#[test]
-fn openapi_parses_and_documents_only_the_live_routes() {
-    let spec = include_str!("../../../contract/http/openapi.yaml");
-    let document: YamlValue = serde_yaml_ng::from_str(spec).expect("OpenAPI must be valid YAML");
-    let paths = document["paths"]
-        .as_mapping()
-        .expect("OpenAPI paths must be a mapping");
-
-    assert_eq!(document["openapi"].as_str(), Some("3.1.0"));
-    // Every response carries the crate version as `serviceVersion`, so a
-    // Cargo.toml bump without a contract bump ships a lie.
-    assert_eq!(
-        document["info"]["version"].as_str(),
-        Some(env!("CARGO_PKG_VERSION"))
-    );
-    for (path, method) in [
-        ("/health/live", "get"),
-        ("/health/ready", "get"),
-        ("/api/v1/capabilities", "get"),
-        ("/api/v1/conversions", "post"),
-        ("/api/v1/conversions/{id}", "get"),
-        ("/api/v1/conversions/{id}/artifacts", "get"),
-        ("/api/v1/conversions/{id}/artifacts/markdown", "get"),
-        ("/api/v1/conversions/{id}/artifacts/manifest", "get"),
-    ] {
-        assert!(
-            !document["paths"][path][method].is_null(),
-            "missing {method} {path}"
-        );
-    }
-    assert_eq!(paths.len(), 8);
-    assert!(document["paths"]["/api/v1/conversions"]["get"].is_null());
-    assert!(!document["components"]["securitySchemes"]["bootstrapBearer"].is_null());
-    assert_eq!(
-        document["paths"]["/api/v1/conversions"]["post"]["security"][0]["bootstrapBearer"]
-            .as_sequence()
-            .unwrap()
-            .len(),
-        0
-    );
-    for status in [
-        "202", "400", "401", "408", "409", "413", "415", "422", "429", "500",
-    ] {
-        assert!(
-            !document["paths"]["/api/v1/conversions"]["post"]["responses"][status].is_null(),
-            "POST response {status} is undocumented"
-        );
-    }
-    for path in [
-        "/api/v1/conversions/{id}",
-        "/api/v1/conversions/{id}/artifacts",
-        "/api/v1/conversions/{id}/artifacts/markdown",
-        "/api/v1/conversions/{id}/artifacts/manifest",
-    ] {
-        assert!(
-            !document["paths"][path]["get"]["security"][0]["bootstrapBearer"].is_null(),
-            "GET {path} must require bearer authentication"
-        );
-    }
-    let submission = &document["components"]["schemas"]["ConversionSubmission"];
-    assert_eq!(submission["additionalProperties"].as_bool(), Some(false));
-    assert_eq!(submission["required"].as_sequence().unwrap().len(), 3);
-    assert_eq!(
-        document["paths"]["/api/v1/conversions"]["post"]["requestBody"]["content"]
-            ["multipart/form-data"]["schema"]["$ref"]
-            .as_str(),
-        Some("#/components/schemas/ConversionSubmission")
-    );
-    for header in [
-        "Location",
-        "Retry-After",
-        "Idempotency-Replayed",
-        "X-Request-Id",
-    ] {
-        assert!(
-            !document["paths"]["/api/v1/conversions"]["post"]["responses"]["202"]["headers"]
-                [header]
-                .is_null(),
-            "202 header {header} is undocumented"
-        );
-    }
-    assert!(
-        document["components"]["schemas"]["ConversionCapabilities"]["properties"]["acceptingJobs"]
-            ["const"]
-            .is_null(),
-        "acceptingJobs is dynamic"
-    );
-    let capabilities = &document["components"]["schemas"]["ConversionCapabilities"];
-    assert_eq!(
-        capabilities["properties"]["durability"]["const"].as_str(),
-        Some("persistent")
-    );
-    let limits = &capabilities["properties"]["limits"];
-    assert!(string_sequence(&limits["required"]).contains(&"maxActiveJobs"));
-    assert!(string_sequence(&limits["required"]).contains(&"maxAudioUploadBytes"));
-    assert!(!string_sequence(&limits["required"]).contains(&"maxEphemeralJobs"));
-    assert_eq!(
-        limits["properties"]["maxActiveJobs"]["minimum"].as_u64(),
-        Some(1)
-    );
-    assert!(limits["properties"]["maxEphemeralJobs"].is_null());
-
-    for status in ["200", "503"] {
-        let response = &document["paths"]["/health/ready"]["get"]["responses"][status];
-        assert_eq!(
-            response["content"]["application/json"]["schema"]["$ref"].as_str(),
-            Some("#/components/schemas/ReadinessResponse"),
-            "/health/ready {status} must answer with the readiness shape"
-        );
-        assert!(
-            !response["headers"]["X-Request-Id"].is_null(),
-            "/health/ready {status} must carry X-Request-Id"
-        );
-    }
-    let readiness = &document["components"]["schemas"]["ReadinessResponse"];
-    assert_eq!(
-        string_sequence(&readiness["properties"]["status"]["enum"]),
-        vec!["ready", "not_ready"]
-    );
-    let checks = &readiness["properties"]["checks"];
-    assert_eq!(
-        string_sequence(&checks["required"]),
-        vec!["database", "dataRoot", "worker"]
-    );
-    assert_eq!(checks["additionalProperties"].as_bool(), Some(false));
-    for check in ["database", "dataRoot", "worker"] {
-        assert_eq!(
-            string_sequence(&checks["properties"][check]["enum"]),
-            vec!["ok", "failed"],
-            "check {check}"
-        );
-    }
-}
-
-fn string_sequence(value: &YamlValue) -> Vec<&str> {
-    value
-        .as_sequence()
-        .expect("expected a YAML sequence")
-        .iter()
-        .map(|entry| entry.as_str().expect("expected a YAML string"))
-        .collect()
 }

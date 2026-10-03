@@ -1,13 +1,12 @@
 //! Native HTTP boundary for the conversion service.
 //!
-//! The webview supplies only contract paths, request metadata and a source
-//! path. This module owns file streaming, response bounds and artifact writes.
-//! The origin and the token come from `backend_host`.
+//! The webview never talks to the service: it asks the host for capabilities
+//! and nothing else. This module owns file streaming, response bounds and
+//! artifact writes. The origin and the token come from `backend_host`.
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
-use reqwest::{multipart, Client, Method, Response, Url};
+use reqwest::header::{HeaderValue, CONTENT_TYPE};
+use reqwest::{multipart, Client, Response, Url};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::{Component, Path};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -26,18 +25,11 @@ const STREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// offending field is named rather than 422ing every job in the run.
 const MAX_METADATA_BYTES: usize = 256;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConversionCapabilities {
     pub(crate) accepting_jobs: bool,
     pub(crate) input_formats: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ConversionRoute {
-    pub(crate) kind: String,
-    pub(crate) reason_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -52,7 +44,6 @@ pub(crate) struct ConversionFailure {
 pub(crate) struct ConversionJob {
     pub(crate) id: String,
     pub(crate) status: String,
-    pub(crate) route: Option<ConversionRoute>,
     #[serde(default)]
     pub(crate) warnings: Vec<String>,
     pub(crate) failure: Option<ConversionFailure>,
@@ -74,32 +65,11 @@ struct CapabilitiesData {
     conversion: ConversionCapabilities,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ServiceRequestPayload {
-    pub(crate) method: String,
-    pub(crate) path: String,
-    pub(crate) headers: BTreeMap<String, String>,
-    pub(crate) body: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ServiceResponsePayload {
+/// A bounded response, its body already scrubbed of the token.
+#[derive(Debug)]
+struct ServiceResponse {
     status: u16,
-    headers: BTreeMap<String, String>,
     body: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ConversionSubmission {
-    source: String,
-    client_run_id: String,
-    profile: String,
-    language_correction: bool,
-    custom_words: String,
-    speaker_count: Option<u32>,
 }
 
 /// Every per-run engine setting the service folds into its replay key, named
@@ -143,50 +113,24 @@ impl OcrOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContractRoute {
-    Liveness,
-    Readiness,
-    Capabilities,
-    CreateConversion,
-    GetConversion,
-    ListArtifacts,
-    DownloadManifest,
-    DownloadMarkdown,
-}
-
-impl ContractRoute {
-    fn requires_authentication(self) -> bool {
-        !matches!(self, Self::Liveness | Self::Readiness | Self::Capabilities)
-    }
-}
-
+/// The webview's one question for the service: is it taking jobs.
 #[tauri::command]
-pub(crate) async fn service_request(
+pub(crate) async fn conversion_capabilities(
     app: AppHandle,
-    request: ServiceRequestPayload,
-) -> Result<ServiceResponsePayload, String> {
-    let base_url = backend_host::backend_origin(&app)?;
-    let route = classify_route(&request.method, &request.path)?;
-    let token = if route.requires_authentication() {
-        Some(backend_host::backend_token(&app)?)
-    } else {
-        None
-    };
-    send_service_request(&base_url, token.as_deref(), request).await
+) -> Result<ConversionCapabilities, String> {
+    fetch_capabilities(&backend_host::backend_origin(&app)?).await
 }
 
 /// Fetch the live routing contract, unauthenticated. Callers read
 /// `input_formats`, which is never duplicated in desktop code.
 pub(crate) async fn fetch_capabilities(base_url: &str) -> Result<ConversionCapabilities, String> {
-    let response =
-        send_service_request(base_url, None, get_request("/api/v1/capabilities")).await?;
+    let response = send_service_request(base_url, None, "/api/v1/capabilities").await?;
     let envelope: CapabilitiesEnvelope = parse_success(response, "capabilities")?;
     Ok(envelope.data.conversion)
 }
 
-/// Submit a source path through the host-only multipart door, so the webview
-/// sees neither the bearer token nor the source bytes.
+/// Stream a source file as multipart, so the webview sees neither the bearer
+/// token nor the source bytes.
 pub(crate) async fn submit_conversion(
     base_url: &str,
     token: &str,
@@ -203,26 +147,49 @@ pub(crate) async fn submit_conversion(
             custom_words.len()
         ));
     }
-    let body = serde_json::to_string(&serde_json::json!({
-        "source": source_path,
-        "clientRunId": client_run_id,
-        "profile": profile,
-        "languageCorrection": ocr.language_correction,
-        "customWords": custom_words,
-        "speakerCount": ocr.speaker_count,
-    }))
-    .map_err(|e| format!("Could not prepare conversion submission: {e}"))?;
-    let response = send_service_request(
-        base_url,
-        Some(token),
-        ServiceRequestPayload {
-            method: "POST".into(),
-            path: "/api/v1/conversions".into(),
-            headers: BTreeMap::from([("idempotency-key".into(), idempotency_key.into())]),
-            body: Some(body),
-        },
-    )
-    .await?;
+    validate_uuid(client_run_id, "clientRunId")?;
+    validate_idempotency_key(idempotency_key)?;
+    let endpoint = endpoint_url(base_url, "/api/v1/conversions")?;
+
+    let source = Path::new(source_path);
+    let metadata = tokio::fs::metadata(source)
+        .await
+        .map_err(|e| format!("Could not open conversion source: {e}"))?;
+    if !metadata.is_file() {
+        return Err("Conversion source must be a regular file".into());
+    }
+    let media_type = crate::media_type(source);
+    let source_part = multipart::Part::file(source)
+        .await
+        .map_err(|e| format!("Could not open conversion source: {e}"))?
+        .mime_str(&media_type)
+        .map_err(|_| "Conversion source media type is invalid".to_string())?;
+    let mut form = multipart::Form::new()
+        .part("source", source_part)
+        .text("clientRunId", client_run_id.to_owned())
+        .text("profile", profile.to_owned());
+    // Absent is the documented default for each, and an older service answers
+    // an unknown field with 422. Only a changed OCR setting sends a part.
+    if !ocr.language_correction {
+        form = form.text("languageCorrection", "false");
+    }
+    if !custom_words.is_empty() {
+        form = form.text("customWords", custom_words);
+    }
+    if let Some(speakers) = ocr.speaker_count {
+        form = form.text("speakerCount", speakers.to_string());
+    }
+
+    let response = http_client()?
+        .post(endpoint)
+        .header("idempotency-key", idempotency_key)
+        .bearer_auth(valid_token(Some(token))?)
+        .multipart(form)
+        .timeout(STREAM_REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(transport_error)?;
+    let response = response_payload(response, Some(token)).await?;
     let envelope: ConversionJobEnvelope = parse_success(response, "submission")?;
     validate_uuid(&envelope.data.id, "conversion id returned by submission")?;
     Ok(envelope.data)
@@ -238,7 +205,7 @@ pub(crate) async fn poll_conversion(
     let response = send_service_request(
         base_url,
         Some(token),
-        get_request(&format!("/api/v1/conversions/{conversion_id}")),
+        &format!("/api/v1/conversions/{conversion_id}"),
     )
     .await?;
     let envelope: ConversionJobEnvelope = parse_success(response, "poll")?;
@@ -258,7 +225,7 @@ pub(crate) fn validate_base_url(base_url: &str) -> Result<(), String> {
 /// The body arrives already redacted from `response_payload`, which is the one
 /// place that scrubs the token.
 fn parse_success<T: for<'de> Deserialize<'de>>(
-    response: ServiceResponsePayload,
+    response: ServiceResponse,
     operation: &str,
 ) -> Result<T, String> {
     if !(200..300).contains(&response.status) {
@@ -276,48 +243,20 @@ fn parse_success<T: for<'de> Deserialize<'de>>(
         .map_err(|_| format!("Conversion service returned an invalid {operation} response"))
 }
 
-fn get_request(path: &str) -> ServiceRequestPayload {
-    ServiceRequestPayload {
-        method: "GET".into(),
-        path: path.into(),
-        headers: BTreeMap::new(),
-        body: None,
-    }
-}
-
-/// Send one bounded, contract-allowlisted request against an explicit service,
-/// so recovery can replay against the server the in-flight row recorded.
-pub(crate) async fn send_service_request(
+/// One bounded GET against an explicit service, so recovery can replay
+/// against the server the in-flight row recorded. A token means bearer auth.
+async fn send_service_request(
     base_url: &str,
     token: Option<&str>,
-    request: ServiceRequestPayload,
-) -> Result<ServiceResponsePayload, String> {
-    let route = classify_route(&request.method, &request.path)?;
-    if route == ContractRoute::DownloadMarkdown {
-        return Err("Markdown artifacts are fetched host-side and cannot cross IPC".into());
+    path: &str,
+) -> Result<ServiceResponse, String> {
+    let mut builder = http_client()?
+        .get(endpoint_url(base_url, path)?)
+        .timeout(SMALL_REQUEST_TIMEOUT);
+    if token.is_some() {
+        builder = builder.bearer_auth(valid_token(token)?);
     }
-
-    let endpoint = endpoint_url(base_url, &request.path)?;
-    let headers = safe_request_headers(&request.headers)?;
-    let client = http_client()?;
-    let response = if route == ContractRoute::CreateConversion {
-        send_conversion(&client, endpoint, token, headers, request.body).await?
-    } else {
-        if request.body.is_some() {
-            return Err("GET conversion-service requests cannot carry a body".into());
-        }
-        let builder = client
-            .request(Method::GET, endpoint)
-            .headers(headers)
-            .timeout(SMALL_REQUEST_TIMEOUT);
-        let builder = if route.requires_authentication() {
-            builder.bearer_auth(valid_token(token)?)
-        } else {
-            builder
-        };
-        builder.send().await.map_err(transport_error)?
-    };
-
+    let response = builder.send().await.map_err(transport_error)?;
     response_payload(response, token).await
 }
 
@@ -465,46 +404,6 @@ fn endpoint_url(base_url: &str, path: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-fn classify_route(method: &str, path: &str) -> Result<ContractRoute, String> {
-    if path.contains(['?', '#']) || !path.starts_with('/') {
-        return Err("Conversion-service paths cannot contain a query or fragment".into());
-    }
-    let method = match method {
-        value if value.eq_ignore_ascii_case("GET") => Method::GET,
-        value if value.eq_ignore_ascii_case("POST") => Method::POST,
-        _ => return Err("Conversion-service method is not allowed".into()),
-    };
-
-    match (method, path) {
-        (Method::GET, "/health/live") => Ok(ContractRoute::Liveness),
-        (Method::GET, "/health/ready") => Ok(ContractRoute::Readiness),
-        (Method::GET, "/api/v1/capabilities") => Ok(ContractRoute::Capabilities),
-        (Method::POST, "/api/v1/conversions") => Ok(ContractRoute::CreateConversion),
-        (Method::GET, dynamic) => classify_conversion_get(dynamic),
-        _ => Err("Conversion-service method/path combination is not allowed".into()),
-    }
-}
-
-fn classify_conversion_get(path: &str) -> Result<ContractRoute, String> {
-    let segments = path.split('/').collect::<Vec<_>>();
-    let (id, tail) = match segments.as_slice() {
-        ["", "api", "v1", "conversions", id] => (*id, &[][..]),
-        ["", "api", "v1", "conversions", id, "artifacts"] => (*id, &["artifacts"][..]),
-        ["", "api", "v1", "conversions", id, "artifacts", artifact] => {
-            (*id, std::slice::from_ref(artifact))
-        }
-        _ => return Err("Conversion-service path is not in the frozen contract".into()),
-    };
-    validate_uuid(id, "conversion id")?;
-    match tail {
-        [] => Ok(ContractRoute::GetConversion),
-        ["artifacts"] => Ok(ContractRoute::ListArtifacts),
-        ["manifest"] => Ok(ContractRoute::DownloadManifest),
-        ["markdown"] => Ok(ContractRoute::DownloadMarkdown),
-        _ => Err("Conversion-service artifact path is not allowed".into()),
-    }
-}
-
 pub(crate) fn validate_uuid(value: &str, label: &str) -> Result<(), String> {
     // Length 36 admits the hyphenated form alone.
     if value.len() == 36 && uuid::Uuid::try_parse(value).is_ok() {
@@ -512,95 +411,6 @@ pub(crate) fn validate_uuid(value: &str, label: &str) -> Result<(), String> {
     } else {
         Err(format!("Invalid {label}"))
     }
-}
-
-fn safe_request_headers(input: &BTreeMap<String, String>) -> Result<HeaderMap, String> {
-    let mut output = HeaderMap::new();
-    for (name, value) in input {
-        let lower = name.to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            "authorization" | "host" | "proxy-authorization"
-        ) {
-            return Err(format!("Caller cannot override the {name} header"));
-        }
-        if !matches!(lower.as_str(), "accept" | "idempotency-key") {
-            continue;
-        }
-
-        let name = HeaderName::from_bytes(lower.as_bytes())
-            .map_err(|_| "Request contains an invalid header name".to_string())?;
-        let value = HeaderValue::from_str(value)
-            .map_err(|_| "Request contains an invalid header value".to_string())?;
-        if output.insert(name, value).is_some() {
-            return Err("Request contains duplicate case-insensitive headers".into());
-        }
-    }
-    Ok(output)
-}
-
-async fn send_conversion(
-    client: &Client,
-    endpoint: Url,
-    token: Option<&str>,
-    headers: HeaderMap,
-    body: Option<String>,
-) -> Result<Response, String> {
-    let body = body.ok_or_else(|| "Conversion submission body is required".to_string())?;
-    let submission: ConversionSubmission = serde_json::from_str(&body)
-        .map_err(|_| "Conversion submission body is invalid".to_string())?;
-    validate_uuid(&submission.client_run_id, "clientRunId")?;
-    if !matches!(
-        submission.profile.as_str(),
-        "standard" | "local_only" | "best_quality"
-    ) {
-        return Err("Conversion profile is not in the frozen contract".into());
-    }
-
-    let idempotency = headers
-        .get("idempotency-key")
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| "Idempotency-Key is required for conversion submission".to_string())?;
-    validate_idempotency_key(idempotency)?;
-
-    let source = Path::new(&submission.source);
-    let metadata = tokio::fs::metadata(source)
-        .await
-        .map_err(|e| format!("Could not open conversion source: {e}"))?;
-    if !metadata.is_file() {
-        return Err("Conversion source must be a regular file".into());
-    }
-    let media_type = crate::media_type(source);
-    let source_part = multipart::Part::file(source)
-        .await
-        .map_err(|e| format!("Could not open conversion source: {e}"))?
-        .mime_str(&media_type)
-        .map_err(|_| "Conversion source media type is invalid".to_string())?;
-    let mut form = multipart::Form::new()
-        .part("source", source_part)
-        .text("clientRunId", submission.client_run_id)
-        .text("profile", submission.profile);
-    // Absent is the documented default for both, and an older service answers
-    // an unknown field with 422. Only a changed OCR setting sends a part.
-    if !submission.language_correction {
-        form = form.text("languageCorrection", "false");
-    }
-    if !submission.custom_words.is_empty() {
-        form = form.text("customWords", submission.custom_words);
-    }
-    if let Some(speakers) = submission.speaker_count {
-        form = form.text("speakerCount", speakers.to_string());
-    }
-
-    client
-        .post(endpoint)
-        .headers(headers)
-        .bearer_auth(valid_token(token)?)
-        .multipart(form)
-        .timeout(STREAM_REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(transport_error)
 }
 
 fn validate_idempotency_key(value: &str) -> Result<(), String> {
@@ -618,41 +428,15 @@ fn validate_idempotency_key(value: &str) -> Result<(), String> {
 async fn response_payload(
     mut response: Response,
     token: Option<&str>,
-) -> Result<ServiceResponsePayload, String> {
+) -> Result<ServiceResponse, String> {
     let status = response.status().as_u16();
-    let headers = response_headers(response.headers(), token);
     let bytes = read_bounded_body(&mut response, GENERIC_BODY_LIMIT).await?;
     let body = String::from_utf8(bytes)
         .map_err(|_| "Conversion service returned a non-text response".to_string())?;
-    let body = redact_token(&body, token);
-    Ok(ServiceResponsePayload {
+    Ok(ServiceResponse {
         status,
-        headers,
-        body,
+        body: redact_token(&body, token),
     })
-}
-
-fn response_headers(headers: &HeaderMap, token: Option<&str>) -> BTreeMap<String, String> {
-    headers
-        .iter()
-        .filter(|(name, _)| {
-            matches!(
-                name.as_str(),
-                "content-type"
-                    | "x-request-id"
-                    | "location"
-                    | "retry-after"
-                    | "idempotency-replayed"
-                    | "etag"
-            )
-        })
-        .filter_map(|(name, value)| {
-            value
-                .to_str()
-                .ok()
-                .map(|value| (name.as_str().to_string(), redact_token(value, token)))
-        })
-        .collect()
 }
 
 fn redact_token(value: &str, token: Option<&str>) -> String {
@@ -668,14 +452,14 @@ async fn read_bounded_body(response: &mut Response, limit: usize) -> Result<Vec<
         .is_some_and(|length| length > limit as u64)
     {
         return Err(format!(
-            "Conversion-service response exceeds the {limit}-byte IPC limit"
+            "Conversion-service response exceeds the {limit}-byte host limit"
         ));
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
         if bytes.len().saturating_add(chunk.len()) > limit {
             return Err(format!(
-                "Conversion-service response exceeds the {limit}-byte IPC limit"
+                "Conversion-service response exceeds the {limit}-byte host limit"
             ));
         }
         bytes.extend_from_slice(&chunk);
@@ -709,7 +493,6 @@ fn transport_error(error: reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::header::{AUTHORIZATION, HOST};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
@@ -720,9 +503,8 @@ mod tests {
     /// as its JSON envelope.
     #[test]
     fn a_refusal_reads_as_the_services_message() {
-        let refused = ServiceResponsePayload {
+        let refused = ServiceResponse {
             status: 413,
-            headers: BTreeMap::new(),
             body: r#"{"error":{"code":"upload_too_large","message":"The upload exceeds the configured limit.","requestId":"r","details":[]}}"#.into(),
         };
         let error = parse_success::<ConversionJobEnvelope>(refused, "submission").unwrap_err();
@@ -858,22 +640,6 @@ mod tests {
     }
 
     #[test]
-    fn only_frozen_method_and_path_pairs_are_allowed() {
-        assert_eq!(
-            classify_route("GET", "/api/v1/capabilities").unwrap(),
-            ContractRoute::Capabilities
-        );
-        assert_eq!(
-            classify_route("get", &format!("/api/v1/conversions/{UUID}")).unwrap(),
-            ContractRoute::GetConversion
-        );
-        assert!(classify_route("DELETE", "/api/v1/conversions").is_err());
-        assert!(classify_route("GET", "/api/v1/private").is_err());
-        assert!(classify_route("GET", "/health/live?redirect=https://example.com").is_err());
-        assert!(classify_route("GET", "/api/v1/conversions/not-a-uuid").is_err());
-    }
-
-    #[test]
     fn a_uuid_must_be_hyphenated() {
         assert!(validate_uuid(UUID, "id").is_ok());
         assert!(validate_uuid("ABCDEF01-2345-4789-8abc-DEF012345678", "id").is_ok());
@@ -890,70 +656,9 @@ mod tests {
         assert!(endpoint_url("https://converter.local/prefix", "/health/live").is_err());
     }
 
+    /// A service that echoes the token cannot put it in a job row.
     #[tokio::test]
-    async fn generic_request_filters_headers_and_preserves_non_success_body() {
-        let server = mock_server(MockResponse {
-            status: "418 I'm a teapot",
-            content_type: "application/json",
-            body: br#"{"error":{"code":"teapot"}}"#.to_vec(),
-            declared_length: None,
-            split_body: false,
-            chunked: false,
-        })
-        .await;
-        let mut headers = BTreeMap::new();
-        headers.insert("Accept".into(), "application/json".into());
-        headers.insert("X-Drop-Me".into(), "not-contract-metadata".into());
-        let response = send_service_request(
-            &server.base_url,
-            None,
-            ServiceRequestPayload {
-                headers,
-                ..get_request("/api/v1/capabilities")
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status, 418);
-        assert_eq!(response.body, r#"{"error":{"code":"teapot"}}"#);
-        assert_eq!(
-            response.headers.get("content-type").map(String::as_str),
-            Some("application/json")
-        );
-        assert!(!response.headers.contains_key("x-wire-case"));
-
-        let request = String::from_utf8(server.request.await.unwrap()).unwrap();
-        let lower = request.to_ascii_lowercase();
-        assert!(request.starts_with("GET /api/v1/capabilities HTTP/1.1\r\n"));
-        assert!(!lower.contains("authorization:"));
-        assert!(lower.contains("accept: application/json\r\n"));
-        assert!(!lower.contains("x-drop-me"));
-        server.task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn caller_cannot_override_host_or_authorization() {
-        for forbidden in [AUTHORIZATION.as_str(), HOST.as_str(), "Proxy-Authorization"] {
-            let mut request = get_request("/api/v1/capabilities");
-            request.headers.insert(forbidden.into(), "attacker".into());
-            let error = send_service_request("http://127.0.0.1:9", Some("real-token"), request)
-                .await
-                .unwrap_err();
-            assert!(error.contains("cannot override"));
-        }
-
-        let error = send_service_request(
-            "http://127.0.0.1:9",
-            None,
-            get_request(&format!("/api/v1/conversions/{UUID}")),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("token is not configured"));
-    }
-
-    #[tokio::test]
-    async fn authenticated_response_cannot_echo_the_keychain_token_to_ipc() {
+    async fn an_error_body_cannot_echo_the_token() {
         let server = mock_server(MockResponse {
             status: "400 Bad Request",
             content_type: "application/json",
@@ -963,16 +668,12 @@ mod tests {
             chunked: false,
         })
         .await;
-        let response = send_service_request(
-            &server.base_url,
-            Some("private-token"),
-            get_request(&format!("/api/v1/conversions/{UUID}")),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status, 400);
-        assert!(!response.body.contains("private-token"));
-        assert!(response.body.contains("[REDACTED]"));
+        let error = poll_conversion(&server.base_url, "private-token", UUID)
+            .await
+            .unwrap_err();
+        assert!(error.contains("HTTP 400"), "{error}");
+        assert!(!error.contains("private-token"));
+        assert!(error.contains("[REDACTED]"));
         let _ = server.request.await.unwrap();
         server.task.await.unwrap();
     }
@@ -987,37 +688,30 @@ mod tests {
         let server = mock_server(MockResponse {
             status: "202 Accepted",
             content_type: "application/json",
-            body: br#"{"data":{"id":"accepted"}}"#.to_vec(),
+            body: format!(r#"{{"data":{{"id":"{UUID}","status":"queued","warnings":[]}}}}"#)
+                .into_bytes(),
             declared_length: None,
             split_body: false,
             chunked: false,
         })
         .await;
-        let mut headers = BTreeMap::new();
-        headers.insert("Idempotency-Key".into(), "stable-key_1".into());
-        headers.insert("Content-Type".into(), "application/json".into());
-        let response = send_service_request(
+        let ocr = OcrOptions {
+            language_correction: false,
+            custom_words: vec!["Uniwise".into(), "Tool-Kit".into()],
+            speaker_count: None,
+        };
+        let job = submit_conversion(
             &server.base_url,
-            Some("upload-token"),
-            ServiceRequestPayload {
-                method: "POST".into(),
-                path: "/api/v1/conversions".into(),
-                headers,
-                body: Some(
-                    serde_json::json!({
-                        "source": source,
-                        "clientRunId": UUID,
-                        "profile": "standard",
-                        "languageCorrection": false,
-                        "customWords": "Uniwise\nTool-Kit"
-                    })
-                    .to_string(),
-                ),
-            },
+            "upload-token",
+            &source.to_string_lossy(),
+            UUID,
+            "standard",
+            &ocr,
+            "stable-key_1",
         )
         .await
         .unwrap();
-        assert_eq!(response.status, 202);
+        assert_eq!(job.id, UUID);
 
         let request = String::from_utf8_lossy(&server.request.await.unwrap()).into_owned();
         let lower = request.to_ascii_lowercase();
@@ -1056,7 +750,9 @@ mod tests {
             parsed.input_formats,
             ["application/pdf", "application/epub+zip"]
         );
-        let _ = capabilities.request.await.unwrap();
+        let request = String::from_utf8(capabilities.request.await.unwrap()).unwrap();
+        assert!(request.starts_with("GET /api/v1/capabilities HTTP/1.1\r\n"));
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
         capabilities.task.await.unwrap();
 
         let poll = mock_server(MockResponse {
@@ -1076,9 +772,6 @@ mod tests {
             .unwrap();
         assert_eq!(parsed.status, "paused_by_future_backend");
         assert_eq!(parsed.warnings, ["still safe"]);
-        let route = parsed.route.unwrap();
-        assert_eq!(route.kind, "future_engine");
-        assert_eq!(route.reason_codes, ["future_reason"]);
         let request = String::from_utf8(poll.request.await.unwrap()).unwrap();
         assert!(request.starts_with(&format!("GET /api/v1/conversions/{UUID} HTTP/1.1\r\n")));
         poll.task.await.unwrap();
@@ -1185,7 +878,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(job.id, UUID);
-        assert_eq!(job.route.unwrap().reason_codes, ["pdf_supported"]);
         let request = String::from_utf8_lossy(&server.request.await.unwrap()).into_owned();
         assert!(request
             .to_ascii_lowercase()
@@ -1256,13 +948,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_request_refuses_markdown_and_caps_other_bodies() {
-        let markdown = format!("/api/v1/conversions/{UUID}/artifacts/markdown");
-        let error = send_service_request("http://127.0.0.1:9", None, get_request(&markdown))
-            .await
-            .unwrap_err();
-        assert!(error.contains("cannot cross IPC"));
-
+    async fn an_oversized_response_body_is_refused() {
         let server = mock_server(MockResponse {
             status: "200 OK",
             content_type: "application/json",
@@ -1272,11 +958,8 @@ mod tests {
             chunked: false,
         })
         .await;
-        let error =
-            send_service_request(&server.base_url, None, get_request("/api/v1/capabilities"))
-                .await
-                .unwrap_err();
-        assert!(error.contains("IPC limit"));
+        let error = fetch_capabilities(&server.base_url).await.unwrap_err();
+        assert!(error.contains("host limit"), "{error}");
         let _ = server.request.await.unwrap();
         server.task.await.unwrap();
     }

@@ -1,12 +1,11 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Serialize;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::fs::File;
 use uuid::Uuid;
 
 use super::service::{ARTIFACT_INTEGRITY_CODE, ARTIFACT_INTEGRITY_MESSAGE};
-use super::{ArtifactKind, ConversionProfile, JobStatus};
-use crate::persistence::{StoredArtifact, StoredConversion};
+use super::JobStatus;
+use crate::persistence::StoredConversion;
 
 /// One advertised upload format: the accepted extension, the canonical media
 /// type stored with the source, the container signature the upload path
@@ -23,8 +22,7 @@ pub(crate) struct SourceFormat {
     pub media_type: &'static str,
     pub magic: ContainerMagic,
     pub engine: LocalEngineKind,
-    /// The family label AnyDoc reports in its diagnostics; used to check
-    /// manifest consistency for AnyDoc jobs. No other engine reads it.
+    /// The family label AnyDoc parses this format as. No other engine reads it.
     pub format_label: &'static str,
 }
 
@@ -386,7 +384,6 @@ pub struct JobView {
     pub id: Uuid,
     pub active_attempt_id: Uuid,
     pub client_run_id: Uuid,
-    pub profile: ConversionProfile,
     pub status: JobStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route: Option<RouteView>,
@@ -403,7 +400,6 @@ impl JobView {
             id: job.id,
             active_attempt_id: job.active_attempt.id,
             client_run_id: job.client_run_id,
-            profile: job.profile,
             status: job.state,
             route: job.route.as_ref().map(|kind| RouteView {
                 kind: kind.clone(),
@@ -457,72 +453,6 @@ pub struct ArtifactRecord {
     pub media_type: String,
     pub byte_length: u64,
     pub sha256: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ArtifactView {
-    pub kind: ArtifactKind,
-    pub attempt_id: Uuid,
-    pub media_type: String,
-    pub byte_length: u64,
-    pub sha256: String,
-    pub href: String,
-}
-
-impl ArtifactView {
-    pub fn from_stored(job_id: Uuid, artifact: &StoredArtifact) -> Self {
-        let kind = artifact.kind;
-        Self {
-            kind,
-            attempt_id: artifact.attempt_id,
-            media_type: artifact.media_type.clone(),
-            byte_length: artifact.byte_length,
-            sha256: artifact.sha256.clone(),
-            href: format!("/api/v1/conversions/{job_id}/artifacts/{}", kind.as_str()),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct ConversionManifest {
-    pub(crate) schema_version: u32,
-    pub(crate) job_id: Uuid,
-    pub(crate) attempt_id: Uuid,
-    pub(crate) client_run_id: Uuid,
-    pub(crate) profile: ConversionProfile,
-    pub(crate) source: ManifestSource,
-    pub(crate) engine: ManifestEngine,
-    pub(crate) route: ManifestRoute,
-    pub(crate) document: Value,
-    pub(crate) warnings: Vec<String>,
-    pub(crate) output: ManifestSource,
-    pub(crate) started_at: String,
-    pub(crate) completed_at: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct ManifestSource {
-    pub(crate) media_type: String,
-    pub(crate) byte_length: u64,
-    pub(crate) sha256: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ManifestEngine {
-    pub(crate) name: String,
-    pub(crate) version: String,
-    pub(crate) features: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct ManifestRoute {
-    pub(crate) kind: String,
-    pub(crate) reason_codes: Vec<String>,
 }
 
 pub fn now() -> String {
@@ -607,7 +537,7 @@ mod tests {
     /// constraint error instead of a clean 415, so pin them together.
     #[test]
     fn advertised_media_types_match_the_migration_check() {
-        let sql = include_str!("../../migrations/0005_audio_source_formats.sql");
+        let sql = include_str!("../../migrations/0007_drop_manifest_and_needs_remote.sql");
         let check = sql
             .split_once("source_media_type     TEXT NOT NULL")
             .expect("the conversions CHECK must exist")
@@ -627,25 +557,6 @@ mod tests {
             advertised_media_types().len(),
             "the migration CHECK lists media types the admission table does not"
         );
-    }
-
-    /// The upload contract and the admission table are the same list. When
-    /// they drifted, OpenAPI advertised 8 media types while the service
-    /// accepted 18.
-    #[test]
-    fn advertised_media_types_match_the_openapi_upload_contract() {
-        let spec = include_str!("../../../../contract/http/openapi.yaml");
-        let declared = spec
-            .split_once(
-                "            encoding:\n              source:\n                contentType: ",
-            )
-            .expect("the multipart source encoding must exist")
-            .1
-            .split_once('\n')
-            .expect("the contentType line must end")
-            .0;
-        let declared: Vec<&str> = declared.split(", ").map(str::trim).collect();
-        assert_eq!(declared, advertised_media_types());
     }
 
     #[test]

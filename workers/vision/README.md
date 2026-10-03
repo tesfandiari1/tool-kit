@@ -1,24 +1,20 @@
-# Vision worker and tools
+# Vision worker
 
 `main.swift` is `tool-kit-vision-worker`, the converter's Vision engine. It
 reads an image or a scanned PDF into Markdown, and describes DOCX and PPTX
 pictures through `--describe`. Its wire contract is
 `crates/worker-protocol/src/vision.rs`, and `pnpm sidecars` builds and stages it.
 
-`tk-vision` and `pdf2png` are development tools for judging Apple Vision's
-output on real documents. Nothing in the converter calls them.
+`pdf2png` rasterizes a PDF into a realistic scan. The `vision_worker` tests
+use it to build their scan fixture.
 
 `swiftc` ships with the Command Line Tools, so there is no Xcode, no SwiftPM,
 no dependency, and no lockfile. `bin/` is gitignored.
 
 ```bash
 ./build.sh
-bin/tk-vision <file.pdf|file.png> [--flat] [--page N] [--dpi N] [--fast]
 bin/pdf2png <in.pdf> <out.png> [dpi]     # make a realistic scan out of a text PDF
 ```
-
-`--flat` prints `document.text.transcript`, the ungrouped baseline, so the
-structured output can be judged against what plain OCR would have given.
 
 ## What the first measurements found
 
@@ -43,11 +39,6 @@ grid. A real table has content in most of its columns and survives untouched.
 `evenly_spaced_lines_publish_as_prose_rather_than_a_false_table` in
 `apps/converter/tests/vision_worker.rs` pins it. Nothing answers the under-reaching
 half, so a form still arrives as loose fields.
-
-**`render.swift` is compiled into both binaries** so the preview tool cannot
-drift from what the worker publishes. It drifted once already: the false-table
-guard landed in the worker while `tk-vision` kept its own copy and went on
-printing the table the worker had stopped emitting.
 
 **The collections overlap.** `title`, `paragraphs`, `lists`, and `tables` each
 report the same text, so a renderer that walks all four prints every sentence

@@ -75,16 +75,6 @@ __pycache__/
 *.cer
 *.mobileprovision
 
-# Schemathesis writes an example database beside the working directory when
-# it is not told otherwise. contract-fuzz.sh keeps it in memory; this covers a
-# hand-run `st`.
-.schemathesis/
-
-# Hypothesis writes its own nested .gitignore holding a bare `*`, so the
-# directory hides itself. That is the tool's choice, not ours, and it vanishes
-# if the tool changes its mind. Name it here so the root list is the answer.
-.hypothesis/
-
 # Local model weights and the MLX build surface. Weights are derived: they are
 # fetched from a pinned revision in the model registry and verified by hash, so
 # deleting them costs a download and never content. They are also gigabytes,

@@ -2,7 +2,6 @@ mod backend_host;
 mod conversion_service;
 mod history;
 mod jobs;
-mod secrets;
 mod settings;
 mod tree;
 mod workspace;
@@ -14,32 +13,6 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use jobs::{Job, JobManager, JobType};
 use settings::Settings;
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SecretStatus {
-    backend: bool,
-}
-
-#[tauri::command]
-fn secret_status() -> SecretStatus {
-    SecretStatus {
-        backend: secrets::has_key("backend"),
-    }
-}
-
-#[tauri::command]
-fn set_secret(app: AppHandle, provider: String, value: String) -> Result<(), String> {
-    match provider.as_str() {
-        // The child validates against the token `ensure_token` mints at
-        // launch, and nothing re-mints. Writing it here 401s every conversion.
-        "backend" if backend_host::app_owns_backend(app) => Err(
-            "Tool-Kit mints the backend token itself while it runs the conversion service".into(),
-        ),
-        "backend" => secrets::set_key(&provider, value.trim()),
-        _ => Err("Unknown provider".into()),
-    }
-}
 
 #[tauri::command]
 fn get_settings(app: AppHandle) -> Settings {
@@ -634,13 +607,9 @@ async fn run_pipeline(
         ));
     }
 
-    // Read once for the run, or a half-written override splits it across two
-    // recorded origins.
-    let mut ledger_origin = String::new();
     if !files.is_empty() {
-        // Through the accessor: Sidecar mode mints this token itself.
+        // Through the accessor: the host mints this token itself.
         backend_host::backend_token(&app)?;
-        ledger_origin = backend_host::ledger_origin(&backend_host::deployment(&app)?).to_string();
     }
 
     // A dropped folder's results nest, and the nest may not exist yet. A
@@ -691,7 +660,7 @@ async fn run_pipeline(
                 source_path: &source_path,
                 file_name: &file_name,
                 output_dir: &output_dir,
-                backend_url: &ledger_origin,
+                backend_url: backend_host::SIDECAR_ALIAS,
                 client_run_id: &client_run_id,
                 idempotency_key: &idempotency_key,
                 conversion_profile: settings::ConversionProfile::LocalOnly.id(),
@@ -1003,15 +972,10 @@ async fn convert_one(
             "Nothing here converts this file.",
         ));
     }
-    // Through the accessor: Sidecar mode mints this token itself.
+    // Through the accessor: the host mints this token itself.
     if let Err(error) = backend_host::backend_token(&app) {
         return Ok(ConvertOneOutcome::blocked("backend_unavailable", error));
     }
-    let deployment = match backend_host::deployment(&app) {
-        Ok(deployment) => deployment,
-        Err(error) => return Ok(ConvertOneOutcome::blocked("backend_unavailable", error)),
-    };
-    let ledger_origin = backend_host::ledger_origin(&deployment).to_string();
 
     // The preflight carries a round trip, so the refusal at the top is stale.
     if !queue_is_free(&state, generation) {
@@ -1062,7 +1026,7 @@ async fn convert_one(
             source_path: &source_path,
             file_name: &file_name,
             output_dir: &output_dir,
-            backend_url: &ledger_origin,
+            backend_url: backend_host::SIDECAR_ALIAS,
             client_run_id: &client_run_id,
             idempotency_key: &idempotency_key,
             conversion_profile: settings::ConversionProfile::LocalOnly.id(),
@@ -1344,8 +1308,6 @@ pub fn run() {
         .manage(JobManager::default())
         .manage(backend_host::BackendHost::new())
         .invoke_handler(tauri::generate_handler![
-            secret_status,
-            set_secret,
             get_settings,
             save_settings,
             list_jobs,
@@ -1372,20 +1334,11 @@ pub fn run() {
             create_project,
             list_project_files,
             changed_project_dirs,
-            conversion_service::service_request,
-            backend_host::app_owns_backend
+            conversion_service::conversion_capabilities
         ])
         .setup(|app| {
             // Opened once. A database that cannot open degrades to no history.
             app.manage(history::init(app.handle()));
-            // Manual only. Sidecar mode has no port yet, and the resume path
-            // fails a job on one refused connection.
-            if matches!(
-                backend_host::deployment(app.handle()),
-                Ok(backend_host::Deployment::Manual { .. })
-            ) {
-                jobs::recover_in_flight(app.handle().clone());
-            }
             // Nothing waits on this: the window opens whether or not it starts.
             backend_host::start(app.handle());
 

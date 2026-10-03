@@ -132,8 +132,6 @@ pub struct Job {
     pub output_path: Option<String>,
     pub error: Option<String>,
     /// Stringly typed, so a new backend value cannot break an older desktop.
-    pub route: Option<String>,
-    pub reason_codes: Vec<String>,
     pub warnings: Vec<String>,
     pub failure: Option<ConversionFailure>,
     /// When this job left the queue, so the elapsed timer excludes the wait.
@@ -159,8 +157,6 @@ impl Job {
             progress_note: "Queued".into(),
             output_path: None,
             error: None,
-            route: None,
-            reason_codes: Vec::new(),
             warnings: Vec::new(),
             failure: None,
             started_at: None,
@@ -373,21 +369,10 @@ fn set_status(app: &AppHandle, id: u64, generation: u64, status: &str, note: &st
 /// Same emit rule as `set_status`: the poll repeats one view until it moves.
 fn apply_backend_view(app: &AppHandle, id: u64, generation: u64, view: &ConversionJob) -> bool {
     let manager = app.state::<JobManager>();
-    let kind = view.route.as_ref().map(|route| route.kind.clone());
-    let reason_codes = view
-        .route
-        .as_ref()
-        .map(|route| route.reason_codes.clone())
-        .unwrap_or_default();
     let mut changed = false;
     let Some(updated) = manager.update_if_generation(id, generation, |job| {
-        changed = job.route != kind
-            || job.reason_codes != reason_codes
-            || job.warnings != view.warnings
-            || job.failure != view.failure;
+        changed = job.warnings != view.warnings || job.failure != view.failure;
         if changed {
-            job.route = kind;
-            job.reason_codes = reason_codes;
             job.warnings = view.warnings.clone();
             job.failure = view.failure.clone();
         }
@@ -558,21 +543,22 @@ enum BackendAction {
     Pending(&'static str),
     Succeeded,
     Failed(String),
-    NeedsRemote,
 }
 
 /// An allowlist: a status a newer backend adds stays pending, not terminal.
-fn backend_action(view: &ConversionJob) -> BackendAction {
+fn backend_action(view: &ConversionJob, job_type: JobType) -> BackendAction {
     match view.status.as_str() {
         "succeeded" => BackendAction::Succeeded,
         "failed" => {
             let message = view.failure.as_ref().map_or_else(
                 || "Conversion failed without details".to_string(),
-                |failure| format!("{}: {}", failure.code, failure.message),
+                |failure| {
+                    gave_up_message(job_type, &failure.code)
+                        .unwrap_or_else(|| format!("{}: {}", failure.code, failure.message))
+                },
             );
             BackendAction::Failed(message)
         }
-        "needs_remote" => BackendAction::NeedsRemote,
         "queued" => BackendAction::Pending("Queued by conversion service…"),
         "converting_local" => BackendAction::Pending("Converting locally…"),
         "finalizing" => BackendAction::Pending("Finalizing…"),
@@ -580,24 +566,24 @@ fn backend_action(view: &ConversionJob) -> BackendAction {
     }
 }
 
-/// A `needs_remote` view carries one engine reason code. Name it in plain words.
-fn local_only_failure(view: &ConversionJob) -> String {
-    let code = view
-        .route
-        .as_ref()
-        .and_then(|route| route.reason_codes.first())
-        .map_or("", String::as_str);
+/// An engine that gave up fails with its reason as the code. Name it in plain
+/// words, since nothing leaves the Mac to try again.
+fn gave_up_message(job_type: JobType, code: &str) -> Option<String> {
     let reason = match code {
-        "" => return "This file could not be converted on this Mac.".into(),
         "mixed_pdf" => "some pages are scanned images",
         "image_based_pdf" | "scanned_pdf" => "every page is a scanned image",
         "ocr_required" => "the text layer is missing or unreadable",
         "garbled_text" => "the text layer is garbled",
         "local_quality_failed" => "no readable text was found",
         "output_too_large" => "the result was too large",
-        other => other,
+        _ => return None,
     };
-    format!("This file could not be converted on this Mac because {reason}.")
+    Some(match job_type {
+        JobType::Transcribe => "This recording could not be transcribed on this Mac.".into(),
+        JobType::Convert => {
+            format!("This file could not be converted on this Mac because {reason}.")
+        }
+    })
 }
 
 async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
@@ -741,7 +727,7 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         if !apply_backend_view(&app, id, generation, &view) {
             return;
         }
-        match backend_action(&view) {
+        match backend_action(&view, job.job_type) {
             BackendAction::Succeeded => {
                 if !set_status(&app, id, generation, "processing", "Saving Markdown…") {
                     return;
@@ -766,18 +752,6 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                 return;
             }
             BackendAction::Failed(error) => {
-                fail(&app, id, generation, &error);
-                return;
-            }
-            // Nothing leaves the Mac, so the service's refusal is the answer.
-            BackendAction::NeedsRemote => {
-                let error = match job.job_type {
-                    // The service never sends this for audio.
-                    JobType::Transcribe => {
-                        "This recording could not be transcribed on this Mac.".to_string()
-                    }
-                    JobType::Convert => local_only_failure(&view),
-                };
                 fail(&app, id, generation, &error);
                 return;
             }
@@ -859,9 +833,6 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
     let Some(backend) = job.backend else {
         return;
     };
-    let Ok(deployment) = backend_host::deployment(app) else {
-        return;
-    };
     let ocr_custom_words = backend.ocr.custom_words_wire();
     if !history::upsert_in_flight(
         app,
@@ -869,7 +840,7 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
             source_path: &job.source_path,
             file_name: &job.file_name,
             output_dir: &job.output_dir,
-            backend_url: backend_host::ledger_origin(&deployment),
+            backend_url: backend_host::SIDECAR_ALIAS,
             client_run_id: &backend.client_run_id,
             idempotency_key: &backend.idempotency_key,
             conversion_profile: backend.profile.id(),
@@ -913,7 +884,7 @@ const REMOTE_REMOVED: &str =
     "Remote conversion was removed. Run this file again to convert it locally.";
 
 /// `live` is the origin the resumed requests go to, not what the row records:
-/// in Sidecar mode the ledger holds an alias, and an alias is not a URL.
+/// the ledger holds an alias, and an alias is not a URL.
 fn validate_recovery_entry(
     entry: &history::InFlightEntry,
     live: &str,
@@ -939,16 +910,15 @@ fn validate_recovery_entry(
         .ok_or_else(|| "Cannot recover conversion with an unknown profile".into())
 }
 
-/// The keychain holds one backend token, so it fits a recovered row only while
-/// the configured origin still matches the row's. Both sides go through
-/// `backend_host::ledger_origin`, so in Sidecar mode both are the alias.
-fn recovery_origin_still_configured(entry: &history::InFlightEntry, configured: &str) -> bool {
-    entry.backend_url.trim_end_matches('/') == configured.trim_end_matches('/')
+/// The sidecar holds only rows recorded under its alias. A URL is a row an
+/// older build sent to a Docker service, which this token never reaches.
+fn recorded_by_the_sidecar(entry: &history::InFlightEntry) -> bool {
+    entry.backend_url == backend_host::SIDECAR_ALIAS
 }
 
 /// Recreate durable backend rows after startup. Invalid origins and changed
-/// sources stay visible and stopped, with their durable rows removed. In
-/// Sidecar mode this runs on the first service that answers.
+/// sources stay visible and stopped, with their durable rows removed. This
+/// runs on the first service that answers.
 pub(crate) fn recover_in_flight(app: AppHandle) {
     let Some(entries) = history::list_in_flight(&app) else {
         return;
@@ -963,14 +933,10 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
     };
 
     let manager = app.state::<JobManager>();
-    let Ok(deployment) = backend_host::deployment(&app) else {
-        return;
-    };
-    let configured_origin = backend_host::ledger_origin(&deployment).to_string();
     let generation = manager.generation();
     for entry in entries {
         let validation = validate_recovery_entry(&entry, &live_origin).and_then(|profile| {
-            if recovery_origin_still_configured(&entry, &configured_origin) {
+            if recorded_by_the_sidecar(&entry) {
                 Ok(profile)
             } else {
                 Err(
@@ -1047,34 +1013,39 @@ mod backend_tests {
         ConversionJob {
             id: "11111111-1111-4111-8111-111111111111".into(),
             status: status.into(),
-            route: None,
             warnings: Vec::new(),
             failure: None,
         }
     }
 
     #[test]
-    fn local_only_failure_names_the_reason() {
-        let mut needs_remote = view("needs_remote");
-        needs_remote.route = Some(conversion_service::ConversionRoute {
-            kind: "local_pdf".into(),
-            reason_codes: vec!["mixed_pdf".into()],
+    fn an_engine_that_gave_up_fails_in_plain_words() {
+        let mut gave_up = view("failed");
+        gave_up.failure = Some(ConversionFailure {
+            code: "mixed_pdf".into(),
+            message: "The PDF has scanned pages".into(),
         });
         assert_eq!(
-            local_only_failure(&needs_remote),
-            "This file could not be converted on this Mac because some pages are scanned images."
+            backend_action(&gave_up, JobType::Convert),
+            BackendAction::Failed(
+                "This file could not be converted on this Mac because some pages are scanned images."
+                    .into()
+            )
+        );
+        assert_eq!(
+            backend_action(&gave_up, JobType::Transcribe),
+            BackendAction::Failed("This recording could not be transcribed on this Mac.".into())
         );
     }
 
     #[test]
     fn only_known_backend_terminal_statuses_are_terminal() {
-        assert_eq!(backend_action(&view("succeeded")), BackendAction::Succeeded);
         assert_eq!(
-            backend_action(&view("needs_remote")),
-            BackendAction::NeedsRemote
+            backend_action(&view("succeeded"), JobType::Convert),
+            BackendAction::Succeeded
         );
         assert!(matches!(
-            backend_action(&view("paused_by_future_backend")),
+            backend_action(&view("paused_by_future_backend"), JobType::Convert),
             BackendAction::Pending("Processing…")
         ));
 
@@ -1084,7 +1055,7 @@ mod backend_tests {
             message: "Document cannot be converted".into(),
         });
         assert_eq!(
-            backend_action(&failed),
+            backend_action(&failed, JobType::Convert),
             BackendAction::Failed("bad_document: Document cannot be converted".into())
         );
     }
@@ -1247,15 +1218,6 @@ mod backend_tests {
         entry.source_mtime = source_mtime;
         let live = "http://127.0.0.1:8080";
         assert!(validate_recovery_entry(&entry, live).is_ok());
-        // One slot, one token: a replaced origin must not get the new one.
-        assert!(recovery_origin_still_configured(
-            &entry,
-            "http://127.0.0.1:8080/"
-        ));
-        assert!(!recovery_origin_still_configured(
-            &entry,
-            "http://other.host:8080"
-        ));
 
         entry.backend_job_id = Some("not-a-uuid".into());
         assert!(validate_recovery_entry(&entry, live)
@@ -1280,38 +1242,16 @@ mod backend_tests {
             .contains("source changed or is missing"));
     }
 
-    /// A different port every launch, so comparing live URLs abandons every row.
+    /// A different port every launch, so the ledger records the alias. A row an
+    /// older build sent to a Docker service names a URL the sidecar never saw.
     #[test]
-    fn a_sidecar_row_survives_the_port_the_next_launch_is_given() {
-        // A property of the type now. An arm reaching for a live URL fails here.
-        let recorded = backend_host::ledger_origin(&backend_host::Deployment::Sidecar);
-        assert_eq!(recorded, backend_host::SIDECAR_ALIAS);
-        let entry = ledger_entry(recorded);
-
-        let now = backend_host::ledger_origin(&backend_host::Deployment::Sidecar);
-
-        assert!(recovery_origin_still_configured(&entry, now));
-    }
-
-    /// Manual mode names the service, so a row bound to one the user moved away
-    /// from must not be handed the current token.
-    #[test]
-    fn a_manual_row_still_refuses_a_service_the_user_replaced() {
-        let manual = |url: &str| backend_host::Deployment::Manual {
-            origin: url.to_string(),
-        };
-        let entry = ledger_entry(backend_host::ledger_origin(&manual(
-            "http://127.0.0.1:8080",
+    fn only_a_row_recorded_under_the_alias_is_the_sidecar_s() {
+        assert!(recorded_by_the_sidecar(&ledger_entry(
+            backend_host::SIDECAR_ALIAS
         )));
-
-        assert!(recovery_origin_still_configured(
-            &entry,
-            backend_host::ledger_origin(&manual("http://127.0.0.1:8080/"))
-        ));
-        assert!(!recovery_origin_still_configured(
-            &entry,
-            backend_host::ledger_origin(&manual("http://other.host:8080"))
-        ));
+        assert!(!recorded_by_the_sidecar(&ledger_entry(
+            "http://127.0.0.1:8080"
+        )));
     }
 
     /// The alias names the service without locating it, so recovery validates

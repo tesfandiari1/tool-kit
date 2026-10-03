@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 use crate::worker_protocol::MARKDOWN_FILE;
 
-const MANIFEST_FILE: &str = "manifest.json";
+/// Published beside `result.md` before migration 0007. An old publication may
+/// still hold it, so validation tolerates it. Nothing writes it.
+const LEGACY_MANIFEST_FILE: &str = "manifest.json";
 
 const JOBS_DIRECTORY: &str = "jobs";
 const SOURCE_DIRECTORY: &str = "source";
@@ -50,26 +52,11 @@ pub struct PreparedSubmission {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PublishedArtifact {
-    Markdown,
-    Manifest,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublicationState {
     Missing,
     StagingOnly,
     Published,
     Conflicting,
-}
-
-impl PublishedArtifact {
-    fn file_name(self) -> &'static str {
-        match self {
-            Self::Markdown => MARKDOWN_FILE,
-            Self::Manifest => MANIFEST_FILE,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -412,8 +399,8 @@ impl ArtifactStore {
         Ok(job_ids)
     }
 
-    /// Validates that one published artifact directory contains exactly the
-    /// two backend-owned regular files and no symlinks or extra entries.
+    /// Validates that one published artifact directory holds `result.md`, at
+    /// most a legacy manifest beside it, and no symlinks or other entries.
     pub async fn validate_published_contents(
         &self,
         job_id: Uuid,
@@ -440,12 +427,6 @@ impl ArtifactStore {
             .await
             .map_err(|source| ArtifactError::Publish {
                 path: paths.staged_markdown(),
-                source,
-            })?;
-        sync_regular_file(&paths.staged_manifest())
-            .await
-            .map_err(|source| ArtifactError::Publish {
-                path: paths.staged_manifest(),
                 source,
             })?;
         sync_directory(paths.publication_staging.clone())
@@ -495,19 +476,18 @@ impl ArtifactStore {
         .await
     }
 
-    /// Opens and hashes a published artifact only after its no-follow file
+    /// Opens and hashes the published Markdown only after its no-follow file
     /// metadata proves that the read is within the caller's byte limit.
-    pub async fn open_bounded_validated_artifact(
+    pub async fn open_bounded_validated_markdown(
         &self,
         job_id: Uuid,
         attempt_id: Uuid,
-        artifact: PublishedArtifact,
         maximum_byte_length: u64,
         expected_byte_length: Option<u64>,
         expected_sha256: Option<&str>,
     ) -> Result<ValidatedOpenFile, ArtifactError> {
         self.open_validated_relative_file_with_limit(
-            &artifact_relative_path(job_id, attempt_id, artifact),
+            &markdown_relative_path(job_id, attempt_id),
             Some(maximum_byte_length),
             expected_byte_length,
             expected_sha256,
@@ -914,12 +894,8 @@ fn artifacts_relative_path(job_id: Uuid, attempt_id: Uuid) -> PathBuf {
     attempt_relative_path(job_id, attempt_id).join(ARTIFACTS_DIRECTORY)
 }
 
-pub fn artifact_relative_path(
-    job_id: Uuid,
-    attempt_id: Uuid,
-    artifact: PublishedArtifact,
-) -> PathBuf {
-    artifacts_relative_path(job_id, attempt_id).join(artifact.file_name())
+pub fn markdown_relative_path(job_id: Uuid, attempt_id: Uuid) -> PathBuf {
+    artifacts_relative_path(job_id, attempt_id).join(MARKDOWN_FILE)
 }
 
 fn preacceptance_quarantine_reservation_relative_path(
@@ -944,8 +920,6 @@ async fn validate_publication_contents(path: &Path) -> Result<(), ArtifactError>
                 source,
             })?;
     let mut markdown = false;
-    let mut manifest = false;
-    let mut count = 0_usize;
     while let Some(entry) =
         entries
             .next_entry()
@@ -955,7 +929,6 @@ async fn validate_publication_contents(path: &Path) -> Result<(), ArtifactError>
                 source,
             })?
     {
-        count += 1;
         let file_type =
             entry
                 .file_type()
@@ -969,13 +942,11 @@ async fn validate_publication_contents(path: &Path) -> Result<(), ArtifactError>
         }
         if entry.file_name() == OsStr::new(MARKDOWN_FILE) {
             markdown = true;
-        } else if entry.file_name() == OsStr::new(MANIFEST_FILE) {
-            manifest = true;
-        } else {
+        } else if entry.file_name() != OsStr::new(LEGACY_MANIFEST_FILE) {
             return Err(ArtifactError::UnexpectedPublicationContents);
         }
     }
-    if count == 2 && markdown && manifest {
+    if markdown {
         Ok(())
     } else {
         Err(ArtifactError::UnexpectedPublicationContents)
@@ -993,14 +964,6 @@ pub struct AttemptPaths {
 impl AttemptPaths {
     pub fn staged_markdown(&self) -> PathBuf {
         self.publication_staging.join(MARKDOWN_FILE)
-    }
-
-    pub fn staged_manifest(&self) -> PathBuf {
-        self.publication_staging.join(MANIFEST_FILE)
-    }
-
-    pub fn manifest(&self) -> PathBuf {
-        self.published.join(MANIFEST_FILE)
     }
 }
 
@@ -1301,11 +1264,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        artifact_relative_path, artifacts_relative_path, attempt_relative_path, job_relative_path,
+        artifacts_relative_path, attempt_relative_path, job_relative_path, markdown_relative_path,
         preacceptance_quarantine_relative_path, preacceptance_quarantine_reservation_relative_path,
         publication_staging_relative_path, source_relative_path, source_staging_relative_path,
-        ArtifactError, ArtifactStore, ProbeFile, PublicationState, PublishedArtifact,
-        HEALTH_DIRECTORY, MANIFEST_FILE,
+        ArtifactError, ArtifactStore, ProbeFile, PublicationState, HEALTH_DIRECTORY,
+        LEGACY_MANIFEST_FILE,
     };
     use crate::worker_protocol::MARKDOWN_FILE;
 
@@ -1364,21 +1327,11 @@ mod tests {
         tokio::fs::write(prepared_attempt.staged_markdown(), b"# result\n")
             .await
             .unwrap();
-        tokio::fs::write(prepared_attempt.staged_manifest(), b"{}")
-            .await
-            .unwrap();
         store.publish_artifacts(job_id, attempt_id).await.unwrap();
 
         let markdown_hash = hex::encode(Sha256::digest(b"# result\n"));
         let mut markdown = store
-            .open_bounded_validated_artifact(
-                job_id,
-                attempt_id,
-                PublishedArtifact::Markdown,
-                9,
-                Some(9),
-                Some(&markdown_hash),
-            )
+            .open_bounded_validated_markdown(job_id, attempt_id, 9, Some(9), Some(&markdown_hash))
             .await
             .unwrap();
         assert_eq!(markdown.byte_length, 9);
@@ -1391,13 +1344,25 @@ mod tests {
             .unwrap();
         assert_eq!(opened_markdown_bytes, b"# result\n");
         assert!(store
-            .resolve_existing_relative(&artifact_relative_path(
-                job_id,
-                attempt_id,
-                PublishedArtifact::Manifest,
-            ))
+            .resolve_existing_relative(&markdown_relative_path(job_id, attempt_id))
             .await
             .is_ok());
+
+        // A publication from before 0007 also holds a manifest, and still reads.
+        tokio::fs::write(prepared_attempt.published.join(LEGACY_MANIFEST_FILE), b"{}")
+            .await
+            .unwrap();
+        store
+            .validate_published_contents(job_id, attempt_id)
+            .await
+            .unwrap();
+        tokio::fs::write(prepared_attempt.published.join("extra.bin"), b"x")
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.validate_published_contents(job_id, attempt_id).await,
+            Err(ArtifactError::UnexpectedPublicationContents)
+        ));
     }
 
     #[tokio::test]
@@ -1419,20 +1384,10 @@ mod tests {
         tokio::fs::write(attempt.staged_markdown(), b"123456789")
             .await
             .unwrap();
-        tokio::fs::write(attempt.staged_manifest(), b"{}")
-            .await
-            .unwrap();
         store.publish_artifacts(job_id, attempt_id).await.unwrap();
 
         let result = store
-            .open_bounded_validated_artifact(
-                job_id,
-                attempt_id,
-                PublishedArtifact::Markdown,
-                8,
-                None,
-                Some(&"0".repeat(64)),
-            )
+            .open_bounded_validated_markdown(job_id, attempt_id, 8, None, Some(&"0".repeat(64)))
             .await;
         assert!(matches!(
             result,
@@ -1578,9 +1533,6 @@ mod tests {
         tokio::fs::write(attempt.staged_markdown(), b"markdown")
             .await
             .unwrap();
-        tokio::fs::write(attempt.staged_manifest(), b"{}")
-            .await
-            .unwrap();
         tokio::fs::create_dir(&attempt.published).await.unwrap();
         assert!(matches!(
             store.publish_artifacts(job_id, attempt_id).await,
@@ -1595,7 +1547,7 @@ mod tests {
             artifacts_relative_path(job_id, attempt_id),
             attempt_relative_path(job_id, attempt_id).join("artifacts")
         );
-        assert_eq!(MANIFEST_FILE, "manifest.json");
+        assert_eq!(LEGACY_MANIFEST_FILE, "manifest.json");
         assert_eq!(MARKDOWN_FILE, "result.md");
     }
 
@@ -1660,9 +1612,6 @@ mod tests {
             PublicationState::StagingOnly
         );
         tokio::fs::write(attempt.staged_markdown(), b"markdown")
-            .await
-            .unwrap();
-        tokio::fs::write(attempt.staged_manifest(), b"{}")
             .await
             .unwrap();
         store.publish_artifacts(job_id, attempt_id).await.unwrap();

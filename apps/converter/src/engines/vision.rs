@@ -35,11 +35,11 @@ const WORKER_LABEL: &str = "Vision";
 /// One runner serves every engine, so one scan may hold it 10 minutes at most.
 const MAX_SCAN_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Engine-specific detail persisted as attempt diagnostics and embedded in the
-/// manifest. Content-free, and wall time is all of it. The page counts go to
-/// the policy through [`analysis`], not here.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+/// Engine-specific detail persisted as attempt diagnostics. Content-free, and
+/// wall time is all of it. The page counts go to the policy through
+/// [`analysis`], not here.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct VisionDiagnostics {
     pub processing_time_ms: u64,
 }
@@ -82,7 +82,7 @@ impl VisionEngine {
     /// The same engine with one more second per page, for a
     /// scanned PDF the worker reads a page at a time, up to
     /// [`MAX_SCAN_TIMEOUT`]. A scan past it times out into the inspector's
-    /// needs_remote.
+    /// verdict.
     pub fn with_page_budget(&self, pages: u32) -> Self {
         Self {
             timeout: (self.timeout + Duration::from_secs(pages.into()))
@@ -269,7 +269,7 @@ fn analysis(
 }
 
 /// The rejections a remote engine could still convert, and the reason the job
-/// carries into `needs_remote`. Everything this engine gives up on is a
+/// fails with. Everything this engine gives up on is a
 /// statement about this engine, not about the file: no text recognized, a
 /// frame count it cannot carry whole, output past the ceiling. Each of those
 /// spends the remote fallback the standard profile promises. Only

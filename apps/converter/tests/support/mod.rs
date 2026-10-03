@@ -30,7 +30,7 @@ use tool_kit_converter::{
     config::{Limits, Settings},
     faults::FaultBarrier,
     persistence::{
-        hash_idempotency_key, CreateOutcome, NewConversion, NewSource, Profile, SqliteRepository,
+        hash_idempotency_key, CreateOutcome, NewConversion, NewSource, SqliteRepository,
         DATABASE_FILENAME,
     },
     router,
@@ -246,7 +246,6 @@ impl TestHarness {
                 client_run_id: Uuid::new_v4(),
                 idempotency_key_sha256: hash_idempotency_key(&format!("missed-notify-{job_id}")),
                 request_fingerprint: hex::encode(Sha256::digest(job_id.as_bytes())),
-                profile: Profile::Standard,
                 source: NewSource {
                     relative_path: format!("jobs/{job_id}/source/input"),
                     media_type: "application/pdf".to_owned(),
@@ -322,7 +321,7 @@ impl TestHarness {
             .execute(&mut *transaction)
             .await
             .unwrap();
-        assert_eq!(deleted.rows_affected(), 2);
+        assert_eq!(deleted.rows_affected(), 1);
         let attempt = sqlx::query(
             "UPDATE attempts
              SET state = 'finalizing', finished_at = NULL
@@ -404,6 +403,21 @@ impl TestHarness {
             .unwrap()
             .try_get("count")
             .unwrap()
+    }
+
+    /// The Markdown size and digest the attempt recorded at finalizing.
+    pub(crate) async fn recorded_markdown(&self, attempt_id: Uuid) -> (u64, String) {
+        let mut connection = self.database_connection().await;
+        let row =
+            sqlx::query("SELECT markdown_byte_length, markdown_sha256 FROM attempts WHERE id = ?1")
+                .bind(attempt_id.hyphenated().to_string())
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        (
+            row.try_get::<i64, _>("markdown_byte_length").unwrap() as u64,
+            row.try_get("markdown_sha256").unwrap(),
+        )
     }
 
     pub(crate) async fn artifact_row_count(&self, attempt_id: Uuid) -> i64 {
@@ -638,7 +652,7 @@ impl TestApp {
             let payload = json_body(response).await;
             if matches!(
                 payload["data"]["status"].as_str(),
-                Some("succeeded" | "failed" | "needs_remote")
+                Some("succeeded" | "failed")
             ) {
                 return payload;
             }

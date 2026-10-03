@@ -25,8 +25,6 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
-use crate::secrets;
-
 /// Sits beside the app binary in `Contents/MacOS` and in `target/debug` alike,
 /// because tauri-bundler strips the `-{target}` suffix when it copies.
 const CONVERTER_BIN: &str = "tool-kit-converter";
@@ -34,8 +32,7 @@ const CONVERTER_BIN: &str = "tool-kit-converter";
 /// The service logs this once, as JSON on stdout, with the bound address.
 const LISTENING_MESSAGE: &str = "conversion service listening";
 
-/// Matches the Docker start period. Cold start is milliseconds, so this is
-/// for a machine under load.
+/// Cold start is milliseconds, so this is for a machine under load.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -89,7 +86,7 @@ struct Inner {
     /// The write end of the child's stdin, parked here so a stop can close it.
     stdin: Option<ChildStdin>,
     /// One token per app launch, reused across restarts.
-    minted: bool,
+    token: Option<String>,
     supervising: bool,
     /// Set by the first `Running` of the launch. Recovery builds one row per
     /// ledger entry, so running it again after a restart doubles them.
@@ -198,17 +195,15 @@ impl BackendHost {
         self.lock().state = state;
     }
 
-    /// Mint the token once per launch and put it where both sides read it. The
-    /// keychain write goes first, through `secrets::set_key`, the only write
-    /// that drops the process memo of an earlier `None`.
+    /// Mint the token once per launch: the child reads the file, the host
+    /// keeps it in memory.
     fn ensure_token(&self, layout: &Layout) -> Result<(), String> {
-        if self.lock().minted {
+        if self.lock().token.is_some() {
             return Ok(());
         }
         let token = mint_token();
-        secrets::set_key("backend", &token)?;
         write_token_file(&layout.token_file, &token)?;
-        self.lock().minted = true;
+        self.lock().token = Some(token);
         Ok(())
     }
 }
@@ -217,20 +212,8 @@ fn host(app: &AppHandle) -> Option<BackendHost> {
     app.try_state::<BackendHost>().map(|state| (*state).clone())
 }
 
-/// Start the sidecar when this install owns the process. A no-op in Manual.
+/// Start the sidecar and supervise it.
 pub(crate) fn start(app: &AppHandle) {
-    match deployment(app) {
-        Ok(Deployment::Sidecar) => {}
-        Ok(Deployment::Manual { .. }) => return,
-        // Nothing to point at and nothing to spawn. Publish, so the status row
-        // carries the reason.
-        Err(message) => {
-            if let Some(host) = host(app) {
-                host.publish(BackendState::Failed { message });
-            }
-            return;
-        }
-    }
     let Some(host) = host(app) else {
         return;
     };
@@ -308,80 +291,9 @@ const STARTING: &str = "The conversion service is starting. Try again in a momen
 /// `validate_base_url` rejects it on sight.
 pub(crate) const SIDECAR_ALIAS: &str = "sidecar";
 
-/// The file a deployment drops beside `settings.json` to point this app at a
-/// service it runs itself.
-pub(crate) const OVERRIDE_FILE: &str = "backend-override.json";
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BackendOverride {
-    url: String,
-}
-
-/// Where the conversion service lives. Sidecar unless a deployment dropped
-/// [`OVERRIDE_FILE`]. The app never writes that file and no control surfaces
-/// it, so nobody lands in Manual by a stray click.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Deployment {
-    Sidecar,
-    Manual { origin: String },
-}
-
-impl Deployment {
-    pub(crate) fn is_sidecar(&self) -> bool {
-        matches!(self, Self::Sidecar)
-    }
-}
-
-/// A malformed override is an error, never a quiet fall back to Sidecar:
-/// converting on this Mac is the one outcome the deployer did not ask for.
-pub(crate) fn deployment(app: &AppHandle) -> Result<Deployment, String> {
-    let Ok(directory) = app.path().app_config_dir() else {
-        return Ok(Deployment::Sidecar);
-    };
-    let path = directory.join(OVERRIDE_FILE);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Deployment::Sidecar);
-        }
-        Err(error) => return Err(format!("Could not read {}: {error}", path.display())),
-    };
-    parse_override(&raw).map_err(|reason| format!("{} {reason}", path.display()))
-}
-
-fn parse_override(raw: &str) -> Result<Deployment, String> {
-    let parsed: BackendOverride =
-        serde_json::from_str(raw).map_err(|error| format!("is not readable: {error}"))?;
-    // Trimmed here: the ledger compares origins by exact string.
-    let origin = parsed.url.trim().trim_end_matches('/').to_string();
-    if origin.is_empty() {
-        return Err("names no url".to_string());
-    }
-    if !origin.starts_with("http://") && !origin.starts_with("https://") {
-        return Err(format!("names {origin}, which is not an http url"));
-    }
-    // Documents never leave this Mac, so a Manual backend is a loopback one.
-    let host = reqwest::Url::parse(&origin).ok();
-    if !matches!(
-        host.as_ref().and_then(reqwest::Url::host_str),
-        Some("localhost" | "127.0.0.1" | "[::1]")
-    ) {
-        return Err(format!("names {origin}, which is not on this Mac"));
-    }
-    Ok(Deployment::Manual { origin })
-}
-
 /// The origin every backend request goes to, read at the moment of the request.
 /// Nothing may hold on to it: the port moves on every launch and restart.
 pub(crate) fn backend_origin(app: &AppHandle) -> Result<String, String> {
-    match deployment(app)? {
-        Deployment::Sidecar => sidecar_origin(app),
-        Deployment::Manual { origin } => Ok(origin),
-    }
-}
-
-fn sidecar_origin(app: &AppHandle) -> Result<String, String> {
     let Some(host) = host(app) else {
         return Err(STARTING.to_string());
     };
@@ -393,26 +305,12 @@ fn sidecar_origin(app: &AppHandle) -> Result<String, String> {
     }
 }
 
-/// The bearer token, from the one keychain slot both modes share.
+/// The bearer token `ensure_token` minted for this launch.
 pub(crate) fn backend_token(app: &AppHandle) -> Result<String, String> {
-    if let Some(token) = secrets::get_key("backend").filter(|value| !value.trim().is_empty()) {
-        return Ok(token);
-    }
-    if deployment(app).is_ok_and(|which| which.is_sidecar()) {
-        // Minted at the top of the launch, so an empty slot means "not yet".
-        return Err(STARTING.to_string());
-    }
-    Err("Backend token is unavailable. Add it in Settings, then retry.".to_string())
-}
-
-/// What the ledger records as the origin a row was submitted against. Never the
-/// live URL: recovery compares by exact equality and the port moves every
-/// launch, so a live URL abandons every in-flight row. Manual records the URL.
-pub(crate) fn ledger_origin(deployment: &Deployment) -> &str {
-    match deployment {
-        Deployment::Sidecar => SIDECAR_ALIAS,
-        Deployment::Manual { origin } => origin,
-    }
+    // Minted at the top of the launch, so none yet means "not yet".
+    host(app)
+        .and_then(|host| host.lock().token.clone())
+        .ok_or_else(|| STARTING.to_string())
 }
 
 // ---------------------------------------------------------------- supervisor
@@ -845,7 +743,7 @@ fn converter_env(layout: &Layout, bcmaps: &Path, diarizer: &Path) -> BTreeMap<St
             "TOOLKIT_CONVERTER_BIND_ADDR".to_string(),
             "127.0.0.1:0".to_string(),
         ),
-        // The Docker defaults are /data and /run/secrets, which a sandboxed
+        // The service defaults are /data and /run/secrets, which a sandboxed
         // app cannot create.
         (
             "TOOLKIT_CONVERTER_DATA_DIR".to_string(),
@@ -975,16 +873,6 @@ impl LogSink {
         // A log write must never take a conversion down with it.
         let _ = writeln!(file, "{line}");
     }
-}
-
-// --------------------------------------------------------------- the commands
-
-/// Whether this app owns the conversion service process, and so whether the
-/// bearer token is anybody's business but its own. A value typed into Settings
-/// on a true answer only breaks the running service.
-#[tauri::command]
-pub(crate) fn app_owns_backend(app: AppHandle) -> bool {
-    deployment(&app).is_ok_and(|which| which.is_sidecar())
 }
 
 #[cfg(test)]
@@ -1129,6 +1017,27 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).expect("token"), token);
     }
 
+    /// The host sends the token the child reads, and a restart keeps it.
+    #[test]
+    fn the_host_keeps_the_token_it_wrote_for_the_child() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let layout = Layout {
+            token_file: dir.path().join("converter.token"),
+            ..layout()
+        };
+        let host = BackendHost::new();
+
+        host.ensure_token(&layout).expect("first mint");
+        let token = host.lock().token.clone().expect("token kept in memory");
+        host.ensure_token(&layout).expect("restart");
+
+        assert_eq!(host.lock().token.as_deref(), Some(token.as_str()));
+        assert_eq!(
+            std::fs::read_to_string(&layout.token_file).expect("token file"),
+            token
+        );
+    }
+
     /// The unlink can lose the race, and a symlink back before the open must not
     /// be followed. The read-only parent loses that race on purpose.
     #[test]
@@ -1175,52 +1084,5 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "the backoff should end with the stop, not with the delay"
         );
-    }
-
-    #[test]
-    fn an_override_names_the_service_a_deployment_runs() {
-        assert_eq!(
-            parse_override(r#"{"url": "http://127.0.0.1:8080"}"#),
-            Ok(Deployment::Manual {
-                origin: "http://127.0.0.1:8080".to_string()
-            })
-        );
-    }
-
-    /// The ledger compares origins by exact string, so a trailing slash would
-    /// abandon every in-flight row it recorded.
-    #[test]
-    fn a_trailing_slash_does_not_make_a_second_origin() {
-        assert_eq!(
-            parse_override(r#"{"url": "  http://127.0.0.1:8080/  "}"#),
-            parse_override(r#"{"url": "http://127.0.0.1:8080"}"#)
-        );
-    }
-
-    /// Each of these is a deployment that meant to point somewhere. The
-    /// alternative to an error is converting here while the container idles.
-    #[test]
-    fn an_override_that_names_nothing_usable_is_an_error_not_a_fall_back() {
-        for (raw, expected) in [
-            (r#"{"url": ""}"#, "names no url"),
-            (r#"{"url": "   "}"#, "names no url"),
-            (r#"{"url": "127.0.0.1:8080"}"#, "not an http url"),
-            (r#"{"url": "file:///etc/passwd"}"#, "not an http url"),
-            (r#"{"url": "https://backend.internal:8080"}"#, "not on this Mac"),
-            (r#"{"url": "http://127.0.0.1.example.com"}"#, "not on this Mac"),
-            (r#"{"origin": "http://127.0.0.1:8080"}"#, "is not readable"),
-            (r#"{"url": 8080}"#, "is not readable"),
-            ("not json at all", "is not readable"),
-        ] {
-            let error = parse_override(raw).expect_err(&format!("{raw} should not parse"));
-            assert!(error.contains(expected), "{raw} gave {error}");
-        }
-    }
-
-    /// `deny_unknown_fields` is the reason this fails. A misspelled key must
-    /// not read as a silent Sidecar.
-    #[test]
-    fn a_misspelled_key_is_refused_rather_than_ignored() {
-        assert!(parse_override(r#"{"url": "http://a.b:1", "extra": 1}"#).is_err());
     }
 }

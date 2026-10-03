@@ -279,43 +279,11 @@
   }
 
   /* --- Settings ----------------------------------------------------------- */
-  /* Padding lives on the scrollport, so the gutter sits beside the fields.
-     --s4 between groups, --s3 between fields, --s2 inside a control. */
   /* Never `.flow` here: its `flex: 1` scroll child inside the sheet's block body
-     never resolves a height, and the head band scrolls off the card. */
+     never resolves a height, and the head band scrolls off the card. The card is
+     the frame, so the inset steps down to --s4. */
   .settings {
-    display: flex;
-    flex-direction: column;
-  }
-  /* Sticky, so the sheet body stays the only scroll container. */
-  .settings__nav {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    padding: var(--s3) var(--s4);
-    background: var(--surface-lift);
-    border-bottom: 1px solid var(--rule);
-  }
-  /* The card is the frame here, so the inset steps down to --s4. */
-  .settings__body {
     padding: var(--s4);
-    scrollbar-gutter: stable;
-  }
-  /* A native input's intrinsic min-width pushes Save and Remove off the row. */
-  .settings-key {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: var(--s2);
-    align-items: center;
-  }
-  .settings-key .ui-input {
-    min-width: 0;
-  }
-  .settings-key__actions {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: var(--s2);
   }
 
   /* --- Blocking hint ------------------------------------------------------ */
