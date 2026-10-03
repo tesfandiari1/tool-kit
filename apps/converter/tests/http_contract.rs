@@ -2,7 +2,7 @@
 
 mod support;
 
-use std::{fs, path::Path, process::Command, time::Duration};
+use std::{fs, time::Duration};
 
 use axum::{
     body::Body,
@@ -12,14 +12,13 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
-use tool_kit_converter::audio_protocol::AUDIO_WORKER_IDENTITY_PREFIX;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::{
-    assert_server_request_id, audio_tools, clean_pdf, count_job_directories, count_named_files,
-    json_body, multipart, multipart_body, pdf_with_content, slow_multipart_prefix, streaming_body,
-    test_app, test_app_with_max_jobs, test_app_with_output_limit, test_app_with_poll_interval,
+    assert_server_request_id, clean_pdf, count_job_directories, count_named_files, json_body,
+    multipart, multipart_body, pdf_with_content, slow_multipart_prefix, streaming_body, test_app,
+    test_app_with_max_jobs, test_app_with_output_limit, test_app_with_poll_interval,
     test_app_with_upload_limits, test_app_with_worker_script, TestHarness, TOKEN,
 };
 
@@ -39,15 +38,6 @@ async fn public_health_and_capabilities_are_truthful() {
     let payload = json_body(response).await;
     let conversion = &payload["data"]["conversion"];
     assert_eq!(conversion["acceptingJobs"], true);
-    assert_eq!(conversion["durability"], "persistent");
-    assert!(conversion["limits"]["maxActiveJobs"].is_u64());
-    assert!(conversion["limits"]["maxEphemeralJobs"].is_null());
-    assert_eq!(
-        conversion["limits"]["maxAudioUploadBytes"].as_u64(),
-        Some(1024 * 1024),
-        "audio has its own ceiling, and a client that reads only maxUploadBytes \
-         refuses recordings this service accepts"
-    );
     assert_eq!(
         conversion["inputFormats"],
         serde_json::json!([
@@ -72,17 +62,16 @@ async fn public_health_and_capabilities_are_truthful() {
         ]),
         "the test app runs no Vision worker, so the image types are contract only"
     );
-    let engines = conversion["engines"].as_array().unwrap();
-    assert_eq!(engines.len(), 2, "apple-vision is absent with its engine");
-    assert_eq!(engines[0]["name"], "pdf-inspector");
-    assert_eq!(engines[0]["version"], "1.25.2");
-    assert_eq!(engines[1]["name"], "anydoc");
-    assert_eq!(engines[1]["version"], "0.2.4");
-    assert!(
-        conversion["engine"].is_null(),
-        "the singular engine field is gone"
-    );
-    assert_eq!(payload["data"]["remoteFallback"]["available"], false);
+    let keys = |value: &Value| {
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(&payload["data"]), ["conversion"]);
+    assert_eq!(keys(conversion), ["acceptingJobs", "inputFormats"]);
 }
 
 #[tokio::test]
@@ -1347,18 +1336,6 @@ const AUDIO_MEDIA_TYPES: [&str; 6] = [
 const TWO_SPEAKERS_WAV: &[u8] = include_bytes!("fixtures/audio/two-speakers.wav");
 const SILENCE_WAV: &[u8] = include_bytes!("fixtures/audio/silence.wav");
 
-/// The version half of the worker's handshake line, which is the version
-/// capabilities must publish for the engine.
-fn worker_identity_version(worker: &Path) -> String {
-    let output = Command::new(worker).arg("--version").output().unwrap();
-    String::from_utf8(output.stdout)
-        .unwrap()
-        .strip_prefix(AUDIO_WORKER_IDENTITY_PREFIX)
-        .and_then(|tail| tail.strip_suffix('\n'))
-        .expect("the worker must answer --version with its identity line")
-        .to_owned()
-}
-
 /// Runs everywhere, because the default harness stages no audio worker. An
 /// advertised format with no engine behind it is a job that is accepted and
 /// never claimed, so the whole audio surface has to be absent instead.
@@ -1367,11 +1344,6 @@ async fn audio_is_unadvertised_and_refused_without_the_worker() {
     let app = test_app().await;
     let payload = json_body(app.request(Method::GET, "/api/v1/capabilities", None).await).await;
     let conversion = &payload["data"]["conversion"];
-    assert!(conversion["engines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|engine| engine["name"] != "local-audio"));
     let formats = conversion["inputFormats"].as_array().unwrap();
     for media_type in AUDIO_MEDIA_TYPES {
         assert!(
@@ -1413,14 +1385,6 @@ async fn a_two_speaker_recording_transcribes_end_to_end() {
 
     let payload = json_body(app.request(Method::GET, "/api/v1/capabilities", None).await).await;
     let conversion = &payload["data"]["conversion"];
-    let engine = conversion["engines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|engine| engine["name"] == "local-audio")
-        .expect("a staged worker must be advertised");
-    let (worker, _) = audio_tools().unwrap();
-    assert_eq!(engine["version"], worker_identity_version(&worker));
     let formats = conversion["inputFormats"].as_array().unwrap();
     for media_type in AUDIO_MEDIA_TYPES {
         assert!(
