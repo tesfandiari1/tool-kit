@@ -31,7 +31,6 @@
     "verify:deps": "cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml check && cargo deny --manifest-path apps/converter/Cargo.toml check && cargo deny --manifest-path crates/worker-protocol/Cargo.toml check",
     "verify:contract": "apps/converter/scripts/contract-fuzz.sh",
     "verify:container": "apps/converter/scripts/container-smoke.sh",
-    "verify:local-corpus": "apps/converter/scripts/verify-local-corpus.sh",
     "verify:api-drift": "apps/converter/scripts/verify-api-drift.sh",
     "verify:release": "apps/desktop/src-tauri/scripts/verify-release.sh",
     "trace:failures": "apps/desktop/src-tauri/scripts/trace-failures.sh",

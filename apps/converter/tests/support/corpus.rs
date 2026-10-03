@@ -362,20 +362,4 @@ mod tests {
             assert!(bytes.len() > b"%PDF-1.4\n".len(), "{name} has no body");
         }
     }
-
-    /// Writes a one-page corpus PDF when `TOOLKIT_CORPUS_PDF_OUT` is set.
-    /// `TOOLKIT_CORPUS_PDF_KIND` picks `native` (default) or `scanned`, because
-    /// acceptance step D.6 needs a scanned input and nothing else produces one.
-    /// Used by `apps/converter/scripts/print-corpus-pdf.sh`.
-    #[test]
-    fn write_native_pdf_fixture_to_env() {
-        let Ok(path) = std::env::var("TOOLKIT_CORPUS_PDF_OUT") else {
-            return;
-        };
-        let bytes = match std::env::var("TOOLKIT_CORPUS_PDF_KIND").as_deref() {
-            Ok("scanned") => image_only_pdf(1),
-            _ => native_pdf(1),
-        };
-        std::fs::write(&path, bytes).expect("write corpus PDF fixture");
-    }
 }
