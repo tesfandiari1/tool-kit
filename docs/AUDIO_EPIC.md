@@ -193,8 +193,17 @@ gates. The ones that mattered:
 - **Parakeet `accurate` tier.** The Settings model list above, the tier
   setting, the worker flag, a warm-load measurement (only the cold 49 s
   including download exists).
-- **A 60-minute file.** Both engines chunk or stream, neither is measured past
-  16 minutes here. Gate on memory as much as on words.
+- **Long recordings, measured 2026-10-02** through the bundled converter on
+  real files. Every one covered to its last minute:
+
+  | Recording | Size | Wall time | Worker peak |
+  | --- | --- | --- | --- |
+  | 78 min m4a, Zoom workshop | 49 MB | 83 s | 991 MB |
+  | 112 min WAV, event | 1129 MB | 80 s | 1163 MB |
+  | 132 min WAV | 1337 MB | 132 s | 1263 MB |
+
+  The 1 GiB upload ceiling refused both WAVs, so the app now passes the
+  converter's own 4 GiB bound (`41eddf6`). Past 132 minutes is unmeasured.
 - **Container widening**, each with a fixture, and the Rev.ai fallback
   question once a rejection has been seen in the wild.
 

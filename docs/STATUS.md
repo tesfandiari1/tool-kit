@@ -10,10 +10,10 @@ Closed work is in [`archive/`](archive/README.md).
 
 | Item | Value |
 | --- | --- |
-| Branch tip | `main`, not pushed. Sprint 1, local PDF OCR, image descriptions, the 2026-10-01 upgrades, the 2026-10-02 code-review fixes (`44867b9` to `aaea300`) and the 2026-10-02 PDF splice (`87d482b`) are committed |
+| Branch tip | `main`, not pushed. Sprint 1, local PDF OCR, image descriptions, the 2026-10-01 upgrades, the 2026-10-02 code-review fixes (`44867b9` to `aaea300`) the 2026-10-02 PDF splice (`87d482b`) and the 4 GiB audio ceiling (`41eddf6`) are committed |
 | OpenAPI contract | 0.5.0 (`contract/http/openapi.yaml`). The converter crate moves with it |
 | Desktop version | 1.0.0 (`package.json`, `Cargo.toml`, `tauri.conf.json`) |
-| Installed bundle | Stale: `/Applications/Tool-Kit.app` was built 2026-10-01 23:32 and predates the 2026-10-02 code-review fixes and the PDF splice. No gate rebuilds it |
+| Installed bundle | Stale: `/Applications/Tool-Kit.app` was built 2026-10-01 23:32. A signed build of `41eddf6` sits in `apps/desktop/src-tauri/target/release/bundle/macos/` and passes `verify-release.sh` apart from the parked Keychain section. Copying it into `/Applications` is a manual step |
 | Backend | M0 to M4 complete. M5 unbuilt. M7 cancelled |
 | Desktop | M6 landed. Gate open on CVR-067 and CVR-081 |
 | Service | Sidecar inside the `.app`, loopback only. Docker needs a `backend-override.json` that only `pnpm backend:docker` writes |
