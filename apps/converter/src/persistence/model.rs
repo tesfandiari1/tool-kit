@@ -66,23 +66,6 @@ pub enum AttemptState {
     Interrupted,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, sqlx::Type)]
-#[serde(rename_all = "snake_case")]
-#[sqlx(rename_all = "snake_case")]
-pub enum ArtifactKind {
-    Markdown,
-    Manifest,
-}
-
-impl ArtifactKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Markdown => "markdown",
-            Self::Manifest => "manifest",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(rename_all = "snake_case")]
@@ -165,12 +148,6 @@ pub struct NewArtifact {
     pub media_type: String,
     pub byte_length: u64,
     pub sha256: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SuccessfulArtifacts {
-    pub markdown: NewArtifact,
-    pub manifest: NewArtifact,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -276,6 +253,11 @@ pub struct StoredAttempt {
     pub warnings: Vec<String>,
     pub fallback_reason: Option<String>,
     pub failure: Option<StoredFailure>,
+    /// The staged Markdown's size and digest as the engine measured them,
+    /// recorded at finalizing. Startup recovery checks a publication that
+    /// never reached the success commit against these.
+    pub markdown_byte_length: Option<u64>,
+    pub markdown_sha256: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
@@ -285,7 +267,6 @@ pub struct StoredAttempt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredArtifact {
     pub attempt_id: Uuid,
-    pub kind: ArtifactKind,
     pub relative_path: String,
     pub media_type: String,
     pub byte_length: u64,
@@ -324,9 +305,6 @@ mod tests {
         for profile in [Profile::Standard, Profile::LocalOnly, Profile::BestQuality] {
             assert_eq!(serde_json::to_value(profile).unwrap(), profile.as_str());
             assert_eq!(profile.as_str().parse::<Profile>(), Ok(profile));
-        }
-        for kind in [ArtifactKind::Markdown, ArtifactKind::Manifest] {
-            assert_eq!(serde_json::to_value(kind).unwrap(), kind.as_str());
         }
         assert_eq!("scanned".parse::<Profile>(), Err(()));
         assert_eq!(

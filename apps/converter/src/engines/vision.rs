@@ -35,11 +35,11 @@ const WORKER_LABEL: &str = "Vision";
 /// One runner serves every engine, so one scan may hold it 10 minutes at most.
 const MAX_SCAN_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Engine-specific detail persisted as attempt diagnostics and embedded in the
-/// manifest. Content-free, and wall time is all of it. The page counts go to
-/// the policy through [`analysis`], not here.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+/// Engine-specific detail persisted as attempt diagnostics. Content-free, and
+/// wall time is all of it. The page counts go to the policy through
+/// [`analysis`], not here.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct VisionDiagnostics {
     pub processing_time_ms: u64,
 }

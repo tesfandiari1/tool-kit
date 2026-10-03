@@ -1,55 +1,43 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::{
-    fs::{self, OpenOptions},
-    io::{AsyncReadExt, AsyncWriteExt},
+    fs,
     sync::{watch, Notify},
 };
 use uuid::Uuid;
 
 use crate::{
     artifacts::{
-        artifact_relative_path, source_relative_path, ArtifactError, ArtifactStore, AttemptPaths,
-        PreparedSubmission, PublishedArtifact,
+        markdown_relative_path, source_relative_path, ArtifactError, ArtifactStore, AttemptPaths,
+        PreparedSubmission, ValidatedOpenFile,
     },
     audio_protocol::AUDIO_ENGINE_NAME,
     engines::{
-        is_complete_native_inspection, AnyDocDiagnostics, AnyDocEngine, AudioDiagnostics,
-        AudioEngine, EngineAnalysis, EngineFailure, EngineOutcome, PdfInspectorEngine,
-        VisionDiagnostics, VisionEngine, ANYDOC_ENGINE_NAME, ANYDOC_VERSION,
+        AnyDocEngine, AudioEngine, EngineAnalysis, EngineFailure, EngineOutcome,
+        PdfInspectorEngine, VisionEngine, ANYDOC_ENGINE_NAME, ANYDOC_VERSION,
     },
     faults::{FaultBarrier, FaultPoint},
     persistence::{
         hash_idempotency_key, ConversionState, CreateOutcome, EngineRecord, FailedResult,
         FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult, NewArtifact, NewConversion,
         NewSource, RepositoryError, SqliteRepository, StoredArtifact, StoredConversion,
-        StoredFailure, SuccessfulArtifacts,
+        StoredFailure,
     },
     vision_protocol::VISION_ENGINE_NAME,
-    worker_protocol::{
-        Inspection, PdfTypeLabel, NATIVE_PAGES_FILE, PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION,
-    },
+    worker_protocol::{Inspection, NATIVE_PAGES_FILE, PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION},
 };
 
 use super::{
     model::{
-        now, servable_media_types, source_format_by_media_type, EngineAvailability,
-        LocalEngineKind, ManifestEngine, ManifestRoute, ManifestSource,
+        servable_media_types, source_format_by_media_type, EngineAvailability, LocalEngineKind,
     },
     policy::{self, ReasonCode},
-    ArtifactKind, ArtifactRecord, ArtifactView, ConversionManifest, ConversionProfile, JobView,
-    SourceMetadata,
+    ArtifactRecord, ConversionProfile, JobView, SourceMetadata,
 };
 
 const MARKDOWN_MEDIA_TYPE: &str = "text/markdown; charset=utf-8";
-const MANIFEST_MEDIA_TYPE: &str = "application/json";
-const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 
 // The wire-visible failure text. Startup recovery reports the same two
 // refusals, so it reads them from here rather than keeping its own copy.
@@ -291,11 +279,19 @@ impl ConversionService {
         Ok(())
     }
 
+    /// Checks a publication that never reached the success commit against the
+    /// digest the attempt recorded at finalizing.
     pub(crate) async fn validate_finalizing_publication(
         &self,
         job: &StoredConversion,
-    ) -> Result<SuccessfulArtifacts, ArtifactReadFailure> {
-        self.validate_published_artifacts(job, None).await
+    ) -> Result<NewArtifact, ArtifactReadFailure> {
+        let opened = self.open_published_markdown(job, None).await?;
+        Ok(NewArtifact {
+            relative_path: portable_relative(markdown_relative_path(job.id, job.active_attempt.id)),
+            media_type: MARKDOWN_MEDIA_TYPE.to_owned(),
+            byte_length: opened.byte_length,
+            sha256: opened.sha256,
+        })
     }
 
     pub(crate) async fn claim_next_queued(
@@ -311,40 +307,9 @@ impl ConversionService {
             .await
     }
 
-    pub async fn artifact_views(
+    pub async fn markdown(
         &self,
         job_id: Uuid,
-    ) -> Result<Option<Vec<ArtifactView>>, ConversionServiceError> {
-        let Some(job) = self.repository.get(job_id).await? else {
-            return Ok(None);
-        };
-        if job.state != ConversionState::Succeeded {
-            return Ok(Some(Vec::new()));
-        }
-        let Some((markdown, manifest)) = artifact_pair(&job) else {
-            self.record_artifact_integrity_failure(&job).await;
-            return Ok(Some(Vec::new()));
-        };
-        match self.validate_artifact_pair(&job, markdown, manifest).await {
-            Ok(()) => {}
-            Err(ArtifactReadFailure::Integrity) => {
-                self.record_artifact_integrity_failure(&job).await;
-                return Ok(Some(Vec::new()));
-            }
-            Err(ArtifactReadFailure::Transient(error)) => {
-                return Err(ConversionServiceError::Artifacts(error));
-            }
-        }
-        Ok(Some(vec![
-            ArtifactView::from_stored(job.id, markdown),
-            ArtifactView::from_stored(job.id, manifest),
-        ]))
-    }
-
-    pub async fn artifact(
-        &self,
-        job_id: Uuid,
-        kind: ArtifactKind,
     ) -> Result<Option<ArtifactLookup>, ConversionServiceError> {
         let Some(job) = self.repository.get(job_id).await? else {
             return Ok(None);
@@ -356,15 +321,20 @@ impl ConversionService {
                 ArtifactLookup::NotReady
             }));
         }
-        let Some((markdown, manifest)) = artifact_pair(&job) else {
-            self.record_artifact_integrity_failure(&job).await;
-            return Ok(Some(ArtifactLookup::NotFound));
+        let opened = match stored_markdown(&job) {
+            Ok(markdown) => self
+                .open_published_markdown(&job, Some(markdown))
+                .await
+                .map(|opened| (markdown.media_type.clone(), opened)),
+            Err(failure) => Err(failure),
         };
-        match self
-            .open_validated_artifact(&job, markdown, manifest, kind)
-            .await
-        {
-            Ok(artifact) => Ok(Some(ArtifactLookup::Ready(artifact))),
+        match opened {
+            Ok((media_type, opened)) => Ok(Some(ArtifactLookup::Ready(ArtifactRecord {
+                file: opened.file,
+                media_type,
+                byte_length: opened.byte_length,
+                sha256: opened.sha256,
+            }))),
             Err(ArtifactReadFailure::Integrity) => {
                 self.record_artifact_integrity_failure(&job).await;
                 Ok(Some(ArtifactLookup::NotFound))
@@ -587,7 +557,6 @@ impl ConversionService {
             }) => {
                 self.finalize_success(
                     job,
-                    paths,
                     analysis,
                     engine_kind.reason(),
                     (byte_length, sha256),
@@ -690,7 +659,6 @@ impl ConversionService {
     async fn finalize_success(
         &self,
         job: StoredConversion,
-        paths: AttemptPaths,
         engine_analysis: EngineAnalysis,
         reason: ReasonCode,
         // The staged Markdown's size and digest, as the engine measured them.
@@ -707,94 +675,15 @@ impl ConversionService {
         let analysis = local_analysis(&engine_analysis, reason_codes.clone(), warnings.clone());
         let finalizing = self
             .repository
-            .mark_finalizing(job_id, attempt_id, analysis, relabel.as_ref())
+            .mark_finalizing(
+                job_id,
+                attempt_id,
+                analysis,
+                (markdown_bytes, &markdown_sha256),
+                relabel.as_ref(),
+            )
             .await?;
         self.faults.hold(FaultPoint::AfterFinalizing).await;
-
-        // The stored row names the engine and route, relabeled or not.
-        let (Some(engine_record), Some(route)) = (
-            finalizing.active_attempt.engine.clone(),
-            finalizing.active_attempt.route.clone(),
-        ) else {
-            self.finish_failure(
-                job_id,
-                attempt_id,
-                FailureStage::Finalizing,
-                EngineFailure::Protocol.code(),
-                PUBLICATION_FAILED_MESSAGE,
-                true,
-            )
-            .await?;
-            return Ok(());
-        };
-        let completed_at = now();
-        let manifest = ConversionManifest {
-            schema_version: 1,
-            job_id,
-            attempt_id,
-            client_run_id: finalizing.client_run_id,
-            profile: finalizing.profile,
-            source: ManifestSource {
-                media_type: finalizing.source.media_type.clone(),
-                byte_length: finalizing.source.byte_length,
-                sha256: finalizing.source.sha256.clone(),
-            },
-            engine: ManifestEngine {
-                name: engine_record.name,
-                version: engine_record.version,
-                features: Vec::new(),
-            },
-            route: ManifestRoute {
-                kind: route,
-                reason_codes,
-            },
-            document: engine_analysis.diagnostics,
-            warnings,
-            output: ManifestSource {
-                media_type: MARKDOWN_MEDIA_TYPE.to_owned(),
-                byte_length: markdown_bytes,
-                sha256: markdown_sha256.clone(),
-            },
-            started_at: finalizing
-                .active_attempt
-                .started_at
-                .clone()
-                .unwrap_or_else(|| finalizing.created_at.clone()),
-            completed_at,
-        };
-        let encoded = match serde_json::to_vec(&manifest) {
-            Ok(encoded) if encoded.len() as u64 <= MAX_MANIFEST_BYTES => encoded,
-            _ => {
-                self.finish_failure(
-                    job_id,
-                    attempt_id,
-                    FailureStage::Finalizing,
-                    "manifest_encoding_failed",
-                    PUBLICATION_FAILED_MESSAGE,
-                    true,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        if write_and_sync_new(&paths.staged_manifest(), &encoded)
-            .await
-            .is_err()
-            || sync_directory(paths.publication_staging.clone())
-                .await
-                .is_err()
-        {
-            self.finish_failure(
-                job_id,
-                attempt_id,
-                FailureStage::Finalizing,
-                "artifact_publication_failed",
-                PUBLICATION_FAILED_MESSAGE,
-                true,
-            )
-            .await?;
-            return Ok(());
-        }
 
         match self.artifacts.publish_artifacts(job_id, attempt_id).await {
             Ok(()) => {}
@@ -823,8 +712,8 @@ impl ConversionService {
         }
         self.faults.hold(FaultPoint::AfterPublish).await;
 
-        let artifacts = match self.validate_finalizing_publication(&finalizing).await {
-            Ok(artifacts) => artifacts,
+        let markdown = match self.validate_finalizing_publication(&finalizing).await {
+            Ok(markdown) => markdown,
             Err(ArtifactReadFailure::Integrity) => {
                 self.finish_failure(
                     job_id,
@@ -841,7 +730,7 @@ impl ConversionService {
         };
         self.faults.hold(FaultPoint::BeforeSuccessCommit).await;
         self.repository
-            .finish_succeeded(job_id, attempt_id, artifacts)
+            .finish_succeeded(job_id, attempt_id, markdown)
             .await?;
         tracing::info!(
             %job_id,
@@ -930,140 +819,44 @@ impl ConversionService {
         &self,
         job: &StoredConversion,
     ) -> Result<(), ArtifactReadFailure> {
-        let (markdown, manifest) = artifact_pair(job).ok_or(ArtifactReadFailure::Integrity)?;
-        self.validate_artifact_pair(job, markdown, manifest).await
-    }
-
-    async fn validate_artifact_pair(
-        &self,
-        job: &StoredConversion,
-        markdown: &StoredArtifact,
-        manifest: &StoredArtifact,
-    ) -> Result<(), ArtifactReadFailure> {
-        validate_artifact_metadata(job, markdown, manifest)?;
-        self.validate_published_artifacts(job, Some((markdown, manifest)))
-            .await?;
+        let markdown = stored_markdown(job)?;
+        self.open_published_markdown(job, Some(markdown)).await?;
         Ok(())
     }
 
-    async fn validate_published_artifacts(
+    /// Opens `result.md` and checks it against the success commit's row, or,
+    /// with none yet, against the digest the attempt recorded at finalizing.
+    async fn open_published_markdown(
         &self,
         job: &StoredConversion,
-        expected: Option<(&StoredArtifact, &StoredArtifact)>,
-    ) -> Result<SuccessfulArtifacts, ArtifactReadFailure> {
+        stored: Option<&StoredArtifact>,
+    ) -> Result<ValidatedOpenFile, ArtifactReadFailure> {
         validate_source_metadata(job)?;
-        self.artifacts
-            .validate_published_contents(job.id, job.active_attempt.id)
-            .await
-            .map_err(classify_artifact_error)?;
-
-        let markdown_expected = expected.map(|(markdown, _)| markdown);
-        let manifest_expected = expected.map(|(_, manifest)| manifest);
-        let manifest = self
-            .artifacts
-            .open_bounded_validated_artifact(
-                job.id,
-                job.active_attempt.id,
-                PublishedArtifact::Manifest,
-                MAX_MANIFEST_BYTES,
-                manifest_expected.map(|artifact| artifact.byte_length),
-                manifest_expected.map(|artifact| artifact.sha256.as_str()),
-            )
-            .await
-            .map_err(classify_artifact_error)?;
-        let mut encoded = Vec::with_capacity(manifest.byte_length as usize);
-        manifest
-            .file
-            .take(MAX_MANIFEST_BYTES + 1)
-            .read_to_end(&mut encoded)
-            .await
-            .map_err(|source| {
-                ArtifactReadFailure::Transient(ArtifactError::InspectPath {
-                    path: self
-                        .artifacts
-                        .attempt_paths(job.id, job.active_attempt.id)
-                        .manifest(),
-                    source,
-                })
-            })?;
-        if !manifest_bytes_match(&encoded, manifest.byte_length, &manifest.sha256) {
-            return Err(ArtifactReadFailure::Integrity);
-        }
-        // `deny_unknown_fields` on the manifest structs is the shape check.
-        // The `document` object is the producing engine's own type, so
-        // `validate_manifest` decodes it against that engine's struct.
-        let decoded: ConversionManifest =
-            serde_json::from_slice(&encoded).map_err(|_| ArtifactReadFailure::Integrity)?;
-        let markdown_limit =
-            markdown_read_limit(markdown_expected, &decoded.output, self.max_output_bytes)?;
-        let markdown = self
-            .artifacts
-            .open_bounded_validated_artifact(
-                job.id,
-                job.active_attempt.id,
-                PublishedArtifact::Markdown,
-                markdown_limit,
-                Some(decoded.output.byte_length),
-                Some(&decoded.output.sha256),
-            )
-            .await
-            .map_err(classify_artifact_error)?;
-        validate_manifest(job, &decoded, markdown.byte_length, &markdown.sha256)?;
-
-        Ok(SuccessfulArtifacts {
-            markdown: NewArtifact {
-                relative_path: portable_relative(artifact_relative_path(
-                    job.id,
-                    job.active_attempt.id,
-                    PublishedArtifact::Markdown,
-                )),
-                media_type: MARKDOWN_MEDIA_TYPE.to_owned(),
-                byte_length: markdown.byte_length,
-                sha256: markdown.sha256,
+        let attempt = &job.active_attempt;
+        let (byte_length, sha256) = match stored {
+            Some(stored) => (stored.byte_length, stored.sha256.as_str()),
+            None => match (
+                attempt.markdown_byte_length,
+                attempt.markdown_sha256.as_deref(),
+            ) {
+                (Some(length), Some(sha256)) if length <= self.max_output_bytes => (length, sha256),
+                _ => return Err(ArtifactReadFailure::Integrity),
             },
-            manifest: NewArtifact {
-                relative_path: portable_relative(artifact_relative_path(
-                    job.id,
-                    job.active_attempt.id,
-                    PublishedArtifact::Manifest,
-                )),
-                media_type: MANIFEST_MEDIA_TYPE.to_owned(),
-                byte_length: manifest.byte_length,
-                sha256: manifest.sha256,
-            },
-        })
-    }
-
-    async fn open_validated_artifact(
-        &self,
-        job: &StoredConversion,
-        markdown: &StoredArtifact,
-        manifest: &StoredArtifact,
-        kind: ArtifactKind,
-    ) -> Result<ArtifactRecord, ArtifactReadFailure> {
-        self.validate_artifact_pair(job, markdown, manifest).await?;
-        let (selected, selected_kind) = match kind {
-            ArtifactKind::Markdown => (markdown, PublishedArtifact::Markdown),
-            ArtifactKind::Manifest => (manifest, PublishedArtifact::Manifest),
         };
-        let opened = self
-            .artifacts
-            .open_bounded_validated_artifact(
-                job.id,
-                job.active_attempt.id,
-                selected_kind,
-                selected.byte_length,
-                Some(selected.byte_length),
-                Some(&selected.sha256),
-            )
+        self.artifacts
+            .validate_published_contents(job.id, attempt.id)
             .await
             .map_err(classify_artifact_error)?;
-        Ok(ArtifactRecord {
-            file: opened.file,
-            media_type: selected.media_type.clone(),
-            byte_length: opened.byte_length,
-            sha256: opened.sha256,
-        })
+        self.artifacts
+            .open_bounded_validated_markdown(
+                job.id,
+                attempt.id,
+                byte_length,
+                Some(byte_length),
+                Some(sha256),
+            )
+            .await
+            .map_err(classify_artifact_error)
     }
 
     async fn record_artifact_integrity_failure(&self, job: &StoredConversion) -> JobView {
@@ -1254,47 +1047,20 @@ fn local_analysis(
     }
 }
 
-fn artifact_pair(job: &StoredConversion) -> Option<(&StoredArtifact, &StoredArtifact)> {
-    if job.artifacts.len() != 2 {
-        return None;
-    }
-    let markdown = job
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == ArtifactKind::Markdown)?;
-    let manifest = job
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == ArtifactKind::Manifest)?;
-    Some((markdown, manifest))
-}
-
-fn validate_artifact_metadata(
-    job: &StoredConversion,
-    markdown: &StoredArtifact,
-    manifest: &StoredArtifact,
-) -> Result<(), ArtifactReadFailure> {
+/// The one artifact row a succeeded job holds, checked against the path and
+/// media type this attempt publishes.
+fn stored_markdown(job: &StoredConversion) -> Result<&StoredArtifact, ArtifactReadFailure> {
+    let [markdown] = job.artifacts.as_slice() else {
+        return Err(ArtifactReadFailure::Integrity);
+    };
     let attempt_id = job.active_attempt.id;
     if markdown.attempt_id != attempt_id
-        || manifest.attempt_id != attempt_id
-        || markdown.relative_path
-            != portable_relative(artifact_relative_path(
-                job.id,
-                attempt_id,
-                PublishedArtifact::Markdown,
-            ))
-        || manifest.relative_path
-            != portable_relative(artifact_relative_path(
-                job.id,
-                attempt_id,
-                PublishedArtifact::Manifest,
-            ))
+        || markdown.relative_path != portable_relative(markdown_relative_path(job.id, attempt_id))
         || markdown.media_type != MARKDOWN_MEDIA_TYPE
-        || manifest.media_type != MANIFEST_MEDIA_TYPE
     {
         return Err(ArtifactReadFailure::Integrity);
     }
-    Ok(())
+    Ok(markdown)
 }
 
 fn validate_source_metadata(job: &StoredConversion) -> Result<(), ArtifactReadFailure> {
@@ -1304,140 +1070,6 @@ fn validate_source_metadata(job: &StoredConversion) -> Result<(), ArtifactReadFa
         return Err(ArtifactReadFailure::Integrity);
     }
     Ok(())
-}
-
-fn validate_manifest(
-    job: &StoredConversion,
-    manifest: &ConversionManifest,
-    markdown_byte_length: u64,
-    markdown_sha256: &str,
-) -> Result<(), ArtifactReadFailure> {
-    let attempt = &job.active_attempt;
-    let Some(engine) = attempt.engine.as_ref() else {
-        return Err(ArtifactReadFailure::Integrity);
-    };
-    let Some(route) = attempt.route.as_ref() else {
-        return Err(ArtifactReadFailure::Integrity);
-    };
-    let Some(inspection) = attempt.inspection.as_ref() else {
-        return Err(ArtifactReadFailure::Integrity);
-    };
-    let Some(classification) = attempt.classification.as_deref() else {
-        return Err(ArtifactReadFailure::Integrity);
-    };
-    let Some(started_at) = attempt.started_at.as_deref() else {
-        return Err(ArtifactReadFailure::Integrity);
-    };
-    // The document detail is engine-specific JSON, checked against the shape
-    // of the engine that produced it.
-    let manifest_classification: &str = match engine.name.as_str() {
-        PDF_ENGINE_NAME => {
-            let document_inspection: Inspection = serde_json::from_value(manifest.document.clone())
-                .map_err(|_| ArtifactReadFailure::Integrity)?;
-            if !is_complete_native_inspection(&document_inspection) {
-                return Err(ArtifactReadFailure::Integrity);
-            }
-            match document_inspection.pdf_type {
-                PdfTypeLabel::TextBased => "text_based",
-                PdfTypeLabel::Scanned => "scanned",
-                PdfTypeLabel::ImageBased => "image_based",
-                PdfTypeLabel::Mixed => "mixed",
-            }
-        }
-        ANYDOC_ENGINE_NAME => {
-            let diagnostics: AnyDocDiagnostics = serde_json::from_value(manifest.document.clone())
-                .map_err(|_| ArtifactReadFailure::Integrity)?;
-            let expected = source_format_by_media_type(&job.source.media_type)
-                .filter(|format| format.engine == LocalEngineKind::AnyDoc)
-                .map(|format| format.format_label);
-            if Some(diagnostics.format.as_str()) != expected {
-                return Err(ArtifactReadFailure::Integrity);
-            }
-            "structured_document"
-        }
-        VISION_ENGINE_NAME => {
-            serde_json::from_value::<VisionDiagnostics>(manifest.document.clone())
-                .map_err(|_| ArtifactReadFailure::Integrity)?;
-            "image_based"
-        }
-        AUDIO_ENGINE_NAME => {
-            serde_json::from_value::<AudioDiagnostics>(manifest.document.clone())
-                .map_err(|_| ArtifactReadFailure::Integrity)?;
-            "audio"
-        }
-        _ => return Err(ArtifactReadFailure::Integrity),
-    };
-    OffsetDateTime::parse(&manifest.started_at, &Rfc3339)
-        .map_err(|_| ArtifactReadFailure::Integrity)?;
-    OffsetDateTime::parse(&manifest.completed_at, &Rfc3339)
-        .map_err(|_| ArtifactReadFailure::Integrity)?;
-    match job.state {
-        ConversionState::Finalizing if attempt.finished_at.is_none() => {}
-        ConversionState::Succeeded => {
-            OffsetDateTime::parse(
-                attempt
-                    .finished_at
-                    .as_deref()
-                    .ok_or(ArtifactReadFailure::Integrity)?,
-                &Rfc3339,
-            )
-            .map_err(|_| ArtifactReadFailure::Integrity)?;
-        }
-        _ => return Err(ArtifactReadFailure::Integrity),
-    }
-
-    if manifest.schema_version != 1
-        || manifest.job_id != job.id
-        || manifest.attempt_id != attempt.id
-        || manifest.client_run_id != job.client_run_id
-        || manifest.profile != job.profile
-        || manifest.source.media_type != job.source.media_type
-        || manifest.source.byte_length != job.source.byte_length
-        || manifest.source.sha256 != job.source.sha256
-        || manifest.engine.name != engine.name
-        || manifest.engine.version != engine.version
-        || !manifest.engine.features.is_empty()
-        || manifest.route.kind != *route
-        || job.route.as_deref() != Some(route.as_str())
-        || manifest.route.reason_codes != attempt.reason_codes
-        || manifest.route.reason_codes != job.reason_codes
-        || manifest.warnings != attempt.warnings
-        || manifest.warnings != job.warnings
-        || manifest.document != *inspection
-        || classification != manifest_classification
-        || manifest.output.media_type != MARKDOWN_MEDIA_TYPE
-        || markdown_byte_length == 0
-        || manifest.output.byte_length != markdown_byte_length
-        || manifest.output.sha256 != markdown_sha256
-        || manifest.started_at != started_at
-    {
-        return Err(ArtifactReadFailure::Integrity);
-    }
-    Ok(())
-}
-
-fn markdown_read_limit(
-    stored: Option<&StoredArtifact>,
-    output: &ManifestSource,
-    configured_maximum: u64,
-) -> Result<u64, ArtifactReadFailure> {
-    if output.media_type != MARKDOWN_MEDIA_TYPE || output.byte_length == 0 {
-        return Err(ArtifactReadFailure::Integrity);
-    }
-    match stored {
-        Some(stored)
-            if stored.byte_length == output.byte_length && stored.sha256 == output.sha256 =>
-        {
-            Ok(stored.byte_length)
-        }
-        Some(_) => Err(ArtifactReadFailure::Integrity),
-        None if output.byte_length <= configured_maximum => Ok(configured_maximum),
-        None => Err(ArtifactReadFailure::Integrity),
-    }
-}
-
-fn manifest_bytes_match(bytes: &[u8], byte_length: u64, sha256: &str) -> bool {
-    bytes.len() as u64 == byte_length && hex::encode(Sha256::digest(bytes)) == sha256
 }
 
 #[derive(Debug)]
@@ -1489,38 +1121,16 @@ fn portable_relative(path: PathBuf) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-async fn write_and_sync_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).await?;
-    file.write_all(bytes).await?;
-    file.sync_all().await
-}
-
-async fn sync_directory(path: PathBuf) -> std::io::Result<()> {
-    tokio::task::spawn_blocking(move || std::fs::File::open(path)?.sync_all())
-        .await
-        .map_err(std::io::Error::other)?
-}
-
 #[cfg(test)]
 mod tests {
     use std::{io::ErrorKind, path::PathBuf};
 
-    use serde_json::json;
-    use sha2::{Digest, Sha256};
     use uuid::Uuid;
 
     use super::{
-        classify_artifact_error, manifest_bytes_match, markdown_read_limit, submission_fingerprint,
-        ArtifactError, ArtifactReadFailure, ConversionManifest, ConversionProfile, ManifestSource,
+        classify_artifact_error, submission_fingerprint, ArtifactError, ArtifactReadFailure,
+        ConversionProfile,
     };
-    use crate::persistence::{ArtifactKind, StoredArtifact};
-    use crate::worker_protocol::Inspection;
 
     /// A replay is matched on the fingerprint alone, so a per-run setting
     /// outside it means a resumed run silently replays onto a job converted
@@ -1626,112 +1236,6 @@ mod tests {
             classify_artifact_error(denied),
             ArtifactReadFailure::Transient(ArtifactError::ValidatePublication { source, .. })
                 if source.kind() == ErrorKind::PermissionDenied
-        ));
-    }
-
-    /// The manifest shape is `deny_unknown_fields` on the structs it decodes
-    /// into. `document` is untyped there, so its shape is the producing
-    /// engine's own type, checked where the manifest is validated.
-    #[test]
-    fn manifest_shape_rejects_unknown_nested_and_document_fields() {
-        let document = json!({
-            "pdfType": "text_based",
-            "confidence": 1.0,
-            "pageCount": 1,
-            "pagesNeedingOcr": [],
-            "ocrReasonsByPage": [{"page": 1, "reasons": []}],
-            "hasEncodingIssues": false,
-            "isComplex": false,
-            "pagesWithTables": [],
-            "pagesWithColumns": [],
-            "processingTimeMs": 1
-        });
-        let valid = json!({
-            "schemaVersion": 1,
-            "jobId": Uuid::nil(),
-            "attemptId": Uuid::nil(),
-            "clientRunId": Uuid::nil(),
-            "profile": "standard",
-            "source": {"mediaType": "application/pdf", "byteLength": 1, "sha256": "a".repeat(64)},
-            "engine": {"name": "pdf-inspector", "version": "1.25.2", "features": []},
-            "route": {"kind": "local_pdf", "reasonCodes": []},
-            "document": document,
-            "warnings": [],
-            "output": {"mediaType": "text/markdown", "byteLength": 1, "sha256": "b".repeat(64)},
-            "startedAt": "1970-01-01T00:00:00Z",
-            "completedAt": "1970-01-01T00:00:00Z"
-        });
-        assert!(serde_json::from_value::<ConversionManifest>(valid.clone()).is_ok());
-        assert!(serde_json::from_value::<Inspection>(document.clone()).is_ok());
-
-        for path in ["top", "source", "engine", "route", "output"] {
-            let mut mutated = valid.clone();
-            match path {
-                "top" => mutated["unexpected"] = json!(true),
-                other => mutated[other]["unexpected"] = json!(true),
-            }
-            assert!(
-                serde_json::from_value::<ConversionManifest>(mutated).is_err(),
-                "an unknown {path} field must not decode"
-            );
-        }
-
-        for path in ["document", "page"] {
-            let mut mutated = document.clone();
-            match path {
-                "document" => mutated["unexpected"] = json!(true),
-                _ => mutated["ocrReasonsByPage"][0]["unexpected"] = json!(true),
-            }
-            assert!(
-                serde_json::from_value::<Inspection>(mutated).is_err(),
-                "an unknown {path} field must not decode"
-            );
-        }
-    }
-
-    #[test]
-    fn markdown_limits_preserve_valid_history_and_bound_new_publications() {
-        let stored = StoredArtifact {
-            attempt_id: Uuid::nil(),
-            kind: ArtifactKind::Markdown,
-            relative_path: "result.md".to_owned(),
-            media_type: super::MARKDOWN_MEDIA_TYPE.to_owned(),
-            byte_length: 10,
-            sha256: "a".repeat(64),
-            created_at: "created".to_owned(),
-        };
-        let output = ManifestSource {
-            media_type: super::MARKDOWN_MEDIA_TYPE.to_owned(),
-            byte_length: 10,
-            sha256: "a".repeat(64),
-        };
-
-        assert_eq!(markdown_read_limit(Some(&stored), &output, 5).unwrap(), 10);
-        assert!(matches!(
-            markdown_read_limit(None, &output, 5),
-            Err(ArtifactReadFailure::Integrity)
-        ));
-        assert_eq!(markdown_read_limit(None, &output, 10).unwrap(), 10);
-
-        let mismatched = ManifestSource {
-            sha256: "b".repeat(64),
-            ..output
-        };
-        assert!(matches!(
-            markdown_read_limit(Some(&stored), &mismatched, 10),
-            Err(ArtifactReadFailure::Integrity)
-        ));
-    }
-
-    #[test]
-    fn parsed_manifest_bytes_must_match_the_validated_handle_hash() {
-        let bytes = br#"{"schemaVersion":1}"#;
-        let sha256 = hex::encode(Sha256::digest(bytes));
-        assert!(manifest_bytes_match(bytes, bytes.len() as u64, &sha256));
-        assert!(!manifest_bytes_match(
-            br#"{"schemaVersion":2}"#,
-            bytes.len() as u64,
-            &sha256
         ));
     }
 }

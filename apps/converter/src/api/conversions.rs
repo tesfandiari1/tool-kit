@@ -19,9 +19,9 @@ use uuid::Uuid;
 use crate::{
     config::Limits,
     conversion::{
-        source_format_by_extension, ArtifactKind, ArtifactLookup, ArtifactView, ContainerMagic,
-        ConversionProfile, EngineAvailability, JobView, LocalEngineKind, SourceMetadata,
-        Submission, SubmissionDecision,
+        source_format_by_extension, ArtifactLookup, ContainerMagic, ConversionProfile,
+        EngineAvailability, JobView, LocalEngineKind, SourceMetadata, Submission,
+        SubmissionDecision,
     },
     error::{ApiError, RequestId},
     AppState,
@@ -198,47 +198,15 @@ pub async fn get(
     Ok(Json(JobEnvelope { data: job }))
 }
 
-pub async fn list_artifacts(
-    State(state): State<AppState>,
-    Extension(request_id): Extension<RequestId>,
-    Path(raw_job_id): Path<String>,
-) -> Result<Json<ArtifactListEnvelope>, ApiError> {
-    let job_id = parse_job_id(&raw_job_id, &request_id)?;
-    let artifacts = state
-        .service()
-        .artifact_views(job_id)
-        .await
-        .map_err(|_| service_unavailable(&request_id))?
-        .ok_or_else(|| not_found(&request_id))?;
-    Ok(Json(ArtifactListEnvelope { data: artifacts }))
-}
-
 pub async fn download_markdown(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
     Path(raw_job_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    download(state, request_id, raw_job_id, ArtifactKind::Markdown).await
-}
-
-pub async fn download_manifest(
-    State(state): State<AppState>,
-    Extension(request_id): Extension<RequestId>,
-    Path(raw_job_id): Path<String>,
-) -> Result<Response, ApiError> {
-    download(state, request_id, raw_job_id, ArtifactKind::Manifest).await
-}
-
-async fn download(
-    state: AppState,
-    request_id: RequestId,
-    raw_job_id: String,
-    kind: ArtifactKind,
-) -> Result<Response, ApiError> {
     let job_id = parse_job_id(&raw_job_id, &request_id)?;
     let lookup = state
         .service()
-        .artifact(job_id, kind)
+        .markdown(job_id)
         .await
         .map_err(|_| service_unavailable(&request_id))?
         .ok_or_else(|| not_found(&request_id))?;
@@ -261,11 +229,7 @@ async fn download(
             ));
         }
     };
-    let extension = match kind {
-        ArtifactKind::Markdown => "md",
-        ArtifactKind::Manifest => "json",
-    };
-    let disposition = format!("attachment; filename=\"conversion-{job_id}.{extension}\"");
+    let disposition = format!("attachment; filename=\"conversion-{job_id}.md\"");
     let etag = format!("\"sha256-{}\"", artifact.sha256);
     Response::builder()
         .status(StatusCode::OK)
@@ -778,11 +742,6 @@ struct StagedSubmission {
 #[derive(Debug, Serialize)]
 pub(super) struct JobEnvelope {
     data: JobView,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct ArtifactListEnvelope {
-    data: Vec<ArtifactView>,
 }
 
 #[cfg(test)]

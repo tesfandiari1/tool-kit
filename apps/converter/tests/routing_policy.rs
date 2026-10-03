@@ -2,7 +2,7 @@
 //!
 //! Every case drives the real HTTP surface and the real worker: submit, wait
 //! for terminal, then read back what a client would actually see (status, route,
-//! warnings, the artifact list, and the Markdown bytes themselves).
+//! warnings, and the Markdown bytes themselves).
 //!
 //! The policy has unit tests over synthetic `QualitySignals`. Those cannot catch
 //! the live defect, because the defect was that a 90%-native PDF reaches the
@@ -27,11 +27,9 @@ struct Outcome {
     reason_codes: Vec<String>,
     warnings: Vec<String>,
     failure_code: Option<String>,
-    artifact_kinds: Vec<String>,
     /// `None` when the Markdown route answers 404, which is the only other
     /// answer this suite tolerates.
     markdown: Option<String>,
-    manifest: Option<Value>,
 }
 
 async fn convert(app: &TestApp, profile: &str, key: &str, source: &[u8]) -> Outcome {
@@ -51,12 +49,6 @@ async fn convert(app: &TestApp, profile: &str, key: &str, source: &[u8]) -> Outc
     let completed = app.wait_for_terminal(&job_id).await;
     let data = &completed["data"];
 
-    let artifacts = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
-        .await;
-    assert_eq!(artifacts.status(), StatusCode::OK, "{key}");
-    let artifact_kinds = strings(&json_body(artifacts).await["data"], "kind");
-
     let response = app
         .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
@@ -66,42 +58,22 @@ async fn convert(app: &TestApp, profile: &str, key: &str, source: &[u8]) -> Outc
         other => panic!("{key}: markdown answered {other}"),
     };
 
-    let response = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await;
-    let manifest = match response.status() {
-        StatusCode::OK => Some(serde_json::from_str(&read_text(response).await).unwrap()),
-        StatusCode::NOT_FOUND => None,
-        other => panic!("{key}: manifest answered {other}"),
-    };
-
     Outcome {
         status: data["status"].as_str().unwrap().to_owned(),
         route_kind: data["route"]["kind"].as_str().unwrap().to_owned(),
-        reason_codes: strings(&data["route"]["reasonCodes"], ""),
-        warnings: strings(&data["warnings"], ""),
+        reason_codes: strings(&data["route"]["reasonCodes"]),
+        warnings: strings(&data["warnings"]),
         failure_code: data["failure"]["code"].as_str().map(str::to_owned),
-        artifact_kinds,
         markdown,
-        manifest,
     }
 }
 
-/// Reads a JSON array as strings. A non-empty `field` picks one key out of each
-/// object instead.
-fn strings(value: &Value, field: &str) -> Vec<String> {
+fn strings(value: &Value) -> Vec<String> {
     value
         .as_array()
         .unwrap()
         .iter()
-        .map(|entry| {
-            let leaf = if field.is_empty() {
-                entry
-            } else {
-                &entry[field]
-            };
-            leaf.as_str().unwrap().to_owned()
-        })
+        .map(|entry| entry.as_str().unwrap().to_owned())
         .collect()
 }
 
@@ -110,28 +82,21 @@ async fn read_text(response: axum::response::Response) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
-/// The published-clean shape: both artifacts, downloadable Markdown, no caveat.
+/// The published-clean shape: downloadable Markdown and the expected caveats.
 fn assert_published(outcome: &Outcome, key: &str, warnings: &[&str]) {
     assert_eq!(outcome.status, "succeeded", "{key}");
     assert_eq!(outcome.route_kind, "local_pdf", "{key}");
     assert_eq!(outcome.failure_code, None, "{key}");
     assert_eq!(outcome.warnings, warnings, "{key}");
-    assert_eq!(outcome.artifact_kinds, ["markdown", "manifest"], "{key}");
     let markdown = outcome.markdown.as_deref().unwrap_or_else(|| {
         panic!("{key}: published without downloadable Markdown");
     });
     assert!(!markdown.trim().is_empty(), "{key}");
-    // The durable record has to carry the same caveat the API reports; a
-    // warning that survives only in the response is a warning a re-read loses.
-    let manifest = outcome.manifest.as_ref().unwrap();
-    assert_eq!(strings(&manifest["warnings"], ""), warnings, "{key}");
 }
 
 /// The routed-away shape: nothing published, nothing on disk to publish later.
 fn assert_nothing_published(outcome: &Outcome, key: &str) {
-    assert!(outcome.artifact_kinds.is_empty(), "{key}");
     assert!(outcome.markdown.is_none(), "{key}");
-    assert!(outcome.manifest.is_none(), "{key}");
 }
 
 #[tokio::test]

@@ -29,16 +29,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/conversions", post(conversions::create))
         .route("/api/v1/conversions/{id}", get(conversions::get))
         .route(
-            "/api/v1/conversions/{id}/artifacts",
-            get(conversions::list_artifacts),
-        )
-        .route(
             "/api/v1/conversions/{id}/artifacts/markdown",
             get(conversions::download_markdown),
-        )
-        .route(
-            "/api/v1/conversions/{id}/artifacts/manifest",
-            get(conversions::download_manifest),
         )
         .route_layer(middleware::from_fn_with_state(
             state.auth().clone(),

@@ -55,10 +55,10 @@ const DIARIZER_LAYOUT: [&str; 6] = [
     "speaker-diarization/plda-parameters.json",
 ];
 
-/// Engine-specific detail persisted as attempt diagnostics and embedded in the
-/// manifest. Content-free: durations and speaker counts, never words.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+/// Engine-specific detail persisted as attempt diagnostics. Content-free:
+/// durations and speaker counts, never words.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AudioDiagnostics {
     pub processing_time_ms: u64,
     pub audio_seconds: f64,

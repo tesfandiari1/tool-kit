@@ -4,9 +4,11 @@ mod support;
 
 use std::{fs, path::PathBuf, time::Duration};
 
-use axum::http::StatusCode;
+use axum::http::{
+    header::{CONTENT_LENGTH, ETAG},
+    StatusCode,
+};
 use http_body_util::BodyExt;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -58,15 +60,11 @@ impl AttemptFiles {
     fn markdown(&self) -> PathBuf {
         self.published.join("result.md")
     }
-
-    fn manifest(&self) -> PathBuf {
-        self.published.join("manifest.json")
-    }
 }
 
 /// The durable state every post-publication barrier must show: the rename is on
-/// disk, the two published files agree with each other, and SQLite still says
-/// `finalizing` with no artifact rows.
+/// disk, the published Markdown matches the digest finalizing recorded, and
+/// SQLite still says `finalizing` with no artifact rows.
 async fn assert_published_but_uncommitted(harness: &TestHarness, seeded: SeededJob) {
     let (status, active_attempt) = harness.stored_status(seeded.job_id).await;
     assert_eq!(status, "finalizing");
@@ -81,46 +79,39 @@ async fn assert_published_but_uncommitted(harness: &TestHarness, seeded: SeededJ
     );
     assert!(files.published.is_dir());
 
+    assert_eq!(fs::read_dir(&files.published).unwrap().count(), 1);
     let markdown = fs::read(files.markdown()).unwrap();
     assert!(!markdown.is_empty());
-    let manifest: Value = serde_json::from_slice(&fs::read(files.manifest()).unwrap()).unwrap();
-    assert_eq!(manifest["attemptId"], seeded.attempt_id.to_string());
     assert_eq!(
-        manifest["output"]["sha256"],
-        hex::encode(Sha256::digest(&markdown)),
-        "the published pair must be complete, not half-written"
+        harness.recorded_markdown(seeded.attempt_id).await,
+        (
+            markdown.len() as u64,
+            hex::encode(Sha256::digest(&markdown))
+        ),
+        "the published Markdown must be complete, not half-written"
     );
 }
 
-/// Downloads both artifacts and checks each against the hash the success commit
-/// recorded, so "succeeded" is only accepted when a client can fetch the bytes.
+/// Downloads the Markdown and checks it against the length and hash the
+/// response states, so "succeeded" is only accepted when a client can fetch
+/// the bytes.
 async fn assert_artifacts_download(app: &TestApp, job_id: Uuid) {
-    let listing = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
+    let download = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
-    assert_eq!(listing.status(), StatusCode::OK);
-    let listing = json_body(listing).await;
-    let artifacts = listing["data"].as_array().unwrap();
-    assert_eq!(artifacts.len(), 2, "{listing:#}");
-
-    for artifact in artifacts {
-        let kind = artifact["kind"].as_str().unwrap();
-        let download = app
-            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/{kind}"))
-            .await;
-        assert_eq!(download.status(), StatusCode::OK, "{kind}");
-        let bytes = download.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            artifact["byteLength"].as_u64().unwrap(),
-            bytes.len() as u64,
-            "{kind}"
-        );
-        assert_eq!(
-            artifact["sha256"],
-            hex::encode(Sha256::digest(&bytes)),
-            "{kind}"
-        );
-    }
+    assert_eq!(download.status(), StatusCode::OK);
+    let length: u64 = download.headers()[CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let etag = download.headers()[ETAG].to_str().unwrap().to_owned();
+    let bytes = download.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(length, bytes.len() as u64);
+    assert_eq!(
+        etag,
+        format!("\"sha256-{}\"", hex::encode(Sha256::digest(&bytes)))
+    );
 }
 
 #[tokio::test]
@@ -185,8 +176,8 @@ async fn crash_after_finalizing_discards_staging_and_retries() {
     let files = AttemptFiles::of(&harness, seeded);
     assert!(files.staging.is_dir(), "the markdown is still only staged");
     assert!(files.staging.join("result.md").is_file());
-    // The manifest is written after this commit, so staging holds the worker's
-    // markdown alone. The engine already removed its report file.
+    // Staging holds the worker's markdown alone. The engine already removed
+    // its report file.
     assert_eq!(fs::read_dir(&files.staging).unwrap().count(), 1);
     assert!(!files.published.exists(), "nothing is published yet");
 
@@ -239,7 +230,7 @@ async fn crash_after_publish_commits_the_same_attempt() {
         "a durable publication is adopted, not converted again"
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
-    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 2);
+    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 1);
     assert_artifacts_download(&restarted, seeded.job_id).await;
     assert!(!restarted.job_runner_failed());
 }
@@ -273,7 +264,7 @@ async fn crash_before_success_commit_is_indistinguishable_from_after_publish() {
         seeded.attempt_id.to_string()
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
-    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 2);
+    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 1);
     assert_artifacts_download(&restarted, seeded.job_id).await;
     assert!(!restarted.job_runner_failed());
 }
@@ -333,7 +324,7 @@ async fn an_unreadable_conversion_is_quarantined_instead_of_stopping_the_boot() 
     );
 
     // Audit rows survive, and the healthy neighbour is untouched.
-    assert_eq!(harness.artifact_row_count(poisoned.attempt_id).await, 2);
+    assert_eq!(harness.artifact_row_count(poisoned.attempt_id).await, 1);
     let survivor = restarted
         .authorized_get(&format!("/api/v1/conversions/{}", healthy.job_id))
         .await;

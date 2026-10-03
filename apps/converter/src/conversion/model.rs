@@ -1,12 +1,11 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Serialize;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::fs::File;
 use uuid::Uuid;
 
 use super::service::{ARTIFACT_INTEGRITY_CODE, ARTIFACT_INTEGRITY_MESSAGE};
-use super::{ArtifactKind, ConversionProfile, JobStatus};
-use crate::persistence::{StoredArtifact, StoredConversion};
+use super::{ConversionProfile, JobStatus};
+use crate::persistence::StoredConversion;
 
 /// One advertised upload format: the accepted extension, the canonical media
 /// type stored with the source, the container signature the upload path
@@ -23,8 +22,7 @@ pub(crate) struct SourceFormat {
     pub media_type: &'static str,
     pub magic: ContainerMagic,
     pub engine: LocalEngineKind,
-    /// The family label AnyDoc reports in its diagnostics; used to check
-    /// manifest consistency for AnyDoc jobs. No other engine reads it.
+    /// The family label AnyDoc parses this format as. No other engine reads it.
     pub format_label: &'static str,
 }
 
@@ -457,72 +455,6 @@ pub struct ArtifactRecord {
     pub media_type: String,
     pub byte_length: u64,
     pub sha256: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ArtifactView {
-    pub kind: ArtifactKind,
-    pub attempt_id: Uuid,
-    pub media_type: String,
-    pub byte_length: u64,
-    pub sha256: String,
-    pub href: String,
-}
-
-impl ArtifactView {
-    pub fn from_stored(job_id: Uuid, artifact: &StoredArtifact) -> Self {
-        let kind = artifact.kind;
-        Self {
-            kind,
-            attempt_id: artifact.attempt_id,
-            media_type: artifact.media_type.clone(),
-            byte_length: artifact.byte_length,
-            sha256: artifact.sha256.clone(),
-            href: format!("/api/v1/conversions/{job_id}/artifacts/{}", kind.as_str()),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct ConversionManifest {
-    pub(crate) schema_version: u32,
-    pub(crate) job_id: Uuid,
-    pub(crate) attempt_id: Uuid,
-    pub(crate) client_run_id: Uuid,
-    pub(crate) profile: ConversionProfile,
-    pub(crate) source: ManifestSource,
-    pub(crate) engine: ManifestEngine,
-    pub(crate) route: ManifestRoute,
-    pub(crate) document: Value,
-    pub(crate) warnings: Vec<String>,
-    pub(crate) output: ManifestSource,
-    pub(crate) started_at: String,
-    pub(crate) completed_at: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct ManifestSource {
-    pub(crate) media_type: String,
-    pub(crate) byte_length: u64,
-    pub(crate) sha256: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ManifestEngine {
-    pub(crate) name: String,
-    pub(crate) version: String,
-    pub(crate) features: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct ManifestRoute {
-    pub(crate) kind: String,
-    pub(crate) reason_codes: Vec<String>,
 }
 
 pub fn now() -> String {

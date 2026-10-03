@@ -77,7 +77,6 @@ async fn corrupt_source_fails_the_claim(corruption: Corruption) {
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
     assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 0);
     assert_eq!(count_named_files(harness.data_dir(), "result.md"), 0);
-    assert_eq!(count_named_files(harness.data_dir(), "manifest.json"), 0);
     app.shutdown(Duration::from_secs(1)).await;
 }
 
@@ -102,9 +101,8 @@ async fn corrupt_published_markdown_fails_the_restart(
         .join(seeded.attempt_id.to_string())
         .join("artifacts");
     let markdown = published.join("result.md");
-    let manifest = published.join("manifest.json");
     // Keeping the decoy out of the published directory leaves the symlink case as
-    // the only reason the bundle fails, not an unexpected third entry.
+    // the only reason the bundle fails, not an unexpected extra entry.
     let decoy = harness.data_dir().parent().unwrap().join("artifact-decoy");
     corruption.apply(&markdown, &decoy);
 
@@ -120,17 +118,14 @@ async fn corrupt_published_markdown_fails_the_restart(
         "{status:#}"
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
-    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 2);
-    assert!(manifest.exists());
-    for name in ["markdown", "manifest"] {
-        let download = restarted
-            .authorized_get(&format!(
-                "/api/v1/conversions/{}/artifacts/{name}",
-                seeded.job_id
-            ))
-            .await;
-        assert_eq!(download.status(), StatusCode::NOT_FOUND, "{name}");
-    }
+    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 1);
+    let download = restarted
+        .authorized_get(&format!(
+            "/api/v1/conversions/{}/artifacts/markdown",
+            seeded.job_id
+        ))
+        .await;
+    assert_eq!(download.status(), StatusCode::NOT_FOUND);
     restarted.shutdown(Duration::from_secs(1)).await;
 }
 

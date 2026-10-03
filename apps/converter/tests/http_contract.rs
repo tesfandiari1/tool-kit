@@ -308,35 +308,18 @@ async fn clean_pdf_completes_and_idempotency_replays_the_job() {
         serde_json::json!(["native_text_pdf"])
     );
 
-    let artifacts = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
-        .await;
-    assert_eq!(artifacts.status(), StatusCode::OK);
-    let artifacts = json_body(artifacts).await;
-    assert_eq!(artifacts["data"].as_array().unwrap().len(), 2);
-
     let markdown = app
         .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
     assert_eq!(markdown.status(), StatusCode::OK);
     assert_eq!(markdown.headers()["cache-control"], "private, no-store");
+    let etag = markdown.headers()["etag"].to_str().unwrap().to_owned();
     let markdown = markdown.into_body().collect().await.unwrap().to_bytes();
     assert!(!markdown.is_empty());
-
-    let manifest = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await;
-    assert_eq!(manifest.status(), StatusCode::OK);
-    let manifest_bytes = manifest.into_body().collect().await.unwrap().to_bytes();
-    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
-    assert_eq!(manifest["schemaVersion"], 1);
-    assert_eq!(manifest["engine"]["version"], "1.25.2");
-    assert_eq!(manifest["document"]["pdfType"], "text_based");
     assert_eq!(
-        manifest["output"]["sha256"],
-        hex::encode(Sha256::digest(&markdown))
+        etag,
+        format!("\"sha256-{}\"", hex::encode(Sha256::digest(&markdown)))
     );
-    assert!(!String::from_utf8_lossy(&manifest_bytes).contains("fixture.pdf"));
 
     let replay = app.submit(body, "clean-pdf-1", TOKEN).await;
     assert_eq!(replay.status(), StatusCode::ACCEPTED);
@@ -388,25 +371,6 @@ async fn docx_completes_through_anydoc_and_replays() {
     assert_eq!(markdown.status(), StatusCode::OK);
     let markdown = markdown.into_body().collect().await.unwrap().to_bytes();
     assert!(String::from_utf8_lossy(&markdown).contains("Fixture Document"));
-
-    let manifest = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await;
-    assert_eq!(manifest.status(), StatusCode::OK);
-    let manifest_bytes = manifest.into_body().collect().await.unwrap().to_bytes();
-    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
-    assert_eq!(manifest["engine"]["name"], "anydoc");
-    assert_eq!(manifest["engine"]["version"], "0.2.4");
-    assert_eq!(manifest["document"]["format"], "docx");
-    assert_eq!(
-        manifest["source"]["mediaType"],
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    );
-    assert_eq!(
-        manifest["output"]["sha256"],
-        hex::encode(Sha256::digest(&markdown))
-    );
-    assert!(!String::from_utf8_lossy(&manifest_bytes).contains("notes.docx"));
 
     let replay = app.submit(body, "anydoc-docx-1", TOKEN).await;
     assert_eq!(replay.status(), StatusCode::ACCEPTED);
@@ -553,16 +517,12 @@ async fn every_advertised_anydoc_family_converts() {
             "{label}"
         );
 
-        let manifest = app
-            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
+        let markdown = app
+            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
             .await;
-        assert_eq!(manifest.status(), StatusCode::OK, "{label}");
-        let manifest: Value =
-            serde_json::from_slice(&manifest.into_body().collect().await.unwrap().to_bytes())
-                .unwrap();
-        assert_eq!(manifest["engine"]["name"], "anydoc", "{label}");
-        assert_eq!(manifest["document"]["format"], label, "{label}");
-        assert!(manifest["document"]["processingTimeMs"].is_u64(), "{label}");
+        assert_eq!(markdown.status(), StatusCode::OK, "{label}");
+        let markdown = markdown.into_body().collect().await.unwrap().to_bytes();
+        assert!(!markdown.is_empty(), "{label}");
     }
 }
 
@@ -663,16 +623,6 @@ async fn broken_and_hostile_anydoc_inputs_fail_closed_without_artifacts() {
         );
         assert_eq!(completed["data"]["failure"]["code"], code, "{code}");
 
-        let artifacts = app
-            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
-            .await;
-        assert!(
-            json_body(artifacts).await["data"]
-                .as_array()
-                .unwrap()
-                .is_empty(),
-            "{code}"
-        );
         let markdown = app
             .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
             .await;
@@ -685,7 +635,7 @@ async fn broken_and_hostile_anydoc_inputs_fail_closed_without_artifacts() {
 async fn a_cross_family_mislabelled_container_fails_before_conversion() {
     // docx/xlsx/pptx/epub all carry the same ZIP magic, so upload admission
     // cannot separate them. An xlsx sent as .docx used to convert fine and
-    // then trip the manifest check as `artifact_integrity_failed` - a
+    // then trip the artifact check as `artifact_integrity_failed` - a
     // corruption code for a merely misnamed file. It must fail as an invalid
     // document instead, and before any parsing happens.
     let app = test_app().await;
@@ -712,13 +662,10 @@ async fn a_cross_family_mislabelled_container_fails_before_conversion() {
         completed["data"]["failure"]["code"], "invalid_document",
         "{completed:#}"
     );
-    let artifacts = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
+    let markdown = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
-    assert!(json_body(artifacts).await["data"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert_eq!(markdown.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -901,14 +848,6 @@ async fn completed_job_idempotency_and_downloads_survive_app_restart() {
         .await
         .unwrap()
         .to_bytes();
-    let manifest_before = first
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
     first.shutdown(Duration::from_secs(1)).await;
     drop(first);
 
@@ -931,19 +870,6 @@ async fn completed_job_idempotency_and_downloads_survive_app_restart() {
             .unwrap()
             .to_bytes(),
         markdown_before
-    );
-    let manifest_after = restarted
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await;
-    assert_eq!(manifest_after.status(), StatusCode::OK);
-    assert_eq!(
-        manifest_after
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes(),
-        manifest_before
     );
 
     let replay = restarted.submit(body, "durable-restart-1", TOKEN).await;
@@ -1012,13 +938,6 @@ async fn corrupted_published_artifact_fails_closed_and_preserves_audit_files() {
         status["data"]["failure"]["code"],
         "artifact_integrity_failed"
     );
-    let artifacts = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
-        .await;
-    assert!(json_body(artifacts).await["data"]
-        .as_array()
-        .unwrap()
-        .is_empty());
     let download = app
         .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
@@ -1155,16 +1074,14 @@ async fn finalizing_job_with_a_valid_published_bundle_completes_during_restart()
         seeded.attempt_id.to_string()
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
-    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 2);
-    for name in ["markdown", "manifest"] {
-        let download = restarted
-            .authorized_get(&format!(
-                "/api/v1/conversions/{}/artifacts/{name}",
-                seeded.job_id
-            ))
-            .await;
-        assert_eq!(download.status(), StatusCode::OK, "{name}");
-    }
+    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 1);
+    let download = restarted
+        .authorized_get(&format!(
+            "/api/v1/conversions/{}/artifacts/markdown",
+            seeded.job_id
+        ))
+        .await;
+    assert_eq!(download.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1185,7 +1102,6 @@ async fn corrupted_succeeded_bundle_is_persisted_failed_on_restart_and_retained_
         .join(seeded.attempt_id.to_string())
         .join("artifacts");
     let markdown = artifacts.join("result.md");
-    let manifest = artifacts.join("manifest.json");
     fs::write(&markdown, b"corrupted while the service was stopped").unwrap();
 
     let restarted = harness.app().await;
@@ -1199,18 +1115,15 @@ async fn corrupted_succeeded_bundle_is_persisted_failed_on_restart_and_retained_
         "artifact_integrity_failed"
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
-    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 2);
+    assert_eq!(harness.artifact_row_count(seeded.attempt_id).await, 1);
     assert!(markdown.exists());
-    assert!(manifest.exists());
-    for name in ["markdown", "manifest"] {
-        let download = restarted
-            .authorized_get(&format!(
-                "/api/v1/conversions/{}/artifacts/{name}",
-                seeded.job_id
-            ))
-            .await;
-        assert_eq!(download.status(), StatusCode::NOT_FOUND, "{name}");
-    }
+    let download = restarted
+        .authorized_get(&format!(
+            "/api/v1/conversions/{}/artifacts/markdown",
+            seeded.job_id
+        ))
+        .await;
+    assert_eq!(download.status(), StatusCode::NOT_FOUND);
 
     restarted.shutdown(Duration::from_secs(1)).await;
     drop(restarted);
@@ -1226,7 +1139,6 @@ async fn corrupted_succeeded_bundle_is_persisted_failed_on_restart_and_retained_
     );
     assert_eq!(harness.attempt_count(seeded.job_id).await, 1);
     assert!(markdown.exists());
-    assert!(manifest.exists());
 }
 
 #[tokio::test]
@@ -1275,7 +1187,7 @@ async fn database_less_canonical_job_is_quarantined_without_touching_an_owned_si
 
 #[tokio::test]
 async fn invalid_finalizing_bundles_requeue_to_a_fresh_attempt() {
-    for case in ["unknown-manifest-field", "extra-publication-file"] {
+    for case in ["changed-markdown", "extra-publication-file"] {
         let harness = TestHarness::new();
         let first = harness.app().await;
         let seeded = first.submit_succeeded_job(case).await;
@@ -1291,15 +1203,9 @@ async fn invalid_finalizing_bundles_requeue_to_a_fresh_attempt() {
             .join(seeded.attempt_id.to_string())
             .join("artifacts");
         match case {
-            "unknown-manifest-field" => {
-                let path = published.join("manifest.json");
-                let mut manifest: Value =
-                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                manifest
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("unexpected".to_owned(), Value::Bool(true));
-                fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            // Finalizing recorded the digest, and this no longer matches it.
+            "changed-markdown" => {
+                fs::write(published.join("result.md"), b"changed after publication").unwrap();
             }
             "extra-publication-file" => {
                 fs::write(published.join("unexpected.bin"), b"unexpected").unwrap();
@@ -1434,28 +1340,6 @@ async fn a_two_speaker_recording_transcribes_end_to_end() {
     assert!(
         !transcript.contains("Speakers guessed"),
         "a pinned count is not a guess:\n{transcript}"
-    );
-
-    // Serving the manifest at all is the classification assertion: the read
-    // path refuses one whose stored classification disagrees with the engine
-    // that produced it, and "audio" is the only value local-audio may carry.
-    let manifest = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/manifest"))
-        .await;
-    assert_eq!(manifest.status(), StatusCode::OK);
-    let manifest: Value =
-        serde_json::from_slice(&manifest.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(manifest["engine"]["name"], "local-audio");
-    assert_eq!(manifest["route"]["kind"], "local_audio");
-    assert_eq!(
-        manifest["route"]["reasonCodes"],
-        serde_json::json!(["transcribed_audio"])
-    );
-    assert_eq!(manifest["document"]["speakersFound"], 2);
-    assert_eq!(manifest["document"]["speakerCountGuessed"], false);
-    assert_eq!(
-        manifest["output"]["sha256"],
-        hex::encode(Sha256::digest(&markdown))
     );
 }
 
@@ -1816,13 +1700,6 @@ async fn non_text_pdf_never_publishes_partial_markdown() {
         completed["data"]["route"]["reasonCodes"],
         serde_json::json!(["native_text_pdf"])
     );
-    let artifacts = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
-        .await;
-    assert!(json_body(artifacts).await["data"]
-        .as_array()
-        .unwrap()
-        .is_empty());
     let markdown = app
         .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
@@ -1849,13 +1726,10 @@ async fn worker_output_limit_routes_without_writing_an_artifact() {
         completed["data"]["route"]["reasonCodes"],
         serde_json::json!(["output_too_large"])
     );
-    let artifacts = app
-        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
+    let markdown = app
+        .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
-    assert!(json_body(artifacts).await["data"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert_eq!(markdown.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -2245,13 +2119,10 @@ async fn malformed_or_untrusted_worker_outputs_never_publish() {
             completed["data"]["failure"]["code"], expected_code,
             "{name}: {completed:#}"
         );
-        let artifacts = app
-            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts"))
+        let markdown = app
+            .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
             .await;
-        assert!(json_body(artifacts).await["data"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert_eq!(markdown.status(), StatusCode::NOT_FOUND, "{name}");
         assert_eq!(
             app.request(Method::GET, "/health/live", None)
                 .await
@@ -2302,6 +2173,16 @@ async fn persistence_dependent_routes_remain_absent() {
             Method::DELETE,
             "/api/v1/conversions/00000000-0000-0000-0000-000000000000",
             StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            Method::GET,
+            "/api/v1/conversions/00000000-0000-0000-0000-000000000000/artifacts",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::GET,
+            "/api/v1/conversions/00000000-0000-0000-0000-000000000000/artifacts/manifest",
+            StatusCode::NOT_FOUND,
         ),
     ] {
         let response = app
