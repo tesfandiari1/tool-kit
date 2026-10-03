@@ -287,8 +287,10 @@ image, so images and recordings convert locally in Sidecar mode only.
 - **`lib.rs`**: the Tauri command surface plus `setup()` (tray, ⌥⌘V shortcut,
   the **Settings…** item). `run_pipeline` expands the selection, clears the
   queue and spawns one job per match, refusing with `no_destination_message`
-  when `output_dir_for` answers `None`. `import_into_project` stages an
-  unimportable drop unchanged, so a file neither job accepts cannot vanish.
+  when `output_dir_for` answers `None`. **A drop is never copied**: the
+  source stays where it is and only its result lands in the active project,
+  a dropped folder's results keeping its shape. `move_dropped_files` renames
+  the drop in instead, and a path that cannot move is staged where it is.
   - **`convert_one` is modelled on `retry_job`, never on `run_pipeline`.** It
     converts one file into the folder that file sits in, reads the generation
     instead of bumping it, appends one job rather than clearing the queue, and

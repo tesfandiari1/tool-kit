@@ -169,6 +169,16 @@ export function SettingsPanel({
                 onPersist({ skipAlreadyDone: e.target.checked });
               }}
             />
+            {settings.workspacePath !== null && (
+              <Switch
+                label="Move dropped files into the project"
+                hint="Off, a dropped file stays where it is and only its result lands in the project. On, the file moves in beside its result. Nothing is ever copied."
+                checked={settings.moveDroppedFiles}
+                onChange={(e) => {
+                  onPersist({ moveDroppedFiles: e.target.checked });
+                }}
+              />
+            )}
             {datalabReachable && (
               <Switch
                 label="High-accuracy convert"

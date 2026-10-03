@@ -4,10 +4,10 @@ import type {
   ConvertOneOutcome,
   DirListing,
   HistoryEntry,
-  ImportOutcome,
   Job,
   JobId,
   KnownDir,
+  MoveOutcome,
   ProjectSummary,
   RunResult,
   Scan,
@@ -49,11 +49,10 @@ export const commands = {
   /// scan's counts came from.
   runPipeline: (inputs: string[], jobType: JobId) =>
     invoke<RunResult>("run_pipeline", { inputs, jobType }),
-  /// Answers with the paths to run: a copy for anything from outside, the file
-  /// itself for anything already there. A file that could not be copied is
-  /// named in `failed` rather than failing the whole import.
-  importIntoProject: (inputs: string[], projectRel: string) =>
-    invoke<ImportOutcome>("import_into_project", { inputs, projectRel }),
+  /// Moves each dropped path into the project and answers the paths to stage.
+  /// One that could not move stays put, is staged anyway, and is named in `failed`.
+  moveIntoProject: (inputs: string[], projectRel: string) =>
+    invoke<MoveOutcome>("move_into_project", { inputs, projectRel }),
   /// Moves the file and the result beside it. Rejects during a run.
   moveToProject: (rel: string, projectRel: string) =>
     invoke<string>("move_to_project", { rel, projectRel }),

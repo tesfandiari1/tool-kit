@@ -175,6 +175,14 @@ export interface Settings {
   /// Where a drop is filed and a run writes, workspace-relative. This, not
   /// `outputDir`, once a workspace is bound.
   activeProjectPath: string | null;
+  /// Move a drop into the active project instead of leaving it where it is.
+  moveDroppedFiles: boolean;
+}
+
+/// What a moved drop left behind. Each `failed` entry is a sentence to show.
+export interface MoveOutcome {
+  staged: string[];
+  failed: string[];
 }
 
 export type SecretStatus = Record<SecretId, boolean>;
@@ -199,6 +207,7 @@ export const DEFAULT_SETTINGS: Settings = {
   zoom: 1,
   expandedPaths: [],
   activeProjectPath: null,
+  moveDroppedFiles: false,
 };
 
 export const ACTIVE: Status[] = ["queued", "working", "processing"];
@@ -249,12 +258,6 @@ export interface ConvertOneOutcome {
   message: string | null;
   /// The result file, for kind "copied".
   path: string | null;
-}
-
-/// What an import left behind. Each `failed` entry is "{file name}: {reason}".
-export interface ImportOutcome {
-  landed: string[];
-  failed: string[];
 }
 
 export interface RunResult {

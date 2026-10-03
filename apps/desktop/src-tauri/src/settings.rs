@@ -96,6 +96,9 @@ pub struct Settings {
     /// The project a drop is filed into, workspace-relative. This, not
     /// `output_dir`, is where a run writes whenever a workspace is bound.
     pub active_project_path: Option<String>,
+    /// Move a drop into the active project instead of leaving it where it is.
+    /// Never a copy: the result is the only new file.
+    pub move_dropped_files: bool,
 }
 
 impl Default for Settings {
@@ -120,6 +123,7 @@ impl Default for Settings {
             workspace_path: None,
             expanded_paths: Vec::new(),
             active_project_path: None,
+            move_dropped_files: false,
         }
     }
 }

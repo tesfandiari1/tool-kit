@@ -638,37 +638,6 @@ fn write_output(
         .map_err(|e| format!("Could not write {}: {e}", candidate.display()))
 }
 
-/// Copy a source file into a folder, byte for byte, and say where it landed.
-/// Bytes, not `read_to_string`: this carries PDFs, office documents and video.
-///
-/// The modification time travels with the bytes. `tree::pair_results` refuses a
-/// result older than its source, and `history` refuses a source whose mtime
-/// moved, so a re-stamped copy is paid for twice.
-pub fn import_source(dir: &str, source: &Path) -> Result<String, String> {
-    let file_name = source
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| format!("{} has no file name", source.display()))?;
-    let ext = source
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default();
-
-    let mut reader = std::fs::File::open(source)
-        .map_err(|e| format!("Could not read {}: {e}", source.display()))?;
-    let modified = reader.metadata().and_then(|m| m.modified()).ok();
-
-    let (mut f, candidate) = claim_path(dir, file_name, ext)?;
-    std::io::copy(&mut reader, &mut f)
-        .and_then(|_| f.sync_all())
-        .map_err(|e| format!("Could not write {}: {e}", candidate.display()))?;
-    // Best effort: a filesystem that refuses the stamp still holds the bytes.
-    if let Some(when) = modified {
-        let _ = f.set_modified(when);
-    }
-    Ok(candidate.to_string_lossy().to_string())
-}
-
 /// Satisfy a job from a result an earlier run produced, rather than paying for
 /// it again. Reached when the history holds a still-valid result for this file,
 /// job and format in another folder. Returns whether the copy succeeded: a
@@ -1655,85 +1624,6 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
         } else {
             run_job(app.clone(), id, generation);
         }
-    }
-}
-
-#[cfg(test)]
-mod import_tests {
-    use super::*;
-
-    #[test]
-    fn an_import_carries_the_bytes_and_the_date() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("deck.pdf");
-        let into = dir.path().join("Inbox");
-        std::fs::create_dir(&into).unwrap();
-        std::fs::write(&src, b"\x25PDF-1.7 not utf-8 \xff\xfe").unwrap();
-        let when = std::fs::metadata(&src).unwrap().modified().unwrap();
-
-        let landed = import_source(into.to_str().unwrap(), &src).unwrap();
-
-        assert_eq!(landed, into.join("deck.pdf").to_string_lossy());
-        assert_eq!(
-            std::fs::read(&landed).unwrap(),
-            std::fs::read(&src).unwrap()
-        );
-        // The tree refuses a result older than its source, history a source
-        // whose mtime moved.
-        assert_eq!(
-            std::fs::metadata(&landed).unwrap().modified().unwrap(),
-            when
-        );
-    }
-
-    #[test]
-    fn an_import_never_overwrites_what_is_already_there() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("deck.pdf");
-        let into = dir.path().join("Inbox");
-        std::fs::create_dir(&into).unwrap();
-        std::fs::write(&src, b"new").unwrap();
-        std::fs::write(into.join("deck.pdf"), b"do not lose me").unwrap();
-
-        let landed = import_source(into.to_str().unwrap(), &src).unwrap();
-
-        assert_eq!(landed, into.join("deck (1).pdf").to_string_lossy());
-        assert_eq!(
-            std::fs::read(into.join("deck.pdf")).unwrap(),
-            b"do not lose me"
-        );
-    }
-
-    #[test]
-    fn importing_a_project_marker_cannot_break_the_folder_it_lands_in() {
-        // `create_new` is the guard: an overwritten marker orphans the folder.
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("project.json");
-        let into = dir.path().join("Inbox");
-        std::fs::create_dir(&into).unwrap();
-        std::fs::write(&src, b"{\"id\":\"impostor\"}").unwrap();
-        std::fs::write(into.join("project.json"), b"{\"id\":\"real\"}").unwrap();
-
-        import_source(into.to_str().unwrap(), &src).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(into.join("project.json")).unwrap(),
-            "{\"id\":\"real\"}"
-        );
-    }
-
-    #[test]
-    fn a_file_with_no_extension_keeps_its_bare_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("NOTES");
-        let into = dir.path().join("Inbox");
-        std::fs::create_dir(&into).unwrap();
-        std::fs::write(&src, b"x").unwrap();
-
-        let landed = import_source(into.to_str().unwrap(), &src).unwrap();
-
-        // Not "NOTES.": the dot only appears when there is an extension.
-        assert_eq!(landed, into.join("NOTES").to_string_lossy());
     }
 }
 

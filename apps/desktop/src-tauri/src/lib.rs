@@ -594,8 +594,8 @@ async fn scan_inputs(app: AppHandle, inputs: Vec<String>) -> Result<Scan, String
     let (convert, direct_len) = scan_files(&inputs, origin.as_ref(), JobType::Convert).await;
     // Every recording: a transcript is done on either route.
     let (transcribe, _) = scan_files(&inputs, origin.as_ref(), JobType::Transcribe).await;
-    let convert_reuse = split_reusable(&app, &convert[..direct_len], JobType::Convert, &cfg);
-    let transcribe_reuse = split_reusable(&app, &transcribe, JobType::Transcribe, &cfg);
+    let convert_reuse = split_reusable(&app, &convert[..direct_len], &inputs, JobType::Convert, &cfg);
+    let transcribe_reuse = split_reusable(&app, &transcribe, &inputs, JobType::Transcribe, &cfg);
     let convert_files = describe_conversion_files(&convert, &convert_reuse);
     let transcribe_files = describe_conversion_files(&transcribe, &transcribe_reuse);
     Ok(Scan {
@@ -637,14 +637,47 @@ fn no_destination_message(cfg: &Settings) -> String {
 }
 
 /// Where **this file's** result goes. Beside the source inside the workspace,
-/// which keeps the tree's pairing rule true. Outside it, the one destination.
-fn output_dir_for_source(source: &Path, cfg: &Settings) -> Option<String> {
+/// which keeps the tree's pairing rule true. Outside it, the one destination,
+/// where a file from a dropped folder keeps that folder's shape.
+fn output_dir_for_source(source: &Path, inputs: &[String], cfg: &Settings) -> Option<String> {
     if let (Some(workspace), Some(parent)) = (&cfg.workspace_path, source.parent()) {
         if parent.starts_with(workspace) && parent.is_dir() {
             return Some(parent.to_string_lossy().into_owned());
         }
     }
-    output_dir_for(cfg)
+    let filing = output_dir_for(cfg)?;
+    // Into a project only. Without one the folder defaults to the dropped
+    // folder itself, and mirroring would nest it inside itself.
+    if cfg.workspace_path.is_none() || cfg.active_project_path.is_none() {
+        return Some(filing);
+    }
+    let dropped = inputs
+        .iter()
+        .map(Path::new)
+        .find(|root| root.is_dir() && source.starts_with(root));
+    Some(match dropped {
+        Some(root) => mirrored_dir(Path::new(&filing), root, source)
+            .to_string_lossy()
+            .into_owned(),
+        None => filing,
+    })
+}
+
+/// The folder a file from a dropped folder writes to: the project, the dropped
+/// folder's own name, then whatever sat between.
+fn mirrored_dir(dir: &Path, root: &Path, source: &Path) -> std::path::PathBuf {
+    let Some(folder) = root.file_name() else {
+        return dir.to_path_buf();
+    };
+    let inner = source
+        .strip_prefix(root)
+        .ok()
+        .and_then(|rel| rel.parent())
+        .filter(|rel| !rel.as_os_str().is_empty());
+    match inner {
+        Some(rel) => dir.join(folder).join(rel),
+        None => dir.join(folder),
+    }
 }
 
 /// Split the files needing no provider call into (already in the output folder,
@@ -652,6 +685,7 @@ fn output_dir_for_source(source: &Path, cfg: &Settings) -> Option<String> {
 fn split_reusable(
     app: &AppHandle,
     files: &[std::path::PathBuf],
+    inputs: &[String],
     jt: JobType,
     cfg: &Settings,
 ) -> ReuseSummary {
@@ -662,7 +696,7 @@ fn split_reusable(
     let mut summary = ReuseSummary::default();
     for (source, output) in found {
         // Per source, not per run: a dropped folder keeps its shape.
-        let disposition = if output_dir_for_source(Path::new(&source), cfg)
+        let disposition = if output_dir_for_source(Path::new(&source), inputs, cfg)
             .as_deref()
             .is_some_and(|dir| history::is_in_dir(&output, dir))
         {
@@ -785,7 +819,7 @@ async fn run_pipeline(
         return Err(no_destination_message(&cfg));
     }
     let output_dir_of = |source: &Path| -> String {
-        output_dir_for_source(source, &cfg).unwrap_or_else(|| filing_dir.clone())
+        output_dir_for_source(source, &inputs, &cfg).unwrap_or_else(|| filing_dir.clone())
     };
     let mut backend_files = Vec::new();
     // Read once. In Sidecar mode the origin is this launch's own port.
@@ -868,6 +902,12 @@ async fn run_pipeline(
         if !secrets::has_key(provider.key_name()) {
             return Err(format!("Add your {} API key in Settings", provider.label()));
         }
+    }
+
+    // A dropped folder's results nest, and the nest may not exist yet. A
+    // failure here surfaces as that job's write error.
+    for source in files.iter().chain(to_copy.iter().map(|(source, _)| source)) {
+        let _ = std::fs::create_dir_all(output_dir_of(source));
     }
 
     // Fresh slate: the new generation retires any task still alive and spending.
@@ -1003,124 +1043,83 @@ fn queue_is_free(state: &JobManager, since: u64) -> bool {
     state.generation() == since && !state.list().iter().any(Job::is_active)
 }
 
-/// What an import left behind: the staged paths, and a line per file that
-/// could not be copied.
+/// What a moved drop left behind: the paths to stage, and a line per path that
+/// stayed where it was.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ImportOutcome {
-    landed: Vec<String>,
+struct MoveOutcome {
+    staged: Vec<String>,
     failed: Vec<String>,
 }
 
-/// Copy dropped files into a project. Returns the paths a run should take: a
-/// copy from outside, the file itself from inside, so a round trip cannot
-/// duplicate a row. A failure is reported per file, so one refused copy does
-/// not strand the files that did land.
+/// Move each dropped path, file or folder, into a project. A rename, never a
+/// copy. A path that cannot move is staged where it is, so a drop never
+/// vanishes, and the history follows each moved file so it is not paid twice.
 #[tauri::command(async)]
-fn import_into_project(
+fn move_into_project(
     app: AppHandle,
     inputs: Vec<String>,
     project_rel: String,
-) -> Result<ImportOutcome, String> {
+) -> Result<MoveOutcome, String> {
     let cfg = settings::load(&app);
     let workspace = cfg
         .workspace_path
         .clone()
         .ok_or_else(|| "No workspace configured".to_string())?;
-    // The tree's own check, so a destination cannot point outside the workspace.
     let dir = tree::resolve(Path::new(&workspace), &project_rel)?;
     if !dir.is_dir() {
         return Err("That project folder is not there any more".into());
     }
-    // Anything either job takes: a drop is filed before it is classified.
-    let importable = |p: &Path| job_of(p).is_some();
 
-    // Copy one file in unless it is already there, and carry its results over.
-    // Reuse is keyed on the source path, so an import otherwise pays again.
-    let take = |into: &Path, source: &Path| -> Result<String, String> {
-        if source
-            .parent()
-            .is_some_and(|parent| history::same_dir(parent, into))
-        {
-            return Ok(source.to_string_lossy().into_owned());
-        }
-        std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
-        let to = jobs::import_source(&into.to_string_lossy(), source)?;
-        history::carry_forward(&app, &source.to_string_lossy(), &to);
-        Ok(to)
-    };
-    let name_of = |path: &Path| -> String {
-        path.file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy()
-            .into_owned()
-    };
-
-    let mut landed = Vec::new();
+    let mut staged = Vec::new();
     let mut failed = Vec::new();
-    for input in &inputs {
-        let root = Path::new(input);
-        // Already filed. Copying gives two rows for one document, and bills.
+    for input in inputs {
+        let root = Path::new(&input);
+        let Some(name) = root.file_name() else {
+            staged.push(input);
+            continue;
+        };
+        // Already in the library: it is filed.
         if root.starts_with(&workspace) {
-            landed.push(input.clone());
+            staged.push(input);
             continue;
         }
-        let matches = collect_files_where(std::slice::from_ref(input), &importable);
-        // Stage the path as dropped: a file that leaves no trace reads as a
-        // drop that missed the window.
-        if matches.is_empty() {
-            landed.push(input.clone());
+        let landing = dir.join(name);
+        if landing.exists() {
+            failed.push(format!(
+                "{} is already in that project, so it stayed where it was",
+                name.to_string_lossy()
+            ));
+            staged.push(input);
             continue;
         }
-
-        if !root.is_dir() {
-            for source in &matches {
-                match take(&dir, source) {
-                    Ok(path) => landed.push(path),
-                    Err(e) => failed.push(format!("{}: {e}", name_of(source))),
-                }
-            }
+        // Keys taken before the move: `MovedFrom` canonicalizes, and a gone
+        // path canonicalizes to itself.
+        let files = collect_files_where(std::slice::from_ref(&input), &|p| job_of(p).is_some());
+        let before: Vec<_> = files
+            .iter()
+            .map(|f| history::MovedFrom::snapshot(&f.to_string_lossy(), None))
+            .collect();
+        // ponytail: rename only, so another disk refuses (EXDEV). Copy then
+        // delete if moving across disks turns out to matter.
+        if let Err(e) = std::fs::rename(root, &landing) {
+            failed.push(format!(
+                "Could not move {}, so it stayed where it was: {e}",
+                name.to_string_lossy()
+            ));
+            staged.push(input);
             continue;
         }
-
-        // A dropped folder keeps its shape, so the tree pairs results where
-        // they sit. It merges by name. `claim_path` numbers collisions.
-        let mut any = false;
-        for source in &matches {
-            match take(&import_destination(&dir, root, source), source) {
-                Ok(_) => any = true,
-                Err(e) => failed.push(format!("{}: {e}", name_of(source))),
-            }
+        for (file, from) in files.iter().zip(&before) {
+            let moved = match file.strip_prefix(root) {
+                Ok(rel) if !rel.as_os_str().is_empty() => landing.join(rel),
+                _ => landing.clone(),
+            };
+            history::relocate(&app, from, &moved.to_string_lossy(), None);
         }
-        // One staged path per dropped folder, even when some of its files
-        // failed: what landed is inside it. The run walks it again. When none
-        // landed, the folder may not exist and the failures say why.
-        if any {
-            landed.push(
-                import_destination(&dir, root, root)
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-        }
+        staged.push(landing.to_string_lossy().into_owned());
     }
-    Ok(ImportOutcome { landed, failed })
-}
-
-/// The folder one imported file lands in: the project, the dropped folder's own
-/// name, then whatever sat between. `root == source` is that folder itself.
-fn import_destination(dir: &Path, root: &Path, source: &Path) -> std::path::PathBuf {
-    let Some(folder) = root.file_name() else {
-        return dir.to_path_buf();
-    };
-    let inner = source
-        .strip_prefix(root)
-        .ok()
-        .and_then(|rel| rel.parent())
-        .filter(|rel| !rel.as_os_str().is_empty());
-    match inner {
-        Some(rel) => dir.join(folder).join(rel),
-        None => dir.join(folder),
-    }
+    Ok(MoveOutcome { staged, failed })
 }
 
 /// File one library file, and the result beside it, into another project. Both
@@ -1662,8 +1661,8 @@ pub fn run() {
             scan_inputs,
             run_pipeline,
             convert_one,
-            import_into_project,
             move_to_project,
+            move_into_project,
             stop_run,
             retry_job,
             reveal_path,
@@ -1847,30 +1846,6 @@ mod scan_tests {
         );
     }
 
-    /// A dropped folder arrives as a folder, and what was nested stays nested.
-    #[test]
-    fn a_dropped_folder_keeps_its_shape_inside_the_project() {
-        let dir = Path::new("/ws/Acme");
-        let root = Path::new("/Users/someone/Desktop/slides");
-
-        assert_eq!(
-            import_destination(dir, root, root),
-            Path::new("/ws/Acme/slides")
-        );
-        assert_eq!(
-            import_destination(dir, root, Path::new("/Users/someone/Desktop/slides/q3.pdf")),
-            Path::new("/ws/Acme/slides")
-        );
-        assert_eq!(
-            import_destination(
-                dir,
-                root,
-                Path::new("/Users/someone/Desktop/slides/appendix/charts.pdf")
-            ),
-            Path::new("/ws/Acme/slides/appendix")
-        );
-    }
-
     /// A dropped folder keeps its shape, so two files in one run have two
     /// destinations. The project root leaves the nested one reading unconverted.
     #[test]
@@ -1884,11 +1859,11 @@ mod scan_tests {
         };
 
         assert_eq!(
-            output_dir_for_source(&root.join("Acme/deck.pdf"), &cfg),
+            output_dir_for_source(&root.join("Acme/deck.pdf"), &[], &cfg),
             Some(root.join("Acme").to_string_lossy().into_owned())
         );
         assert_eq!(
-            output_dir_for_source(&root.join("Acme/slides/q3.pdf"), &cfg),
+            output_dir_for_source(&root.join("Acme/slides/q3.pdf"), &[], &cfg),
             Some(root.join("Acme/slides").to_string_lossy().into_owned())
         );
     }
@@ -1905,8 +1880,36 @@ mod scan_tests {
         };
 
         assert_eq!(
-            output_dir_for_source(Path::new("/Users/someone/Desktop/loose.pdf"), &cfg),
+            output_dir_for_source(Path::new("/Users/someone/Desktop/loose.pdf"), &[], &cfg),
             Some(root.join("Acme").to_string_lossy().into_owned())
+        );
+    }
+
+    /// A dropped folder from outside keeps its shape inside the project, and
+    /// a loose file beside it still lands at the project root.
+    #[test]
+    fn a_dropped_folder_from_outside_keeps_its_shape() {
+        let root = tree("outdir-mirror", &["Acme/keep.md"]);
+        let cfg = Settings {
+            workspace_path: Some(root.to_string_lossy().into_owned()),
+            active_project_path: Some("Acme".into()),
+            ..Settings::default()
+        };
+        let dropped = tree("outdir-mirror-drop", &["slides/q3.pdf", "slides/appendix/charts.pdf"]);
+        let inputs = [dropped.join("slides").to_string_lossy().into_owned()];
+        let acme = root.join("Acme");
+
+        assert_eq!(
+            output_dir_for_source(&dropped.join("slides/q3.pdf"), &inputs, &cfg),
+            Some(acme.join("slides").to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            output_dir_for_source(&dropped.join("slides/appendix/charts.pdf"), &inputs, &cfg),
+            Some(acme.join("slides/appendix").to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            output_dir_for_source(Path::new("/Users/someone/Desktop/loose.pdf"), &inputs, &cfg),
+            Some(acme.to_string_lossy().into_owned())
         );
     }
 

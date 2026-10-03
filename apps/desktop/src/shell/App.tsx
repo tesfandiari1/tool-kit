@@ -446,33 +446,6 @@ export default function App() {
     [mutateInputs]
   );
 
-  /// File a drop into the library and stage what came back, never the dropped
-  /// paths: the run dedupes by path, so both would convert it twice.
-  const importDrop = useCallback(
-    async (paths: string[]) => {
-      // A cancelled picker still costs a round trip and a full re-list.
-      if (paths.length === 0) return paths;
-      const project = settingsRef.current.activeProjectPath;
-      if (project === null) return paths;
-      try {
-        const { landed, failed } = await commands.importIntoProject(paths, project);
-        // No watcher, and the focus reconcile does not fire while the window
-        // keeps focus, so without this the copies land invisibly.
-        setRunsFinished((n) => n + 1);
-        // A file that never landed is staged nowhere, so unsaid it vanishes.
-        if (failed.length > 0) {
-          const rest = failed.length - 1;
-          showToast(rest > 0 ? `${failed[0]} (+${String(rest)} more)` : failed[0], "danger");
-        }
-        return landed;
-      } catch (e) {
-        showToast(String(e), "danger");
-        return [];
-      }
-    },
-    [showToast],
-  );
-
   /// One file, converted into the folder it already sits in. The host answers
   /// a verdict and this renders it: a second planner here would disagree with
   /// the one a run uses.
@@ -556,16 +529,43 @@ export default function App() {
     [projects, renameDoc, showPreview, showToast, tree],
   );
 
+  /// Stage a drop where it is, or move it into the active project first when
+  /// the setting asks. Never a copy: the result is the only new file.
+  const stageDrop = useCallback(
+    async (paths: string[]) => {
+      const { moveDroppedFiles, activeProjectPath } = settingsRef.current;
+      if (!moveDroppedFiles || activeProjectPath === null || paths.length === 0) {
+        addPaths(paths);
+        return;
+      }
+      try {
+        const { staged, failed } = await commands.moveIntoProject(paths, activeProjectPath);
+        // No watcher, so without this the moved files land invisibly.
+        setRunsFinished((n) => n + 1);
+        if (failed.length > 0) {
+          const rest = failed.length - 1;
+          showToast(rest > 0 ? `${failed[0]} (+${String(rest)} more)` : failed[0], "danger");
+        }
+        addPaths(staged);
+      } catch (e) {
+        // Nothing moved, so stage the drop where it is rather than lose it.
+        showToast(String(e), "danger");
+        addPaths(paths);
+      }
+    },
+    [addPaths, showToast],
+  );
+
   const importFiles = useCallback(async () => {
     const picked = await pickFiles();
     // The view switch waits for the picker: a cancel evicts nothing.
     if (picked.length === 0) return;
     setView("run");
-    addPaths(await importDrop(picked));
-  }, [addPaths, importDrop]);
+    await stageDrop(picked);
+  }, [stageDrop]);
 
   const addFolders = async () => {
-    addPaths(await importDrop(await pickFolders()));
+    await stageDrop(await pickFolders());
   };
 
   const pickOutput = async () => {
@@ -587,9 +587,9 @@ export default function App() {
     (paths: string[]) => {
       setSettingsOpen(false);
       setView("run");
-      void importDrop(paths).then(addPaths);
+      void stageDrop(paths);
     },
-    [addPaths, importDrop],
+    [stageDrop],
   );
   const dragging = useDragDrop(onDrop);
 
