@@ -3,6 +3,7 @@
 - Steal host, folder, and onboarding patterns from Yaak, OpenWork, Apple Setup Assistant, and Obsidian; do not fork those products or copy Electron, Tailwind/shadcn, Zustand, or TanStack Query/Router.
 - Product target is a local markdown workspace editor (library-first), not a batch converter; the title-bar nav is Library/Run/History and Settings is a sheet over the window at ⌘,; follow `docs/north-star.md`.
 - Workspace root plus projects as folders (Claude/ChatGPT desktop pattern); documents are durable in the project on import; export is copy-out only, never move.
+- Never duplicate a user's file: a drop stays where it is and only its result lands in the project; moving the original in is an opt-in setting, never a copy.
 - No backend retention of customer files; conversion uses ephemeral local workers and discards scratch after each run; local vs cloud conversion mode is user-configurable in onboarding and settings.
 - Conversion HTTP and secrets stay in Tauri; never browser-fetch the remote service or put the bearer token in the webview.
 - Prefer type-aware ESLint (`strictTypeChecked`, exhaustive switches, official React hooks) and Vitest on plan/billing math over Biome, Prettier, Playwright, or coverage theater.

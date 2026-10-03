@@ -1,7 +1,8 @@
 # Tool-Kit
 
 A macOS menu-bar utility that turns files into AI-ready text. Drop files or
-folders, hit Run, get markdown or transcripts back next to the originals.
+folders, hit Run, get markdown or transcripts back in your project. The
+originals stay where they are and are never copied.
 
 **Current work:** local same-machine closeout. Start at
 [`docs/STATUS.md`](docs/STATUS.md).
@@ -13,8 +14,10 @@ folders, hit Run, get markdown or transcripts back next to the originals.
 | Convert | Datalab | PDF / DOCX / XLSX / images / … → Markdown |
 | Transcribe | Rev.ai | audio / video → text |
 
-The job is chosen from what you drop, and results default to the folder the
-input came from. API keys live in the macOS Keychain and are not exposed to the
+The job is chosen from what you drop. Results land in the active project, and a
+dropped folder keeps its shape there. Without a library, results default to the
+folder the input came from. Settings → Runs can move dropped files into the
+project instead of leaving them in place. API keys live in the macOS Keychain and are not exposed to the
 webview or stored in plaintext application settings.
 
 ## Develop

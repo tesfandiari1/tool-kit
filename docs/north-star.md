@@ -1,6 +1,6 @@
 # North star
 
-**Last updated:** 2026-08-19
+**Last updated:** 2026-10-03
 
 This document is the product target for Tool-Kit after the local-first pivot.
 It was produced from a greenfield debate (workspace editor, filesystem truth,
@@ -47,8 +47,10 @@ importing a new one.
 3. **Projects are real folders.** Creating a project creates a directory. Finder
    operations are valid; the app reconciles on focus.
 
-4. **Documents are durable immediately.** Import creates the project copy
-   before conversion finishes. There is no “temp until export” staging area.
+4. **Documents are durable immediately, and never duplicated.** Conversion
+   writes the markdown straight into the project. The original stays where it
+   was, or moves into the project when the user asks. The app never copies it.
+   There is no “temp until export” staging area.
 
 5. **Export is copy-out, never move.** The project copy stays. Export writes a
    copy elsewhere and records the event. The app does not track exported copies.
@@ -75,7 +77,7 @@ These decisions merge three greenfield positions. Rationale is one line each.
 | Metadata | `document.json` sidecar per document + minimal re-link key in markdown | Keeps exported markdown clean; sidecar holds sources and tool history |
 | Index | SQLite under `.toolkit/`, fully rebuildable | Needed for search and provenance at scale; must pass “delete and rebuild” test |
 | Provenance depth (v1) | Tool-run ledger in index, not full content-addressed store | CAS graph is the long-term target; v1 records runs without rewriting storage |
-| Originals | Copy to project `_sources/` on import | PDF→markdown is lossy; you cannot reconstruct the source |
+| Originals | Leave in place, or move into the project on request. Never copy | Two copies of every file doubles storage. The original still exists, so the lossy conversion loses nothing (reversed 2026-10-03, was copy to `_sources/`) |
 | Backend role | Sandboxed local worker subprocess | Ephemeral scratch only; no durable `jobs/{uuid}/` retention in product mode |
 | Cloud AI (future) | Explicit consent + egress ledger before any bytes leave | “Local-first” must be demonstrable, not marketing |
 | Editor model | Markdown source + preview | WYSIWYG implies an internal AST that fights file-as-truth |
@@ -126,7 +128,7 @@ One markdown file plus metadata. Lives inside a project.
   "content": "quarterly-report.md",
   "sources": [
     {
-      "path": "_sources/quarterly-report.pdf",
+      "path": "/Users/someone/Desktop/quarterly-report.pdf",
       "mediaType": "application/pdf",
       "sha256": "…"
     }
@@ -145,15 +147,15 @@ toolkit-id: d_01k2def456
 
 ### Import
 
-Bringing external bytes into a project. Always:
+Bringing external content into a project. The original is never copied:
 
 1. Create document row in index (status: importing)
-2. Copy original → `{project}/_sources/{name}`
-3. Hash the copy
+2. Move the original into the project, only when the user turned that on
+3. Hash the original where it now sits
 4. Run convert tool into `{project}/{slug}.md`
-5. Write sidecar; mark import complete
+5. Write sidecar with the original's path; mark import complete
 
-Import is durable at step 2, before conversion starts.
+A dropped folder keeps its shape: its results nest under the folder's name.
 
 ### Tool run
 
@@ -197,12 +199,11 @@ returns document to draft state.
 │   └── cache/thumbs/…
 ├── Inbox/
 │   ├── project.json
-│   ├── _sources/                     ← canonical originals
+│   ├── report.pdf                    ← an original, only when moved in
 │   ├── report.md                     ← canonical markdown
 │   └── report.document.json          ← canonical metadata
 └── Acme Acquisition/
     ├── project.json
-    ├── _sources/
     ├── 2019 MSA.md
     ├── 2019 MSA.document.json
     ├── 2019 MSA.redacted.md          ← sibling output from redact tool
@@ -210,7 +211,7 @@ returns document to draft state.
 ```
 
 **Canonical (user would be upset to lose):** `*.md`, `*.document.json`,
-`_sources/`, `project.json`.
+any original moved into the project, `project.json`.
 
 **Derived (safe to delete):** everything under `.toolkit/`. The app must rebuild
 a working library from a tree walk + sidecars.
@@ -255,7 +256,7 @@ Each tool declares behavior in a manifest (JSON on disk or built-in):
 
 ```text
 App → spawn sandboxed worker
-    → read source from project/_sources/ (path only, no upload)
+    → read source where it sits (path only, no upload)
     → write scratch to $TMPDIR/toolkit/runs/{runId}/
     → validate output
     → atomic move into project/
@@ -329,7 +330,7 @@ Importing → Draft ⇄ Saved → (export event, still Draft/Saved)
 
 | State | Meaning |
 |-------|---------|
-| **Importing** | Source copied; conversion in progress |
+| **Importing** | Conversion in progress; the original is untouched |
 | **Draft** | Content on disk; differs from last explicit save checkpoint |
 | **Saved** | User (or autosave policy) recorded a checkpoint hash |
 
@@ -385,12 +386,12 @@ app shows correct projects.
 
 **Build:**
 
-- Drop / ⌘O → copy to `_sources/`, create document + sidecar
+- Drop / ⌘O → convert into the project, original left in place or moved in, create document + sidecar
 - Sandboxed local convert worker (PDF first)
 - Library list with inline import progress
 - Open document → editor (read existing markdown path)
 
-**Verify:** import 10 PDFs into Inbox; all appear as `.md` + sidecar + source;
+**Verify:** import 10 PDFs into Inbox; all appear as `.md` + sidecar, and no PDF exists twice;
 no files remain in `$TMPDIR` after completion.
 
 ### Phase 3 — Edit + save + export
@@ -458,7 +459,7 @@ These follow from the model but are explicitly deferred:
 | Capability | Hook in v1 |
 |------------|------------|
 | Eval / quality | Tool-run ledger + input/output hashes |
-| Staleness (“re-convert?”) | Source sha256 in sidecar vs current `_sources/` hash |
+| Staleness (“re-convert?”) | Source sha256 in sidecar vs the original's current hash |
 | AI enrichment | Consent grant table + `network: true` tools |
 | Full CAS provenance graph | Replace revision snapshots with content-addressed blobs |
 | Cross-machine | Export/import workspace; not sync |
