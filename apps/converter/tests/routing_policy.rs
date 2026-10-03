@@ -32,10 +32,11 @@ struct Outcome {
     markdown: Option<String>,
 }
 
-async fn convert(app: &TestApp, profile: &str, key: &str, source: &[u8]) -> Outcome {
+/// Sends the retired `local_only` profile, as the desktop does.
+async fn convert(app: &TestApp, key: &str, source: &[u8]) -> Outcome {
     let response = app
         .submit(
-            multipart_body(Uuid::new_v4(), profile, source, "corpus.pdf"),
+            multipart_body(Uuid::new_v4(), "local_only", source, "corpus.pdf"),
             key,
             TOKEN,
         )
@@ -100,22 +101,20 @@ fn assert_nothing_published(outcome: &Outcome, key: &str) {
 }
 
 #[tokio::test]
-async fn a_fully_native_pdf_publishes_clean_under_both_local_profiles() {
-    for profile in ["standard", "local_only"] {
-        let app = test_app().await;
-        for pages in [1, 4, 10] {
-            let key = format!("native-{profile}-{pages}");
-            let outcome = convert(&app, profile, &key, &corpus::native_pdf(pages)).await;
-            assert_eq!(outcome.reason_codes, ["native_text_pdf"], "{key}");
-            assert_published(&outcome, &key, &[]);
-            let markdown = outcome.markdown.unwrap();
-            // Every page's text has to survive, not just the first one.
-            for page in 0..pages {
-                assert!(
-                    markdown.contains(&format!("Sheet {page} ")),
-                    "{key}: page {page} is missing"
-                );
-            }
+async fn a_fully_native_pdf_publishes_clean() {
+    let app = test_app().await;
+    for pages in [1, 4, 10] {
+        let key = format!("native-{pages}");
+        let outcome = convert(&app, &key, &corpus::native_pdf(pages)).await;
+        assert_eq!(outcome.reason_codes, ["native_text_pdf"], "{key}");
+        assert_published(&outcome, &key, &[]);
+        let markdown = outcome.markdown.unwrap();
+        // Every page's text has to survive, not just the first one.
+        for page in 0..pages {
+            assert!(
+                markdown.contains(&format!("Sheet {page} ")),
+                "{key}: page {page} is missing"
+            );
         }
     }
 }
@@ -132,24 +131,21 @@ async fn a_fully_native_pdf_publishes_clean_under_both_local_profiles() {
 /// report with a one-line cover page and no images anywhere reports the same
 /// 0.9 and loses nothing. Routing on it would bill Datalab for that document.
 #[tokio::test]
-async fn a_partly_scanned_pdf_publishes_with_a_warning_under_every_profile() {
+async fn a_partly_scanned_pdf_publishes_with_a_warning() {
     let app = test_app().await;
-    for profile in ["standard", "local_only"] {
-        for text_pages in [2, 3, 4, 9] {
-            let key = format!("partly-{profile}-{text_pages}");
-            let outcome =
-                convert(&app, profile, &key, &corpus::partly_scanned_pdf(text_pages)).await;
-            assert_eq!(outcome.reason_codes, ["native_text_pdf"], "{key}");
-            // Downloadable, not merely listed: a warning over zero bytes is its
-            // own bug.
-            assert_published(&outcome, &key, &["pages_without_extractable_text"]);
-            let markdown = outcome.markdown.clone().unwrap();
-            for page in 0..text_pages {
-                assert!(
-                    markdown.contains(&format!("Sheet {page} ")),
-                    "{key}: page {page} is missing"
-                );
-            }
+    for text_pages in [2, 3, 4, 9] {
+        let key = format!("partly-{text_pages}");
+        let outcome = convert(&app, &key, &corpus::partly_scanned_pdf(text_pages)).await;
+        assert_eq!(outcome.reason_codes, ["native_text_pdf"], "{key}");
+        // Downloadable, not merely reported: a warning over zero bytes is its
+        // own bug.
+        assert_published(&outcome, &key, &["pages_without_extractable_text"]);
+        let markdown = outcome.markdown.clone().unwrap();
+        for page in 0..text_pages {
+            assert!(
+                markdown.contains(&format!("Sheet {page} ")),
+                "{key}: page {page} is missing"
+            );
         }
     }
 }
@@ -164,7 +160,7 @@ async fn a_partly_scanned_pdf_publishes_with_a_warning_under_every_profile() {
 #[tokio::test]
 async fn a_sparse_cover_page_is_not_missing_content() {
     let app = test_app().await;
-    let outcome = convert(&app, "standard", "cover", &corpus::sparse_cover_pdf(9)).await;
+    let outcome = convert(&app, "cover", &corpus::sparse_cover_pdf(9)).await;
     assert_eq!(outcome.reason_codes, ["native_text_pdf"], "cover");
     assert_published(&outcome, "cover", &["pages_without_extractable_text"]);
     let markdown = outcome.markdown.unwrap();
@@ -181,92 +177,79 @@ async fn a_sparse_cover_page_is_not_missing_content() {
 }
 
 /// A single native page plus a single image page classifies as `mixed`, so the
-/// engine gives up before producing Markdown. `local_only` cannot publish what
-/// was never written.
+/// engine gives up before producing Markdown, and the job fails.
 #[tokio::test]
-async fn a_half_scanned_pdf_needs_remote_under_both_profiles() {
-    for profile in ["standard", "local_only"] {
-        let app = test_app().await;
-        let key = format!("mixed-{profile}");
-        let outcome = convert(&app, profile, &key, &corpus::partly_scanned_pdf(1)).await;
-        assert_eq!(outcome.status, "needs_remote", "{key}");
-        assert_eq!(outcome.reason_codes, ["mixed_pdf"], "{key}");
-        assert_eq!(outcome.warnings, [] as [&str; 0], "{key}");
-        assert_nothing_published(&outcome, &key);
-    }
+async fn a_half_scanned_pdf_fails_with_its_reason() {
+    let app = test_app().await;
+    let outcome = convert(&app, "mixed", &corpus::partly_scanned_pdf(1)).await;
+    assert_eq!(outcome.status, "failed", "mixed");
+    assert_eq!(outcome.failure_code.as_deref(), Some("mixed_pdf"), "mixed");
+    assert_eq!(outcome.reason_codes, ["mixed_pdf"], "mixed");
+    assert_eq!(outcome.warnings, [] as [&str; 0], "mixed");
+    assert_nothing_published(&outcome, "mixed");
 }
 
 #[tokio::test]
 async fn complex_layouts_warn_without_changing_the_route() {
-    for profile in ["standard", "local_only"] {
-        let app = test_app().await;
+    let app = test_app().await;
 
-        let key = format!("table-{profile}");
-        let outcome = convert(&app, profile, &key, &corpus::dense_table_pdf()).await;
-        assert_eq!(outcome.reason_codes, ["native_text_pdf"], "{key}");
-        // Ruled cells read as columns as well as tables: aligned cell text is
-        // literally a multi-column layout.
-        assert_published(&outcome, &key, &["dense_tables", "multi_column_layout"]);
-        assert!(outcome.markdown.unwrap().contains("R0 C0"), "{key}");
+    let outcome = convert(&app, "table", &corpus::dense_table_pdf()).await;
+    assert_eq!(outcome.reason_codes, ["native_text_pdf"], "table");
+    // Ruled cells read as columns as well as tables: aligned cell text is
+    // literally a multi-column layout.
+    assert_published(&outcome, "table", &["dense_tables", "multi_column_layout"]);
+    assert!(outcome.markdown.unwrap().contains("R0 C0"), "table");
 
-        let key = format!("columns-{profile}");
-        let outcome = convert(&app, profile, &key, &corpus::two_column_pdf()).await;
-        assert_eq!(outcome.reason_codes, ["native_text_pdf"], "{key}");
-        assert_published(&outcome, &key, &["multi_column_layout"]);
-        assert!(
-            outcome.markdown.unwrap().contains("Column 1 line 0"),
-            "{key}"
-        );
-    }
+    let outcome = convert(&app, "columns", &corpus::two_column_pdf()).await;
+    assert_eq!(outcome.reason_codes, ["native_text_pdf"], "columns");
+    assert_published(&outcome, "columns", &["multi_column_layout"]);
+    assert!(
+        outcome.markdown.unwrap().contains("Column 1 line 0"),
+        "columns"
+    );
 }
 
-/// When the engine gives up, its own reason reaches the client verbatim and the
-/// profile does not soften it: `local_only` has no partial Markdown to publish.
+/// When the engine gives up, the job fails and its own reason reaches the
+/// client verbatim, as the failure code and as the route's reason.
 #[tokio::test]
-async fn a_pdf_the_engine_gave_up_on_needs_remote_and_keeps_its_reason() {
-    for profile in ["standard", "local_only"] {
-        let app = test_app().await;
-        for (name, source, reason) in [
-            ("image-only-1", corpus::image_only_pdf(1), "scanned_pdf"),
-            ("image-only-3", corpus::image_only_pdf(3), "scanned_pdf"),
-            ("blank-content", corpus::blank_content_pdf(), "scanned_pdf"),
-            ("garbled-font", corpus::garbled_font_pdf(), "ocr_required"),
-            ("acroform", corpus::form_pdf(), "ocr_required"),
-        ] {
-            let key = format!("{name}-{profile}");
-            let outcome = convert(&app, profile, &key, &source).await;
-            assert_eq!(outcome.status, "needs_remote", "{key}");
-            assert_eq!(outcome.route_kind, "local_pdf", "{key}");
-            assert_eq!(outcome.reason_codes, [reason], "{key}");
-            assert_eq!(outcome.warnings, [] as [&str; 0], "{key}");
-            assert_eq!(outcome.failure_code, None, "{key}");
-            assert_nothing_published(&outcome, &key);
-        }
-        assert_eq!(count_named_files(app.data_dir(), "result.md"), 0);
+async fn a_pdf_the_engine_gave_up_on_fails_and_keeps_its_reason() {
+    let app = test_app().await;
+    for (name, source, reason) in [
+        ("image-only-1", corpus::image_only_pdf(1), "scanned_pdf"),
+        ("image-only-3", corpus::image_only_pdf(3), "scanned_pdf"),
+        ("blank-content", corpus::blank_content_pdf(), "scanned_pdf"),
+        ("garbled-font", corpus::garbled_font_pdf(), "ocr_required"),
+        ("acroform", corpus::form_pdf(), "ocr_required"),
+    ] {
+        let outcome = convert(&app, name, &source).await;
+        assert_eq!(outcome.status, "failed", "{name}");
+        assert_eq!(outcome.route_kind, "local_pdf", "{name}");
+        assert_eq!(outcome.reason_codes, [reason], "{name}");
+        assert_eq!(outcome.warnings, [] as [&str; 0], "{name}");
+        assert_eq!(outcome.failure_code.as_deref(), Some(reason), "{name}");
+        assert_nothing_published(&outcome, name);
     }
+    assert_eq!(count_named_files(app.data_dir(), "result.md"), 0);
 }
 
-/// A rejection is a failure, not a route: there is no remote leg that would fix
-/// an encrypted or truncated file, so `needs_remote` would be a lie.
+/// A rejection fails with the worker's code and no engine reason: the file is
+/// encrypted or truncated, which no engine would fix.
 #[tokio::test]
 async fn a_rejected_pdf_fails_without_publishing() {
-    for profile in ["standard", "local_only"] {
-        let app = test_app().await;
-        for (name, source, code) in [
-            ("encrypted", corpus::encrypted_pdf(), "encrypted_pdf"),
-            (
-                "truncated",
-                corpus::truncated_pdf(),
-                "invalid_pdf_structure",
-            ),
-        ] {
-            let key = format!("{name}-{profile}");
-            let outcome = convert(&app, profile, &key, &source).await;
-            assert_eq!(outcome.status, "failed", "{key}");
-            assert_eq!(outcome.failure_code.as_deref(), Some(code), "{key}");
-            assert_eq!(outcome.reason_codes, [] as [&str; 0], "{key}");
-            assert_eq!(outcome.warnings, [] as [&str; 0], "{key}");
-            assert_nothing_published(&outcome, &key);
-        }
+    let app = test_app().await;
+    for (name, source, code) in [
+        ("encrypted", corpus::encrypted_pdf(), "encrypted_pdf"),
+        (
+            "truncated",
+            corpus::truncated_pdf(),
+            "invalid_pdf_structure",
+        ),
+    ] {
+        let outcome = convert(&app, name, &source).await;
+        assert_eq!(outcome.status, "failed", "{name}");
+        assert_eq!(outcome.failure_code.as_deref(), Some(code), "{name}");
+        assert_eq!(outcome.reason_codes, [] as [&str; 0], "{name}");
+        assert_eq!(outcome.warnings, [] as [&str; 0], "{name}");
+        assert_nothing_published(&outcome, name);
     }
 }

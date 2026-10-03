@@ -11,7 +11,6 @@ cases:
   - id: native-text-1-page
     generator: native_pdf
     generatorArgs: [1]
-    profile: standard
     expectedStatus: succeeded
     expectedRoute: local_pdf
     expectedReasonCodes: [native_text_pdf]
@@ -21,7 +20,6 @@ cases:
   - id: native-text-10-pages
     generator: native_pdf
     generatorArgs: [10]
-    profile: standard
     expectedStatus: succeeded
     expectedRoute: local_pdf
     expectedReasonCodes: [native_text_pdf]
@@ -33,12 +31,12 @@ cases:
   - id: mixed-1-text-1-image
     generator: partly_scanned_pdf
     generatorArgs: [1]
-    profile: standard
-    expectedStatus: needs_remote
+    expectedStatus: failed
     expectedRoute: local_pdf
     expectedReasonCodes: [mixed_pdf]
     expectedWarnings: []
     expectedArtifact: false
+    expectedFailureCode: mixed_pdf
 
   # The live defect M4 exists for. The worker converts these (text_based,
   # confidence 0.667 and 0.9), and the image page's content is absent from the
@@ -47,11 +45,10 @@ cases:
   # They must also never be routed remote on this signal alone: an ordinary
   # report with a one-line cover page and no images anywhere reports the same
   # 0.9, and loses nothing. Warning is what the signal supports; billing is
-  # not. Profile therefore does not change the outcome here.
+  # not.
   - id: partly-scanned-2-text-pages
     generator: partly_scanned_pdf
     generatorArgs: [2]
-    profile: standard
     expectedStatus: succeeded
     expectedRoute: local_pdf
     expectedReasonCodes: [native_text_pdf]
@@ -61,7 +58,6 @@ cases:
   - id: partly-scanned-9-text-pages
     generator: partly_scanned_pdf
     generatorArgs: [9]
-    profile: standard
     expectedStatus: succeeded
     expectedRoute: local_pdf
     expectedReasonCodes: [native_text_pdf]
@@ -73,17 +69,6 @@ cases:
   - id: sparse-cover-page
     generator: sparse_cover_pdf
     generatorArgs: [9]
-    profile: standard
-    expectedStatus: succeeded
-    expectedRoute: local_pdf
-    expectedReasonCodes: [native_text_pdf]
-    expectedWarnings: [pages_without_extractable_text]
-    expectedArtifact: true
-
-  - id: partly-scanned-9-text-pages-local-only
-    generator: partly_scanned_pdf
-    generatorArgs: [9]
-    profile: local_only
     expectedStatus: succeeded
     expectedRoute: local_pdf
     expectedReasonCodes: [native_text_pdf]
@@ -93,39 +78,27 @@ cases:
   - id: scanned-1-page
     generator: image_only_pdf
     generatorArgs: [1]
-    profile: standard
-    expectedStatus: needs_remote
+    expectedStatus: failed
     expectedRoute: local_pdf
     expectedReasonCodes: [scanned_pdf]
     expectedWarnings: []
     expectedArtifact: false
+    expectedFailureCode: scanned_pdf
 
   - id: scanned-3-pages
     generator: image_only_pdf
     generatorArgs: [3]
-    profile: standard
-    expectedStatus: needs_remote
+    expectedStatus: failed
     expectedRoute: local_pdf
     expectedReasonCodes: [scanned_pdf]
     expectedWarnings: []
     expectedArtifact: false
-
-  # local_only cannot rescue an engine that produced no Markdown at all.
-  - id: scanned-1-page-local-only
-    generator: image_only_pdf
-    generatorArgs: [1]
-    profile: local_only
-    expectedStatus: needs_remote
-    expectedRoute: local_pdf
-    expectedReasonCodes: [scanned_pdf]
-    expectedWarnings: []
-    expectedArtifact: false
+    expectedFailureCode: scanned_pdf
 
   # Ruled grid: the inspector reports both tables and columns on the page.
   - id: dense-table
     generator: dense_table_pdf
     generatorArgs: []
-    profile: standard
     expectedStatus: succeeded
     expectedRoute: local_pdf
     expectedReasonCodes: [native_text_pdf]
@@ -135,7 +108,6 @@ cases:
   - id: two-column-text
     generator: two_column_pdf
     generatorArgs: []
-    profile: standard
     expectedStatus: succeeded
     expectedRoute: local_pdf
     expectedReasonCodes: [native_text_pdf]
@@ -147,40 +119,39 @@ cases:
   - id: garbled-identity-h-font
     generator: garbled_font_pdf
     generatorArgs: []
-    profile: standard
-    expectedStatus: needs_remote
+    expectedStatus: failed
     expectedRoute: local_pdf
     expectedReasonCodes: [ocr_required]
     expectedWarnings: []
     expectedArtifact: false
+    expectedFailureCode: ocr_required
 
   # The field value lives in the annotation, not the content stream.
   - id: acroform-text-field
     generator: form_pdf
     generatorArgs: []
-    profile: standard
-    expectedStatus: needs_remote
+    expectedStatus: failed
     expectedRoute: local_pdf
     expectedReasonCodes: [ocr_required]
     expectedWarnings: []
     expectedArtifact: false
+    expectedFailureCode: ocr_required
 
   - id: blank-content-stream
     generator: blank_content_pdf
     generatorArgs: []
-    profile: standard
-    expectedStatus: needs_remote
+    expectedStatus: failed
     expectedRoute: local_pdf
     expectedReasonCodes: [scanned_pdf]
     expectedWarnings: []
     expectedArtifact: false
+    expectedFailureCode: scanned_pdf
 
   # Rejections never reach the policy, so the route is the one recorded when
   # the local attempt started and the reason codes stay empty.
   - id: encrypted
     generator: encrypted_pdf
     generatorArgs: []
-    profile: standard
     expectedStatus: failed
     expectedRoute: local_pdf
     expectedReasonCodes: []
@@ -191,7 +162,6 @@ cases:
   - id: truncated
     generator: truncated_pdf
     generatorArgs: []
-    profile: standard
     expectedStatus: failed
     expectedRoute: local_pdf
     expectedReasonCodes: []

@@ -222,8 +222,7 @@ impl AudioEngine {
                 }
             }
             // Every rejection is terminal, so none of them carries an
-            // analysis. The desktop answers `needs_remote` by sending the file
-            // to Datalab, which cannot transcribe.
+            // analysis.
             AudioOutcome::Rejected { code } => {
                 child::reject_if_markdown_staged(paths).await?;
                 EngineOutcome::Rejected {

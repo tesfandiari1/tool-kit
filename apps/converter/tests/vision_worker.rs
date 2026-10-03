@@ -602,10 +602,7 @@ async fn convert_scan(harness: &support::TestHarness, pdf: &[u8]) -> (Value, Str
             .authorized_get(&format!("/api/v1/conversions/{job_id}"))
             .await;
         data = support::json_body(response).await["data"].clone();
-        if matches!(
-            data["status"].as_str(),
-            Some("succeeded" | "failed" | "needs_remote")
-        ) {
+        if matches!(data["status"].as_str(), Some("succeeded" | "failed")) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -733,10 +730,7 @@ async fn docx_pictures_never_leak_the_description_marker() {
             .authorized_get(&format!("/api/v1/conversions/{job_id}"))
             .await;
         data = support::json_body(response).await["data"].clone();
-        if matches!(
-            data["status"].as_str(),
-            Some("succeeded" | "failed" | "needs_remote")
-        ) {
+        if matches!(data["status"].as_str(), Some("succeeded" | "failed")) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

@@ -2,7 +2,7 @@ mod model;
 mod policy;
 mod service;
 
-pub use crate::persistence::{ConversionState as JobStatus, Profile as ConversionProfile};
+pub use crate::persistence::ConversionState as JobStatus;
 pub(crate) use model::{
     servable_media_types, source_format_by_extension, ContainerMagic, EngineAvailability,
     LocalEngineKind,

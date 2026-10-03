@@ -296,7 +296,7 @@ async fn clean_pdf_completes_and_idempotency_replays_the_job() {
     let location = response.headers()["location"].to_str().unwrap().to_owned();
     let submitted = json_body(response).await;
     let job_id = submitted["data"]["id"].as_str().unwrap().to_owned();
-    assert_eq!(submitted["data"]["profile"], "standard");
+    assert!(submitted["data"].get("profile").is_none());
     assert_eq!(submitted["data"]["status"], "queued");
     assert_eq!(location, format!("/api/v1/conversions/{job_id}"));
 
@@ -1344,7 +1344,7 @@ async fn a_two_speaker_recording_transcribes_end_to_end() {
 }
 
 /// A rejection ends the job. v1 has no remote leg for a local transcription,
-/// so `needs_remote` here would strand it.
+/// so the job fails with the worker's code.
 #[tokio::test]
 async fn a_recording_with_no_speech_fails_rather_than_asking_for_a_remote() {
     let Some(harness) = TestHarness::with_audio_worker() else {
@@ -1484,15 +1484,6 @@ async fn the_audio_ceiling_bounds_recordings_without_touching_documents() {
 #[tokio::test]
 async fn invalid_submission_fields_are_rejected_without_creating_jobs() {
     let app = test_app().await;
-    let pdf = clean_pdf();
-
-    let wrong_profile = multipart_body(Uuid::new_v4(), "best_quality", &pdf, "fixture.pdf");
-    let response = app.submit(wrong_profile, "profile-1", TOKEN).await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        json_body(response).await["error"]["code"],
-        "profile_unavailable"
-    );
 
     // A real PNG, well formed and advertised by the contract. Only the missing
     // engine refuses it, and it must refuse before anything is staged.
@@ -1529,6 +1520,38 @@ async fn invalid_submission_fields_are_rejected_without_creating_jobs() {
     assert_eq!(count_job_directories(app.data_dir()), 0);
     assert_eq!(count_named_files(app.data_dir(), "input"), 0);
     assert_eq!(count_named_files(app.data_dir(), "input.staging"), 0);
+}
+
+/// The desktop still sends a profile. Its value is ignored, so a resubmit with
+/// another value, or with none, replays the same job.
+#[tokio::test]
+async fn a_retired_profile_is_accepted_and_ignored() {
+    let app = test_app().await;
+    let pdf = clean_pdf();
+    let client_run_id = Uuid::new_v4();
+    let response = app
+        .submit(
+            multipart_body(client_run_id, "local_only", &pdf, "fixture.pdf"),
+            "retired-profile-1",
+            TOKEN,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job_id = json_body(response).await["data"]["id"].clone();
+
+    let without_profile = multipart(
+        &[("clientRunId", &client_run_id.to_string())],
+        Some((&pdf, "fixture.pdf", "application/pdf")),
+    );
+    for body in [
+        multipart_body(client_run_id, "best_quality", &pdf, "fixture.pdf"),
+        without_profile,
+    ] {
+        let replay = app.submit(body, "retired-profile-1", TOKEN).await;
+        assert_eq!(replay.status(), StatusCode::ACCEPTED);
+        assert_eq!(replay.headers()["idempotency-replayed"], "true");
+        assert_eq!(json_body(replay).await["data"]["id"], job_id);
+    }
 }
 
 #[tokio::test]
@@ -1691,15 +1714,23 @@ async fn non_text_pdf_never_publishes_partial_markdown() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let submitted = json_body(response).await;
     let job_id = submitted["data"]["id"].as_str().unwrap();
-    assert_eq!(submitted["data"]["profile"], "local_only");
     assert_eq!(submitted["data"]["status"], "queued");
 
     let completed = app.wait_for_terminal(job_id).await;
-    assert_eq!(completed["data"]["status"], "needs_remote", "{completed:#}");
+    assert_eq!(completed["data"]["status"], "failed", "{completed:#}");
     assert_ne!(
         completed["data"]["route"]["reasonCodes"],
         serde_json::json!(["native_text_pdf"])
     );
+    // The engine's reason is the code, and the message is plain words.
+    assert_eq!(
+        completed["data"]["failure"]["code"],
+        completed["data"]["route"]["reasonCodes"][0]
+    );
+    assert!(completed["data"]["failure"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("This file could not be converted on this Mac because "));
     let markdown = app
         .authorized_get(&format!("/api/v1/conversions/{job_id}/artifacts/markdown"))
         .await;
@@ -1712,7 +1743,7 @@ async fn non_text_pdf_never_publishes_partial_markdown() {
 }
 
 #[tokio::test]
-async fn worker_output_limit_routes_without_writing_an_artifact() {
+async fn worker_output_limit_fails_without_writing_an_artifact() {
     let app = test_app_with_output_limit(16).await;
     let body = multipart_body(Uuid::new_v4(), "standard", &clean_pdf(), "bounded.pdf");
     let response = app.submit(body, "bounded-output-1", TOKEN).await;
@@ -1721,7 +1752,8 @@ async fn worker_output_limit_routes_without_writing_an_artifact() {
     let job_id = submitted["data"]["id"].as_str().unwrap();
 
     let completed = app.wait_for_terminal(job_id).await;
-    assert_eq!(completed["data"]["status"], "needs_remote", "{completed:#}");
+    assert_eq!(completed["data"]["status"], "failed", "{completed:#}");
+    assert_eq!(completed["data"]["failure"]["code"], "output_too_large");
     assert_eq!(
         completed["data"]["route"]["reasonCodes"],
         serde_json::json!(["output_too_large"])

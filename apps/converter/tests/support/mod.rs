@@ -30,7 +30,7 @@ use tool_kit_converter::{
     config::{Limits, Settings},
     faults::FaultBarrier,
     persistence::{
-        hash_idempotency_key, CreateOutcome, NewConversion, NewSource, Profile, SqliteRepository,
+        hash_idempotency_key, CreateOutcome, NewConversion, NewSource, SqliteRepository,
         DATABASE_FILENAME,
     },
     router,
@@ -246,7 +246,6 @@ impl TestHarness {
                 client_run_id: Uuid::new_v4(),
                 idempotency_key_sha256: hash_idempotency_key(&format!("missed-notify-{job_id}")),
                 request_fingerprint: hex::encode(Sha256::digest(job_id.as_bytes())),
-                profile: Profile::Standard,
                 source: NewSource {
                     relative_path: format!("jobs/{job_id}/source/input"),
                     media_type: "application/pdf".to_owned(),
@@ -653,7 +652,7 @@ impl TestApp {
             let payload = json_body(response).await;
             if matches!(
                 payload["data"]["status"].as_str(),
-                Some("succeeded" | "failed" | "needs_remote")
+                Some("succeeded" | "failed")
             ) {
                 return payload;
             }

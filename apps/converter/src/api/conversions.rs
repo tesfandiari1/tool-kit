@@ -19,9 +19,8 @@ use uuid::Uuid;
 use crate::{
     config::Limits,
     conversion::{
-        source_format_by_extension, ArtifactLookup, ContainerMagic, ConversionProfile,
-        EngineAvailability, JobView, LocalEngineKind, SourceMetadata, Submission,
-        SubmissionDecision,
+        source_format_by_extension, ArtifactLookup, ContainerMagic, EngineAvailability, JobView,
+        LocalEngineKind, SourceMetadata, Submission, SubmissionDecision,
     },
     error::{ApiError, RequestId},
     AppState,
@@ -136,17 +135,6 @@ pub async fn create(
             ));
         }
     };
-    if staged.profile == ConversionProfile::BestQuality {
-        state.service().discard_unaccepted_job(job_id).await;
-        staged_guard.disarm();
-        return Err(error(
-            StatusCode::CONFLICT,
-            "profile_unavailable",
-            "The best_quality profile is not available in this service version.",
-            &request_id,
-        ));
-    }
-
     // The service owns the tree from here, and its own error handling applies.
     staged_guard.disarm();
     let decision = state
@@ -155,7 +143,6 @@ pub async fn create(
             prepared,
             attempt_id,
             client_run_id: staged.client_run_id,
-            profile: staged.profile,
             source: staged.source,
             language_correction: staged.language_correction,
             custom_words: staged.custom_words,
@@ -258,7 +245,7 @@ async fn stage_multipart(
     request_id: &RequestId,
 ) -> Result<StagedSubmission, ApiError> {
     let mut client_run_id = None;
-    let mut profile = None;
+    let mut profile_seen = false;
     let mut source = None;
     let mut language_correction = None;
     let mut custom_words = None;
@@ -280,16 +267,11 @@ async fn stage_multipart(
                     )
                 })?);
             }
-            Some("profile") if profile.is_none() => {
-                let value = read_text(field, request_id).await?;
-                profile = Some(value.parse::<ConversionProfile>().map_err(|_| {
-                    error(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "invalid_profile",
-                        "profile must be standard, local_only, or best_quality.",
-                        request_id,
-                    )
-                })?);
+            // Retired: every job runs on this Mac. Read and dropped, because
+            // the desktop still sends one.
+            Some("profile") if !profile_seen => {
+                read_text(field, request_id).await?;
+                profile_seen = true;
             }
             Some("languageCorrection") if language_correction.is_none() => {
                 let value = read_text(field, request_id).await?;
@@ -374,8 +356,6 @@ async fn stage_multipart(
                 request_id,
             )
         })?,
-        profile: profile
-            .ok_or_else(|| missing("missing_profile", "profile is required.", request_id))?,
         source: source
             .ok_or_else(|| missing("missing_source", "source is required.", request_id))?,
         // Both are optional; absent is the documented default.
@@ -732,7 +712,6 @@ fn scratch_write_failed(request_id: &RequestId) -> ApiError {
 
 struct StagedSubmission {
     client_run_id: Uuid,
-    profile: ConversionProfile,
     source: SourceMetadata,
     language_correction: bool,
     custom_words: String,

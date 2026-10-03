@@ -16,8 +16,8 @@ use uuid::Uuid;
 
 use super::model::{
     AttemptState, CommitOperation, ConversionState, CreateOutcome, DocumentClassification,
-    EngineRecord, FailedResult, FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult,
-    NewArtifact, NewConversion, RecoveryCandidate, RequeueOutcome, StoredArtifact, StoredAttempt,
+    EngineRecord, FailedResult, FailureStage, LocalAnalysis, LocalStart, NewArtifact,
+    NewConversion, RecoveryCandidate, RequeueOutcome, StoredArtifact, StoredAttempt,
     StoredConversion, StoredFailure, StoredSource,
 };
 
@@ -128,14 +128,14 @@ impl SqliteRepository {
         sqlx::query(
             "INSERT INTO conversions (
                 id, client_run_id, auth_scope, idempotency_key_hash,
-                request_fingerprint, profile, status, source_relative_path,
+                request_fingerprint, status, source_relative_path,
                 source_media_type, source_byte_length, source_sha256,
                 reason_codes_json, warnings_json,
                 origin_request_id, created_at, updated_at,
                 ocr_language_correction, ocr_custom_words, speaker_count
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8, ?9, ?10,
-                '[]', '[]', ?11, ?12, ?12, ?13, ?14, ?15
+                ?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9,
+                '[]', '[]', ?10, ?11, ?11, ?12, ?13, ?14
              )",
         )
         .bind(&conversion_id)
@@ -143,7 +143,6 @@ impl SqliteRepository {
         .bind(AUTH_SCOPE)
         .bind(&input.idempotency_key_sha256)
         .bind(&input.request_fingerprint)
-        .bind(input.profile)
         .bind(&input.source.relative_path)
         .bind(&input.source.media_type)
         .bind(source_byte_length)
@@ -390,14 +389,17 @@ impl SqliteRepository {
         Ok(conversion)
     }
 
-    pub async fn finish_needs_remote(
+    /// An engine that gave up. The attempt keeps the analysis it reported, and
+    /// both rows fail with the engine's reason as the code.
+    pub async fn finish_gave_up(
         &self,
         conversion_id: Uuid,
         attempt_id: Uuid,
-        result: NeedsRemoteResult,
+        analysis: LocalAnalysis,
+        failure: StoredFailure,
     ) -> Result<StoredConversion, RepositoryError> {
-        validate_bounded_text(&result.fallback_reason, 128, "fallback reason is invalid")?;
-        let analysis = encode_local_analysis(&result.analysis)?;
+        validate_failure(&failure)?;
+        let analysis = encode_local_analysis(&analysis)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         require_active_state(
             &mut transaction,
@@ -416,9 +418,9 @@ impl SqliteRepository {
                 attempt_id,
             },
             AttemptState::ConvertingLocal,
-            AttemptState::NeedsRemote,
+            AttemptState::ConvertingLocal,
             &analysis,
-            Some(&result.fallback_reason),
+            Some(&failure.code),
             &updated_at,
         )
         .await?;
@@ -427,16 +429,27 @@ impl SqliteRepository {
             conversion_id,
             attempt_id,
             ConversionState::ConvertingLocal,
-            ConversionState::NeedsRemote,
+            ConversionState::ConvertingLocal,
             &analysis,
             &updated_at,
+        )
+        .await?;
+        fail_rows(
+            &mut transaction,
+            ActiveIds {
+                conversion_id,
+                attempt_id,
+            },
+            FailureStage::ConvertingLocal,
+            &failure.code,
+            &failure.message,
         )
         .await?;
 
         let conversion = load_required_conversion(&mut transaction, conversion_id).await?;
         commit_transition(
             transaction,
-            CommitOperation::FinishNeedsRemote,
+            CommitOperation::FinishFailed,
             conversion_id,
             attempt_id,
         )
@@ -1362,7 +1375,6 @@ async fn load_conversion(
         "SELECT
             c.id AS conversion_id,
             c.client_run_id,
-            c.profile,
             c.status AS conversion_state,
             c.source_relative_path,
             c.source_media_type,
@@ -1498,7 +1510,6 @@ fn decode_conversion(row: &SqliteRow) -> Result<StoredConversion, RepositoryErro
     Ok(StoredConversion {
         id: parse_uuid(row.try_get("conversion_id")?, "conversions.id")?,
         client_run_id: parse_uuid(row.try_get("client_run_id")?, "conversions.client_run_id")?,
-        profile: row.try_get("profile")?,
         state: row.try_get("conversion_state")?,
         source: StoredSource {
             relative_path: row.try_get("source_relative_path")?,
@@ -1749,8 +1760,8 @@ mod tests {
     };
     use crate::persistence::{
         AttemptState, ConversionState, CreateOutcome, DocumentClassification, EngineRecord,
-        FailedResult, FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult, NewArtifact,
-        NewConversion, NewSource, Profile, RecoveryCandidate, RequeueOutcome, StoredFailure,
+        FailedResult, FailureStage, LocalAnalysis, LocalStart, NewArtifact, NewConversion,
+        NewSource, RecoveryCandidate, RequeueOutcome, StoredFailure,
     };
 
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1875,46 +1886,24 @@ mod tests {
 
         let job_id = "11111111-2222-4333-8444-555555555555";
         let attempt_id = "66666666-7777-4888-8999-000000000000";
-        // Every seeded conversion is this insert. Only the columns it takes vary.
-        let insert_conversion = async |id: &str,
-                                       digest_character: &str,
-                                       profile: &str,
-                                       media_type: &str,
-                                       byte_length: i64,
-                                       origin_request_id: &str,
-                                       timestamp: &str| {
-            sqlx::query(
-                "INSERT INTO conversions (
-                    id, client_run_id, auth_scope, idempotency_key_hash,
-                    request_fingerprint, profile, status, source_relative_path,
-                    source_media_type, source_byte_length, source_sha256,
-                    reason_codes_json, warnings_json, origin_request_id,
-                    created_at, updated_at
-                 ) VALUES (
-                    ?1, ?1, 'bootstrap', ?2, ?2, ?3, 'queued', ?4, ?5, ?6, ?2,
-                    '[]', '[]', ?7, ?8, ?8
-                 )",
-            )
-            .bind(id)
-            .bind(digest_character.repeat(64))
-            .bind(profile)
-            .bind(format!("jobs/{id}/source/input"))
-            .bind(media_type)
-            .bind(byte_length)
-            .bind(origin_request_id)
-            .bind(timestamp)
-            .execute(&pool)
-            .await
-        };
-        insert_conversion(
-            job_id,
-            "a",
-            "standard",
-            "application/pdf",
-            128,
-            "request-1",
-            "2026-08-18T00:00:00Z",
+        // M2 required a profile. Migration 0007 dropped it.
+        sqlx::query(
+            "INSERT INTO conversions (
+                id, client_run_id, auth_scope, idempotency_key_hash,
+                request_fingerprint, profile, status, source_relative_path,
+                source_media_type, source_byte_length, source_sha256,
+                reason_codes_json, warnings_json, origin_request_id,
+                created_at, updated_at
+             ) VALUES (
+                ?1, ?1, 'bootstrap', ?2, ?2, 'standard', 'queued', ?3,
+                'application/pdf', 128, ?2, '[]', '[]', 'request-1', ?4, ?4
+             )",
         )
+        .bind(job_id)
+        .bind("a".repeat(64))
+        .bind(format!("jobs/{job_id}/source/input"))
+        .bind("2026-08-18T00:00:00Z")
+        .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
@@ -1930,8 +1919,38 @@ mod tests {
         .await
         .unwrap();
 
-        // The full migrator applies 0002 and 0003 over the populated M2 rows.
+        // The full migrator applies every later migration over the M2 rows.
         super::MIGRATOR.run(&pool).await.unwrap();
+        // Every conversion seeded after the upgrade is this insert. Only the
+        // columns it takes vary.
+        let insert_conversion = async |id: &str,
+                                       digest_character: &str,
+                                       media_type: &str,
+                                       byte_length: i64,
+                                       origin_request_id: &str,
+                                       timestamp: &str| {
+            sqlx::query(
+                "INSERT INTO conversions (
+                    id, client_run_id, auth_scope, idempotency_key_hash,
+                    request_fingerprint, status, source_relative_path,
+                    source_media_type, source_byte_length, source_sha256,
+                    reason_codes_json, warnings_json, origin_request_id,
+                    created_at, updated_at
+                 ) VALUES (
+                    ?1, ?1, 'bootstrap', ?2, ?2, 'queued', ?3, ?4, ?5, ?2,
+                    '[]', '[]', ?6, ?7, ?7
+                 )",
+            )
+            .bind(id)
+            .bind(digest_character.repeat(64))
+            .bind(format!("jobs/{id}/source/input"))
+            .bind(media_type)
+            .bind(byte_length)
+            .bind(origin_request_id)
+            .bind(timestamp)
+            .execute(&pool)
+            .await
+        };
 
         let surviving: i64 = sqlx::query("SELECT COUNT(*) AS n FROM conversions")
             .fetch_one(&pool)
@@ -1958,7 +1977,6 @@ mod tests {
         insert_conversion(
             docx_id,
             "b",
-            "local_only",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             256,
             "request-2",
@@ -1972,7 +1990,6 @@ mod tests {
         insert_conversion(
             odt_id,
             "c",
-            "standard",
             "application/vnd.oasis.opendocument.text",
             256,
             "request-3",
@@ -2001,13 +2018,13 @@ mod tests {
         sqlx::query(
             "INSERT INTO conversions (
                 id, client_run_id, auth_scope, idempotency_key_hash,
-                request_fingerprint, profile, status, source_relative_path,
+                request_fingerprint, status, source_relative_path,
                 source_media_type, source_byte_length, source_sha256,
                 reason_codes_json, warnings_json, origin_request_id,
                 created_at, updated_at, ocr_language_correction,
                 ocr_custom_words
              ) VALUES (
-                ?1, ?1, 'bootstrap', ?2, ?2, 'standard', 'queued', ?3,
+                ?1, ?1, 'bootstrap', ?2, ?2, 'queued', ?3,
                 'image/png', 256, ?2, '[]', '[]', 'request-4',
                 '2026-08-18T00:00:03Z', '2026-08-18T00:00:03Z', 0, 'Uniwise'
              )",
@@ -2042,7 +2059,6 @@ mod tests {
         let rejected = insert_conversion(
             bad_id,
             "c",
-            "standard",
             "text/plain",
             64,
             "request-3",
@@ -2056,7 +2072,8 @@ mod tests {
 
     /// Migration 0007 runs over ledgers that already hold finished jobs. A
     /// succeeded job keeps its Markdown row and stays readable, and its
-    /// manifest row goes.
+    /// manifest row goes. A needs_remote job becomes failed with its reason as
+    /// the code, and the profile column goes.
     #[tokio::test]
     async fn migration_0007_upgrades_a_ledger_with_finished_jobs() {
         use sqlx::migrate::Migrator;
@@ -2154,7 +2171,61 @@ mod tests {
         .await
         .unwrap();
 
+        let gave_up = "22222222-2222-4333-8444-555555555555";
+        let gave_up_attempt = "77777777-7777-4888-8999-000000000000";
+        sqlx::query(
+            "INSERT INTO conversions (
+                id, client_run_id, auth_scope, idempotency_key_hash,
+                request_fingerprint, profile, status, source_relative_path,
+                source_media_type, source_byte_length, source_sha256, route,
+                reason_codes_json, warnings_json, origin_request_id,
+                created_at, updated_at
+             ) VALUES (
+                ?1, ?1, 'bootstrap', ?2, ?2, 'local_only', 'needs_remote',
+                'jobs/' || ?1 || '/source/input', 'application/pdf', 128, ?2,
+                'local_pdf', '[\"mixed_pdf\"]', '[]', 'request-2', ?3, ?3
+             )",
+        )
+        .bind(gave_up)
+        .bind("d".repeat(64))
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attempts (
+                id, conversion_id, attempt_number, state, recovery_count,
+                engine_name, engine_version, route, classification,
+                inspection_json, reason_codes_json, warnings_json,
+                fallback_reason, created_at, updated_at, started_at, finished_at
+             ) VALUES (
+                ?1, ?2, 1, 'needs_remote', 0, 'pdf-inspector', '1.25.2',
+                'local_pdf', 'mixed', '{\"pageCount\":2}', '[\"mixed_pdf\"]', '[]',
+                'mixed_pdf', ?3, ?3, ?3, ?3
+             )",
+        )
+        .bind(gave_up_attempt)
+        .bind(gave_up)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE conversions SET active_attempt_id = ?1 WHERE id = ?2")
+            .bind(gave_up_attempt)
+            .bind(gave_up)
+            .execute(&pool)
+            .await
+            .unwrap();
+
         super::MIGRATOR.run(&pool).await.unwrap();
+        let columns: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('conversions')")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.try_get("name").unwrap())
+            .collect();
+        assert!(!columns.iter().any(|name| name == "profile"));
         let kinds: Vec<String> = sqlx::query("SELECT kind FROM artifacts")
             .fetch_all(&pool)
             .await
@@ -2182,6 +2253,24 @@ mod tests {
         assert_eq!(job.artifacts.len(), 1);
         assert_eq!(job.artifacts[0].sha256, "b".repeat(64));
         assert_eq!(job.active_attempt.markdown_byte_length, None);
+
+        let job = repository
+            .get(Uuid::parse_str(gave_up).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.state, ConversionState::Failed);
+        assert_eq!(job.active_attempt.state, AttemptState::Failed);
+        let failure = StoredFailure {
+            code: "mixed_pdf".to_owned(),
+            message: "This file could not be converted on this Mac because some pages are \
+                      scanned images."
+                .to_owned(),
+        };
+        assert_eq!(job.failure.as_ref(), Some(&failure));
+        assert_eq!(job.active_attempt.failure.as_ref(), Some(&failure));
+        assert_eq!(job.reason_codes, ["mixed_pdf"]);
+        assert!(job.active_attempt.inspection.is_some());
     }
 
     #[tokio::test]
@@ -2563,28 +2652,28 @@ mod tests {
         assert_eq!(failed.state, ConversionState::Failed);
         assert_eq!(failed.active_attempt.state, AttemptState::Failed);
 
-        let remote = converting_conversion(&repository, "needs-remote", "b").await;
-        let remote = repository
-            .finish_needs_remote(
-                remote.id,
-                remote.active_attempt.id,
-                NeedsRemoteResult {
-                    analysis: LocalAnalysis {
-                        classification: DocumentClassification::Scanned,
-                        inspection: serde_json::json!({"pageCount": 2}),
-                        reason_codes: vec!["scanned_pdf".to_owned()],
-                        warnings: vec![],
-                    },
-                    fallback_reason: "scanned_pdf".to_owned(),
-                },
+        let gave_up = converting_conversion(&repository, "gave-up", "b").await;
+        let gave_up = repository
+            .finish_gave_up(
+                gave_up.id,
+                gave_up.active_attempt.id,
+                scanned_analysis(),
+                failed_result(FailureStage::ConvertingLocal, "scanned_pdf").failure,
             )
             .await
             .unwrap();
-        assert_eq!(remote.state, ConversionState::NeedsRemote);
-        assert_eq!(remote.active_attempt.state, AttemptState::NeedsRemote);
+        assert_eq!(gave_up.state, ConversionState::Failed);
+        assert_eq!(gave_up.active_attempt.state, AttemptState::Failed);
+        assert_eq!(gave_up.failure.unwrap().code, "scanned_pdf");
+        assert_eq!(gave_up.reason_codes, ["scanned_pdf"]);
+        // The analysis stays as failure evidence.
         assert_eq!(
-            remote.active_attempt.fallback_reason.as_deref(),
+            gave_up.active_attempt.fallback_reason.as_deref(),
             Some("scanned_pdf")
+        );
+        assert_eq!(
+            gave_up.active_attempt.inspection,
+            Some(serde_json::json!({"pageCount": 1}))
         );
 
         let converting_failure =
@@ -3075,20 +3164,13 @@ mod tests {
             )
             .await
             .unwrap();
-        let needs_remote = converting_conversion(&repository, "list-needs-remote", "f").await;
+        let gave_up = converting_conversion(&repository, "list-gave-up", "f").await;
         repository
-            .finish_needs_remote(
-                needs_remote.id,
-                needs_remote.active_attempt.id,
-                NeedsRemoteResult {
-                    analysis: LocalAnalysis {
-                        classification: DocumentClassification::Scanned,
-                        inspection: serde_json::json!({"pageCount": 1}),
-                        reason_codes: vec!["scanned_pdf".to_owned()],
-                        warnings: vec![],
-                    },
-                    fallback_reason: "scanned_pdf".to_owned(),
-                },
+            .finish_gave_up(
+                gave_up.id,
+                gave_up.active_attempt.id,
+                scanned_analysis(),
+                failed_result(FailureStage::ConvertingLocal, "scanned_pdf").failure,
             )
             .await
             .unwrap();
@@ -3130,7 +3212,7 @@ mod tests {
                 finalizing.id,
                 succeeded.id,
                 failed.id,
-                needs_remote.id,
+                gave_up.id,
             ])
         );
         repository.health_check().await.unwrap();
@@ -3287,7 +3369,6 @@ mod tests {
             client_run_id: Uuid::nil(),
             idempotency_key_sha256: hash_idempotency_key(key),
             request_fingerprint: fingerprint_character.repeat(64),
-            profile: Profile::Standard,
             source: NewSource {
                 relative_path: format!("jobs/{id}/source/input"),
                 media_type: "application/pdf".to_owned(),
@@ -3316,6 +3397,15 @@ mod tests {
             classification: DocumentClassification::TextBased,
             inspection: serde_json::json!({"pageCount": 1}),
             reason_codes: vec!["native_text_pdf".to_owned()],
+            warnings: vec![],
+        }
+    }
+
+    fn scanned_analysis() -> LocalAnalysis {
+        LocalAnalysis {
+            classification: DocumentClassification::Scanned,
+            inspection: serde_json::json!({"pageCount": 1}),
+            reason_codes: vec!["scanned_pdf".to_owned()],
             warnings: vec![],
         }
     }

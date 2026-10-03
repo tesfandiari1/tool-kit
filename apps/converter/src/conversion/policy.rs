@@ -66,6 +66,31 @@ impl ReasonCode {
     }
 }
 
+/// What a job whose engine gave up says to the person who dropped the file.
+/// The reason itself is the failure code.
+pub(crate) fn gave_up_message(reason: FallbackReason) -> &'static str {
+    match reason {
+        FallbackReason::ScannedPdf | FallbackReason::ImageBasedPdf => {
+            "This file could not be converted on this Mac because every page is a scanned image."
+        }
+        FallbackReason::MixedPdf => {
+            "This file could not be converted on this Mac because some pages are scanned images."
+        }
+        FallbackReason::OcrRequired => {
+            "This file could not be converted on this Mac because the text layer is missing or unreadable."
+        }
+        FallbackReason::GarbledText => {
+            "This file could not be converted on this Mac because the text layer is garbled."
+        }
+        FallbackReason::LocalQualityFailed => {
+            "This file could not be converted on this Mac because no readable text was found."
+        }
+        FallbackReason::OutputTooLarge => {
+            "This file could not be converted on this Mac because the result was too large."
+        }
+    }
+}
+
 /// A caveat about output that was still published. Warnings never change the
 /// route; they exist so a degraded success stops being a silent one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,7 +119,7 @@ impl Warning {
 /// The warnings published Markdown carries. An engine that gave up publishes
 /// nothing, so it gets none.
 ///
-/// **Profile changes none of this, on purpose.** The only signal for routing a
+/// **Nothing routes on this, on purpose.** The only signal for routing a
 /// partly-textless document remote, `QualitySignals::native_text_ratio`, is
 /// wrong in both directions: a report with a one-line cover page reports 0.9
 /// with nothing missing, and a page holding text and a full-page scan reports
@@ -194,6 +219,16 @@ mod tests {
             FallbackReason::OutputTooLarge,
         ] {
             assert_eq!(ReasonCode::Engine(reason).as_str(), reason.as_str());
+            // Migration 0007 wrote the same words onto every old needs_remote
+            // row, and the two copies must read alike.
+            let (opening, cause) = gave_up_message(reason).split_once(" because ").unwrap();
+            let migration =
+                include_str!("../../migrations/0007_drop_manifest_and_needs_remote.sql");
+            assert!(migration.contains(&format!("'{opening} because '")));
+            assert!(
+                migration.contains(&format!("WHEN '{}' THEN '{cause}'", reason.as_str())),
+                "{reason:?}"
+            );
         }
     }
 
@@ -253,7 +288,7 @@ mod tests {
     /// Every string in it is checked against the code that produces it.
     #[test]
     fn the_eval_corpus_manifest_uses_only_strings_the_service_can_emit() {
-        use crate::conversion::{ConversionProfile, JobStatus};
+        use crate::conversion::JobStatus;
         use crate::engines::EngineFailure;
         use crate::worker_protocol::RejectionCode;
 
@@ -270,7 +305,6 @@ mod tests {
             id: String,
             generator: String,
             generator_args: Vec<u32>,
-            profile: String,
             expected_status: String,
             expected_route: String,
             expected_reason_codes: Vec<String>,
@@ -299,16 +333,10 @@ mod tests {
             JobStatus::Finalizing,
             JobStatus::Succeeded,
             JobStatus::Failed,
-            JobStatus::NeedsRemote,
         ]
         .into_iter()
         .map(status_string)
         .collect();
-        let profiles = [
-            ConversionProfile::Standard.as_str(),
-            ConversionProfile::LocalOnly.as_str(),
-            ConversionProfile::BestQuality.as_str(),
-        ];
         let routes = [
             LocalEngineKind::Pdf.route_str(),
             LocalEngineKind::AnyDoc.route_str(),
@@ -333,8 +361,18 @@ mod tests {
             Warning::MultiColumnLayout,
         ]
         .map(Warning::as_str);
-        // The corpus is PDF-only, so a case fails either as a worker rejection
-        // or as a local engine failure.
+        // The corpus is PDF-only, so a case fails as a worker rejection, as a
+        // local engine failure, or as the reason the engine gave up.
+        let gave_up = [
+            FallbackReason::ScannedPdf,
+            FallbackReason::ImageBasedPdf,
+            FallbackReason::MixedPdf,
+            FallbackReason::GarbledText,
+            FallbackReason::OcrRequired,
+            FallbackReason::LocalQualityFailed,
+            FallbackReason::OutputTooLarge,
+        ]
+        .map(FallbackReason::as_str);
         let failure_codes = [
             RejectionCode::EncryptedPdf.as_str(),
             RejectionCode::InvalidPdf.as_str(),
@@ -359,11 +397,6 @@ mod tests {
             assert!(
                 case.generator_args.iter().all(|pages| *pages > 0),
                 "{id} asks for a zero-page PDF"
-            );
-            assert!(
-                profiles.contains(&case.profile.as_str()),
-                "{id} uses profile {}",
-                case.profile
             );
             assert!(
                 statuses.contains(&case.expected_status),
@@ -399,7 +432,7 @@ mod tests {
             );
             if let Some(code) = &case.expected_failure_code {
                 assert!(
-                    failure_codes.contains(&code.as_str()),
+                    failure_codes.contains(&code.as_str()) || gave_up.contains(&code.as_str()),
                     "{id} expects failure code {code}"
                 );
             }

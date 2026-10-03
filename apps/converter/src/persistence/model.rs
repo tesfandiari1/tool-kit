@@ -1,40 +1,9 @@
-use std::str::FromStr;
-
 use serde::{
     de::{value::Error as ValueError, IntoDeserializer},
     Deserialize, Serialize,
 };
 use serde_json::Value;
 use uuid::Uuid;
-
-/// The serde strings are the HTTP contract and the sqlx ones the database
-/// column. They are the same three words, which is why one enum carries both.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, sqlx::Type)]
-#[serde(rename_all = "snake_case")]
-#[sqlx(rename_all = "snake_case")]
-pub enum Profile {
-    Standard,
-    LocalOnly,
-    BestQuality,
-}
-
-impl Profile {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::LocalOnly => "local_only",
-            Self::BestQuality => "best_quality",
-        }
-    }
-}
-
-impl FromStr for Profile {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::deserialize(IntoDeserializer::<ValueError>::into_deserializer(value)).map_err(|_| ())
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
@@ -45,12 +14,11 @@ pub enum ConversionState {
     Finalizing,
     Succeeded,
     Failed,
-    NeedsRemote,
 }
 
 impl ConversionState {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::NeedsRemote)
+        matches!(self, Self::Succeeded | Self::Failed)
     }
 }
 
@@ -62,7 +30,6 @@ pub enum AttemptState {
     Finalizing,
     Succeeded,
     Failed,
-    NeedsRemote,
     Interrupted,
 }
 
@@ -103,12 +70,6 @@ pub struct LocalAnalysis {
     pub inspection: Value,
     pub reason_codes: Vec<String>,
     pub warnings: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct NeedsRemoteResult {
-    pub analysis: LocalAnalysis,
-    pub fallback_reason: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -156,7 +117,6 @@ pub enum CommitOperation {
     StartLocal,
     ClaimNextQueued,
     MarkFinalizing,
-    FinishNeedsRemote,
     FinishFailed,
     FinishSucceeded,
     MarkArtifactIntegrityFailed,
@@ -197,7 +157,6 @@ pub struct NewConversion {
     pub client_run_id: Uuid,
     pub idempotency_key_sha256: String,
     pub request_fingerprint: String,
-    pub profile: Profile,
     pub source: NewSource,
     pub origin_request_id: String,
     /// The OCR settings the request carried. Only the Vision engine reads
@@ -278,7 +237,6 @@ pub struct StoredArtifact {
 pub struct StoredConversion {
     pub id: Uuid,
     pub client_run_id: Uuid,
-    pub profile: Profile,
     pub state: ConversionState,
     pub source: StoredSource,
     pub active_attempt: StoredAttempt,
@@ -299,14 +257,8 @@ pub struct StoredConversion {
 mod tests {
     use super::*;
 
-    /// `as_str` is a hand copy of the `snake_case` rule serde and sqlx share.
     #[test]
-    fn as_str_matches_the_derived_vocabulary() {
-        for profile in [Profile::Standard, Profile::LocalOnly, Profile::BestQuality] {
-            assert_eq!(serde_json::to_value(profile).unwrap(), profile.as_str());
-            assert_eq!(profile.as_str().parse::<Profile>(), Ok(profile));
-        }
-        assert_eq!("scanned".parse::<Profile>(), Err(()));
+    fn stored_classifications_parse_the_derived_vocabulary() {
         assert_eq!(
             DocumentClassification::from_stored("structured_document"),
             Some(DocumentClassification::StructuredDocument)

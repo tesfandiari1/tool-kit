@@ -182,11 +182,13 @@ impl StartupRecovery {
                 }
                 Err(ArtifactReadFailure::Transient(error)) => Err(error.into()),
             },
-            state => Err(StartupRecoveryError::UnexpectedCandidateState {
-                job_id: job.id,
-                attempt_id: job.active_attempt.id,
-                state,
-            }),
+            state @ ConversionState::Failed => {
+                Err(StartupRecoveryError::UnexpectedCandidateState {
+                    job_id: job.id,
+                    attempt_id: job.active_attempt.id,
+                    state,
+                })
+            }
         }
     }
 
@@ -395,7 +397,7 @@ fn validate_candidate_invariants(job: &StoredConversion) -> Result<(), StartupRe
                 && attempt.started_at.is_some()
                 && attempt.finished_at.is_some()
         }
-        ConversionState::Failed | ConversionState::NeedsRemote => false,
+        ConversionState::Failed => false,
     };
     if !metadata_valid {
         return invalid_metadata(job, "active state metadata is incomplete or inconsistent");

@@ -21,9 +21,8 @@ use crate::{
     faults::{FaultBarrier, FaultPoint},
     persistence::{
         hash_idempotency_key, ConversionState, CreateOutcome, EngineRecord, FailedResult,
-        FailureStage, LocalAnalysis, LocalStart, NeedsRemoteResult, NewArtifact, NewConversion,
-        NewSource, RepositoryError, SqliteRepository, StoredArtifact, StoredConversion,
-        StoredFailure,
+        FailureStage, LocalAnalysis, LocalStart, NewArtifact, NewConversion, NewSource,
+        RepositoryError, SqliteRepository, StoredArtifact, StoredConversion, StoredFailure,
     },
     vision_protocol::VISION_ENGINE_NAME,
     worker_protocol::{Inspection, NATIVE_PAGES_FILE, PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION},
@@ -34,7 +33,7 @@ use super::{
         servable_media_types, source_format_by_media_type, EngineAvailability, LocalEngineKind,
     },
     policy::{self, ReasonCode},
-    ArtifactRecord, ConversionProfile, JobView, SourceMetadata,
+    ArtifactRecord, JobView, SourceMetadata,
 };
 
 const MARKDOWN_MEDIA_TYPE: &str = "text/markdown; charset=utf-8";
@@ -143,7 +142,6 @@ impl ConversionService {
 
         let fingerprint = submission_fingerprint(
             submission.client_run_id,
-            submission.profile,
             &published_source.sha256,
             submission.language_correction,
             &submission.custom_words,
@@ -155,7 +153,6 @@ impl ConversionService {
             client_run_id: submission.client_run_id,
             idempotency_key_sha256: hash_idempotency_key(&submission.idempotency_key),
             request_fingerprint: fingerprint,
-            profile: submission.profile,
             source: NewSource {
                 relative_path: portable_relative(source_relative_path(job_id)),
                 media_type: submission.source.media_type.clone(),
@@ -485,7 +482,7 @@ impl ConversionService {
         // A PDF with no native text on any page is a scan, and Vision reads
         // scans locally. One the worker left native pages for gets only its
         // other pages read, and they are spliced in. Anything short of a
-        // conversion keeps the inspector's needs_remote and its reason.
+        // conversion keeps the inspector's verdict and its reason.
         let scan_engine = match (&conversion, self.vision_engine.as_ref()) {
             (Ok(EngineOutcome::NeedsRemote { analysis, .. }), Some(engine))
                 if source_format.engine == LocalEngineKind::Pdf =>
@@ -524,8 +521,8 @@ impl ConversionService {
                         Ok(converted)
                     }
                     Err(EngineFailure::Interrupted) => Err(EngineFailure::Interrupted),
-                    // The job keeps the inspector's needs_remote, so this line
-                    // is the only trace that Vision tried the scan.
+                    // The job keeps the inspector's verdict, so this line is
+                    // the only trace that Vision tried the scan.
                     scan => {
                         let outcome = match &scan {
                             Ok(EngineOutcome::NeedsRemote { reason_code, .. }) => {
@@ -535,7 +532,7 @@ impl ConversionService {
                             Ok(EngineOutcome::Converted { .. }) => "converted",
                             Err(failure) => failure.code(),
                         };
-                        tracing::warn!(%job_id, %attempt_id, outcome, "Vision could not read the scan, so the job keeps needs_remote");
+                        tracing::warn!(%job_id, %attempt_id, outcome, "Vision could not read the scan, so the job keeps the inspector's verdict");
                         conversion
                     }
                 }
@@ -564,8 +561,9 @@ impl ConversionService {
                 )
                 .await?;
             }
-            // The engine gave up, so any staged Markdown is discarded with the
-            // attempt.
+            // The engine gave up. Nothing leaves the Mac, so the job fails
+            // with the engine's reason, and any staged Markdown is discarded
+            // with the attempt.
             Ok(EngineOutcome::NeedsRemote {
                 analysis,
                 reason_code,
@@ -573,24 +571,24 @@ impl ConversionService {
                 let reason = ReasonCode::Engine(reason_code).as_str().to_owned();
                 let analysis = local_analysis(&analysis, vec![reason.clone()], Vec::new());
                 self.repository
-                    .finish_needs_remote(
+                    .finish_gave_up(
                         job_id,
                         attempt_id,
-                        NeedsRemoteResult {
-                            analysis,
-                            fallback_reason: reason.clone(),
+                        analysis,
+                        StoredFailure {
+                            code: reason.clone(),
+                            message: policy::gave_up_message(reason_code).to_owned(),
                         },
                     )
                     .await?;
                 self.discard_attempt(job_id, attempt_id).await;
                 self.discard_source(job_id).await;
-                tracing::info!(
+                tracing::warn!(
                     %job_id,
                     %attempt_id,
                     %request_id,
-                    status = "needs_remote",
-                    reason_code = %reason,
-                    "conversion attempt completed"
+                    failure_code = %reason,
+                    "conversion attempt failed"
                 );
             }
             Ok(EngineOutcome::Rejected { rejection }) => {
@@ -628,7 +626,7 @@ impl ConversionService {
     }
 
     /// OCRs a scanned PDF with Vision. Any failure before the worker runs is
-    /// `Unavailable`, which keeps the inspector's needs_remote.
+    /// `Unavailable`, which keeps the inspector's verdict.
     async fn read_scan(
         &self,
         job: &StoredConversion,
@@ -903,7 +901,6 @@ pub struct Submission {
     pub prepared: PreparedSubmission,
     pub attempt_id: Uuid,
     pub client_run_id: Uuid,
-    pub profile: ConversionProfile,
     pub source: SourceMetadata,
     /// Read by the Vision engine and by nothing else.
     pub language_correction: bool,
@@ -963,7 +960,6 @@ pub(crate) enum ConversionExecutionError {
 /// onto a job converted with the settings the user has since turned off.
 pub(crate) fn submission_fingerprint(
     client_run_id: Uuid,
-    profile: ConversionProfile,
     source_sha256: &str,
     language_correction: bool,
     custom_words: &str,
@@ -974,7 +970,9 @@ pub(crate) fn submission_fingerprint(
     digest.update(b"tool-kit-conversion-m2\0");
     digest.update(client_run_id.as_bytes());
     digest.update(b"\0");
-    digest.update(profile.as_str().as_bytes());
+    // The retired profile, at the one value the desktop sent. A stored request
+    // keeps its fingerprint, so a resubmit after the upgrade still replays.
+    digest.update(b"local_only");
     digest.update(b"\0");
     digest.update(source_sha256.as_bytes());
     digest.update(b"\0");
@@ -1129,7 +1127,6 @@ mod tests {
 
     use super::{
         classify_artifact_error, submission_fingerprint, ArtifactError, ArtifactReadFailure,
-        ConversionProfile,
     };
 
     /// A replay is matched on the fingerprint alone, so a per-run setting
@@ -1140,14 +1137,7 @@ mod tests {
         let run = Uuid::new_v4();
         let sha = "a".repeat(64);
         let fingerprint = |correction, words, speakers| {
-            submission_fingerprint(
-                run,
-                ConversionProfile::Standard,
-                &sha,
-                correction,
-                words,
-                speakers,
-            )
+            submission_fingerprint(run, &sha, correction, words, speakers)
         };
         let baseline = fingerprint(true, "Acme", None);
         assert_ne!(baseline, fingerprint(false, "Acme", None));
@@ -1158,6 +1148,18 @@ mod tests {
             fingerprint(true, "Acme", Some(3))
         );
         assert_eq!(baseline, fingerprint(true, "Acme", None));
+    }
+
+    /// Every stored request was fingerprinted with the retired `local_only`
+    /// profile in it. The digest must not move, or a resubmit after the
+    /// upgrade conflicts instead of replaying.
+    #[test]
+    fn the_fingerprint_matches_one_stored_before_the_profile_was_retired() {
+        let run = Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+        assert_eq!(
+            submission_fingerprint(run, &"a".repeat(64), true, "", None),
+            "ea04b1667b9c8cbf7b4ab382af509fca0f92f322da105c0cf2b1f1e2f48d056b"
+        );
     }
 
     #[test]

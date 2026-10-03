@@ -4,7 +4,7 @@ use tokio::fs::File;
 use uuid::Uuid;
 
 use super::service::{ARTIFACT_INTEGRITY_CODE, ARTIFACT_INTEGRITY_MESSAGE};
-use super::{ConversionProfile, JobStatus};
+use super::JobStatus;
 use crate::persistence::StoredConversion;
 
 /// One advertised upload format: the accepted extension, the canonical media
@@ -384,7 +384,6 @@ pub struct JobView {
     pub id: Uuid,
     pub active_attempt_id: Uuid,
     pub client_run_id: Uuid,
-    pub profile: ConversionProfile,
     pub status: JobStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route: Option<RouteView>,
@@ -401,7 +400,6 @@ impl JobView {
             id: job.id,
             active_attempt_id: job.active_attempt.id,
             client_run_id: job.client_run_id,
-            profile: job.profile,
             status: job.state,
             route: job.route.as_ref().map(|kind| RouteView {
                 kind: kind.clone(),
@@ -539,7 +537,7 @@ mod tests {
     /// constraint error instead of a clean 415, so pin them together.
     #[test]
     fn advertised_media_types_match_the_migration_check() {
-        let sql = include_str!("../../migrations/0005_audio_source_formats.sql");
+        let sql = include_str!("../../migrations/0007_drop_manifest_and_needs_remote.sql");
         let check = sql
             .split_once("source_media_type     TEXT NOT NULL")
             .expect("the conversions CHECK must exist")
