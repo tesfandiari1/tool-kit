@@ -133,6 +133,8 @@ export interface Settings {
   customWords: string[];
   /// How many people speak in a recording. Null lets the transcriber guess.
   speakerCount: number | null;
+  /// The language Transcribe hears, BCP 47. Null follows the Mac's.
+  speechLocale: string | null;
   skipAlreadyDone: boolean;
   /// Last SplitPane layout. Null until the user has dragged the seam.
   splitLayout: Record<string, number> | null;
@@ -163,6 +165,7 @@ export const DEFAULT_SETTINGS: Settings = {
   languageCorrection: true,
   customWords: [],
   speakerCount: null,
+  speechLocale: null,
   skipAlreadyDone: true,
   splitLayout: null,
   expandedWidth: null,
@@ -223,4 +226,25 @@ export interface RunResult {
   skipped: number;
   /// Satisfied by copying a result from elsewhere.
   copied: number;
+}
+
+/// Apple's speech model for the language Transcribe uses. `supported` means
+/// Apple has one and it is not on this Mac yet.
+export interface SpeechModel {
+  state: "installed" | "downloading" | "supported" | "unsupported";
+  /// BCP 47.
+  locale: string;
+  /// The locale's English name.
+  language: string;
+  /// What "Same as this Mac" resolves to.
+  systemLocale: string;
+  systemLanguage: string;
+  /// Every language Apple offers, the ones on this Mac first.
+  choices: SpeechChoice[];
+}
+
+export interface SpeechChoice {
+  locale: string;
+  language: string;
+  installed: boolean;
 }

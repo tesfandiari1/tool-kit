@@ -147,6 +147,7 @@ pub async fn create(
             language_correction: staged.language_correction,
             custom_words: staged.custom_words,
             speaker_count: staged.speaker_count,
+            speech_locale: staged.speech_locale,
             idempotency_key,
             origin_request_id: request_id.as_str().to_owned(),
         })
@@ -250,6 +251,7 @@ async fn stage_multipart(
     let mut language_correction = None;
     let mut custom_words = None;
     let mut speaker_count = None;
+    let mut speech_locale = None;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -322,13 +324,29 @@ async fn stage_multipart(
                         })?,
                 );
             }
+            Some("speechLocale") if speech_locale.is_none() => {
+                let value = read_text(field, request_id).await?;
+                // It lands in the worker's environment, so only BCP 47's own
+                // characters pass.
+                if !(2..=35).contains(&value.len())
+                    || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                {
+                    return Err(error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "invalid_speech_locale",
+                        "speechLocale must be a BCP 47 language tag.",
+                        request_id,
+                    ));
+                }
+                speech_locale = Some(value);
+            }
             Some("source") if source.is_none() => {
                 source =
                     Some(stream_source(field, source_path, limits, available, request_id).await?);
             }
             Some(
                 "clientRunId" | "profile" | "source" | "languageCorrection" | "customWords"
-                | "speakerCount",
+                | "speakerCount" | "speechLocale",
             ) => {
                 return Err(error(
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -341,7 +359,7 @@ async fn stage_multipart(
                 return Err(error(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "unexpected_multipart_field",
-                    "Only source, clientRunId, profile, languageCorrection, customWords, and speakerCount are accepted.",
+                    "Only source, clientRunId, profile, languageCorrection, customWords, speakerCount, and speechLocale are accepted.",
                     request_id,
                 ));
             }
@@ -363,6 +381,8 @@ async fn stage_multipart(
         custom_words: custom_words.unwrap_or_default(),
         // Absent means the diarizer guesses.
         speaker_count,
+        // Absent means the Mac's own language.
+        speech_locale,
     })
 }
 
@@ -716,6 +736,7 @@ struct StagedSubmission {
     language_correction: bool,
     custom_words: String,
     speaker_count: Option<u32>,
+    speech_locale: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

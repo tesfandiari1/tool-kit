@@ -46,6 +46,7 @@ import {
   workArea,
 } from "@/platform/host";
 import { ONBOARDING, SPLIT, WORKSPACE, ZOOM } from "./geometry";
+import { useSpeechModel } from "./useSpeechModel";
 import { useToast } from "./useToast";
 import { useDocuments } from "./useDocuments";
 import { useProjectTree } from "./useProjectTree";
@@ -113,6 +114,7 @@ export default function App() {
   const settingsSave = useRef<Promise<void>>(Promise.resolve());
 
   const { toast, showToast } = useToast();
+  const speech = useSpeechModel();
   const {
     docs,
     activeId,
@@ -958,6 +960,7 @@ export default function App() {
   const settingsPanel = (
     <SettingsPanel
       settings={settings}
+      speech={speech}
       onPersist={persist}
       onToast={showToast}
     />

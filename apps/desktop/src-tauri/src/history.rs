@@ -19,7 +19,7 @@ use tauri::{AppHandle, Manager};
 const MAX_ENTRIES: i64 = 5_000;
 
 /// Bump on a schema change, with a matching `if version < N` in `migrate`.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// The open database, or `None`, which makes every operation a silent no-op.
 pub struct History {
@@ -72,6 +72,7 @@ pub struct NewInFlight<'a> {
     /// Newline-joined custom words, the same form the submission sends.
     pub ocr_custom_words: &'a str,
     pub speaker_count: Option<u32>,
+    pub speech_locale: Option<&'a str>,
 }
 
 /// A backend conversion that can be recovered after an app restart.
@@ -99,6 +100,7 @@ pub struct InFlightEntry {
     pub ocr_language_correction: bool,
     pub ocr_custom_words: String,
     pub speaker_count: Option<u32>,
+    pub speech_locale: Option<String>,
     /// Source modification time in Unix milliseconds at submit time.
     pub source_mtime: i64,
     /// Unix seconds.
@@ -216,7 +218,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              ALTER TABLE inflight_conversions ADD COLUMN speaker_count INTEGER;",
         )?;
     }
-    // Add `if version < 7 { … }` above and bump SCHEMA_VERSION. A file from a
+    if version < 7 {
+        // The language is part of the replay fingerprint too. NULL is the
+        // Mac's own language, which every older row was transcribed in.
+        conn.execute_batch("ALTER TABLE inflight_conversions ADD COLUMN speech_locale TEXT;")?;
+    }
+    // Add `if version < 8 { … }` above and bump SCHEMA_VERSION. A file from a
     // newer build is left alone: rewriting it would lose history.
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -284,8 +291,8 @@ fn upsert_in_flight_row(conn: &Connection, pending: &NewInFlight<'_>) -> rusqlit
            (idempotency_key, source_path, file_name, output_dir, backend_url,
             client_run_id, backend_job_id, conversion_profile, job_type,
             ocr_language_correction, ocr_custom_words, speaker_count,
-            source_mtime, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            speech_locale, source_mtime, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(idempotency_key) DO NOTHING",
         rusqlite::params![
             pending.idempotency_key,
@@ -299,6 +306,7 @@ fn upsert_in_flight_row(conn: &Connection, pending: &NewInFlight<'_>) -> rusqlit
             pending.ocr_language_correction,
             pending.ocr_custom_words,
             pending.speaker_count,
+            pending.speech_locale,
             source_mtime,
             now_secs(),
         ],
@@ -376,7 +384,7 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
         "SELECT source_path, file_name, output_dir, backend_url,
                 client_run_id, idempotency_key, backend_job_id,
                 fallback_provider, conversion_profile, job_type, ocr_language_correction,
-                ocr_custom_words, speaker_count, source_mtime, created_at
+                ocr_custom_words, speaker_count, source_mtime, created_at, speech_locale
            FROM inflight_conversions
           ORDER BY created_at ASC, idempotency_key ASC",
     )?;
@@ -397,6 +405,7 @@ fn select_in_flight(conn: &Connection) -> rusqlite::Result<Vec<InFlightEntry>> {
             speaker_count: row.get(12)?,
             source_mtime: row.get(13)?,
             created_at: row.get(14)?,
+            speech_locale: row.get(15)?,
         })
     })?;
     rows.collect()
@@ -975,6 +984,7 @@ mod tests {
             ocr_language_correction: true,
             ocr_custom_words: "",
             speaker_count: None,
+            speech_locale: None,
         };
         assert!(
             !upsert_in_flight_row(&conn, &pending).unwrap(),
@@ -1004,6 +1014,7 @@ mod tests {
             ocr_language_correction: false,
             ocr_custom_words: "Uniwise\nTool-Kit",
             speaker_count: Some(2),
+            speech_locale: None,
         };
 
         assert!(upsert_in_flight_row(&conn, &pending).unwrap());
@@ -1063,6 +1074,7 @@ mod tests {
             ocr_language_correction: true,
             ocr_custom_words: "",
             speaker_count: None,
+            speech_locale: None,
         };
 
         assert!(upsert_in_flight_row(&conn, &pending).unwrap());
@@ -1092,6 +1104,7 @@ mod tests {
             ocr_language_correction: true,
             ocr_custom_words: "",
             speaker_count: None,
+            speech_locale: None,
         };
         assert!(upsert_in_flight_row(&conn, &original).unwrap());
 
@@ -1128,6 +1141,7 @@ mod tests {
             ocr_language_correction: true,
             ocr_custom_words: "",
             speaker_count: None,
+            speech_locale: None,
         };
 
         assert!(upsert_in_flight_row(&conn, &pending).unwrap());
@@ -1164,6 +1178,7 @@ mod tests {
             ocr_language_correction: true,
             ocr_custom_words: "",
             speaker_count: None,
+            speech_locale: None,
         };
 
         {
@@ -1513,7 +1528,7 @@ mod tests {
     /// The count is part of the replay fingerprint, so recovery must resubmit
     /// the recorded one and not today's setting.
     #[test]
-    fn a_transcription_records_its_job_type_and_speaker_count() {
+    fn a_transcription_records_its_job_type_speaker_count_and_language() {
         let conn = db();
         let (src, out) = pair("inflight-transcribe");
         let source_path = src.to_string_lossy().into_owned();
@@ -1530,6 +1545,7 @@ mod tests {
             ocr_language_correction: true,
             ocr_custom_words: "",
             speaker_count: Some(2),
+            speech_locale: Some("de-DE"),
         };
 
         assert!(upsert_in_flight_row(&conn, &pending).unwrap());
@@ -1537,6 +1553,7 @@ mod tests {
         let rows = select_in_flight(&conn).unwrap();
         assert_eq!(rows[0].job_type, "transcribe");
         assert_eq!(rows[0].speaker_count, Some(2));
+        assert_eq!(rows[0].speech_locale.as_deref(), Some("de-DE"));
     }
 
     #[test]

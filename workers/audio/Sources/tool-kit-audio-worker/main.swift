@@ -10,7 +10,11 @@
 //
 // `--fetch diarizer <dir>` is the only path that downloads models, and the
 // build scripts drive it. A job still lets the OS install SpeechAnalyzer locale
-// assets on first use; a failure there comes back as speech_assets_unavailable.
+// assets on first use. A failure there comes back as speech_assets_unavailable.
+//
+// `--speech status` and `--speech install` let the desktop's Settings check for
+// and fetch that locale model ahead of a job. Both print one JSON line, and
+// install prints `progress <0...1>` lines before it.
 //
 // The wire contract is crates/worker-protocol/src/audio.rs.
 
@@ -125,6 +129,124 @@ private func fetchDiarizer(into directory: URL) async -> Never {
     exit(0)
 }
 
+// MARK: - Speech model
+
+/// The transcriber a job builds: the env locale or the system one, matched to
+/// what SpeechAnalyzer supports. Nil when it supports neither, beside the
+/// locale that was asked for.
+private func speechTranscriber() async -> (Locale, SpeechTranscriber?) {
+    let requested =
+        (environment(localeEnv).flatMap { $0.isEmpty ? nil : $0 })
+        .map(Locale.init(identifier:)) ?? Locale.current
+    guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: requested) else {
+        return (requested, nil)
+    }
+    return (locale, SpeechTranscriber(locale: locale, preset: .transcription))
+}
+
+private struct SpeechChoice: Encodable {
+    let locale: String
+    let language: String
+    let installed: Bool
+}
+
+private struct SpeechModel: Encodable {
+    let state: String
+    let locale: String
+    /// In English, because the desktop's copy is.
+    let language: String
+    /// What an unset locale resolves to, for "Same as this Mac".
+    let systemLocale: String
+    let systemLanguage: String
+    /// Every language SpeechAnalyzer offers, the ones on this Mac first.
+    let choices: [SpeechChoice]
+}
+
+private func englishName(_ locale: Locale) -> String {
+    Locale(identifier: "en").localizedString(forIdentifier: locale.identifier)
+        ?? locale.identifier(.bcp47)
+}
+
+/// Unbuffered: `print` holds a pipe's output until exit, and the desktop reads
+/// progress live.
+private func emit(_ line: String) {
+    FileHandle.standardOutput.write(Data("\(line)\n".utf8))
+}
+
+private func reportSpeechModel(_ locale: Locale, _ transcriber: SpeechTranscriber?) async -> Never {
+    var state = "unsupported"
+    if let transcriber {
+        switch await AssetInventory.status(forModules: [transcriber]) {
+        case .installed: state = "installed"
+        case .downloading: state = "downloading"
+        case .supported: state = "supported"
+        case .unsupported: state = "unsupported"
+        @unknown default: state = "unsupported"
+        }
+    }
+    let system =
+        await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current) ?? Locale.current
+    let installed = Set(await SpeechTranscriber.installedLocales.map { $0.identifier(.bcp47) })
+    let choices = await SpeechTranscriber.supportedLocales
+        .map {
+            SpeechChoice(
+                locale: $0.identifier(.bcp47), language: englishName($0),
+                installed: installed.contains($0.identifier(.bcp47)))
+        }
+        .sorted { ($0.installed ? 0 : 1, $0.language) < ($1.installed ? 0 : 1, $1.language) }
+    let model = SpeechModel(
+        state: state, locale: locale.identifier(.bcp47), language: englishName(locale),
+        systemLocale: system.identifier(.bcp47), systemLanguage: englishName(system),
+        choices: choices)
+    guard let json = try? JSONEncoder().encode(model) else { fail("speech model encode failed") }
+    emit(String(decoding: json, as: UTF8.self))
+    exit(0)
+}
+
+/// Apple gives each app a few locale slots (`maximumReservedLocales`), and an
+/// install claims one. Someone who switches languages would run out and every
+/// later install would fail, so before one, every slot but this language's and
+/// the Mac's own goes back. A released model stays while another app uses it.
+/// Nothing is released when the model is already here.
+private func freeReservations(for locale: Locale, _ transcriber: SpeechTranscriber) async {
+    guard await AssetInventory.status(forModules: [transcriber]) != .installed else { return }
+    var keep = [locale.identifier(.bcp47)]
+    if let system = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current) {
+        keep.append(system.identifier(.bcp47))
+    }
+    for reserved in await AssetInventory.reservedLocales
+    where !keep.contains(reserved.identifier(.bcp47)) {
+        _ = await AssetInventory.release(reservedLocale: reserved)
+    }
+}
+
+private func installSpeechModel() async -> Never {
+    let (locale, transcriber) = await speechTranscriber()
+    if let transcriber {
+        await freeReservations(for: locale, transcriber)
+        do {
+            if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                let ticker = Task {
+                    var last = -1.0
+                    while !Task.isCancelled {
+                        let done = request.progress.fractionCompleted
+                        if done != last {
+                            emit("progress \(done)")
+                            last = done
+                        }
+                        try? await Task.sleep(for: .milliseconds(250))
+                    }
+                }
+                defer { ticker.cancel() }
+                try await request.downloadAndInstall()
+            }
+        } catch {
+            fail("speech model install failed: \(error)")
+        }
+    }
+    await reportSpeechModel(locale, transcriber)
+}
+
 // MARK: - Job
 
 /// Apple's on-device speech stack. The results arrive on a stream while
@@ -225,13 +347,9 @@ private func run(_ stagingPath: String) async -> Never {
     guard file.length > 0 else { finish(.rejected(.noSpeechFound), in: staging) }
     let audioSeconds = Double(file.length) / file.processingFormat.sampleRate
 
-    let requestedLocale = (environment(localeEnv).flatMap { $0.isEmpty ? nil : $0 })
-        .map(Locale.init(identifier:)) ?? Locale.current
-    guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: requestedLocale) else {
-        finish(.rejected(.localeUnsupported), in: staging)
-    }
-
-    let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
+    let (locale, found) = await speechTranscriber()
+    guard let transcriber = found else { finish(.rejected(.localeUnsupported), in: staging) }
+    await freeReservations(for: locale, transcriber)
     do {
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
             try await request.downloadAndInstall()
@@ -322,7 +440,16 @@ if arguments == ["--version"] {
 if arguments.count == 3, arguments[0] == "--fetch", arguments[1] == "diarizer" {
     await fetchDiarizer(into: URL(fileURLWithPath: arguments[2]))
 }
+if arguments == ["--speech", "status"] {
+    let (locale, transcriber) = await speechTranscriber()
+    await reportSpeechModel(locale, transcriber)
+}
+if arguments == ["--speech", "install"] {
+    await installSpeechModel()
+}
 guard arguments.count == 1 else {
-    fail("usage: tool-kit-audio-worker <staging-directory> | --version | --fetch diarizer <dir>")
+    fail(
+        "usage: tool-kit-audio-worker <staging-directory> | --version | --fetch diarizer <dir>"
+            + " | --speech status | --speech install")
 }
 await run(arguments[0])

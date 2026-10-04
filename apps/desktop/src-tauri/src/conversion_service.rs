@@ -80,6 +80,8 @@ pub(crate) struct OcrOptions {
     pub(crate) language_correction: bool,
     pub(crate) custom_words: Vec<String>,
     pub(crate) speaker_count: Option<u32>,
+    /// BCP 47, `None` for the Mac's own language.
+    pub(crate) speech_locale: Option<String>,
 }
 
 impl Default for OcrOptions {
@@ -89,6 +91,7 @@ impl Default for OcrOptions {
             language_correction: true,
             custom_words: Vec::new(),
             speaker_count: None,
+            speech_locale: None,
         }
     }
 }
@@ -104,11 +107,13 @@ impl OcrOptions {
         language_correction: bool,
         custom_words: &str,
         speaker_count: Option<u32>,
+        speech_locale: Option<String>,
     ) -> Self {
         Self {
             language_correction,
             custom_words: custom_words.lines().map(str::to_owned).collect(),
             speaker_count,
+            speech_locale,
         }
     }
 }
@@ -178,6 +183,9 @@ pub(crate) async fn submit_conversion(
     }
     if let Some(speakers) = ocr.speaker_count {
         form = form.text("speakerCount", speakers.to_string());
+    }
+    if let Some(locale) = &ocr.speech_locale {
+        form = form.text("speechLocale", locale.clone());
     }
 
     let response = http_client()?
@@ -623,6 +631,7 @@ mod tests {
             language_correction: true,
             custom_words: vec!["Uniwise".into(); 40],
             speaker_count: None,
+            speech_locale: None,
         };
         assert!(ocr.custom_words_wire().len() > MAX_METADATA_BYTES);
         let error = submit_conversion(
@@ -699,6 +708,7 @@ mod tests {
             language_correction: false,
             custom_words: vec!["Uniwise".into(), "Tool-Kit".into()],
             speaker_count: None,
+            speech_locale: None,
         };
         let job = submit_conversion(
             &server.base_url,
@@ -872,6 +882,7 @@ mod tests {
                 language_correction: false,
                 custom_words: vec!["Uniwise".into(), "Tool-Kit".into()],
                 speaker_count: Some(2),
+                speech_locale: None,
             },
             "stable-replay-key",
         )

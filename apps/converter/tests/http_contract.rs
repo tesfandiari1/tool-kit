@@ -1439,6 +1439,55 @@ async fn speaker_count_is_validated_and_part_of_the_request_identity() {
     );
 }
 
+#[tokio::test]
+async fn speech_locale_is_validated_and_part_of_the_request_identity() {
+    let app = test_app().await;
+    let pdf = clean_pdf();
+    for (locales, key, code) in [
+        (["d"].as_slice(), "locale-short", "invalid_speech_locale"),
+        (
+            ["de DE"].as_slice(),
+            "locale-space",
+            "invalid_speech_locale",
+        ),
+        (
+            ["de-DE\n"].as_slice(),
+            "locale-newline",
+            "invalid_speech_locale",
+        ),
+        (
+            ["de-DE", "en-US"].as_slice(),
+            "locale-twice",
+            "duplicate_multipart_field",
+        ),
+    ] {
+        let client_run_id = Uuid::new_v4().to_string();
+        let mut fields = vec![("clientRunId", client_run_id.as_str())];
+        fields.extend(locales.iter().map(|locale| ("speechLocale", *locale)));
+        let body = multipart(&fields, Some((&pdf, "fixture.pdf", "application/pdf")));
+        let response = app.submit(body, key, TOKEN).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{key}");
+        assert_eq!(json_body(response).await["error"]["code"], code, "{key}");
+    }
+    assert_eq!(count_job_directories(app.data_dir()), 0);
+
+    // Same key, same bytes, another language must conflict, never replay a
+    // transcript made in the first one.
+    let client_run_id = Uuid::new_v4().to_string();
+    let submit = |locale: &'static str| {
+        multipart(
+            &[("clientRunId", &client_run_id), ("speechLocale", locale)],
+            Some((&pdf, "fixture.pdf", "application/pdf")),
+        )
+    };
+    let response = app.submit(submit("de-DE"), "locale-identity", TOKEN).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let replay = app.submit(submit("de-DE"), "locale-identity", TOKEN).await;
+    assert_eq!(replay.headers()["idempotency-replayed"], "true");
+    let conflict = app.submit(submit("en-US"), "locale-identity", TOKEN).await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+}
+
 /// An hour of audio clears the document ceiling by an order of magnitude, so
 /// the two limits are separate and the format's engine picks which one binds.
 #[tokio::test]

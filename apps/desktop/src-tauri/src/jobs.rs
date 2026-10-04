@@ -848,6 +848,7 @@ pub fn restore_in_flight(app: &AppHandle, id: u64) {
             ocr_language_correction: backend.ocr.language_correction,
             ocr_custom_words: &ocr_custom_words,
             speaker_count: backend.ocr.speaker_count,
+            speech_locale: backend.ocr.speech_locale.as_deref(),
         },
     ) {
         return;
@@ -960,6 +961,7 @@ pub(crate) fn recover_in_flight(app: AppHandle) {
                 entry.ocr_language_correction,
                 &entry.ocr_custom_words,
                 entry.speaker_count,
+                entry.speech_locale,
             ),
         );
         context.recovery_blocker.clone_from(&recovery_error);
@@ -1004,6 +1006,7 @@ mod backend_tests {
             ocr_language_correction: true,
             ocr_custom_words: String::new(),
             speaker_count: None,
+            speech_locale: None,
             source_mtime: 1,
             created_at: 1,
         }
@@ -1179,8 +1182,12 @@ mod backend_tests {
     /// The OCR options are in the replay fingerprint, so reading Settings 409s.
     #[test]
     fn a_recovered_context_carries_the_recorded_ocr_options() {
-        let recorded =
-            conversion_service::OcrOptions::from_wire(false, "Uniwise\nTool-Kit", Some(2));
+        let recorded = conversion_service::OcrOptions::from_wire(
+            false,
+            "Uniwise\nTool-Kit",
+            Some(2),
+            Some("de-DE".into()),
+        );
         let context = BackendContext::new(
             "22222222-2222-4222-8222-222222222222".into(),
             "33333333-3333-4333-8333-333333333333".into(),

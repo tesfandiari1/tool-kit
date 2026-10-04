@@ -146,6 +146,7 @@ impl ConversionService {
             submission.language_correction,
             &submission.custom_words,
             submission.speaker_count,
+            submission.speech_locale.as_deref(),
         );
         let input = NewConversion {
             id: job_id,
@@ -163,6 +164,7 @@ impl ConversionService {
             ocr_language_correction: submission.language_correction,
             ocr_custom_words: submission.custom_words,
             speaker_count: submission.speaker_count,
+            speech_locale: submission.speech_locale,
         };
 
         let decision = match self.repository.create_or_replay(input).await {
@@ -473,6 +475,7 @@ impl ConversionService {
                             shutdown,
                             &job.source.media_type,
                             job.speaker_count,
+                            job.speech_locale.as_deref(),
                         )
                         .await
                 }
@@ -909,6 +912,9 @@ pub struct Submission {
     /// Read by the Audio engine and by nothing else. `None` lets the diarizer
     /// guess how many speakers the recording holds.
     pub speaker_count: Option<u32>,
+    /// Read by the Audio engine and by nothing else. BCP 47, `None` for the
+    /// Mac's own language.
+    pub speech_locale: Option<String>,
     pub idempotency_key: String,
     pub origin_request_id: String,
 }
@@ -964,6 +970,7 @@ pub(crate) fn submission_fingerprint(
     language_correction: bool,
     custom_words: &str,
     speaker_count: Option<u32>,
+    speech_locale: Option<&str>,
 ) -> String {
     let mut digest = Sha256::new();
     // Bumped with the fields below, so an old fingerprint cannot collide.
@@ -987,6 +994,12 @@ pub(crate) fn submission_fingerprint(
             .unwrap_or_default()
             .as_bytes(),
     );
+    // Only when set, so a request that never named a language keeps the
+    // fingerprint it had before the field existed and still replays.
+    if let Some(locale) = speech_locale {
+        digest.update(b"\0locale=");
+        digest.update(locale.as_bytes());
+    }
     hex::encode(digest.finalize())
 }
 
@@ -1137,7 +1150,7 @@ mod tests {
         let run = Uuid::new_v4();
         let sha = "a".repeat(64);
         let fingerprint = |correction, words, speakers| {
-            submission_fingerprint(run, &sha, correction, words, speakers)
+            submission_fingerprint(run, &sha, correction, words, speakers, None)
         };
         let baseline = fingerprint(true, "Acme", None);
         assert_ne!(baseline, fingerprint(false, "Acme", None));
@@ -1148,6 +1161,14 @@ mod tests {
             fingerprint(true, "Acme", Some(3))
         );
         assert_eq!(baseline, fingerprint(true, "Acme", None));
+        // A named language is a different job, and no language keeps the old
+        // fingerprint, so a request from before the field still replays.
+        let german = submission_fingerprint(run, &sha, true, "Acme", None, Some("de-DE"));
+        assert_ne!(baseline, german);
+        assert_ne!(
+            german,
+            submission_fingerprint(run, &sha, true, "Acme", None, Some("en-US"))
+        );
     }
 
     /// Every stored request was fingerprinted with the retired `local_only`
@@ -1157,7 +1178,7 @@ mod tests {
     fn the_fingerprint_matches_one_stored_before_the_profile_was_retired() {
         let run = Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
         assert_eq!(
-            submission_fingerprint(run, &"a".repeat(64), true, "", None),
+            submission_fingerprint(run, &"a".repeat(64), true, "", None, None),
             "ea04b1667b9c8cbf7b4ab382af509fca0f92f322da105c0cf2b1f1e2f48d056b"
         );
     }

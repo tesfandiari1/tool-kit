@@ -275,6 +275,17 @@ export function Gallery() {
                     { value: "json", label: "JSON" },
                   ]}
                 />
+                <Select
+                  label="Grouped"
+                  defaultValue=""
+                  hint="Consecutive options that share a group sit under one heading."
+                  options={[
+                    { value: "", label: "Same as this Mac: English (United States)" },
+                    { value: "en-GB", label: "English (United Kingdom)", group: "On this Mac" },
+                    { value: "fr-FR", label: "French (France)", group: "On this Mac" },
+                    { value: "de-DE", label: "German (Germany)", group: "Download from Apple" },
+                  ]}
+                />
               </Stack>
             </div>
             <div className="gal__specimen">

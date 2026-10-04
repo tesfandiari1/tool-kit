@@ -30,7 +30,7 @@ use crate::{
         audio_source_extension, AudioDetail, AudioOutcome, AudioRejectionCode, AudioReport,
         AUDIO_ENGINE_NAME, AUDIO_MARKDOWN_FILE, AUDIO_WORKER_DIARIZER_DIR_ENV,
         AUDIO_WORKER_EXPECTED_SOURCE_BYTES_ENV, AUDIO_WORKER_EXPECTED_SOURCE_SHA256_ENV,
-        AUDIO_WORKER_IDENTITY_PREFIX, AUDIO_WORKER_MAX_OUTPUT_BYTES_ENV,
+        AUDIO_WORKER_IDENTITY_PREFIX, AUDIO_WORKER_LOCALE_ENV, AUDIO_WORKER_MAX_OUTPUT_BYTES_ENV,
         AUDIO_WORKER_MEDIA_TYPE_ENV, AUDIO_WORKER_PROTOCOL_VERSION, AUDIO_WORKER_REPORT_FILE,
         AUDIO_WORKER_SPEAKER_COUNT_ENV,
     },
@@ -126,6 +126,7 @@ impl AudioEngine {
         cancellation: watch::Receiver<bool>,
         media_type: &str,
         speaker_count: Option<u32>,
+        speech_locale: Option<&str>,
     ) -> Result<EngineOutcome, EngineFailure> {
         if *cancellation.borrow() {
             return Err(EngineFailure::Interrupted);
@@ -164,6 +165,8 @@ impl AudioEngine {
                     .map(|count| count.to_string())
                     .unwrap_or_default(),
             )
+            // Empty for the Mac's own language, which the worker resolves.
+            .env(AUDIO_WORKER_LOCALE_ENV, speech_locale.unwrap_or_default())
             .stdin(Stdio::from(source))
             .stdout(Stdio::null())
             // The diarizer prints `[Profiling]` lines on every run, so stderr
@@ -326,7 +329,7 @@ fn rejection(code: AudioRejectionCode) -> EngineRejection {
         },
         AudioRejectionCode::SpeechAssetsUnavailable => EngineRejection {
             code: "speech_assets_unavailable",
-            message: "The on-device speech model could not be installed.",
+            message: "The on-device speech model could not be installed. Connect to the internet, or download it in Settings.",
         },
         AudioRejectionCode::OutputTooLarge => EngineRejection {
             code: "output_too_large",
@@ -525,7 +528,7 @@ mod tests {
             AudioEngine::initialize(worker, models, Duration::from_secs(10), 1024).unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
-            .convert(&paths, source, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None, None)
             .await
             .unwrap();
         assert!(matches!(outcome, EngineOutcome::Converted { .. }));
@@ -587,7 +590,7 @@ mod tests {
         assert_eq!(engine.version(), IDENTITY);
         let (_cancel, cancellation) = watch::channel(false);
         let outcome = engine
-            .convert(&paths, source, cancellation, "audio/wav", Some(2))
+            .convert(&paths, source, cancellation, "audio/wav", Some(2), None)
             .await
             .unwrap();
 
@@ -634,7 +637,7 @@ mod tests {
                 AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
             let (_cancel, cancellation) = watch::channel(false);
             let outcome = engine
-                .convert(&paths, source, cancellation, "audio/wav", None)
+                .convert(&paths, source, cancellation, "audio/wav", None, None)
                 .await
                 .unwrap();
 
@@ -658,7 +661,7 @@ mod tests {
         let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None, None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Crashed);
@@ -682,7 +685,7 @@ mod tests {
         let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None, None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Protocol);
@@ -706,7 +709,7 @@ mod tests {
         let engine = AudioEngine::initialize(worker, models, Duration::from_secs(5), 1024).unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None, None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Protocol);
@@ -731,7 +734,7 @@ mod tests {
             AudioEngine::initialize(worker, models, Duration::from_millis(200), 1024).unwrap();
         let (_cancel, cancellation) = watch::channel(false);
         let result = engine
-            .convert(&paths, source, cancellation, "audio/wav", None)
+            .convert(&paths, source, cancellation, "audio/wav", None, None)
             .await;
 
         assert_eq!(result.unwrap_err(), EngineFailure::Timeout);
@@ -739,12 +742,15 @@ mod tests {
     }
 
     /// The media type names the worker's scratch file, the diarizer directory
-    /// is the only path to the models, and the speaker count is always sent so
-    /// a blank one means guess rather than "use your own default".
+    /// is the only path to the models, and the speaker count and locale are
+    /// always sent, so a blank one means guess or the Mac's language rather
+    /// than whatever the worker inherited.
     #[cfg(unix)]
     #[tokio::test]
-    async fn the_worker_receives_the_media_type_diarizer_and_speaker_count() {
-        for (speaker_count, expected) in [(Some(3_u32), "3"), (None, "")] {
+    async fn the_worker_receives_the_media_type_diarizer_speaker_count_and_locale() {
+        for (speaker_count, expected, locale) in
+            [(Some(3_u32), "3", Some("de-DE")), (None, "", None)]
+        {
             let directory = tempfile::tempdir().unwrap();
             let worker = directory.path().join("worker");
             write_worker(
@@ -765,7 +771,14 @@ mod tests {
                     .unwrap();
             let (_cancel, cancellation) = watch::channel(false);
             engine
-                .convert(&paths, source, cancellation, "audio/mpeg", speaker_count)
+                .convert(
+                    &paths,
+                    source,
+                    cancellation,
+                    "audio/mpeg",
+                    speaker_count,
+                    locale,
+                )
                 .await
                 .unwrap();
 
@@ -774,8 +787,7 @@ mod tests {
             assert_eq!(lines[0], "audio/mpeg");
             assert_eq!(lines[1], models.to_str().unwrap());
             assert_eq!(lines[2], expected);
-            // v1 has no locale setting; the worker follows the system locale.
-            assert_eq!(lines[3], "");
+            assert_eq!(lines[3], locale.unwrap_or_default());
         }
     }
 }

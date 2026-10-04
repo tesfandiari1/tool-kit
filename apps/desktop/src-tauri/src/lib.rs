@@ -3,6 +3,7 @@ mod conversion_service;
 mod history;
 mod jobs;
 mod settings;
+mod speech_model;
 mod tree;
 mod workspace;
 
@@ -220,6 +221,7 @@ fn route_conversion_candidates(
 /// The engine options a new submission carries. A speaker count rides only on
 /// a recording, and one outside the contract's 1 to 20 is dropped so the
 /// diarizer guesses, rather than the service refusing every file with a 422.
+/// The language rides only on a recording too.
 fn submission_options(cfg: &Settings, jt: JobType) -> conversion_service::OcrOptions {
     conversion_service::OcrOptions {
         language_correction: cfg.language_correction,
@@ -227,6 +229,10 @@ fn submission_options(cfg: &Settings, jt: JobType) -> conversion_service::OcrOpt
         speaker_count: cfg
             .speaker_count
             .filter(|count| jt == JobType::Transcribe && (1..=20).contains(count)),
+        speech_locale: cfg
+            .speech_locale
+            .clone()
+            .filter(|_| jt == JobType::Transcribe),
     }
 }
 
@@ -668,6 +674,7 @@ async fn run_pipeline(
                 ocr_language_correction: ocr.language_correction,
                 ocr_custom_words: &ocr_custom_words,
                 speaker_count: ocr.speaker_count,
+                speech_locale: ocr.speech_locale.as_deref(),
             },
         );
         let job = Job::new_backend(
@@ -1034,6 +1041,7 @@ async fn convert_one(
             ocr_language_correction: ocr.language_correction,
             ocr_custom_words: &ocr.custom_words_wire(),
             speaker_count: ocr.speaker_count,
+            speech_locale: ocr.speech_locale.as_deref(),
         },
     );
     let job = Job::new_backend(
@@ -1334,7 +1342,9 @@ pub fn run() {
             create_project,
             list_project_files,
             changed_project_dirs,
-            conversion_service::conversion_capabilities
+            conversion_service::conversion_capabilities,
+            speech_model::speech_model_status,
+            speech_model::download_speech_model
         ])
         .setup(|app| {
             // Opened once. A database that cannot open degrades to no history.
@@ -1759,7 +1769,7 @@ mod scan_tests {
     /// The service 422s a count outside 1 to 20 on any file, and a document
     /// has no speakers to count.
     #[test]
-    fn a_speaker_count_rides_only_on_a_recording_and_only_in_range() {
+    fn speaker_count_and_language_ride_only_on_a_recording() {
         let with = |count| Settings {
             speaker_count: Some(count),
             ..Settings::default()
@@ -1778,6 +1788,20 @@ mod scan_tests {
         );
         assert_eq!(
             submission_options(&with(21), JobType::Transcribe).speaker_count,
+            None
+        );
+        let german = Settings {
+            speech_locale: Some("de-DE".into()),
+            ..Settings::default()
+        };
+        assert_eq!(
+            submission_options(&german, JobType::Transcribe)
+                .speech_locale
+                .as_deref(),
+            Some("de-DE")
+        );
+        assert_eq!(
+            submission_options(&german, JobType::Convert).speech_locale,
             None
         );
     }

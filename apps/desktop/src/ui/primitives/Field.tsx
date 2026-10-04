@@ -98,6 +98,20 @@ export function Input({
 export interface SelectOption {
   value: string;
   label: string;
+  /// Consecutive options with one group render under one native `<optgroup>`.
+  group?: string;
+}
+
+/// Runs of options that share a group, in order. An ungrouped option is a run
+/// of its own.
+function runs(options: SelectOption[]) {
+  const out: { group?: string; options: SelectOption[] }[] = [];
+  for (const o of options) {
+    const last = out[out.length - 1] as (typeof out)[number] | undefined;
+    if (last && o.group !== undefined && last.group === o.group) last.options.push(o);
+    else out.push({ group: o.group, options: [o] });
+  }
+  return out;
 }
 
 export interface SelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement>, "children"> {
@@ -136,11 +150,20 @@ export function Select({
         className={cx("ui-select", className)}
         {...rest}
       >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
+        {runs(options).map((run) => {
+          const items = run.options.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ));
+          return run.group === undefined ? (
+            items
+          ) : (
+            <optgroup key={run.group} label={run.group}>
+              {items}
+            </optgroup>
+          );
+        })}
       </select>
     </Field>
   );

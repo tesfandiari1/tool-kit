@@ -77,6 +77,89 @@ One low item left from the verify pass over the 2026-09-12 fix:
   self-corrects on the recovery re-scan. A fix needs a fourth copy of the
   converter's format list. Recommended: close it.
 
+## macOS release pipeline rebuild (planned, 2026-10-03)
+
+Owner decision: GitHub Actions produces verified **draft** releases. Local
+builds are for development. Apple Silicon macOS `.app` and `.dmg` only;
+retain `dev.esfandiari.toolkit`, developer team `92MA44797J`, and the macOS 26
+runtime minimum. This is a plan; no release automation has been implemented.
+
+Use the [Karpathy guidelines](/Users/tristin/.agents/skills/karpathy-guidelines/SKILL.md):
+replace custom release machinery with supported tools, retain only necessary
+native-input preparation and product-specific checks, and delete each old
+path once its replacement passes. Preserve the in-flight speech-model work.
+
+| Current piece | Disposition |
+| --- | --- |
+| `verify-release.sh` (248 lines) | Delete. Use native Apple validation plus focused bundle smoke tests. Preserve checks for identity, nested code, resources and notices; discard signature-output parsing and newest-DMG selection. |
+| `build-sidecars.sh` (214 lines) | Replace with a small native-input preparation step. Rust/Swift compilation, target-suffixed binaries, CMaps, diarizer resources and redistribution notices remain necessary. |
+| Worker `build.sh` scripts | Retain compiler entrypoints; remove duplicated model staging when the shared preparation step owns it. Adapt existing tests to consume that same staged model set. |
+| Root `tauri` wrapper and repeated preparation | Move preparation to Tauri's dev/build hooks. Keep an explicit call for direct Cargo checks that run outside those hooks. |
+| CI placeholder binaries/resources | Remove. Desktop CI must compile real native inputs. Missing worker/model prerequisites must fail required macOS checks instead of silently skipping them. |
+| Manual signing/notarization/install recipes | Remove after cutover. Tauri owns bundling/signing, Apple owns notarization/validation, GitHub owns draft assets, Finder installs the resulting DMG. |
+
+Implementation order and acceptance gates:
+
+1. **Prove the hosted toolchain without signing credentials.** Build all four
+   native helpers and the desktop from a fresh checkout. Honor the existing
+   Node, pnpm, Rust and dependency pins. The Vision source references macOS 27
+   APIs, so select Xcode 27.0 with its macOS 27 SDK while retaining the macOS 26
+   deployment floor. GitHub currently documents `xcode-27` ARM64 as a preview
+   runner; ordinary `macos-26` lists only Xcode 26. Verify availability and a
+   real cold build before making this the release runner. If unavailable,
+   report the toolchain blocker rather than removing features or introducing
+   a self-hosted runner. Gate: five arm64 executables, complete native assets,
+   matching worker handshakes, no developer-machine paths required at runtime.
+2. **Make native preparation one dependency.** Invoke the same minimal build
+   and staging step from Tauri's `beforeDevCommand`/`beforeBuildCommand` and
+   desktop Cargo CI. A bundle-only hook is too late for `tauri-build`'s
+   `externalBin` validation. Let Cargo/SwiftPM handle incremental compilation;
+   stage the pinned diarizer set once and preserve required license notices.
+   Gate: fresh `pnpm tauri dev`, an unsigned CI bundle, and desktop checks work
+   without a manually run prerequisite or placeholder files.
+3. **Add one manually dispatched release workflow.** Use the official
+   `tauri-apps/tauri-action`, pinned to a reviewed release commit, with the
+   repository's CLI and `projectPath: apps/desktop`. Run the existing quality
+   gates on the same source SHA. Keep signing secrets confined to a trusted
+   release job: Developer ID certificate/password and App Store Connect API
+   credentials in GitHub secrets, with a temporary keychain and cleanup.
+   Keep the non-secret expected identity in one configuration location.
+   Gate: missing/wrong credentials fail; local dev and PR checks need none.
+4. **Finish and verify exact artifacts before uploading.** Tauri signs the
+   nested code and app and performs app notarization. Use Apple's `notarytool`
+   and `stapler` for the DMG step the selected Tauri version does not perform.
+   Consume this run's explicit artifact paths. Check Developer ID/team,
+   nested signatures, app/DMG tickets and Gatekeeper with native Apple tools.
+   Exercise the bundled converter/workers using existing PDF, OCR and audio
+   fixtures, with the checkout's binaries/resources unavailable as fallbacks.
+   Gate: a tampered helper, missing model/CMap, or rejected notarization fails
+   the workflow; a required smoke test cannot pass by skipping. Hosted speech
+   or AI limitations must be recorded and covered on a physical Mac before
+   publication, not described as a successful end-to-end test.
+5. **Create the draft from the verified output.** Run the Tauri action in
+   build-only mode; after the final checks, use GitHub CLI to create/upload a
+   draft tied to the built version and SHA. Attach the final DMG, its checksum
+   and the verification result. Fail on a version mismatch or existing
+   release rather than replacing assets implicitly. Gate: no release assets
+   uploaded on failure; promotion publishes these exact bytes without a
+   rebuild. Download/install on a clean Apple Silicon Mac running macOS 26
+   and verify the optional macOS 27 feature separately before publication.
+6. **Delete the superseded process.** Remove the old verifier, wrappers,
+   placeholder staging and manual repair recipes once the first draft passes.
+   Reconcile `README.md`, `CLAUDE.md`, package scripts and this status together;
+   README owns the usage instructions. Gate: every documented build/release
+   entrypoint uses the replacement and no callers reference the removed tools.
+
+No custom installer/updater, release framework, additional task runner,
+conversion-engine refactor, or public publication is part of this rebuild.
+Only native preparation and bundle behavior tests justify custom code.
+
+References: [Tauri action](https://github.com/tauri-apps/tauri-action),
+[Tauri hooks](https://v2.tauri.app/reference/config/#buildconfig),
+[macOS signing](https://v2.tauri.app/distribute/sign/macos/),
+[GitHub macOS runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
+[Xcode 27 runner inventory](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md).
+
 ## Next
 
 - **Audio epic, sprint 1 landed 2026-09-12, committed in `faaceb7`.** One Swift worker on

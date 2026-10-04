@@ -1,15 +1,17 @@
-import { useState } from "react";
-import { Input, Meta, Stack, Switch } from "@ui";
-import { type Settings } from "@/app/types";
+import { useEffect, useState } from "react";
+import { Button, Input, Meta, Meter, Row, Select, Stack, Switch } from "@ui";
+import { type Settings, type SpeechModel } from "@/app/types";
 
 /// One list. A plain column, never `FlowLayout`, whose scroll region cannot
 /// resolve a height inside a sheet body that already scrolls.
 export function SettingsPanel({
   settings,
+  speech,
   onPersist,
   onToast,
 }: {
   settings: Settings;
+  speech: SpeechModelControl;
   onPersist: (patch: Partial<Settings>) => void;
   onToast: (msg: string) => void;
 }) {
@@ -29,6 +31,13 @@ export function SettingsPanel({
           onPersist({ customWords });
         }}
         onToast={onToast}
+      />
+      <SpeechLanguageField
+        locale={settings.speechLocale}
+        onPick={(speechLocale) => {
+          onPersist({ speechLocale });
+        }}
+        {...speech}
       />
       <SpeakerCountField
         value={settings.speakerCount}
@@ -181,5 +190,116 @@ function SpeakerCountField({
         if (e.key === "Enter") commit(e.currentTarget.validity.badInput);
       }}
     />
+  );
+}
+
+/// `useSpeechModel`'s surface. Undefined `model` is a check in flight, null a
+/// build with no audio worker.
+interface SpeechModelControl {
+  model: SpeechModel | null | undefined;
+  progress: number | null;
+  failure: { message: string; retry: "check" | "download" } | null;
+  refresh: (locale: string | null) => Promise<void>;
+  download: (locale: string | null) => Promise<void>;
+}
+
+const RECORDINGS_STAY = "Your recordings never leave this Mac.";
+
+/// The language Transcribe hears, and whether Apple's model for it is here.
+/// Checked each time Settings opens or the pick changes, because a Transcribe
+/// job or another app can install it too. Picking a language that is not here
+/// is the consent to download it.
+function SpeechLanguageField({
+  locale,
+  onPick,
+  model,
+  progress,
+  failure,
+  refresh,
+  download,
+}: SpeechModelControl & {
+  locale: string | null;
+  onPick: (locale: string | null) => void;
+}) {
+  useEffect(() => {
+    void refresh(locale);
+  }, [refresh, locale]);
+  if (model === null) return null;
+
+  const ours = progress !== null;
+  const state = ours ? "downloading" : model?.state;
+  let hint = "Checking this Mac.";
+  switch (state) {
+    case "installed":
+      hint = "On this Mac. Transcribe works without an internet connection.";
+      break;
+    case "downloading":
+      hint = ours
+        ? `Downloading from Apple, ${String(Math.round(progress * 100))}%. ${RECORDINGS_STAY}`
+        : `Downloading from Apple. ${RECORDINGS_STAY}`;
+      break;
+    case "supported":
+      hint = `Not on this Mac yet. It downloads once from Apple. ${RECORDINGS_STAY}`;
+      break;
+    case "unsupported":
+      hint = "Apple has no on-device model for this language. Pick one from the list.";
+      break;
+    case undefined:
+      break;
+  }
+
+  const options =
+    model === undefined
+      ? [{ value: locale ?? "", label: "Checking…" }]
+      : [
+          { value: "", label: `Same as this Mac: ${model.systemLanguage}` },
+          ...model.choices.map((c) => ({
+            value: c.locale,
+            label: c.language,
+            group: c.installed ? "On this Mac" : "Download from Apple",
+          })),
+        ];
+  // A saved language Apple no longer lists still shows as picked.
+  if (locale !== null && !options.some((o) => o.value === locale)) {
+    options.push({ value: locale, label: locale });
+  }
+
+  const pick = (value: string) => {
+    const next = value || null;
+    onPick(next);
+    const target = next ?? model?.systemLocale;
+    const choice = model?.choices.find((c) => c.locale === target);
+    if (choice && !choice.installed) void download(next);
+  };
+
+  return (
+    <Stack gap={2}>
+      <Select
+        label="Transcription language"
+        hint={hint}
+        error={failure?.message}
+        value={locale ?? ""}
+        disabled={model === undefined || ours}
+        options={options}
+        onChange={(e) => {
+          pick(e.target.value);
+        }}
+      />
+      {state === "downloading" && (
+        <Meter value={progress ?? undefined} label="Language download" />
+      )}
+      {(failure !== null || state === "supported") && (
+        <Row>
+          <Button
+            size="sm"
+            onClick={() => {
+              void (failure?.retry === "check" ? refresh(locale) : download(locale));
+            }}
+          >
+            {failure === null ? "Download" : "Try again"}
+          </Button>
+        </Row>
+      )}
+    </Stack>
   );
 }

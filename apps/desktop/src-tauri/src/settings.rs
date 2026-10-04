@@ -48,6 +48,8 @@ pub struct Settings {
     pub custom_words: Vec<String>,
     /// How many people speak in the recordings. Blank lets the diarizer guess.
     pub speaker_count: Option<u32>,
+    /// The language Transcribe hears, BCP 47. `None` follows the Mac's.
+    pub speech_locale: Option<String>,
     /// Leave a file alone when the history says it already has a result.
     pub skip_already_done: bool,
     /// Last SplitPane layout, percentages keyed by pane id (`start` / `end`).
@@ -80,6 +82,7 @@ impl Default for Settings {
             language_correction: true,
             custom_words: Vec::new(),
             speaker_count: None,
+            speech_locale: None,
             skip_already_done: true,
             split_layout: None,
             expanded_width: None,

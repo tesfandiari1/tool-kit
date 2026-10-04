@@ -256,6 +256,7 @@ impl TestHarness {
                 ocr_language_correction: true,
                 ocr_custom_words: String::new(),
                 speaker_count: None,
+                speech_locale: None,
             })
             .await
             .unwrap();

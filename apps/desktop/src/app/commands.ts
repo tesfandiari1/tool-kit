@@ -12,6 +12,7 @@ import type {
   RunResult,
   Scan,
   Settings,
+  SpeechModel,
   WorkspaceInfo,
 } from "./types";
 
@@ -75,6 +76,16 @@ export const commands = {
   /// The webview's one question for the conversion service.
   capabilities: () =>
     invoke<{ acceptingJobs: boolean; inputFormats: string[] }>("conversion_capabilities"),
+  /// Null on a build without the audio worker. `locale` null is the Mac's own.
+  speechModel: (locale: string | null) =>
+    invoke<SpeechModel | null>("speech_model_status", { locale }),
+  /// Resolves once the model is in. Progress arrives on `onSpeechModelProgress`.
+  downloadSpeechModel: (locale: string | null) =>
+    invoke<SpeechModel | null>("download_speech_model", { locale }),
+  onSpeechModelProgress: (handler: (done: number) => void) =>
+    listen<number>("speech-model-progress", (e) => {
+      handler(e.payload);
+    }),
   onJobUpdated: (handler: (job: Job) => void) => listen<Job>("job-updated", (e) => {
     handler(e.payload);
   }),

@@ -221,6 +221,11 @@ recordings need `workers/audio/`, so a host without a worker advertises fewer.
   the child by closing stdin **and** running `/bin/kill -TERM`. An in-flight
   ledger row records the alias `sidecar`, never a URL: the port is ephemeral,
   and a recorded URL breaks Retry across a relaunch.
+- **`speech_model.rs`**: Settings' check and fetch of Apple's speech model
+  for the Transcribe language, through `tool-kit-audio-worker --speech
+  status|install`. It clears the environment as the converter does, so it
+  resolves the locale a job will. The one host path that spawns a worker.
+  Progress goes out as `speech-model-progress`.
 - **`lib.rs`**: the Tauri command surface plus `setup()` (tray, ⌥⌘V shortcut,
   the **Settings…** item). `run_pipeline` expands the selection, clears the
   queue and spawns one job per match, refusing with `NO_DESTINATION`

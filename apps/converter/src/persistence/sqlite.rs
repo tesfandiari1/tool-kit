@@ -132,10 +132,11 @@ impl SqliteRepository {
                 source_media_type, source_byte_length, source_sha256,
                 reason_codes_json, warnings_json,
                 origin_request_id, created_at, updated_at,
-                ocr_language_correction, ocr_custom_words, speaker_count
+                ocr_language_correction, ocr_custom_words, speaker_count,
+                speech_locale
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9,
-                '[]', '[]', ?10, ?11, ?11, ?12, ?13, ?14
+                '[]', '[]', ?10, ?11, ?11, ?12, ?13, ?14, ?15
              )",
         )
         .bind(&conversion_id)
@@ -152,6 +153,7 @@ impl SqliteRepository {
         .bind(input.ocr_language_correction)
         .bind(&input.ocr_custom_words)
         .bind(input.speaker_count.map(i64::from))
+        .bind(&input.speech_locale)
         .execute(&mut *transaction)
         .await?;
 
@@ -1391,6 +1393,7 @@ async fn load_conversion(
             c.ocr_language_correction,
             c.ocr_custom_words,
             c.speaker_count,
+            c.speech_locale,
             a.id AS attempt_id,
             a.queue_seq,
             a.attempt_number,
@@ -1573,6 +1576,7 @@ fn decode_conversion(row: &SqliteRow) -> Result<StoredConversion, RepositoryErro
             .try_get::<Option<i64>, _>("speaker_count")?
             .map(|count| nonnegative_u32(count, "conversions.speaker_count"))
             .transpose()?,
+        speech_locale: row.try_get("speech_locale")?,
     })
 }
 
@@ -3379,6 +3383,7 @@ mod tests {
             ocr_language_correction: true,
             ocr_custom_words: String::new(),
             speaker_count: None,
+            speech_locale: None,
         }
     }
 

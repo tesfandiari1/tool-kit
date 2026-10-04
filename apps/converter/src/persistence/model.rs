@@ -167,6 +167,8 @@ pub struct NewConversion {
     /// The speaker count the request pinned, `None` to let the diarizer guess.
     /// Stored for the same reason the OCR settings are.
     pub speaker_count: Option<u32>,
+    /// BCP 47, `None` for the Mac's own language.
+    pub speech_locale: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -251,6 +253,7 @@ pub struct StoredConversion {
     pub ocr_language_correction: bool,
     pub ocr_custom_words: String,
     pub speaker_count: Option<u32>,
+    pub speech_locale: Option<String>,
 }
 
 #[cfg(test)]
