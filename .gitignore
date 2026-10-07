@@ -85,3 +85,6 @@ models/cache/
 *.gguf
 *.metallib
 .build/
+
+# Release hand-off: the DMG, checksum, notes and images for the GitHub release page
+/release/
