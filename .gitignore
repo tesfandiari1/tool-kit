@@ -26,10 +26,12 @@ dist-ssr
 !.env.example
 deploy/docker/secrets/
 
-# Local tool caches and agent state
+# Per-developer agent, editor and tool state. CLAUDE.md and AGENTS.md are the
+# shared agent instructions. `gitnexus analyze` regenerates .claude/skills/.
+.claude/
+.cursor/
 .firecrawl/
 .impeccable/
-.cursor/hooks/state/
 .gitnexus/
 
 # Runtime / local data (SQLite, job artifacts)
@@ -41,7 +43,6 @@ deploy/docker/secrets/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
-apps/converter/data/
 
 # Rust (crate gitignores already cover /target/ in each crate)
 /target/
@@ -69,22 +70,28 @@ __pycache__/
 *.sln
 *.sw?
 
-# Apple signing leftovers (creds themselves live in .env.local)
+# Apple signing material (creds themselves live in .env.local). *.p8 is an
+# App Store Connect API key.
 *.p12
 *.pfx
 *.cer
+*.p8
+*.pem
 *.mobileprovision
 
-# Local model weights and the MLX build surface. Weights are derived: they are
-# fetched from a pinned revision in the model registry and verified by hash, so
-# deleting them costs a download and never content. They are also gigabytes,
-# and an accidental `git add` of one is not something you undo cleanly. These
-# land before the first fetch rather than after it.
-models/cache/
+# Swift and Xcode. Opening a SwiftPM worker in Xcode writes per-user state.
+.build/
+.swiftpm/
+xcuserdata/
+DerivedData/
+
+# Model weights are gigabytes, and an accidental `git add` of one is hard to
+# undo in a public history.
 *.safetensors
 *.gguf
 *.metallib
-.build/
 
-# Release hand-off: the DMG, checksum, notes and images for the GitHub release page
+# Release hand-off: the DMG, checksum, notes and images for the GitHub release
+# page. A DMG belongs on a release, never in git.
 /release/
+*.dmg
