@@ -1,13 +1,90 @@
-# Tool-Kit
+<p align="center">
+  <img src="apps/desktop/src-tauri/icons/128x128@2x.png" width="112" alt="Tool-Kit icon">
+</p>
 
-A macOS menu-bar utility that turns files into AI-ready text. Drop files or
-folders, hit Run, get markdown or transcripts back in your project. The
-originals stay where they are and are never copied.
+<h1 align="center">Tool-Kit</h1>
+
+<p align="center">
+  <a href="https://github.com/tesfandiari1/tool-kit/releases/latest">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/media/download-dark.png">
+      <img src="docs/media/download-light.png" width="300" alt="Download Tool-Kit for macOS">
+    </picture>
+  </a>
+  <br>
+  <sub>Apple silicon · macOS 26 or later · Free and open source</sub>
+</p>
+
+<br>
+
+<img src="docs/media/hero.png" width="100%" alt="Tool-Kit. Bring locality to AI. Turn documents, scans and recordings into AI-ready Markdown on your Mac. Your files never leave it.">
+
+## Why local
+
+Many AI workflows start by uploading your files to someone else's server.
+Tool-Kit does that preparation on your Mac. It reads your PDFs, scans and
+recordings with on-device engines and writes plain Markdown into a folder you
+own. Then you decide what goes to an AI, and when.
+
+No account. No API key. No upload. The app goes online only to download
+Apple's speech model for the language you transcribe.
+
+<img src="docs/media/how-it-works.png" width="100%" alt="How it works: drop PDF, Word, PowerPoint, Excel, EPUB, images, audio or video. Tool-Kit runs on your Mac. Markdown comes out.">
+
+## What it does
+
+| Drop | Get |
+|---|---|
+| **Documents.** PDF, Word, PowerPoint, Excel, EPUB, OpenDocument, RTF, CSV | Markdown |
+| **Scans and images.** Scanned PDFs, PNG, JPEG, TIFF, WebP, GIF, BMP | Markdown, read by Apple's on-device text recognition |
+| **Recordings.** WAV, M4A, MP3, FLAC, MP4, MOV | A Markdown transcript with timestamps and speaker labels |
+
+- Tool-Kit picks the job from what you drop. Drop a whole folder, and the
+  results keep its shape.
+- Your originals stay where they are, and only the Markdown lands in your
+  library. Settings can move dropped files into the library instead.
+- Tool-Kit skips a file that already has a result.
+- Your library is a plain folder of Markdown files. Read and edit them in the
+  app, or open them in any editor.
+
+## Install
+
+1. Download the DMG from the
+   [latest release](https://github.com/tesfandiari1/tool-kit/releases/latest).
+2. Open the DMG and drag Tool-Kit to Applications.
+3. Open Tool-Kit. macOS asks you once to confirm an app from the internet.
+   Click **Open**.
+4. Pick a folder for your library.
+
+## Keys
+
+| Keys | Action |
+|---|---|
+| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>V</kbd> | Show or hide Tool-Kit from any app |
+| <kbd>⌘</kbd><kbd>O</kbd> | Choose files to convert |
+| <kbd>⌘</kbd><kbd>S</kbd> | Save the open document |
+| <kbd>⌘</kbd><kbd>,</kbd> | Settings |
+| <kbd>⌘</kbd><kbd>+</kbd> / <kbd>⌘</kbd><kbd>-</kbd> | Zoom |
+
+In Settings, choose the transcription language and the number of speakers.
+Add custom words to help the text recognition with names and jargon.
+
+## Known limits
+
+- Tool-Kit runs only on Apple silicon Macs with macOS 26 or later.
+- Tool-Kit refuses HTML files and recordings that macOS cannot read, such as
+  OGG, AAC, MKV, WebM and AVI.
+
+---
+
+## For developers
+
+Everything below is for building Tool-Kit from source.
 
 **Current work:** local same-machine closeout. Start at
 [`docs/STATUS.md`](docs/STATUS.md).
 
-## Current desktop implementation
+### Current desktop implementation
 
 | Job | Engine | In → Out |
 |---|---|---|
