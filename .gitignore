@@ -23,7 +23,6 @@ dist-ssr
 # Secrets and local env
 .env
 .env.*
-deploy/docker/secrets/
 
 # Per-developer agent, editor and tool state. CLAUDE.md and AGENTS.md are the
 # shared agent instructions. `gitnexus analyze` regenerates .claude/skills/.
