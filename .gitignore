@@ -20,10 +20,9 @@ dist-ssr
 /apps/desktop/vite.config.js
 /apps/desktop/vite.config.d.ts
 
-# Secrets and local env. Keep committed examples.
+# Secrets and local env
 .env
 .env.*
-!.env.example
 deploy/docker/secrets/
 
 # Per-developer agent, editor and tool state. CLAUDE.md and AGENTS.md are the
