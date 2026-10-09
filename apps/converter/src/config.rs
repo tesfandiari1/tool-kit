@@ -7,7 +7,9 @@ const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8080";
 const DEFAULT_LOG_FILTER: &str = "tool_kit_converter=info";
 const DEFAULT_TOKEN_FILE: &str = "/run/secrets/bootstrap_token";
 const DEFAULT_DATA_DIR: &str = "/data";
-const DEFAULT_MAX_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
+/// A scanned textbook runs 50 MB and up. The upload streams to disk, and the
+/// workers' memory scales with pages, not bytes.
+const DEFAULT_MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: u64 = 50 * 1024 * 1024;
 const DEFAULT_MAX_JOBS: usize = 32;
 const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 2;
@@ -313,8 +315,8 @@ mod tests {
     }
 
     #[test]
-    fn default_limits_fit_the_development_tmpfs() {
-        assert_eq!(DEFAULT_MAX_UPLOAD_BYTES, 25 * 1024 * 1024);
+    fn default_document_limits() {
+        assert_eq!(DEFAULT_MAX_UPLOAD_BYTES, 512 * 1024 * 1024);
         assert_eq!(DEFAULT_MAX_OUTPUT_BYTES, 50 * 1024 * 1024);
     }
 

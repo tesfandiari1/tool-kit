@@ -613,7 +613,7 @@ function JobRow({
           </Meta>
         </button>
         {job.status === "failed" && job.error ? (
-          <Text as="span" size="xs" tone="fault" className="job-sub">
+          <Text as="span" size="xs" tone="fault" className="job-sub job-error" title={job.error}>
             {job.error}
           </Text>
         ) : active ? (

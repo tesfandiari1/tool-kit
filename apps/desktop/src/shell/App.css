@@ -471,6 +471,12 @@
     flex-shrink: 100;
     min-width: 0;
   }
+  /* A failure outranks the name: at `flex-shrink: 100` a long file name
+     squeezed the error to zero width and the row failed in silence. */
+  .job-error {
+    flex-shrink: 0;
+    max-width: 60%;
+  }
   .job-time {
     flex-shrink: 0;
   }
