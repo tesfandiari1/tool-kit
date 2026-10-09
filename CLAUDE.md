@@ -89,8 +89,12 @@ The HTTP contract is hand-written: `apps/converter/tests/http_contract.rs`.
 
 All under `~/Library/Application Support/dev.esfandiari.toolkit/`.
 
-- `converter.log`: sidecar stdout and stderr, PDF and Vision worker panics included. It is
-  capped at 2 MB, then truncated, not rotated.
+- `tool-kit.log`: the host's own lines: launch, quit, exit, each converter exit
+  with its status, each failed job, and panics. Capped at 2 MB, reset at launch.
+- `converter.log`: sidecar stdout and stderr, PDF and Vision worker panics included. One
+  `worker exited` / `worker failed` line per worker child names the worker, its
+  time and its exit code or signal. Routine requests log at debug, so failures
+  and slow requests stand out. It is capped at 2 MB, then truncated, not rotated.
 - `history.db`: one row per run, with the error the user saw.
 - `converter/converter.sqlite`: `attempts.inspection_json` holds page counts
   and the pages that need OCR.

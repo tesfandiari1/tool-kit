@@ -390,8 +390,28 @@ pub struct JobView {
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<JobFailure>,
+    /// Pages read so far by a worker that reports them, while converting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pages: Option<PageProgress>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct PageProgress {
+    pub done: u32,
+    pub total: u32,
+}
+
+impl PageProgress {
+    /// `"<done> <total>"` from the worker's progress file. Anything else is no
+    /// progress, never an error: the file is a hint the worker rewrites.
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split_ascii_whitespace();
+        let done = parts.next()?.parse().ok()?;
+        let total = parts.next()?.parse().ok()?;
+        (parts.next().is_none() && done <= total && total > 0).then_some(Self { done, total })
+    }
 }
 
 impl JobView {
@@ -410,6 +430,7 @@ impl JobView {
                 code: failure.code.clone(),
                 message: failure.message.clone(),
             }),
+            pages: None,
             created_at: job.created_at.clone(),
             updated_at: job.updated_at.clone(),
         }
@@ -464,6 +485,20 @@ pub fn now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_progress_reads_only_a_well_formed_pair() {
+        assert_eq!(
+            PageProgress::parse("120 632\n"),
+            Some(PageProgress {
+                done: 120,
+                total: 632
+            })
+        );
+        for bad in ["", "120", "633 632", "0 0", "1 2 3", "a 2", "-1 2"] {
+            assert_eq!(PageProgress::parse(bad), None, "{bad:?}");
+        }
+    }
 
     const IMAGE_MEDIA_TYPES: [&str; 6] = [
         "image/png",

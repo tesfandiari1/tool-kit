@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Semaphore;
@@ -18,9 +18,13 @@ use crate::{backend_host, history, settings};
 const RESUME_MAX_ATTEMPTS: u32 = 6;
 const RESUME_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Every 5s for ~60 minutes, bailing after ~1 minute of unbroken errors.
+/// The first poll comes after 250 ms and each wait doubles to 5 s, so a small
+/// file lands in well under a second. Bails after ~1 minute of unbroken errors.
+const BACKEND_POLL_FIRST: Duration = Duration::from_millis(250);
 const BACKEND_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const BACKEND_MAX_POLLS: u32 = 720;
+/// The converter runs one job at a time and a scan may hold it an hour, so a
+/// job queued behind one waits longer than that.
+const BACKEND_MAX_WAIT: Duration = Duration::from_secs(3 * 3600);
 const BACKEND_MAX_CONSECUTIVE_ERRORS: u32 = 12;
 
 #[derive(Clone, Debug)]
@@ -394,6 +398,10 @@ fn fail_backend_retryable(app: &AppHandle, id: u64, generation: u64, err: &str) 
             job.error = Some(err.to_string());
         })
     {
+        crate::host_log::line(&format!(
+            "job failed, retryable: {}: {err}",
+            updated.job().file_name
+        ));
         updated.emit(app);
     }
 }
@@ -412,6 +420,7 @@ fn fail(app: &AppHandle, id: u64, generation: u64, err: &str) {
         if let Some(backend) = &job.backend {
             history::delete_in_flight(app, &backend.idempotency_key);
         }
+        crate::host_log::line(&format!("job failed: {}: {err}", job.file_name));
         log_history(app, job, "failed", Some(err));
         updated.emit(app);
     }
@@ -540,7 +549,7 @@ pub fn reuse_result(app: &AppHandle, id: u64, generation: u64, existing: &str) -
 
 #[derive(Debug, PartialEq, Eq)]
 enum BackendAction {
-    Pending(&'static str),
+    Pending(String),
     Succeeded,
     Failed(String),
 }
@@ -559,10 +568,13 @@ fn backend_action(view: &ConversionJob, job_type: JobType) -> BackendAction {
             );
             BackendAction::Failed(message)
         }
-        "queued" => BackendAction::Pending("Queued by conversion service…"),
-        "converting_local" => BackendAction::Pending("Converting locally…"),
-        "finalizing" => BackendAction::Pending("Finalizing…"),
-        _ => BackendAction::Pending("Processing…"),
+        "queued" => BackendAction::Pending("Queued by conversion service…".into()),
+        "converting_local" => BackendAction::Pending(view.pages.map_or_else(
+            || "Converting locally…".into(),
+            |pages| format!("Reading page {} of {}…", pages.done, pages.total),
+        )),
+        "finalizing" => BackendAction::Pending("Finalizing…".into()),
+        _ => BackendAction::Pending("Processing…".into()),
     }
 }
 
@@ -718,7 +730,8 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
         }
     };
 
-    let mut polls = 0u32;
+    let waiting_since = Instant::now();
+    let mut delay = BACKEND_POLL_FIRST;
     let mut consecutive_errors = 0u32;
     loop {
         if stale(&app) {
@@ -756,14 +769,13 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
                 return;
             }
             BackendAction::Pending(note) => {
-                if !set_status(&app, id, generation, "processing", note) {
+                if !set_status(&app, id, generation, "processing", &note) {
                     return;
                 }
             }
         }
 
-        polls += 1;
-        if polls > BACKEND_MAX_POLLS {
+        if waiting_since.elapsed() > BACKEND_MAX_WAIT {
             fail_backend_retryable(
                 &app,
                 id,
@@ -772,7 +784,8 @@ async fn run_backend_job(app: AppHandle, id: u64, generation: u64, job: Job) {
             );
             return;
         }
-        tokio::time::sleep(BACKEND_POLL_INTERVAL).await;
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(BACKEND_POLL_INTERVAL);
         if stale(&app) {
             return;
         }
@@ -1018,7 +1031,25 @@ mod backend_tests {
             status: status.into(),
             warnings: Vec::new(),
             failure: None,
+            pages: None,
         }
+    }
+
+    #[test]
+    fn a_reported_page_count_becomes_the_progress_note() {
+        let mut converting = view("converting_local");
+        assert_eq!(
+            backend_action(&converting, JobType::Convert),
+            BackendAction::Pending("Converting locally…".into())
+        );
+        converting.pages = Some(crate::conversion_service::PageProgress {
+            done: 120,
+            total: 632,
+        });
+        assert_eq!(
+            backend_action(&converting, JobType::Convert),
+            BackendAction::Pending("Reading page 120 of 632…".into())
+        );
     }
 
     #[test]
@@ -1049,7 +1080,7 @@ mod backend_tests {
         );
         assert!(matches!(
             backend_action(&view("paused_by_future_backend"), JobType::Convert),
-            BackendAction::Pending("Processing…")
+            BackendAction::Pending(note) if note == "Processing…"
         ));
 
         let mut failed = view("failed");

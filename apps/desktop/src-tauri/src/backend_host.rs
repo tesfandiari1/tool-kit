@@ -359,12 +359,16 @@ async fn supervise(app: AppHandle, host: BackendHost) {
                     // is no port, and one refused connection fails a job.
                     crate::jobs::recover_in_flight(app.clone());
                 }
-                let _ = child.wait().await;
+                let status = child.wait().await;
+                crate::host_log::line(&format!("converter pid {pid} exited: {status:?}"));
                 host.release();
                 let _ = std::fs::remove_file(&layout.runtime_file);
                 last_message = "The conversion service stopped unexpectedly".to_string();
             }
-            Err(message) => last_message = message,
+            Err(message) => {
+                crate::host_log::line(&format!("converter did not start: {message}"));
+                last_message = message;
+            }
         }
 
         if host.stale(epoch) {

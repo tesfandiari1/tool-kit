@@ -24,13 +24,14 @@ use crate::{
         FailureStage, LocalAnalysis, LocalStart, NewArtifact, NewConversion, NewSource,
         RepositoryError, SqliteRepository, StoredArtifact, StoredConversion, StoredFailure,
     },
-    vision_protocol::VISION_ENGINE_NAME,
+    vision_protocol::{VISION_ENGINE_NAME, VISION_WORKER_PROGRESS_FILE},
     worker_protocol::{Inspection, NATIVE_PAGES_FILE, PDF_ENGINE_NAME, PDF_INSPECTOR_VERSION},
 };
 
 use super::{
     model::{
         servable_media_types, source_format_by_media_type, EngineAvailability, LocalEngineKind,
+        PageProgress,
     },
     policy::{self, ReasonCode},
     ArtifactRecord, JobView, SourceMetadata,
@@ -813,7 +814,18 @@ impl ConversionService {
                 }
             }
         }
-        Ok(JobView::from_stored(&job))
+        let mut view = JobView::from_stored(&job);
+        if job.state == ConversionState::ConvertingLocal {
+            let attempt = self
+                .artifacts
+                .attempt_paths(job.id, job.active_attempt.id)
+                .attempt;
+            view.pages = fs::read_to_string(attempt.join(VISION_WORKER_PROGRESS_FILE))
+                .await
+                .ok()
+                .and_then(|text| PageProgress::parse(&text));
+        }
+        Ok(view)
     }
 
     pub(crate) async fn validate_stored_artifacts(

@@ -47,6 +47,14 @@ pub(crate) struct ConversionJob {
     #[serde(default)]
     pub(crate) warnings: Vec<String>,
     pub(crate) failure: Option<ConversionFailure>,
+    #[serde(default)]
+    pub(crate) pages: Option<PageProgress>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct PageProgress {
+    pub(crate) done: u32,
+    pub(crate) total: u32,
 }
 
 #[derive(Debug, Deserialize)]

@@ -9,6 +9,7 @@
 
 use std::{
     io::Read as _,
+    os::unix::process::ExitStatusExt as _,
     path::{Path, PathBuf},
     process::ExitStatus,
     process::{Command as StdCommand, Stdio},
@@ -23,7 +24,7 @@ use tokio::{
     io::AsyncReadExt,
     process::Child,
     sync::watch,
-    time::{sleep, Duration},
+    time::{sleep, Duration, Instant},
 };
 
 use tool_kit_worker_protocol::is_lowercase_sha256;
@@ -37,6 +38,36 @@ const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Waits for a worker child under a hard deadline and a cancellation watch.
 pub(crate) async fn wait_for_child(
+    child: &mut Child,
+    worker: &str,
+    timeout: Duration,
+    cancellation: watch::Receiver<bool>,
+) -> Result<ExitStatus, EngineFailure> {
+    let pid = child.id();
+    let started = Instant::now();
+    let result = wait_inner(child, timeout, cancellation).await;
+    // One line per worker, so a failed or slow conversion names which child
+    // ended, how, and after how long. A signal 9 with no timeout is the OS.
+    let elapsed_s = started.elapsed().as_secs_f32();
+    match &result {
+        Ok(_) => tracing::info!(worker, pid, elapsed_s, "worker exited"),
+        Err(failure) => {
+            let status = child.try_wait().ok().flatten();
+            tracing::warn!(
+                worker,
+                pid,
+                elapsed_s,
+                failure = ?failure,
+                code = ?status.and_then(|s| s.code()),
+                signal = ?status.and_then(|s| s.signal()),
+                "worker failed"
+            );
+        }
+    }
+    result
+}
+
+async fn wait_inner(
     child: &mut Child,
     timeout: Duration,
     mut cancellation: watch::Receiver<bool>,

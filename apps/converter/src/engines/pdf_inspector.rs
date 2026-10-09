@@ -113,7 +113,7 @@ impl PdfInspectorEngine {
         }
 
         let mut child = command.spawn().map_err(|_| EngineFailure::Unavailable)?;
-        wait_for_child(&mut child, self.timeout, cancellation).await?;
+        wait_for_child(&mut child, "pdf", self.timeout, cancellation).await?;
 
         self.read_and_validate_report(paths).await
     }

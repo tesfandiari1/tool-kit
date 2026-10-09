@@ -138,12 +138,12 @@ async fn run_worker(
         Some(model) if output.status.success() => Ok(Some(model)),
         _ => {
             // A clean exit with no report is a worker older than this host.
-            eprintln!(
+            crate::host_log::line(&format!(
                 "speech model {verb} failed ({}, report {}): {}",
                 output.status,
                 if model.is_some() { "read" } else { "missing" },
                 String::from_utf8_lossy(&output.stderr).trim()
-            );
+            ));
             Err(if verb == "install" {
                 "The speech model did not download. Check the internet connection and try again."
             } else {

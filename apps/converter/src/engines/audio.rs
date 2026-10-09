@@ -182,7 +182,8 @@ impl AudioEngine {
             .map(|stderr| tokio::spawn(last_line(stderr)));
         // A killed worker cannot run its own cleanup, and the attempt survives a
         // requeue, so the parent removes the scratch source copy itself.
-        if let Err(failure) = wait_for_child(&mut child, self.timeout, cancellation).await {
+        if let Err(failure) = wait_for_child(&mut child, "audio", self.timeout, cancellation).await
+        {
             if let Some(extension) = audio_source_extension(media_type) {
                 let _ = fs::remove_file(paths.attempt.join(format!("source.{extension}"))).await;
             }

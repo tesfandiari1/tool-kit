@@ -122,7 +122,7 @@ pub fn init(app: &AppHandle) -> History {
         });
     History {
         db: Mutex::new(
-            db.inspect_err(|e| eprintln!("[tool-kit] history unavailable: {e}"))
+            db.inspect_err(|e| crate::host_log::line(&format!("history unavailable: {e}")))
                 .ok(),
         ),
     }
@@ -605,7 +605,7 @@ fn reuse_map(
         Ok(s) => s,
         Err(e) => {
             // Logged, or a broken query reads as "nothing done" and runs again.
-            eprintln!("[tool-kit] history reuse query failed: {e}");
+            crate::host_log::line(&format!("history reuse query failed: {e}"));
             return HashMap::new();
         }
     };
@@ -724,7 +724,7 @@ fn with_db<T>(app: &AppHandle, f: impl FnOnce(&Connection) -> rusqlite::Result<T
     match f(conn) {
         Ok(v) => Some(v),
         Err(e) => {
-            eprintln!("[tool-kit] history query failed: {e}");
+            crate::host_log::line(&format!("history query failed: {e}"));
             None
         }
     }

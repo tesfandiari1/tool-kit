@@ -104,7 +104,7 @@ impl AnyDocEngine {
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
         let mut child = command.spawn().map_err(|_| EngineFailure::Unavailable)?;
-        wait_for_child(&mut child, self.timeout, cancellation.clone()).await?;
+        wait_for_child(&mut child, "anydoc", self.timeout, cancellation.clone()).await?;
         let (processing_time_ms, marked) =
             match child::read_report(&output.path().join(ANYDOC_REPORT_FILE)).await? {
                 AnyDocReport::Converted {
@@ -250,7 +250,7 @@ async fn describe(
     // ponytail: about 5 s per picture after a cold model load, measured on
     // one Mac. A huge deck waits that long, cancellation still stops it.
     let budget = Duration::from_secs(20 + 5 * files as u64);
-    let _ = wait_for_child(&mut child, budget, cancellation).await;
+    let _ = wait_for_child(&mut child, "vision-describe", budget, cancellation).await;
     for (n, name) in placements {
         // The worker parsed hostile input, so a name may not leave the
         // directory.

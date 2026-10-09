@@ -23,6 +23,7 @@ use crate::{
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const MULTIPART_OVERHEAD_BYTES: u64 = 1024 * 1024;
+const SLOW_REQUEST_MS: u128 = 1000;
 
 pub fn router(state: AppState) -> Router {
     let protected = Router::new()
@@ -116,14 +117,15 @@ async fn trace_request(mut request: Request, next: Next) -> Response {
     response
         .headers_mut()
         .insert(REQUEST_ID_HEADER, request_id_header);
-    tracing::info!(
-        request_id = %request_id,
-        method = %method,
-        path = %path,
-        status = response.status().as_u16(),
-        elapsed_ms = started.elapsed().as_millis(),
-        "http request completed"
-    );
+    let status = response.status().as_u16();
+    let elapsed_ms = started.elapsed().as_millis();
+    // The host polls every few seconds, so a routine poll at info buries the
+    // lines that explain a failure.
+    if status < 400 && elapsed_ms < SLOW_REQUEST_MS {
+        tracing::debug!(request_id = %request_id, method = %method, path = %path, status, elapsed_ms, "http request completed");
+    } else {
+        tracing::info!(request_id = %request_id, method = %method, path = %path, status, elapsed_ms, "http request completed");
+    }
 
     response
 }

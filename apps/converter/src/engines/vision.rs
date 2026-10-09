@@ -32,8 +32,9 @@ use crate::{
 };
 
 const WORKER_LABEL: &str = "Vision";
-/// One runner serves every engine, so one scan may hold it 10 minutes at most.
-const MAX_SCAN_TIMEOUT: Duration = Duration::from_secs(600);
+/// One runner serves every engine, so one scan may hold it an hour at most:
+/// enough for an 1800-page book at the two seconds a page the budget allows.
+const MAX_SCAN_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Engine-specific detail persisted as attempt diagnostics. Content-free, and
 /// wall time is all of it. The page counts go to the policy through
@@ -79,13 +80,13 @@ impl VisionEngine {
         &self.version
     }
 
-    /// The same engine with one more second per page, for a
+    /// The same engine with two more seconds per page, for a
     /// scanned PDF the worker reads a page at a time, up to
     /// [`MAX_SCAN_TIMEOUT`]. A scan past it times out into the inspector's
     /// verdict.
     pub fn with_page_budget(&self, pages: u32) -> Self {
         Self {
-            timeout: (self.timeout + Duration::from_secs(pages.into()))
+            timeout: (self.timeout + Duration::from_secs(2 * u64::from(pages)))
                 .min(MAX_SCAN_TIMEOUT.max(self.timeout)),
             ..self.clone()
         }
@@ -150,7 +151,7 @@ impl VisionEngine {
             command.env(VISION_WORKER_NATIVE_PAGES_ENV, NATIVE_PAGES_FILE);
         }
         let mut child = command.spawn().map_err(|_| EngineFailure::Unavailable)?;
-        wait_for_child(&mut child, self.timeout, cancellation).await?;
+        wait_for_child(&mut child, "vision", self.timeout, cancellation).await?;
 
         self.read_and_validate_report(paths, started.elapsed())
             .await
@@ -380,19 +381,22 @@ mod tests {
         ));
     }
 
-    /// A second a page, so a 100 000-page scan held the only runner for a day.
+    /// Two seconds a page, so a 100 000-page scan would hold the only runner for days.
     #[cfg(unix)]
     #[test]
-    fn the_scan_budget_stops_at_ten_minutes() {
+    fn the_scan_budget_stops_at_an_hour() {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("worker");
         write_worker(&worker, &worker_script("exit 0"));
         let engine = VisionEngine::initialize(worker, Duration::from_secs(60), 1024).unwrap();
 
-        assert_eq!(engine.with_page_budget(30).timeout, Duration::from_secs(90));
+        assert_eq!(
+            engine.with_page_budget(30).timeout,
+            Duration::from_secs(120)
+        );
         assert_eq!(
             engine.with_page_budget(100_000).timeout,
-            Duration::from_secs(600)
+            Duration::from_secs(3600)
         );
     }
 

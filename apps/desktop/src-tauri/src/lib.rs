@@ -1,6 +1,7 @@
 mod backend_host;
 mod conversion_service;
 mod history;
+mod host_log;
 mod jobs;
 mod settings;
 mod speech_model;
@@ -1132,6 +1133,7 @@ fn retry_failed(app: AppHandle, state: State<JobManager>) -> Result<usize, Strin
 async fn quit_app(app: AppHandle) {
     // Not `RunEvent::Exit`: a wait inside applicationWillTerminate reads as a
     // hang.
+    host_log::line("quit requested");
     backend_host::stop(&app, backend_host::STOP_BUDGET).await;
     app.exit(0);
 }
@@ -1347,6 +1349,14 @@ pub fn run() {
             speech_model::download_speech_model
         ])
         .setup(|app| {
+            if let Ok(dir) = app.path().app_data_dir() {
+                host_log::init(dir);
+            }
+            host_log::line(&format!(
+                "launch {} pid {}",
+                app.package_info().version,
+                std::process::id()
+            ));
             // Opened once. A database that cannot open degrades to no history.
             app.manage(history::init(app.handle()));
             // Nothing waits on this: the window opens whether or not it starts.
@@ -1395,7 +1405,9 @@ pub fn run() {
                 match tray_icon {
                     Ok(icon) => tray = tray.icon(icon),
                     Err(e) => {
-                        eprintln!("[tool-kit] tray icon failed to load ({e}); using the app icon");
+                        crate::host_log::line(&format!(
+                            "tray icon failed to load ({e}); using the app icon"
+                        ));
                         if let Some(icon) = app.default_window_icon() {
                             tray = tray.icon(icon.clone());
                         }
@@ -1418,7 +1430,7 @@ pub fn run() {
                         .build(),
                 )?;
                 if let Err(e) = app.global_shortcut().register(toggle) {
-                    eprintln!("[tool-kit] could not register global shortcut: {e}");
+                    crate::host_log::line(&format!("could not register global shortcut: {e}"));
                 }
 
                 // Spliced, never `set_menu`: a fresh menu drops Edit, View,
@@ -1457,6 +1469,7 @@ pub fn run() {
         .run(|app, event| {
             // Not ExitRequested: ⌘Q hides the window and never fires it.
             if let tauri::RunEvent::Exit = event {
+                host_log::line("exit");
                 backend_host::stop_on_exit(app);
             }
             // Closing only hides the window, so the Dock icon is the way back.
