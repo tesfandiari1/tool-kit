@@ -51,6 +51,25 @@ order is reading order.
 
 **Speed:** 386 to 1047 ms per page at 200 dpi, single threaded, untuned.
 
+## Long scans
+
+**One CGPDFDocument per page.** A document keeps every decoded page image
+until it is freed, about 40 MB a page on an Internet Archive scan. One document
+for a 632-page book grew past 16 GB. `renderPage(_:of:dpi:)` opens a document
+per page from the shared `CGDataProvider`, at about 2 ms each. An
+`autoreleasepool` does not help, and reopening every 10 pages still held 1.2 GB.
+
+**Render and read overlap.** The next page renders while Vision reads the
+current one, so at most two bitmaps are held. On a 30-page MRC scan this took
+the run from 20.4 s to 12.8 s with byte-identical output.
+
+**Progress.** After each PDF page the worker writes `<done> <total>\n` to
+`vision-progress` in its cwd, through a rename. Every 25 pages and on the last
+it prints `tool-kit-vision-worker: page <n>/<total> footprint=<MB>MB` to stderr.
+
+Not taken: OCR on the 1-bit JBIG2 text mask alone. It was faster but matched
+the full render on only 96% of words, with e-to-c errors and lost headings.
+
 ## Corpus note
 
 `apps/converter/tests/support/corpus.rs` generates its `scanned` fixture as a coarse

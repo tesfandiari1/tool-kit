@@ -35,6 +35,10 @@ pub const VISION_WORKER_CUSTOM_WORDS_ENV: &str = "TOOLKIT_VISION_WORKER_CUSTOM_W
 /// A file in the staging directory holding the PDF worker's native pages. Set,
 /// the worker reads only the pages it lists as `null` and splices the rest in.
 pub const VISION_WORKER_NATIVE_PAGES_ENV: &str = "TOOLKIT_VISION_WORKER_NATIVE_PAGES";
+/// Rewritten after each PDF page in the worker's working directory, the
+/// attempt directory, as `"<done> <total>\n"`. Progress only: never trusted for
+/// the outcome, and absent for a single image.
+pub const VISION_WORKER_PROGRESS_FILE: &str = "vision-progress";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

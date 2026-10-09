@@ -2,9 +2,10 @@
 // write Markdown.
 //
 // Spawned the way apps/converter/src/engines/pdf_inspector.rs spawns
-// tool-kit-pdf-worker: cleared environment, staging directory as argv[1],
-// source bytes on stdin, stdout and stderr on /dev/null. The report file is
-// the only channel back, so every decision has to land there. Exit 0 once a
+// tool-kit-pdf-worker: cleared environment, staging directory as argv[1], the
+// attempt directory as cwd, source bytes on stdin. The report file is the only
+// channel for results, so every decision has to land there. A PDF also writes
+// `vision-progress` in the cwd and a stderr line every 25 pages. Exit 0 once a
 // report is written, 70 on any failure.
 //
 // The wire contract is crates/worker-protocol/src/vision.rs. Keep the two in
@@ -249,6 +250,35 @@ private func finish(_ outcome: Outcome, in staging: URL) -> Never {
     exit(0)
 }
 
+/// The process's physical footprint in MB, the figure Activity Monitor shows.
+private func footprintMB() -> UInt64 {
+    var info = task_vm_info_data_t()
+    var count = mach_msg_type_number_t(
+        MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+    let result = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+        }
+    }
+    return result == KERN_SUCCESS ? info.phys_footprint / 1_048_576 : 0
+}
+
+/// Page progress for the converter, which runs the worker in the attempt
+/// directory and reads `vision-progress` there. The rename keeps a reader from
+/// seeing a half-written line. Progress is advisory, so a failed write is
+/// ignored.
+private func reportProgress(_ done: Int, of total: Int) {
+    if (try? Data("\(done) \(total)\n".utf8).write(
+        to: URL(fileURLWithPath: "vision-progress.tmp"))) != nil
+    {
+        rename("vision-progress.tmp", "vision-progress")
+    }
+    if done % 25 == 0 || done == total {
+        FileHandle.standardError.write(Data(
+            "tool-kit-vision-worker: page \(done)/\(total) footprint=\(footprintMB())MB\n".utf8))
+    }
+}
+
 /// One bitmap's Markdown. A page Vision found nothing on comes back either as
 /// no observation at all or as a document with empty collections. Both are the
 /// same answer: an empty string.
@@ -307,8 +337,8 @@ private func run(_ stagingPath: String) async -> Never {
     let rendered: String
     var pageCounts: Pages?
     if isPdf(source) {
-        // A scanned PDF the inspector found no text in. One page is rendered,
-        // read and released at a time. A page with no text adds nothing to the
+        // A scanned PDF the inspector found no text in. Pages are rendered,
+        // read and released in turn. A page with no text adds nothing to the
         // Markdown, but it is counted, so the loss reaches the report.
         guard let provider = CGDataProvider(data: source as CFData),
               let pdf = CGPDFDocument(provider), pdf.numberOfPages > 0
@@ -325,16 +355,27 @@ private func run(_ stagingPath: String) async -> Never {
             else { fail("\(nativePagesEnv) does not name this PDF's pages") }
             native = decoded.pages
         }
+        // The next OCR page renders on the CPU while Vision reads this one, so
+        // one render is in flight and two bitmaps are held at most.
+        let ocrPages = (1...pdf.numberOfPages).filter { native?[$0 - 1] == nil }
+        func render(_ number: Int?) -> Task<CGImage?, Never>? {
+            number.map { number in Task.detached { renderPage(number, of: provider, dpi: 200) } }
+        }
+        var next = render(ocrPages.first)
+        var nextIndex = 1
         var pages: [String] = []
         for number in 1...pdf.numberOfPages {
+            defer { reportProgress(number, of: pdf.numberOfPages) }
             if let text = native?[number - 1] {
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty { pages.append(trimmed) }
                 continue
             }
-            guard let page = pdf.page(at: number), let image = renderPage(page, dpi: 200) else {
+            guard let image = await next?.value else {
                 finish(.rejected(.invalidImage), in: staging)
             }
+            next = render(nextIndex < ocrPages.count ? ocrPages[nextIndex] : nil)
+            nextIndex += 1
             let text = await recognize(image, with: request)
             if !text.isEmpty { pages.append(text) }
         }

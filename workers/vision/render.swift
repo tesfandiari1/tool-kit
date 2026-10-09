@@ -9,6 +9,18 @@ import Vision
 /// 200 dpi would be gigabytes.
 private let maxPageSide: CGFloat = 8192
 
+/// Page `number` of the PDF in `provider`, rendered through a document opened
+/// for this page alone. A CGPDFDocument keeps every decoded page image until it
+/// is freed: one document for a 632-page scanned book grew past 16 GB, one per
+/// page held under 400 MB. Opening one costs about 2 ms.
+func renderPage(_ number: Int, of provider: CGDataProvider, dpi: CGFloat) -> CGImage? {
+    guard let document = CGPDFDocument(provider) else { return nil }
+    // A CGPDFPage does not keep its document alive.
+    return withExtendedLifetime(document) {
+        document.page(at: number).flatMap { renderPage($0, dpi: dpi) }
+    }
+}
+
 /// One PDF page as an opaque bitmap at `dpi`, white behind the page. Callers
 /// render a page, read it and drop it before the next, so a long scan never
 /// holds every bitmap at once.
