@@ -12,7 +12,7 @@ Closed work is in [`archive/`](archive/README.md).
 | --- | --- |
 | Branch tip | `main` at `35e24fa`, pushed. It holds everything through the local-only removal (`7f03a88`), the 2026-10-03 cleanup (PRs #29 and #30) and four Dependabot bumps (thiserror, uuid twice, reqwest). CI green |
 | HTTP contract | `apps/converter/tests/http_contract.rs`. The OpenAPI, Spectral and Schemathesis suite was removed on 2026-10-03 |
-| Desktop version | 1.0.0 (`package.json`, `Cargo.toml`, `tauri.conf.json`) |
+| Desktop version | 1.0.1 (`package.json`, `Cargo.toml`, `tauri.conf.json`) |
 | Installed bundle | Current: `/Applications/Tool-Kit.app` is a signed, not notarized, build of `35e24fa`, installed 2026-10-03. `verify-release.sh` passes in full |
 | Backend | M0 to M4 complete. M5 and M7 cancelled |
 | Desktop | M6 landed. Gate open on CVR-067 and CVR-081 |

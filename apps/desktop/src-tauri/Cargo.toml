@@ -1,6 +1,6 @@
 [package]
 name = "tool-kit"
-version = "1.0.0"
+version = "1.0.1"
 description = "macOS menu-bar app that turns files into AI-ready text"
 authors = ["Tristin Esfandiari"]
 edition = "2021"
